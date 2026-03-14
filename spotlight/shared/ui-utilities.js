@@ -304,8 +304,8 @@ export class SpotlightUtils {
             return '';
         }
 
-        const score = result.score || 0;
-        const type = result.type || 'unknown';
+        const score = SpotlightUtils.escapeHtml(String(result.score || 0));
+        const type = SpotlightUtils.escapeHtml(result.type || 'unknown');
         const fuzzyMatch = result.metadata?.fuzzyMatch ? ' (fuzzy)' : '';
 
         return `<span style="color: #888; font-size: 10px; margin-left: 8px;">[${type}:${score}${fuzzyMatch}]</span>`;
