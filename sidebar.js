@@ -1093,6 +1093,17 @@ async function updateSpaceSwitcher() {
 
             spaces.splice(newIndex, 0, draggedSpace);
 
+            // Sync the new order to Chrome's tab groups
+            // To maintain the visual order of spaces, we move each tab group sequentially
+            // to the end of the window. This ensures Chrome's tab groups match our spaces array.
+            for (const space of spaces) {
+                try {
+                    await chrome.tabGroups.move(space.id, { index: -1 });
+                } catch (error) {
+                    Logger.warn(`Error moving tab group for space ${space.id} (may be inactive):`, error);
+                }
+            }
+
             // Save and re-render
             saveSpaces();
             await updateSpaceSwitcher(); // Re-render to reflect new order and clean up listeners
