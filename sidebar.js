@@ -2293,7 +2293,7 @@ async function createNewFolder(spaceElement) {
                 title: folderNameInput.value
             });
             folderNameInput.style.display = 'none';
-            folderTitle.innerHTML = folderNameInput.value;
+            folderTitle.textContent = folderNameInput.value;
             folderTitle.style.display = 'inline';
         }
     });
@@ -2329,7 +2329,7 @@ async function createNewFolder(spaceElement) {
         }
         // Update display regardless of save/cancel
         folderNameInput.style.display = 'none';
-        folderTitle.innerHTML = folderNameInput.value || 'Untitled';
+        folderTitle.textContent = folderNameInput.value || 'Untitled';
         folderTitle.style.display = 'inline';
     };
 
@@ -2442,7 +2442,7 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                             folderNameInput.readOnly = true;
                             folderNameInput.disabled = true;
                             folderNameInput.style.display = 'none';
-                            folderTitle.innerHTML = item.title;
+                            folderTitle.textContent = item.title;
                             folderTitle.style.display = 'inline';
                         };
 
@@ -2462,7 +2462,7 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                         folderNameInput.readOnly = true;
                         folderNameInput.disabled = true;
                         folderNameInput.style.display = 'none';
-                        folderTitle.innerHTML = item.title;
+                        folderTitle.textContent = item.title;
                         folderTitle.style.display = 'inline';
 
                         container.appendChild(folderElement);
@@ -2790,7 +2790,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     // Set up action button
     actionButton.classList.remove('tab-close');
     actionButton.classList.add(isBookmarkOnly ? 'tab-remove' : 'tab-close');
-    actionButton.innerHTML = isBookmarkOnly ? '−' : '×';
+    actionButton.textContent = isBookmarkOnly ? '−' : '×';
     actionButton.title = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
     actionButton.addEventListener('click', async (e) => {
         e.stopPropagation();
