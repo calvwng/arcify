@@ -928,6 +928,15 @@ function createSpaceElement(space) {
     const newFolderBtn = spaceElement.querySelector('.new-folder-btn');
     const deleteSpaceBtn = spaceElement.querySelector('.delete-space-btn');
     const settingsBtn = spaceElement.querySelector('.settings-btn');
+    const spaceOptionsBtn = spaceElement.querySelector('.space-options');
+    const spaceOptionsDropdown = spaceElement.querySelector('.space-options-dropdown');
+
+    if (spaceOptionsBtn && spaceOptionsDropdown) {
+        spaceOptionsBtn.addEventListener('mouseenter', () => spaceOptionsBtn.setAttribute('aria-expanded', 'true'));
+        spaceOptionsBtn.addEventListener('mouseleave', () => spaceOptionsBtn.setAttribute('aria-expanded', 'false'));
+        spaceOptionsDropdown.addEventListener('mouseenter', () => spaceOptionsBtn.setAttribute('aria-expanded', 'true'));
+        spaceOptionsDropdown.addEventListener('mouseleave', () => spaceOptionsBtn.setAttribute('aria-expanded', 'false'));
+    }
 
     newFolderBtn.addEventListener('click', () => {
         createNewFolder(spaceContainer);
@@ -963,6 +972,7 @@ function createSpaceElement(space) {
             showArchivedTabsPopup(space.id); // Populate and show
             popup.classList.toggle('visible');
         }
+        archiveButton.setAttribute('aria-expanded', popup.classList.contains('visible'));
     });
 
     // Add to DOM
@@ -2277,6 +2287,7 @@ async function createNewFolder(spaceElement) {
     folderElement.classList.toggle('collapsed');
     folderContent.classList.toggle('collapsed');
     folderToggle.classList.toggle('collapsed');
+    folderToggle.setAttribute('aria-expanded', !folderElement.classList.contains('collapsed'));
 
     // Set up initial display for new folder
     folderNameInput.style.display = 'inline-block';
@@ -2288,6 +2299,7 @@ async function createNewFolder(spaceElement) {
         folderElement.classList.toggle('collapsed');
         folderContent.classList.toggle('collapsed');
         folderToggle.classList.toggle('collapsed');
+        folderToggle.setAttribute('aria-expanded', !folderElement.classList.contains('collapsed'));
         folderIcon.innerHTML = folderElement.classList.contains('collapsed') ? FOLDER_CLOSED_ICON : FOLDER_OPEN_ICON;
         syncCollapsedFolderTabs(folderElement);
     });
@@ -2418,6 +2430,7 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                             folderElement.classList.toggle('collapsed');
                             folderContent.classList.toggle('collapsed');
                             folderToggle.classList.toggle('collapsed');
+                            folderToggle.setAttribute('aria-expanded', !folderElement.classList.contains('collapsed'));
                             updateFolderIcon(folderElement);
                             updateFolderIcon(folderElement);
                             syncCollapsedFolderTabs(folderElement);
@@ -2606,8 +2619,10 @@ function updateChevronState(spaceElement, pinnedContainer) {
 
     if (isCollapsed) {
         chevronButton.classList.add('collapsed');
+        chevronButton.setAttribute('aria-expanded', 'false');
     } else {
         chevronButton.classList.remove('collapsed');
+        chevronButton.setAttribute('aria-expanded', 'true');
     }
 }
 

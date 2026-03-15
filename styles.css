@@ -35,6 +35,16 @@ body {
     overflow: hidden;
 }
 
+/* Global focus styles for keyboard accessibility */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+.tab:focus-visible,
+.pinned-favicon:focus-visible {
+    outline: 2px solid var(--chrome-blue-color, #8bb3f3);
+    outline-offset: 2px;
+}
+
 h3 {
     opacity: 0.8;
     font-weight: 600;
