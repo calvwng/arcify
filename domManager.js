@@ -364,6 +364,7 @@ export async function showArchivedTabsPopup(activeSpaceId) {
     toggleWrapper.className = 'archiving-toggle';
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
+    toggle.setAttribute('role', 'switch');
     toggle.checked = archivingEnabled;
     const slider = document.createElement('span');
     slider.className = 'archiving-toggle-slider';
@@ -444,6 +445,7 @@ export async function showArchivedTabsPopup(activeSpaceId) {
             const restoreButton = document.createElement('button');
             restoreButton.innerHTML = RESTORE_ICON;
             restoreButton.className = 'tab-restore';
+            restoreButton.setAttribute('aria-label', 'Restore tab');
             restoreButton.style.marginLeft = 'auto';
             item.addEventListener('click', (e) => {
                 e.stopPropagation();
