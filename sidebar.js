@@ -929,6 +929,20 @@ function createSpaceElement(space) {
     const deleteSpaceBtn = spaceElement.querySelector('.delete-space-btn');
     const settingsBtn = spaceElement.querySelector('.settings-btn');
 
+    // Dynamic aria-expanded for options dropdown
+    const optionsContainer = spaceElement.querySelector('.space-options-container');
+    const optionsButton = spaceElement.querySelector('.space-options');
+    if (optionsContainer && optionsButton) {
+        optionsContainer.addEventListener('mouseenter', () => optionsButton.setAttribute('aria-expanded', 'true'));
+        optionsContainer.addEventListener('mouseleave', () => optionsButton.setAttribute('aria-expanded', 'false'));
+        optionsContainer.addEventListener('focusin', () => optionsButton.setAttribute('aria-expanded', 'true'));
+        optionsContainer.addEventListener('focusout', (e) => {
+            if (!optionsContainer.contains(e.relatedTarget)) {
+                optionsButton.setAttribute('aria-expanded', 'false');
+            }
+        });
+    }
+
     newFolderBtn.addEventListener('click', () => {
         createNewFolder(spaceContainer);
     });
