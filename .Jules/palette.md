@@ -1,0 +1,3 @@
+## 2024-05-14 - Add ARIA labels to icon-only buttons
+**Learning:** Found a pattern of missing `aria-label` attributes on icon-only buttons in the Arcify app, both in static HTML templates (`sidebar.html`) and dynamically generated elements in JS (`sidebar.js`, `domManager.js`). This makes the UI less accessible to screen readers, as `title` attributes alone aren't always reliably announced.
+**Action:** When adding or reviewing new icon-only interactive elements in the UI, ensure we update both the static template definitions and any JS constructor functions to include explicitly descriptive `aria-label` attributes alongside `title` attributes for tooltips.
