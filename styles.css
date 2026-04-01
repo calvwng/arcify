@@ -2150,3 +2150,9 @@ h3 {
     display: flex;
     align-items: center;
 }
+/* Accessibility focus styles */
+.sidebar-container button:focus-visible,
+button:focus-visible {
+    outline: 2px solid var(--chrome-blue-color, #8bb3f3);
+    outline-offset: 2px;
+}
