@@ -1,0 +1,3 @@
+## 2025-02-09 - Dynamic ARIA Label Synchronization on State-Dependent Buttons
+**Learning:** When a single button changes its primary function dynamically based on state (e.g., a generic "action" button switching from "Close Tab" to "Remove Bookmark"), the `aria-label` must be explicitly synchronized in the JavaScript event loop using `setAttribute`. Static `aria-label` attributes in HTML are insufficient, and updating the `title` attribute alone does not guarantee reliable screen reader announcements.
+**Action:** Always implement a paired update for dynamic UI elements: whenever `button.textContent` or `button.title` is modified to reflect a new state, immediately follow it with `button.setAttribute('aria-label', newValue)`.
