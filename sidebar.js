@@ -1247,6 +1247,7 @@ function openFolder(folderElement) {
     folderElement.classList.remove('collapsed');
     folderContent.classList.remove('collapsed');
     folderToggle.classList.remove('collapsed');
+    folderToggle.setAttribute('aria-expanded', 'true');
 
     // Update icon to show folder is open
     if (folderIcon) {
@@ -2277,6 +2278,8 @@ async function createNewFolder(spaceElement) {
     folderElement.classList.toggle('collapsed');
     folderContent.classList.toggle('collapsed');
     folderToggle.classList.toggle('collapsed');
+    const isNowExpanded = !folderToggle.classList.contains('collapsed');
+    folderToggle.setAttribute('aria-expanded', isNowExpanded.toString());
 
     // Set up initial display for new folder
     folderNameInput.style.display = 'inline-block';
@@ -2288,7 +2291,9 @@ async function createNewFolder(spaceElement) {
         folderElement.classList.toggle('collapsed');
         folderContent.classList.toggle('collapsed');
         folderToggle.classList.toggle('collapsed');
-        folderIcon.innerHTML = folderElement.classList.contains('collapsed') ? FOLDER_CLOSED_ICON : FOLDER_OPEN_ICON;
+        const isExpanded = !folderElement.classList.contains('collapsed');
+        folderToggle.setAttribute('aria-expanded', isExpanded.toString());
+        folderIcon.innerHTML = !isExpanded ? FOLDER_CLOSED_ICON : FOLDER_OPEN_ICON;
         syncCollapsedFolderTabs(folderElement);
     });
 
@@ -2418,7 +2423,8 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                             folderElement.classList.toggle('collapsed');
                             folderContent.classList.toggle('collapsed');
                             folderToggle.classList.toggle('collapsed');
-                            updateFolderIcon(folderElement);
+                            const isExpanded = !folderElement.classList.contains('collapsed');
+                            folderToggle.setAttribute('aria-expanded', isExpanded.toString());
                             updateFolderIcon(folderElement);
                             syncCollapsedFolderTabs(folderElement);
                         });
