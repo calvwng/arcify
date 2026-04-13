@@ -880,12 +880,33 @@ function createSpaceElement(space) {
     if (isPinnedCollapsed) {
         chevronButton.classList.add('collapsed');
         pinnedSection.classList.add('collapsed');
+        chevronButton.setAttribute('aria-expanded', 'false');
     }
 
     // Initialize chevron state
     updateChevronState(spaceElement, pinnedSection);
 
 
+
+    const spaceOptionsContainer = spaceElement.querySelector('.space-options-container');
+    const spaceOptionsBtn = spaceElement.querySelector('.space-options');
+
+    if (spaceOptionsContainer && spaceOptionsBtn) {
+        spaceOptionsContainer.addEventListener('mouseenter', () => {
+            spaceOptionsBtn.setAttribute('aria-expanded', 'true');
+        });
+        spaceOptionsContainer.addEventListener('mouseleave', () => {
+            spaceOptionsBtn.setAttribute('aria-expanded', 'false');
+        });
+
+        // Also support focus events for keyboard navigation accessibility
+        spaceOptionsBtn.addEventListener('focus', () => {
+            spaceOptionsBtn.setAttribute('aria-expanded', 'true');
+        });
+        spaceOptionsBtn.addEventListener('blur', () => {
+            spaceOptionsBtn.setAttribute('aria-expanded', 'false');
+        });
+    }
 
     chevronButton.addEventListener('click', (e) => {
         e.stopPropagation(); // Prevent space name editing
@@ -895,11 +916,13 @@ function createSpaceElement(space) {
             // Expand
             chevronButton.classList.remove('collapsed');
             pinnedSection.classList.remove('collapsed');
+            chevronButton.setAttribute('aria-expanded', 'true');
             localStorage.setItem(`space-${space.id}-pinned-collapsed`, 'false');
         } else {
             // Collapse
             chevronButton.classList.add('collapsed');
             pinnedSection.classList.add('collapsed');
+            chevronButton.setAttribute('aria-expanded', 'false');
             localStorage.setItem(`space-${space.id}-pinned-collapsed`, 'true');
         }
 
@@ -1247,6 +1270,7 @@ function openFolder(folderElement) {
     folderElement.classList.remove('collapsed');
     folderContent.classList.remove('collapsed');
     folderToggle.classList.remove('collapsed');
+    folderToggle.setAttribute('aria-expanded', 'true');
 
     // Update icon to show folder is open
     if (folderIcon) {
@@ -2277,6 +2301,7 @@ async function createNewFolder(spaceElement) {
     folderElement.classList.toggle('collapsed');
     folderContent.classList.toggle('collapsed');
     folderToggle.classList.toggle('collapsed');
+    folderToggle.setAttribute('aria-expanded', folderElement.classList.contains('collapsed') ? 'false' : 'true');
 
     // Set up initial display for new folder
     folderNameInput.style.display = 'inline-block';
@@ -2288,6 +2313,7 @@ async function createNewFolder(spaceElement) {
         folderElement.classList.toggle('collapsed');
         folderContent.classList.toggle('collapsed');
         folderToggle.classList.toggle('collapsed');
+        folderToggle.setAttribute('aria-expanded', folderElement.classList.contains('collapsed') ? 'false' : 'true');
         folderIcon.innerHTML = folderElement.classList.contains('collapsed') ? FOLDER_CLOSED_ICON : FOLDER_OPEN_ICON;
         syncCollapsedFolderTabs(folderElement);
     });
@@ -2418,7 +2444,7 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                             folderElement.classList.toggle('collapsed');
                             folderContent.classList.toggle('collapsed');
                             folderToggle.classList.toggle('collapsed');
-                            updateFolderIcon(folderElement);
+                            folderToggle.setAttribute('aria-expanded', folderElement.classList.contains('collapsed') ? 'false' : 'true');
                             updateFolderIcon(folderElement);
                             syncCollapsedFolderTabs(folderElement);
                         });
@@ -2606,8 +2632,10 @@ function updateChevronState(spaceElement, pinnedContainer) {
 
     if (isCollapsed) {
         chevronButton.classList.add('collapsed');
+        chevronButton.setAttribute('aria-expanded', 'false');
     } else {
         chevronButton.classList.remove('collapsed');
+        chevronButton.setAttribute('aria-expanded', 'true');
     }
 }
 
