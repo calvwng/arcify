@@ -1,0 +1,3 @@
+## 2026-04-14 - Accessibility Labels for Icon Buttons
+**Learning:** Found several icon-only buttons (`.placeholder-close-btn`, `.new-tab-btn`, `.add-space-toggle`, `.space-toggle-chevron`, `#archive-button`, `#space-options`, `.folder-toggle`, `.tab-close`) in `sidebar.html` that have `title` attributes but are missing `aria-label` attributes for screen reader accessibility. Found a dynamically created icon button in `domManager.js` (`restoreButton`) that also lacks an `aria-label`.
+**Action:** Adding explicit `aria-label` attributes to these buttons so that their purpose is clear to users relying on assistive technologies.
