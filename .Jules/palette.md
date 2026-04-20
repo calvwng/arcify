@@ -1,0 +1,3 @@
+## 2025-04-20 - Add ARIA attributes to Advanced Options Toggle
+**Learning:** Adding dynamic ARIA attributes (e.g., `aria-expanded` and `aria-controls`) to collapsible toggles like the advanced options menu improves screen reader context significantly.
+**Action:** When implementing custom interactive elements like toggles, ensure that their state is mapped to ARIA attributes synchronously when their underlying visual state is updated.
