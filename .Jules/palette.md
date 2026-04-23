@@ -1,0 +1,3 @@
+## 2024-05-18 - Added ARIA labels to Sidebar Buttons
+**Learning:** Found several icon-only buttons (`.placeholder-close-btn`, `.tab-close`, `.folder-toggle`, and a dynamically created `restoreButton`) lacking `aria-label` attributes. While some had `title` attributes (which serve as hover tooltips for sighted users and as a fallback accessible name), explicitly adding `aria-label` provides a strictly superior and unambiguous experience for screen readers.
+**Action:** When adding or reviewing custom UI elements (especially icon-only actions), always ensure an explicit `aria-label` is set, even if a `title` attribute is present.
