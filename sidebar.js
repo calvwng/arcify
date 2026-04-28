@@ -2802,7 +2802,9 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     actionButton.classList.remove('tab-close');
     actionButton.classList.add(isBookmarkOnly ? 'tab-remove' : 'tab-close');
     actionButton.textContent = isBookmarkOnly ? '−' : '×';
-    actionButton.title = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
+    const actionLabel = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
+    actionButton.title = actionLabel;
+    actionButton.setAttribute('aria-label', actionLabel);
     actionButton.addEventListener('click', async (e) => {
         e.stopPropagation();
         const activeSpace = spaces.find(s => s.id === activeSpaceId);
