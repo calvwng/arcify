@@ -924,6 +924,22 @@ function createSpaceElement(space) {
     const cleanBtn = spaceElement.querySelector('.clean-tabs-btn');
     cleanBtn.addEventListener('click', () => cleanTemporaryTabs(space.id));
 
+    // Accessibility for hover-based space options dropdown
+    const spaceOptionsContainer = spaceElement.querySelector('.space-options-container');
+    const spaceOptionsBtn = spaceElement.querySelector('.space-options');
+    const spaceOptionsDropdown = spaceElement.querySelector('.space-options-dropdown');
+    if (spaceOptionsContainer && spaceOptionsBtn && spaceOptionsDropdown) {
+        const dropdownId = `space-options-dropdown-${space.id}`;
+        spaceOptionsDropdown.id = dropdownId;
+        spaceOptionsBtn.setAttribute('aria-haspopup', 'true');
+        spaceOptionsBtn.setAttribute('aria-expanded', 'false');
+        spaceOptionsBtn.setAttribute('aria-controls', dropdownId);
+        spaceOptionsContainer.addEventListener('mouseenter', () => spaceOptionsBtn.setAttribute('aria-expanded', 'true'));
+        spaceOptionsContainer.addEventListener('mouseleave', () => spaceOptionsBtn.setAttribute('aria-expanded', 'false'));
+        spaceOptionsContainer.addEventListener('focusin', () => spaceOptionsBtn.setAttribute('aria-expanded', 'true'));
+        spaceOptionsContainer.addEventListener('focusout', () => spaceOptionsBtn.setAttribute('aria-expanded', 'false'));
+    }
+
     // Set up options menu
     const newFolderBtn = spaceElement.querySelector('.new-folder-btn');
     const deleteSpaceBtn = spaceElement.querySelector('.delete-space-btn');
