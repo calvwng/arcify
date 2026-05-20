@@ -1247,6 +1247,7 @@ function openFolder(folderElement) {
     folderElement.classList.remove('collapsed');
     folderContent.classList.remove('collapsed');
     folderToggle.classList.remove('collapsed');
+    folderToggle.setAttribute('aria-expanded', 'true');
 
     // Update icon to show folder is open
     if (folderIcon) {
@@ -2418,6 +2419,7 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                             folderElement.classList.toggle('collapsed');
                             folderContent.classList.toggle('collapsed');
                             folderToggle.classList.toggle('collapsed');
+                            folderToggle.setAttribute('aria-expanded', folderElement.classList.contains('collapsed') ? 'false' : 'true');
                             updateFolderIcon(folderElement);
                             updateFolderIcon(folderElement);
                             syncCollapsedFolderTabs(folderElement);
@@ -2803,6 +2805,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     actionButton.classList.add(isBookmarkOnly ? 'tab-remove' : 'tab-close');
     actionButton.textContent = isBookmarkOnly ? '−' : '×';
     actionButton.title = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
+    actionButton.setAttribute('aria-label', isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab');
     actionButton.addEventListener('click', async (e) => {
         e.stopPropagation();
         const activeSpace = spaces.find(s => s.id === activeSpaceId);
