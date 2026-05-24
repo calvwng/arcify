@@ -445,6 +445,8 @@ export async function showArchivedTabsPopup(activeSpaceId) {
             restoreButton.innerHTML = RESTORE_ICON;
             restoreButton.className = 'tab-restore';
             restoreButton.style.marginLeft = 'auto';
+            restoreButton.title = 'Restore Tab';
+            restoreButton.setAttribute('aria-label', 'Restore Tab');
             item.addEventListener('click', (e) => {
                 e.stopPropagation();
                 Utils.restoreArchivedTab(archivedTab);
