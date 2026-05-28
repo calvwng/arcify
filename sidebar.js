@@ -1247,6 +1247,7 @@ function openFolder(folderElement) {
     folderElement.classList.remove('collapsed');
     folderContent.classList.remove('collapsed');
     folderToggle.classList.remove('collapsed');
+    folderToggle.setAttribute('aria-label', 'Collapse folder');
 
     // Update icon to show folder is open
     if (folderIcon) {
@@ -2288,7 +2289,9 @@ async function createNewFolder(spaceElement) {
         folderElement.classList.toggle('collapsed');
         folderContent.classList.toggle('collapsed');
         folderToggle.classList.toggle('collapsed');
-        folderIcon.innerHTML = folderElement.classList.contains('collapsed') ? FOLDER_CLOSED_ICON : FOLDER_OPEN_ICON;
+        const isCollapsed = folderElement.classList.contains('collapsed');
+        folderToggle.setAttribute('aria-label', isCollapsed ? 'Expand folder' : 'Collapse folder');
+        folderIcon.innerHTML = isCollapsed ? FOLDER_CLOSED_ICON : FOLDER_OPEN_ICON;
         syncCollapsedFolderTabs(folderElement);
     });
 
@@ -2418,6 +2421,7 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                             folderElement.classList.toggle('collapsed');
                             folderContent.classList.toggle('collapsed');
                             folderToggle.classList.toggle('collapsed');
+                            folderToggle.setAttribute('aria-label', folderElement.classList.contains('collapsed') ? 'Expand folder' : 'Collapse folder');
                             updateFolderIcon(folderElement);
                             updateFolderIcon(folderElement);
                             syncCollapsedFolderTabs(folderElement);
@@ -2606,8 +2610,10 @@ function updateChevronState(spaceElement, pinnedContainer) {
 
     if (isCollapsed) {
         chevronButton.classList.add('collapsed');
+        chevronButton.setAttribute('aria-label', 'Expand pinned section');
     } else {
         chevronButton.classList.remove('collapsed');
+        chevronButton.setAttribute('aria-label', 'Collapse pinned section');
     }
 }
 
@@ -2803,6 +2809,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     actionButton.classList.add(isBookmarkOnly ? 'tab-remove' : 'tab-close');
     actionButton.textContent = isBookmarkOnly ? '−' : '×';
     actionButton.title = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
+    actionButton.setAttribute('aria-label', isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab');
     actionButton.addEventListener('click', async (e) => {
         e.stopPropagation();
         const activeSpace = spaces.find(s => s.id === activeSpaceId);

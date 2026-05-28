@@ -1,0 +1,3 @@
+## 2026-05-28 - Dynamic Accessibility Attributes
+**Learning:** Icon-only buttons (like chevron toggles, folder toggles, close buttons) in Arcify's sidebar heavily rely on JavaScript state changes. Static `aria-label` attributes are insufficient because the button's purpose and title change dynamically (e.g., from 'Expand folder' to 'Collapse folder', or 'Close Tab' to 'Remove Bookmark').
+**Action:** Always verify if a button's icon or title is modified via JavaScript events and explicitly synchronize the `aria-label` attribute via `setAttribute()` alongside those changes to maintain accurate context for screen readers.
