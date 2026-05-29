@@ -880,6 +880,7 @@ function createSpaceElement(space) {
     if (isPinnedCollapsed) {
         chevronButton.classList.add('collapsed');
         pinnedSection.classList.add('collapsed');
+        chevronButton.setAttribute('aria-expanded', 'false');
     }
 
     // Initialize chevron state
@@ -896,11 +897,13 @@ function createSpaceElement(space) {
             chevronButton.classList.remove('collapsed');
             pinnedSection.classList.remove('collapsed');
             localStorage.setItem(`space-${space.id}-pinned-collapsed`, 'false');
+            chevronButton.setAttribute('aria-expanded', 'true');
         } else {
             // Collapse
             chevronButton.classList.add('collapsed');
             pinnedSection.classList.add('collapsed');
             localStorage.setItem(`space-${space.id}-pinned-collapsed`, 'true');
+            chevronButton.setAttribute('aria-expanded', 'false');
         }
 
         // Update chevron state
@@ -959,11 +962,25 @@ function createSpaceElement(space) {
         const isVisible = popup.style.opacity == 1;
         if (isVisible) {
             popup.classList.toggle('visible');
+            archiveButton.setAttribute('aria-expanded', 'false');
         } else {
             showArchivedTabsPopup(space.id); // Populate and show
             popup.classList.toggle('visible');
+            archiveButton.setAttribute('aria-expanded', 'true');
         }
     });
+
+    // Handle space options hover for aria-expanded
+    const spaceOptionsContainer = spaceElement.querySelector('.space-options-container');
+    const spaceOptionsBtn = spaceElement.querySelector('.space-options');
+    if (spaceOptionsContainer && spaceOptionsBtn) {
+        spaceOptionsContainer.addEventListener('mouseenter', () => {
+            spaceOptionsBtn.setAttribute('aria-expanded', 'true');
+        });
+        spaceOptionsContainer.addEventListener('mouseleave', () => {
+            spaceOptionsBtn.setAttribute('aria-expanded', 'false');
+        });
+    }
 
     // Add to DOM
     spacesList.appendChild(spaceElement);
@@ -1247,6 +1264,7 @@ function openFolder(folderElement) {
     folderElement.classList.remove('collapsed');
     folderContent.classList.remove('collapsed');
     folderToggle.classList.remove('collapsed');
+    folderToggle.setAttribute('aria-expanded', 'true');
 
     // Update icon to show folder is open
     if (folderIcon) {
@@ -2276,7 +2294,8 @@ async function createNewFolder(spaceElement) {
     // Open new folder by default
     folderElement.classList.toggle('collapsed');
     folderContent.classList.toggle('collapsed');
-    folderToggle.classList.toggle('collapsed');
+    const isFolderCollapsed = folderToggle.classList.toggle('collapsed');
+    folderToggle.setAttribute('aria-expanded', isFolderCollapsed ? 'false' : 'true');
 
     // Set up initial display for new folder
     folderNameInput.style.display = 'inline-block';
@@ -2287,7 +2306,8 @@ async function createNewFolder(spaceElement) {
         collapsedFolderShownTabs.delete(folderElement);
         folderElement.classList.toggle('collapsed');
         folderContent.classList.toggle('collapsed');
-        folderToggle.classList.toggle('collapsed');
+        const isNowCollapsed = folderToggle.classList.toggle('collapsed');
+        folderToggle.setAttribute('aria-expanded', isNowCollapsed ? 'false' : 'true');
         folderIcon.innerHTML = folderElement.classList.contains('collapsed') ? FOLDER_CLOSED_ICON : FOLDER_OPEN_ICON;
         syncCollapsedFolderTabs(folderElement);
     });
@@ -2417,7 +2437,8 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                             collapsedFolderShownTabs.delete(folderElement);
                             folderElement.classList.toggle('collapsed');
                             folderContent.classList.toggle('collapsed');
-                            folderToggle.classList.toggle('collapsed');
+                            const isNowCollapsed = folderToggle.classList.toggle('collapsed');
+                            folderToggle.setAttribute('aria-expanded', isNowCollapsed ? 'false' : 'true');
                             updateFolderIcon(folderElement);
                             updateFolderIcon(folderElement);
                             syncCollapsedFolderTabs(folderElement);

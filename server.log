@@ -1,0 +1,8 @@
+127.0.0.1 - - [29/May/2026 11:00:57] "GET /sidebar.html HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 11:00:57] "GET /styles.css HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 11:00:57] "GET /assets/logger-DhKyUzS8.js HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 11:00:57] "GET /assets/modulepreload-polyfill-B5Qt9EMX.js HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 11:00:57] "GET /assets/utils-Bi91D6Ew.js HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 11:00:57] "GET /assets/localstorage-JdnWBOzG.js HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 11:00:57] "GET /assets/bookmark-utils-C_2wX-y_.js HTTP/1.1" 200 -
+127.0.0.1 - - [29/May/2026 11:00:57] "GET /sidebar.js HTTP/1.1" 200 -

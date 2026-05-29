@@ -1,0 +1,3 @@
+## 2024-05-29 - Synchronizing ARIA states on Hover Menus
+**Learning:** In Arcify, hover-based context menus like the `.space-options` dropdown are visually triggered via CSS `:hover` on their parent containers (`.space-options-container`). Because they do not use a standard `<button>` click to toggle, their accessible state (`aria-expanded`) must be manually synchronized using JavaScript `mouseenter` and `mouseleave` event listeners to ensure screen readers are accurately notified when the menu appears.
+**Action:** Always bind `mouseenter` and `mouseleave` events to the parent container of a hover-triggered dropdown to correctly toggle `aria-expanded` on the triggering element, maintaining alignment between visual state and accessibility tree.

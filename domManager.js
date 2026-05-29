@@ -40,7 +40,8 @@ export function setupDOMElements(createNewSpace) {
 
         // Toggle visibility classes
         inputContainer.classList.toggle('visible');
-        addSpaceBtn.classList.toggle('active');
+        const isActive = addSpaceBtn.classList.toggle('active');
+        addSpaceBtn.setAttribute('aria-expanded', isActive ? 'true' : 'false');
 
         // Toggle space switcher visibility
         if (isInputVisible) {
@@ -102,7 +103,8 @@ export function showSpaceNameInput() {
     const addSpaceBtn = document.getElementById('addSpaceBtn');
     const addSpaceInputContainer = document.getElementById('addSpaceInputContainer');
 
-    addSpaceBtn.classList.toggle('active');
+    const isActive = addSpaceBtn.classList.toggle('active');
+    addSpaceBtn.setAttribute('aria-expanded', isActive ? 'true' : 'false');
     addSpaceInputContainer.classList.toggle('visible');
     const errorPopup = document.createElement('div');
     errorPopup.className = 'error-popup';
@@ -445,6 +447,7 @@ export async function showArchivedTabsPopup(activeSpaceId) {
             restoreButton.innerHTML = RESTORE_ICON;
             restoreButton.className = 'tab-restore';
             restoreButton.style.marginLeft = 'auto';
+            restoreButton.setAttribute('aria-label', 'Restore archived tab');
             item.addEventListener('click', (e) => {
                 e.stopPropagation();
                 Utils.restoreArchivedTab(archivedTab);
