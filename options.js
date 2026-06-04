@@ -213,6 +213,7 @@ function setupAdvancedOptions() {
       const isExpanded = content.style.display !== 'none';
       content.style.display = isExpanded ? 'none' : 'block';
       toggle.classList.toggle('expanded', !isExpanded);
+      toggle.setAttribute('aria-expanded', !isExpanded);
     });
   }
 
