@@ -1115,6 +1115,8 @@ async function updateSpaceSwitcher() {
     spaces.forEach(space => {
         const button = document.createElement('button');
         button.textContent = space.name;
+        button.setAttribute('aria-label', `Switch to space ${space.name}`);
+        button.setAttribute('title', `Switch to space ${space.name}`);
         button.dataset.spaceId = space.id; // Store space ID
         button.classList.toggle('active', space.id === activeSpaceId);
         button.draggable = true; // Make the button draggable
@@ -1160,6 +1162,8 @@ async function updateSpaceSwitcher() {
         } else {
             const button = document.createElement('button');
             button.textContent = spaceFolder.title;
+            button.setAttribute('aria-label', `Switch to space ${spaceFolder.title}`);
+            button.setAttribute('title', `Switch to space ${spaceFolder.title}`);
             button.addEventListener('click', async () => {
                 const newTab = await ChromeHelper.createNewTab();
                 await createSpaceFromInactive(spaceFolder.title, newTab);
