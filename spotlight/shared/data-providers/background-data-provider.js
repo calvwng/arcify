@@ -121,7 +121,8 @@ export class BackgroundDataProvider extends BaseDataProvider {
             }
             Logger.log('[BackgroundDataProvider] Found Arcify folder:', arcifyFolder.id);
 
-            const spaceFolders = await chrome.bookmarks.getChildren(arcifyFolder.id);
+            const arcifyTree = await chrome.bookmarks.getSubTree(arcifyFolder.id);
+            const spaceFolders = arcifyTree[0].children || [];
             Logger.log('[BackgroundDataProvider] Found space folders:', spaceFolders.length, spaceFolders.map(f => f.title));
             const pinnedTabs = [];
 
@@ -132,7 +133,7 @@ export class BackgroundDataProvider extends BaseDataProvider {
                 if (!space) continue;
 
                 // Get all bookmarks in this space folder (recursively)
-                const bookmarks = await BookmarkUtils.getBookmarksFromFolderRecursive(spaceFolder.id);
+                const bookmarks = await BookmarkUtils.getBookmarksFromFolderRecursive(spaceFolder);
                 Logger.log('[BackgroundDataProvider] Found bookmarks in', spaceFolder.title, ':', bookmarks.length);
                 
                 for (const bookmark of bookmarks) {

@@ -79,16 +79,25 @@ export const BookmarkUtils = {
 
     /**
      * Recursively get all bookmarks from a folder and its subfolders
-     * @param {string} folderId - ID of the folder to search
+     * @param {string|Object} folderOrId - ID of the folder or the folder node itself
      * @param {Object} options - Options for filtering and processing
      * @param {boolean} options.includeTabIds - Whether to include tab IDs for matching tabs
      * @param {number} options.groupId - Group ID to match tabs against (if includeTabIds is true)
      * @returns {Promise<Array>} Array of bookmark objects
      */
-    async getBookmarksFromFolderRecursive(folderId, options = {}) {
+    async getBookmarksFromFolderRecursive(folderOrId, options = {}) {
         const { includeTabIds = false, groupId = null } = options;
         const bookmarks = [];
-        const items = await chrome.bookmarks.getChildren(folderId);
+
+        let folderNode;
+        if (typeof folderOrId === 'string') {
+            const tree = await chrome.bookmarks.getSubTree(folderOrId);
+            folderNode = tree[0];
+        } else {
+            folderNode = folderOrId;
+        }
+
+        const items = folderNode.children || [];
 
         // Get tabs once if needed for matching
         let tabs = [];
@@ -116,7 +125,7 @@ export const BookmarkUtils = {
                 bookmarks.push(bookmarkData);
             } else {
                 // This is a folder, recursively get bookmarks
-                const subBookmarks = await this.getBookmarksFromFolderRecursive(item.id, options);
+                const subBookmarks = await this.getBookmarksFromFolderRecursive(item, options);
                 bookmarks.push(...subBookmarks);
             }
         }
@@ -354,7 +363,8 @@ export const BookmarkUtils = {
      */
     async matchTabsWithBookmarks(folder, groupId, setTabNameOverride = null) {
         const bookmarks = [];
-        const items = await chrome.bookmarks.getChildren(folder.id);
+        // Use children if already available (from getSubTree), otherwise fetch them
+        const items = folder.children || await chrome.bookmarks.getChildren(folder.id);
         const tabs = await chrome.tabs.query({ groupId: groupId });
 
         for (const item of items) {
