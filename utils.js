@@ -68,6 +68,10 @@ const Utils = {
         if (!url) return '';
         try {
             const u = new URL(url);
+            // Handle cases where origin might be "null" (e.g., chrome-extension://, about:blank)
+            if (u.origin === 'null') {
+                return String(url).split('#')[0].split('?')[0];
+            }
             return `${u.origin}${u.pathname}`;
         } catch {
             // Fallback for non-standard URLs
