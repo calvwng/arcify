@@ -41,6 +41,7 @@ export function setupDOMElements(createNewSpace) {
         // Toggle visibility classes
         inputContainer.classList.toggle('visible');
         addSpaceBtn.classList.toggle('active');
+        addSpaceBtn.setAttribute('aria-expanded', !isInputVisible);
 
         // Toggle space switcher visibility
         if (isInputVisible) {
@@ -101,9 +102,11 @@ export function setupDOMElements(createNewSpace) {
 export function showSpaceNameInput() {
     const addSpaceBtn = document.getElementById('addSpaceBtn');
     const addSpaceInputContainer = document.getElementById('addSpaceInputContainer');
+    const isVisible = addSpaceInputContainer.classList.contains('visible');
 
     addSpaceBtn.classList.toggle('active');
     addSpaceInputContainer.classList.toggle('visible');
+    addSpaceBtn.setAttribute('aria-expanded', !isVisible);
     const errorPopup = document.createElement('div');
     errorPopup.className = 'error-popup';
     errorPopup.textContent = 'A space with this name already exists';
