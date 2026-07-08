@@ -2778,6 +2778,8 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             const enabled = await canBackToPinned();
             favicon.classList.toggle('pinned-back', enabled);
             favicon.title = enabled ? 'Back to Pinned URL' : '';
+            if (enabled) favicon.setAttribute('aria-label', 'Back to Pinned URL');
+            else favicon.removeAttribute('aria-label');
             urlChangedSlash.classList.toggle('visible', enabled);
         };
 
@@ -2803,6 +2805,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     actionButton.classList.add(isBookmarkOnly ? 'tab-remove' : 'tab-close');
     actionButton.textContent = isBookmarkOnly ? '−' : '×';
     actionButton.title = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
+    actionButton.setAttribute('aria-label', isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab');
     actionButton.addEventListener('click', async (e) => {
         e.stopPropagation();
         const activeSpace = spaces.find(s => s.id === activeSpaceId);
@@ -3396,6 +3399,8 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                     const shouldEnableBack = Boolean(pinnedUrl && tab.url && Utils.getPinnedUrlKey(tab.url) !== Utils.getPinnedUrlKey(pinnedUrl));
                     faviconElement.classList.toggle('pinned-back', shouldEnableBack);
                     faviconElement.title = shouldEnableBack ? 'Back to Pinned URL' : '';
+                    if (shouldEnableBack) faviconElement.setAttribute('aria-label', 'Back to Pinned URL');
+                    else faviconElement.removeAttribute('aria-label');
                     const slash = tabElement.querySelector('.tab-url-changed-slash');
                     if (slash) slash.classList.toggle('visible', shouldEnableBack);
                 }
