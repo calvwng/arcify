@@ -1,0 +1,3 @@
+## 2024-05-14 - Add ARIA Labels to Icon-Only Buttons
+**Learning:** Icon-only buttons (like `+` or chevron svgs), particularly within sidebar templates and dynamically generated elements, need explicit `aria-label` attributes for accessibility. Without these, screen readers may not be able to adequately convey the function of the button to the user. Relying solely on `title` attributes or visual icons is insufficient.
+**Action:** Consistently add descriptive `aria-label` attributes to all icon-only buttons created in HTML templates (like `sidebar.html`) and those generated dynamically in JavaScript (like in `domManager.js` and `sidebar.js`). This ensures the interface is accessible to all users.
