@@ -1,0 +1,4 @@
+## 2024-05-18 - ARIA expansion pattern for dropdowns and popups
+
+**Learning:** When managing custom popups and hover-based menus (like `.space-options-dropdown` or `.archived-tabs-popup`), assigning `aria-expanded` and managing it dynamically directly through JS events (e.g. `mouseenter`/`mouseleave` or click-to-toggle) ensures screen readers properly communicate the menu visibility state that isn't tied to standard `<details>` or `<dialog>` elements. We noticed the dynamic generation of elements often requires explicit `.setAttribute('role', 'switch')` if they mimic iOS toggle buttons.
+**Action:** Always map toggle, accordion, and custom dropdown visibility changes to explicit `aria-expanded` attribute updates in JS (especially for hover-activated menus where CSS `display` alone isn't enough for screen readers). Combine CSS `:focus-visible` with these semantic additions.

@@ -46,10 +46,16 @@ export function setupDOMElements(createNewSpace) {
         if (isInputVisible) {
             spaceSwitcher.style.opacity = '1';
             spaceSwitcher.style.visibility = 'visible';
+            addSpaceBtn.setAttribute('aria-expanded', 'false');
         } else {
             spaceNameInput.value = '';
             spaceSwitcher.style.opacity = '0';
             spaceSwitcher.style.visibility = 'hidden';
+            addSpaceBtn.setAttribute('aria-expanded', 'true');
+            // Focus the input when expanding
+            setTimeout(() => {
+                spaceNameInput.focus();
+            }, 50);
         }
     });
 
@@ -364,6 +370,7 @@ export async function showArchivedTabsPopup(activeSpaceId) {
     toggleWrapper.className = 'archiving-toggle';
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
+    toggle.setAttribute('role', 'switch');
     toggle.checked = archivingEnabled;
     const slider = document.createElement('span');
     slider.className = 'archiving-toggle-slider';
