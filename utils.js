@@ -1,3 +1,5 @@
+import { isPracticeUrl } from './tour-practice.js';
+import { getSpaceTabs, spaceRequest } from './space-client.js';
 /**
  * Utils - Shared utility functions and storage management
  * 
@@ -20,10 +22,16 @@ const ARCHIVED_TABS_KEY = 'archivedTabs';
 
 const Utils = {
 
-    processBookmarkFolder: async function (folder, groupId) {
+    async focusTab(tabId) {
+        const tab = await chrome.tabs.update(tabId, { active: true });
+        await chrome.windows.update(tab.windowId, { focused: true });
+        return tab;
+    },
+
+    processBookmarkFolder: async function (folder, spaceId) {
         const bookmarks = [];
         const items = await chrome.bookmarks.getChildren(folder.id);
-        const tabs = await chrome.tabs.query({ groupId: groupId });
+        const tabs = await getSpaceTabs(spaceId);
         for (const item of items) {
             if (item.url) {
                 // This is a bookmark
@@ -38,7 +46,7 @@ const Utils = {
                 }
             } else {
                 // This is a folder, recursively process it
-                const subFolderBookmarks = await this.processBookmarkFolder(item, groupId);
+                const subFolderBookmarks = await this.processBookmarkFolder(item, spaceId);
                 bookmarks.push(...subFolderBookmarks);
             }
         }
@@ -66,6 +74,8 @@ const Utils = {
     // intentionally ignore query params + hash to avoid treating benign changes (e.g. Google Docs) as "navigated away".
     getPinnedUrlKey: function (url) {
         if (!url) return '';
+        // Each local lesson/run is a distinct practice tab, even though it shares a page.
+        if (isPracticeUrl(url)) return url;
         try {
             const u = new URL(url);
             // Handle cases where origin might be "null" (e.g., chrome-extension://, about:blank)
@@ -83,13 +93,12 @@ const Utils = {
         const defaultSettings = {
             defaultSpaceName: 'Home',
             autoArchiveEnabled: false, // Default: disabled
-            autoArchiveIdleMinutes: 360, // Default: 30 minutes
-            enableSpotlight: true, // Default: enabled (controls both spotlight and custom new tab)
+            autoArchiveIdleMinutes: 360, // Default: 6 hours
+            syncTabGroups: false,
             invertTabOrder: true, // Default: enabled (New tabs/High index on top)
             colorOverrides: null, // Default: no color overrides
             debugLoggingEnabled: false, // Default: disabled (controls debug logging)
             showAllOpenTabsInCollapsedFolders: false, // Default: Arc behavior (only show active tab in collapsed folder)
-            // ... other settings ...
         };
         const result = await chrome.storage.sync.get(defaultSettings);
         Logger.log("Retrieved settings:", result);
@@ -153,81 +162,63 @@ const Utils = {
         return states[tabId] || null;
     },
 
+    // Serialization chain for pinnedTabStatesById read-modify-write ops. Without this,
+    // concurrent set/remove callers (e.g. sidebar init's Promise.all over groups) each read
+    // the SAME base object and write it back, so the last write clobbers earlier bindings —
+    // dropping favorites' tab<->bookmark links (B10). Chaining makes each op atomic.
+    _pinnedStateChain: Promise.resolve(),
+    _serializePinnedStateOp: function (op) {
+        const run = this._pinnedStateChain.then(op, op);
+        // Keep the chain alive even if an op rejects, so one failure can't wedge the queue.
+        this._pinnedStateChain = run.then(() => { }, () => { });
+        return run;
+    },
+
     setPinnedTabState: async function (tabId, state) {
         if (!tabId || !state) return;
-        const states = await this.getPinnedTabStates();
-        states[tabId] = {
-            pinnedUrl: state.pinnedUrl || null,
-            bookmarkId: state.bookmarkId || null
-        };
-        await this.savePinnedTabStates(states);
+        return this._serializePinnedStateOp(async () => {
+            const states = await this.getPinnedTabStates();
+            states[tabId] = {
+                pinnedUrl: state.pinnedUrl || null,
+                bookmarkId: state.bookmarkId || null
+            };
+            await this.savePinnedTabStates(states);
+        });
     },
 
     removePinnedTabState: async function (tabId) {
         if (!tabId) return;
-        const states = await this.getPinnedTabStates();
-        if (states[tabId]) {
-            delete states[tabId];
-            await this.savePinnedTabStates(states);
-        }
-    },
-
-    getTabGroupColor: async function (groupName) {
-        let tabGroups = await chrome.tabGroups.query({});
-
-        const chromeTabGroupColors = [
-            'grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'
-        ];
-        const existingGroup = tabGroups.find(group => group.title === groupName);
-        if (existingGroup) {
-            return existingGroup.color;
-        } else {
-            const randomIndex = Math.floor(Math.random() * chromeTabGroupColors.length);
-            return chromeTabGroupColors[randomIndex];
-        }
-    },
-
-    updateBookmarkTitleIfNeeded: async function (tab, activeSpace, newTitle) {
-        Logger.log(`Attempting to update bookmark for pinned tab ${tab.id} in space ${activeSpace.name} to title: ${newTitle}`);
-
-        try {
-            const spaceFolder = await LocalStorage.getOrCreateSpaceFolder(activeSpace.name);
-            if (!spaceFolder) {
-                Logger.error(`Bookmark folder for space ${activeSpace.name} not found.`);
-                return;
+        return this._serializePinnedStateOp(async () => {
+            const states = await this.getPinnedTabStates();
+            if (states[tabId]) {
+                delete states[tabId];
+                await this.savePinnedTabStates(states);
             }
+        });
+    },
 
-            // Recursive function to find and update the bookmark
-            const findAndUpdate = async (folderId) => {
-                const items = await chrome.bookmarks.getChildren(folderId);
-                for (const item of items) {
-                    if (item.url && item.url === tab.url) {
-                        // Found the bookmark
-                        // Avoid unnecessary updates if title is already correct
-                        if (item.title !== newTitle) {
-                            Logger.log(`Found bookmark ${item.id} for URL ${tab.url}. Updating title to "${newTitle}"`);
-                            await chrome.bookmarks.update(item.id, { title: newTitle });
-                        } else {
-                            Logger.log(`Bookmark ${item.id} title already matches "${newTitle}". Skipping update.`);
-                        }
-                        return true; // Found
-                    } else if (!item.url) {
-                        // It's a subfolder, search recursively
-                        const found = await findAndUpdate(item.id);
-                        if (found) return true; // Stop searching if found in subfolder
-                    }
+    // Drop pinnedTabStatesById entries whose tab id is no longer a live tab. Keyed by
+    // ephemeral tab id, this map otherwise accumulates dead keys across restarts, and a
+    // reused id could inherit a stale binding (B11). Called once on startup. Pass ALL live
+    // tab ids (across windows) so multi-window bindings aren't wrongly pruned.
+    prunePinnedTabStates: async function (validTabIds) {
+        const valid = new Set((validTabIds || []).map(id => String(id)));
+        return this._serializePinnedStateOp(async () => {
+            const states = await this.getPinnedTabStates();
+            let changed = false;
+            for (const key of Object.keys(states)) {
+                if (!valid.has(String(key))) {
+                    delete states[key];
+                    changed = true;
                 }
-                return false; // Not found in this folder
-            };
-
-            const updated = await findAndUpdate(spaceFolder.id);
-            if (!updated) {
-                Logger.log(`Bookmark for URL ${tab.url} not found in space folder ${activeSpace.name}.`);
             }
+            if (changed) await this.savePinnedTabStates(states);
+        });
+    },
 
-        } catch (error) {
-            Logger.error(`Error updating bookmark for tab ${tab.id}:`, error);
-        }
+    getSpaceColor: async function (groupName) {
+        const { spaces = [] } = await chrome.storage.local.get('spaces');
+        return spaces.find(s => s.name === groupName)?.color || 'grey';
     },
 
     // Function to get if archiving is enabled
@@ -280,12 +271,14 @@ const Utils = {
     archiveTab: async function (tabId) {
         try {
             const tab = await chrome.tabs.get(tabId);
-            if (!tab || !activeSpaceId) return;
+            const spaces = await spaceRequest('get');
+            const space = spaces.find(s => [...s.spaceBookmarks, ...s.temporaryTabs].includes(tabId));
+            if (!tab || !space) return;
 
             const tabData = {
                 url: tab.url,
                 name: tab.title,
-                spaceId: activeSpaceId // Archive within the current space
+                spaceId: space.id
             };
 
             await this.addArchivedTab(tabData);
@@ -309,25 +302,14 @@ const Utils = {
 
     restoreArchivedTab: async function (archivedTabData) {
         try {
-            // Create the tab in the original space's group
+            // Reopen the archived URL and restore its extension-owned membership.
             const newTab = await chrome.tabs.create({
                 url: archivedTabData.url,
                 active: true, // Make it active
                 // windowId: currentWindow.id // Ensure it's in the current window
             });
 
-            // Immediately group the new tab into the correct space (if spaceId is valid)
-            if (archivedTabData.spaceId && archivedTabData.spaceId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-                try {
-                    // Check if the group still exists
-                    await chrome.tabGroups.get(archivedTabData.spaceId);
-                    // Group exists, add tab to it
-                    await chrome.tabs.group({ tabIds: [newTab.id], groupId: archivedTabData.spaceId });
-                } catch (e) {
-                    // Group doesn't exist, create a new one or leave ungrouped
-                    Logger.warn(`Space ${archivedTabData.spaceId} no longer exists, tab restored without grouping`);
-                }
-            }
+            await spaceRequest('assign', { tabId: newTab.id, spaceId: archivedTabData.spaceId });
 
             // Remove from archive storage
             await this.removeArchivedTab(archivedTabData.url, archivedTabData.spaceId);
@@ -373,40 +355,14 @@ const Utils = {
         await chrome.storage.sync.set({ invertTabOrder: enabled });
     },
 
-    // Search and remove bookmark by URL from a folder structure recursively
-    searchAndRemoveBookmark: async function (folderId, tabUrl, options = {}) {
-        const {
-            removeTabElement = false, // Whether to also remove the tab element from DOM
-            tabElement = null, // The tab element to remove if removeTabElement is true
-            logRemoval = false // Whether to log the removal
-        } = options;
 
-        const items = await chrome.bookmarks.getChildren(folderId);
-        for (const item of items) {
-            if (item.url === tabUrl) {
-                if (logRemoval) {
-                    Logger.log("removing bookmark", item);
-                }
-                await chrome.bookmarks.remove(item.id);
-
-                if (removeTabElement && tabElement) {
-                    tabElement.remove();
-                }
-
-                return true; // Bookmark found and removed
-            } else if (!item.url) {
-                // This is a folder, search recursively
-                const found = await this.searchAndRemoveBookmark(item.id, tabUrl, options);
-                if (found) return true;
-            }
-        }
-        return false; // Bookmark not found
-    },
     // Navigate to adjacent tab within a space (next or previous)
     _navigateTabInSpace: async function (tabId, sourceSpace, direction) {
         const temporaryTabs = sourceSpace?.temporaryTabs ?? [];
         const spaceBookmarks = sourceSpace?.spaceBookmarks ?? [];
-        const allTabs = [...spaceBookmarks, ...temporaryTabs];
+        const currentTab = await chrome.tabs.get(tabId);
+        const windowTabs = new Set((await chrome.tabs.query({ windowId: currentTab.windowId })).map(t => t.id));
+        const allTabs = [...spaceBookmarks, ...temporaryTabs].filter(id => windowTabs.has(id));
 
         if (allTabs.length === 0) return;
 
