@@ -2631,7 +2631,8 @@ async function refreshActiveSpaceUI() {
 // Function to update chevron state based on pinned section visibility
 function updateChevronState(spaceElement, pinnedContainer) {
     const chevronButton = spaceElement.querySelector('.space-toggle-chevron');
-    const isCollapsed = pinnedContainer.classList.contains('collapsed');
+    const pinnedSection = spaceElement.querySelector('.pinned-tabs');
+    const isCollapsed = pinnedSection.classList.contains('collapsed');
     if (!chevronButton) {
         return;
     }

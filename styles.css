@@ -2154,6 +2154,7 @@ h3 {
 /* Visible keyboard focus, including the visible tracks of hidden switch inputs. */
 button:focus-visible,
 input:focus-visible,
+#newSpaceName:focus-visible,
 select:focus-visible,
 .ios-toggle:focus-visible + .toggle-label,
 .archiving-toggle input:focus-visible + .archiving-toggle-slider {
