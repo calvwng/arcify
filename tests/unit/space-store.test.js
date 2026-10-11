@@ -217,3 +217,118 @@ test('sidebar reads discover later bookmark folders and follow folder renames by
     assert.equal(store.spaces[2].bookmarkFolderId, 'later');
     assert.deepEqual(mutations, []);
 });
+
+test('restart restores duplicate URLs in different windows with new IDs and reversed enumeration', async () => {
+    tabs = [
+        { id: 1, windowId: 1, index: 0, url: 'https://same.test/' },
+        { id: 3, windowId: 1, index: 1, url: 'https://anchor-a.test/' },
+        { id: 2, windowId: 2, index: 0, url: 'https://same.test/' },
+        { id: 4, windowId: 2, index: 1, url: 'https://anchor-b.test/' }
+    ];
+    local.spaces = [space('a', [1, 3]), space('b', [4])];
+    local.spaces[1].spaceBookmarks = [2];
+    local.tabNameOverridesById = { 1: 'A duplicate', 2: 'B duplicate' };
+    local.pinnedTabStatesById = { 2: { bookmarkId: 'b-favorite', pinnedUrl: 'https://same.test/' } };
+    await new SpaceStore().dispatch({ action: 'get' });
+    assert.notEqual(local.spaceTabSnapshot[0].windowKey, local.spaceTabSnapshot[2].windowKey);
+    session = {}; chrome.storage.session = area(session);
+    // Query order, window IDs, and tab IDs all change; tab-strip positions do not.
+    tabs = [
+        { id: 20, windowId: 22, index: 0, url: 'https://same.test/' },
+        { id: 40, windowId: 22, index: 1, url: 'https://anchor-b.test/' },
+        { id: 30, windowId: 11, index: 1, url: 'https://anchor-a.test/' },
+        { id: 10, windowId: 11, index: 0, url: 'https://same.test/' }
+    ];
+    await new SpaceStore().dispatch({ action: 'get' });
+    assert.equal(ownerOf(local.spaces, 10).id, 'a');
+    assert.equal(ownerOf(local.spaces, 20).id, 'b');
+    assert.deepEqual(local.spaces[1].spaceBookmarks, [20]);
+    assert.equal(local.tabNameOverridesById[10], 'A duplicate');
+    assert.equal(local.tabNameOverridesById[20], 'B duplicate');
+    assert.equal(local.pinnedTabStatesById[20].bookmarkId, 'b-favorite');
+});
+
+test('same-window duplicate URLs recover by position rather than query order', async () => {
+    tabs = [{ id: 1, windowId: 1, index: 0, url: 'https://same.test/' },
+        { id: 2, windowId: 1, index: 1, url: 'https://same.test/' }];
+    local.tabNameOverridesById = { 1: 'First', 2: 'Second' };
+    await new SpaceStore().dispatch({ action: 'get' });
+    session = {}; chrome.storage.session = area(session);
+    tabs = [{ id: 20, windowId: 11, index: 1, url: 'https://same.test/' },
+        { id: 10, windowId: 11, index: 0, url: 'https://same.test/' }];
+    await new SpaceStore().dispatch({ action: 'get' });
+    assert.equal(ownerOf(local.spaces, 10).id, 'a');
+    assert.equal(ownerOf(local.spaces, 20).id, 'b');
+    assert.deepEqual(local.tabNameOverridesById, { 10: 'First', 20: 'Second' });
+});
+
+test('identical windows retain ambiguous recovery metadata without assigning it arbitrarily', async () => {
+    tabs = [{ id: 1, windowId: 1, index: 0, url: 'https://same.test/' },
+        { id: 2, windowId: 2, index: 0, url: 'https://same.test/' }];
+    local.tabNameOverridesById = { 1: 'First', 2: 'Second' };
+    await new SpaceStore().dispatch({ action: 'get' });
+    const saved = structuredClone(local.spaceTabSnapshot);
+    session = {}; chrome.storage.session = area(session);
+    tabs = [{ id: 20, windowId: 22, index: 0, url: 'https://same.test/' },
+        { id: 10, windowId: 11, index: 0, url: 'https://same.test/' }];
+    await new SpaceStore().dispatch({ action: 'get' });
+    assert.deepEqual(local.tabNameOverridesById, {});
+    assert.deepEqual(local.spaceTabSnapshot, saved);
+    // A worker suspension/restart must not turn provisional assignments into certainty.
+    await new SpaceStore().dispatch({ action: 'get' });
+    assert.deepEqual(local.tabNameOverridesById, {});
+    assert.deepEqual(local.spaceTabSnapshot, saved);
+});
+
+test('legacy ambiguous duplicate URLs do not consume the first restore record', async () => {
+    session.spaceSession = false;
+    local.spaceTabSnapshot = ['a', 'b'].map(spaceId => ({ spaceId, section: 'temporaryTabs',
+        order: 0, url: 'https://same.test/', nameOverride: spaceId }));
+    tabs = [{ id: 10, windowId: 1, index: 0, url: 'https://same.test/' },
+        { id: 20, windowId: 2, index: 0, url: 'https://same.test/' }];
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    assert.equal(store.restoreQueue.length, 2);
+    assert.deepEqual(local.tabNameOverridesById, {});
+});
+
+test('late window anchors recover duplicate metadata after a worker restart', async () => {
+    tabs = [{ id: 1, windowId: 1, index: 0, url: 'https://same.test/' },
+        { id: 3, windowId: 1, index: 1, url: 'https://anchor-a.test/' },
+        { id: 2, windowId: 2, index: 0, url: 'https://same.test/' },
+        { id: 4, windowId: 2, index: 1, url: 'https://anchor-b.test/' }];
+    local.spaces = [space('a', [1, 3]), space('b', [2, 4])];
+    local.tabNameOverridesById = { 1: 'A', 2: 'B' };
+    await new SpaceStore().dispatch({ action: 'get' });
+    session = {}; chrome.storage.session = area(session);
+    tabs = [{ id: 20, windowId: 22, index: 0, url: 'https://same.test/' },
+        { id: 10, windowId: 11, index: 0, url: 'https://same.test/' },
+        { id: 30, windowId: 11, index: 1 }, { id: 40, windowId: 22, index: 1 }];
+    await new SpaceStore().dispatch({ action: 'get' });
+    assert.deepEqual(local.tabNameOverridesById, {});
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    tabs[2].url = 'https://anchor-a.test/'; tabs[3].url = 'https://anchor-b.test/';
+    await store.run(async () => { store.track(tabs[2]); store.track(tabs[3]); await store.persist(); });
+    assert.equal(ownerOf(local.spaces, 10).id, 'a');
+    assert.equal(ownerOf(local.spaces, 20).id, 'b');
+    assert.deepEqual(local.tabNameOverridesById, { 10: 'A', 20: 'B' });
+    assert.equal(store.restoreQueue.length, 0);
+});
+
+test('closing and reopening a window retains duplicate URL positions and metadata', async () => {
+    tabs = [{ id: 1, windowId: 1, index: 0, url: 'https://same.test/' },
+        { id: 2, windowId: 1, index: 1, url: 'https://same.test/' }];
+    local.tabNameOverridesById = { 1: 'First', 2: 'Second' };
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    tabs = tabs.filter(t => t.id !== 1);
+    chrome.tabs.onRemoved.emit(1, { isWindowClosing: true }); await store.run(() => {});
+    tabs = [];
+    chrome.tabs.onRemoved.emit(2, { isWindowClosing: true }); await store.run(() => {});
+    assert.equal(local.spaceWindowSnapshot[0].tabs.length, 2);
+    tabs = [{ id: 20, windowId: 11, index: 1, url: 'https://same.test/' },
+        { id: 10, windowId: 11, index: 0, url: 'https://same.test/' }];
+    await new SpaceStore().dispatch({ action: 'get' });
+    assert.equal(ownerOf(local.spaces, 10).id, 'a');
+    assert.equal(ownerOf(local.spaces, 20).id, 'b');
+    assert.equal(local.tabNameOverridesById[10], 'First');
+    assert.equal(local.tabNameOverridesById[20], 'Second');
+});

@@ -8,6 +8,7 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}) {
     const tabs = await chrome.tabs.query({});
     const byId = new Map(tabs.map(t => [t.id, t]));
     const next = {};
+    const windowGroups = new Map();
     for (const space of spaces) {
         const members = [...space.spaceBookmarks, ...space.temporaryTabs].map(id => byId.get(id)).filter(t => t && !t.pinned);
         const windows = [...new Set(members.map(t => t.windowId))];
@@ -24,8 +25,8 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}) {
                 groupId = await chrome.tabs.group({ tabIds: ids, ...(groupId === undefined ? { createProperties: { windowId } } : { groupId }) });
             }
             next[key] = groupId;
-            // Preserve space order using projected numeric group IDs, only while sync is enabled.
-            await chrome.tabGroups.move(groupId, { index: -1 });
+            if (!windowGroups.has(windowId)) windowGroups.set(windowId, []);
+            windowGroups.get(windowId).push(groupId);
             const collapsed = Boolean(activeSpaces[windowId] && activeSpaces[windowId] !== space.id);
             if (!liveGroup || liveGroup.title !== space.name || liveGroup.color !== space.color || liveGroup.collapsed !== collapsed) {
                 await chrome.tabGroups.update(groupId, { title: space.name, color: space.color, collapsed });
@@ -35,6 +36,23 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}) {
             if (current.length === ids.length && current.some((t, i) => t.id !== ids[i])) {
                 await chrome.tabs.move(ids, { index: current[0].index });
             }
+        }
+    }
+    // Compare the complete target before moving any groups. Moving each group to
+    // the end unconditionally churns even an ordered strip and its onMoved events
+    // schedule another projection forever.
+    for (const [windowId, groupIds] of windowGroups) {
+        const orderedTabs = (await chrome.tabs.query({ windowId })).sort((a, b) => a.index - b.index);
+        const projected = new Set(groupIds);
+        const target = [
+            ...orderedTabs.filter(t => !projected.has(t.groupId)),
+            ...groupIds.flatMap(id => orderedTabs.filter(t => t.groupId === id))
+        ];
+        if (orderedTabs.every((t, index) => t.id === target[index].id)) continue;
+        for (const groupId of groupIds) {
+            if (!(await chrome.storage.sync.get('syncTabGroups')).syncTabGroups) return;
+            const current = (await chrome.tabs.query({ windowId })).sort((a, b) => a.index - b.index);
+            if (current.at(-1)?.groupId !== groupId) await chrome.tabGroups.move(groupId, { index: -1 });
         }
     }
     await chrome.storage.session.set({ spaceGroupProjection: next });

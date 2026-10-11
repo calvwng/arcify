@@ -1,6 +1,7 @@
 import { isPracticeUrl } from './tour-practice.js';
 import { syncSpaceGroups } from './tab-group-sync.js';
 import { LocalStorage } from './localstorage.js';
+import { captureWindowTabs, matchRestoreRecord } from './space-restore.js';
 
 const sections = ['spaceBookmarks', 'temporaryTabs'];
 export const tabIds = space => sections.flatMap(key => space?.[key] || []);
@@ -60,16 +61,21 @@ export class SpaceStore {
     }
     async initialize() {
         if (this.initialized) return;
-        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'archivedTabs']);
-        const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks']);
+        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs']);
+        const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'spaceRecoveryCandidates']);
         this.spaces = data.spaces || [];
         this.snapshotByTab = new Map((data.spaceTabSnapshot || []).filter(t => t.tabId).map(t => [t.tabId, t]));
         this.provisional = new Set();
+        this.recoveryCandidates = new Set(session.spaceSession ? session.spaceRecoveryCandidates || [] : []);
+        this.savedWindows = data.spaceWindowSnapshot || [];
+        this.windowKeys = new Map(session.spaceSession ? session.spaceWindowKeys || [] : []);
+        this.restoreWindowKeys = new Map(session.spaceSession ? session.spaceRestoreWindowKeys || [] : []);
         this.restoredMetadata = [];
         this.restoredRanks = new Map(session.restoredTabRanks || []);
         this.active = session.activeSpaces || {};
         this.defaultSpaceName = (await chrome.storage.sync.get('defaultSpaceName')).defaultSpaceName || 'Home';
         const live = await chrome.tabs.query({});
+        this.liveTabs = new Map(live.map(t => [t.id, t]));
         if (data.spaceModelVersion !== 2) {
             const idMap = new Map();
             const migrated = [];
@@ -95,6 +101,7 @@ export class SpaceStore {
             this.restoreQueue = [];
         } else if (!session.spaceSession) {
             // Chrome tab IDs are session-local. Never accept an old ID after restart.
+            this.snapshotByTab.clear();
             this.restoreQueue = data.spaceTabSnapshot || [];
             this.spaces.forEach(s => { s.spaceBookmarks = []; s.temporaryTabs = []; delete s.lastTab; });
             this.active = {};
@@ -103,6 +110,8 @@ export class SpaceStore {
         } else {
             this.restoreQueue = session.spaceRestoreQueue || [];
         }
+        const restoreKeys = new Set([...this.restoreQueue.map(t => t.windowKey), ...this.restoreWindowKeys.values()]);
+        this.savedWindows = this.savedWindows.filter(w => restoreKeys.has(w.key));
         await this.discoverBookmarkSpaces();
         if (!this.spaces.length) {
             this.spaces.push(await this.makeSpace(this.defaultSpaceName));
@@ -132,6 +141,7 @@ export class SpaceStore {
         return before !== JSON.stringify(this.spaces);
     }
     track(tab) {
+        this.liveTabs.set(tab.id, tab);
         const url = tab.url || tab.pendingUrl;
         if (tab.pinned) {
             for (const space of this.spaces) for (const key of sections) space[key] = space[key].filter(id => id !== tab.id);
@@ -143,14 +153,21 @@ export class SpaceStore {
         }
         const existing = ownerOf(this.spaces, tab.id);
         if (existing) {
-            if (!this.provisional.has(tab.id) || !url) return;
+            if ((!this.provisional.has(tab.id) && !this.recoveryCandidates.has(tab.id)) || !url) return;
             this.provisional.delete(tab.id);
-            if (!this.restoreQueue.some(t => t.url === url)) return;
-            for (const key of sections) existing[key] = existing[key].filter(id => id !== tab.id);
         }
         if (!url) this.provisional.add(tab.id);
-        const restoredIndex = this.restoreQueue.findIndex(t => t.url === url && this.spaces.some(s => s.id === t.spaceId));
+        const validQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId));
+        this.restoreQueue = validQueue;
+        const restoreKeys = new Set([...validQueue.map(t => t.windowKey), ...this.restoreWindowKeys.values()]);
+        const restoredIndex = matchRestoreRecord(tab, validQueue, this.savedWindows.filter(w => restoreKeys.has(w.key)), this.restoreWindowKeys, [...this.liveTabs.values()]);
+        for (const [id, key] of this.restoreWindowKeys) this.windowKeys.set(id, key);
         const restored = restoredIndex >= 0 ? this.restoreQueue.splice(restoredIndex, 1)[0] : null;
+        if (restored) this.recoveryCandidates.delete(tab.id);
+        else if (url && this.restoreQueue.some(t => t.url === url)) this.recoveryCandidates.add(tab.id);
+        else this.recoveryCandidates.delete(tab.id);
+        if (existing && !restored) return;
+        if (existing) for (const key of sections) existing[key] = existing[key].filter(id => id !== tab.id);
         // Chrome can attach the current tab as opener even for Cmd/Ctrl+T.
         // A blank new-tab page belongs to the selected space, not that incidental opener.
         const isNewTabPage = !url || /^(chrome:\/\/(newtab|new-tab-page)\/?|about:blank)$/.test(url);
@@ -175,6 +192,8 @@ export class SpaceStore {
     }
     async persist() {
         const tabs = new Map((await chrome.tabs.query({})).map(t => [t.id, t]));
+        this.liveTabs = tabs;
+        for (const id of this.recoveryCandidates) if (tabs.has(id)) this.track(tabs.get(id));
         this.restoreQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId));
         const metadata = await chrome.storage.local.get(['pinnedTabStatesById', 'tabNameOverridesById']);
         const pinnedStates = metadata.pinnedTabStatesById || {};
@@ -191,16 +210,32 @@ export class SpaceStore {
         for (const space of this.spaces) for (const section of sections) {
             space[section] = [...new Set(space[section])].filter(id => tabs.has(id));
             space[section].forEach((id, order) => {
+                // An unresolved recovery tab has only a provisional space owner.
+                // Keep its original record instead of persisting that guess.
+                if (this.recoveryCandidates.has(id)) {
+                    this.snapshotByTab.delete(id);
+                    return;
+                }
                 const tab = tabs.get(id);
+                if (!this.windowKeys.has(tab.windowId)) this.windowKeys.set(tab.windowId, crypto.randomUUID());
                 const record = { tabId: id, spaceId: space.id, section, order: this.restoredRanks.get(id) ?? order, url: tab.url || tab.pendingUrl || '',
+                    windowKey: this.windowKeys.get(tab.windowId), tabIndex: tab.index,
                     ...(pinnedStates[id] ? { pinnedState: pinnedStates[id] } : {}),
                     ...(overrides[id] ? { nameOverride: overrides[id] } : {}) };
                 snapshot.push(record);
                 this.snapshotByTab.set(id, record);
             });
         }
-        await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot: [...snapshot, ...this.restoreQueue] });
-        await chrome.storage.session.set({ spaceSession: true, activeSpaces: this.active, spaceRestoreQueue: this.restoreQueue, restoredTabRanks: [...this.restoredRanks] });
+        const pendingWindows = new Set(this.restoreQueue.map(t => t.windowKey));
+        const windowSnapshot = this.savedWindows.filter(w => pendingWindows.has(w.key));
+        for (const windowId of new Set([...tabs.values()].map(t => t.windowId))) {
+            if (!this.windowKeys.has(windowId)) this.windowKeys.set(windowId, crypto.randomUUID());
+            const key = this.windowKeys.get(windowId);
+            if (!windowSnapshot.some(w => w.key === key)) windowSnapshot.push({ key, tabs: captureWindowTabs([...tabs.values()].filter(t => t.windowId === windowId)) });
+        }
+        this.savedWindows = windowSnapshot;
+        await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot: [...snapshot, ...this.restoreQueue], spaceWindowSnapshot: windowSnapshot });
+        await chrome.storage.session.set({ spaceSession: true, activeSpaces: this.active, spaceRestoreQueue: this.restoreQueue, restoredTabRanks: [...this.restoredRanks], spaceWindowKeys: [...this.windowKeys], spaceRestoreWindowKeys: [...this.restoreWindowKeys], spaceRecoveryCandidates: [...new Set([...this.recoveryCandidates, ...this.provisional])] });
         try { await syncSpaceGroups(this.spaces, this.active); }
         catch (error) { console.warn('Tab group sync deferred:', error); }
     }
@@ -225,6 +260,7 @@ export class SpaceStore {
                     const target = this.spaces.find(s => s.id === message.spaceId);
                     if (target) {
                         this.provisional.delete(message.tabId);
+                        this.recoveryCandidates.delete(message.tabId);
                         for (const space of this.spaces) for (const key of sections) space[key] = space[key].filter(id => id !== message.tabId);
                         target[message.pinned ? 'spaceBookmarks' : 'temporaryTabs'].push(message.tabId);
                     }
@@ -263,6 +299,8 @@ export class SpaceStore {
             if (info?.isWindowClosing && record && this.spaces.some(s => s.id === record.spaceId)) this.restoreQueue.push(record);
             this.snapshotByTab.delete(id);
             this.provisional.delete(id);
+            this.recoveryCandidates.delete(id);
+            this.liveTabs.delete(id);
             for (const space of this.spaces) {
                 for (const key of sections) space[key] = space[key].filter(t => t !== id);
                 if (space.lastTab === id) delete space.lastTab;
