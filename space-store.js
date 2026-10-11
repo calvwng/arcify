@@ -193,6 +193,10 @@ export class SpaceStore {
     async persist() {
         const tabs = new Map((await chrome.tabs.query({})).map(t => [t.id, t]));
         this.liveTabs = tabs;
+        const liveWindows = new Set([...tabs.values()].map(t => t.windowId));
+        for (const keys of [this.windowKeys, this.restoreWindowKeys]) {
+            for (const id of keys.keys()) if (!liveWindows.has(id)) keys.delete(id);
+        }
         for (const id of this.recoveryCandidates) if (tabs.has(id)) this.track(tabs.get(id));
         this.restoreQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId));
         const metadata = await chrome.storage.local.get(['pinnedTabStatesById', 'tabNameOverridesById']);
@@ -228,7 +232,7 @@ export class SpaceStore {
         }
         const pendingWindows = new Set(this.restoreQueue.map(t => t.windowKey));
         const windowSnapshot = this.savedWindows.filter(w => pendingWindows.has(w.key));
-        for (const windowId of new Set([...tabs.values()].map(t => t.windowId))) {
+        for (const windowId of liveWindows) {
             if (!this.windowKeys.has(windowId)) this.windowKeys.set(windowId, crypto.randomUUID());
             const key = this.windowKeys.get(windowId);
             if (!windowSnapshot.some(w => w.key === key)) windowSnapshot.push({ key, tabs: captureWindowTabs([...tabs.values()].filter(t => t.windowId === windowId)) });
@@ -307,6 +311,9 @@ export class SpaceStore {
             }
         }));
         chrome.tabs.onReplaced.addListener((added, removed) => handle(() => {
+            for (const ids of [this.provisional, this.recoveryCandidates]) {
+                if (ids.delete(removed)) ids.add(added);
+            }
             for (const space of this.spaces) {
                 for (const key of sections) space[key] = space[key].map(id => id === removed ? added : id);
                 if (space.lastTab === removed) space.lastTab = added;
@@ -321,13 +328,16 @@ export class SpaceStore {
             if (area === 'sync' && changes.syncTabGroups) handle(() => {});
             if (area === 'sync' && changes.defaultSpaceName) handle(() => { this.defaultSpaceName = changes.defaultSpaceName.newValue || 'Home'; });
         });
-        // Tab-strip changes only request a projection; they never alter the model.
+        // Refresh restoration positions after native moves without changing space
+        // membership. The projection is idempotent, so its follow-up event settles.
         let syncTimer;
         const scheduleSync = () => {
             clearTimeout(syncTimer);
-            syncTimer = setTimeout(() => this.run(() => syncSpaceGroups(this.spaces, this.active)).catch(console.error), 200);
+            syncTimer = setTimeout(() => this.run(() => this.persist()).catch(console.error), 200);
         };
         chrome.tabs.onMoved.addListener(scheduleSync);
+        chrome.tabs.onAttached?.addListener(scheduleSync);
+        chrome.tabs.onDetached?.addListener(scheduleSync);
         chrome.tabs.onUpdated.addListener((id, change) => { if (change.groupId !== undefined) scheduleSync(); });
         chrome.tabGroups.onRemoved.addListener(scheduleSync);
         chrome.tabGroups.onUpdated.addListener(scheduleSync);
