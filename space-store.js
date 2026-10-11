@@ -244,53 +244,55 @@ export class SpaceStore {
         catch (error) { console.warn('Tab group sync deferred:', error); }
     }
     async dispatch(message) {
-        return this.run(async () => {
-            switch (message.action) {
-                case 'get':
-                    if (await this.discoverBookmarkSpaces()) await this.persist();
-                    break;
-                case 'patch':
-                    for (const next of message.after) {
-                        const prev = message.before.find(s => s.id === next.id);
-                        for (const key of sections) if (JSON.stringify(next[key]) !== JSON.stringify(prev?.[key])) {
-                            for (const id of next[key] || []) this.restoredRanks.delete(id);
-                        }
+        return this.run(() => this.applyAction(message));
+    }
+    // Internal only: callers already holding run() may compose the existing operations.
+    async applyAction(message) {
+        switch (message.action) {
+            case 'get':
+                if (await this.discoverBookmarkSpaces()) await this.persist();
+                break;
+            case 'patch':
+                for (const next of message.after) {
+                    const prev = message.before.find(s => s.id === next.id);
+                    for (const key of sections) if (JSON.stringify(next[key]) !== JSON.stringify(prev?.[key])) {
+                        for (const id of next[key] || []) this.restoredRanks.delete(id);
                     }
-                    this.spaces = applySpacePatch(this.spaces, message.before, message.after);
-                    if (!this.spaces.length) this.spaces.push(await this.makeSpace(this.defaultSpaceName));
-                    break;
-                case 'activate': this.active[message.windowId] = message.spaceId; break;
-                case 'assign': {
-                    const target = this.spaces.find(s => s.id === message.spaceId);
-                    if (target) {
-                        this.provisional.delete(message.tabId);
-                        this.recoveryCandidates.delete(message.tabId);
-                        for (const space of this.spaces) for (const key of sections) space[key] = space[key].filter(id => id !== message.tabId);
-                        target[message.pinned ? 'spaceBookmarks' : 'temporaryTabs'].push(message.tabId);
-                    }
-                    break;
                 }
-                case 'import': {
-                    const groups = await chrome.tabGroups.query({ windowId: message.windowId });
-                    const tabs = await chrome.tabs.query({ windowId: message.windowId });
-                    for (const group of groups) {
-                        let name = group.title || 'Imported space';
-                        const base = name;
-                        for (let i = 2; this.spaces.some(s => s.name === name); i++) name = `${base} ${i}`;
-                        const space = await this.makeSpace(name, group.color);
-                        const ids = tabs.filter(t => t.groupId === group.id && !t.pinned).map(t => t.id);
-                        for (const old of this.spaces) for (const key of sections) old[key] = old[key].filter(id => !ids.includes(id));
-                        space.temporaryTabs = ids;
-                        this.spaces.push(space);
-                    }
-                    await chrome.storage.local.set({ tabGroupImportDismissed: true });
-                    break;
+                this.spaces = applySpacePatch(this.spaces, message.before, message.after);
+                if (!this.spaces.length) this.spaces.push(await this.makeSpace(this.defaultSpaceName));
+                break;
+            case 'activate': this.active[message.windowId] = message.spaceId; break;
+            case 'assign': {
+                const target = this.spaces.find(s => s.id === message.spaceId);
+                if (target) {
+                    this.provisional.delete(message.tabId);
+                    this.recoveryCandidates.delete(message.tabId);
+                    for (const space of this.spaces) for (const key of sections) space[key] = space[key].filter(id => id !== message.tabId);
+                    target[message.pinned ? 'spaceBookmarks' : 'temporaryTabs'].push(message.tabId);
                 }
-                default: throw new Error('Unknown space action');
+                break;
             }
-            if (message.action !== 'get') await this.persist();
-            return clone(this.spaces);
-        });
+            case 'import': {
+                const groups = await chrome.tabGroups.query({ windowId: message.windowId });
+                const tabs = await chrome.tabs.query({ windowId: message.windowId });
+                for (const group of groups) {
+                    let name = group.title || 'Imported space';
+                    const base = name;
+                    for (let i = 2; this.spaces.some(s => s.name === name); i++) name = `${base} ${i}`;
+                    const space = await this.makeSpace(name, group.color);
+                    const ids = tabs.filter(t => t.groupId === group.id && !t.pinned).map(t => t.id);
+                    for (const old of this.spaces) for (const key of sections) old[key] = old[key].filter(id => !ids.includes(id));
+                    space.temporaryTabs = ids;
+                    this.spaces.push(space);
+                }
+                await chrome.storage.local.set({ tabGroupImportDismissed: true });
+                break;
+            }
+            default: throw new Error('Unknown space action');
+        }
+        if (message.action !== 'get') await this.persist();
+        return clone(this.spaces);
     }
     install() {
         const handle = operation => this.run(async () => { await operation(); await this.persist(); }).catch(console.error);

@@ -14,6 +14,7 @@ registerTourMessages();
  */
 
 import { SpaceStore, ownerOf } from './space-store.js';
+import { registerSpotlightBridge } from './spotlight-bridge.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { registerBookmarkListeners } from './bookmark-events.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
@@ -22,6 +23,7 @@ registerBookmarkListeners();
 
 const spaceStore = new SpaceStore();
 spaceStore.install();
+registerSpotlightBridge(spaceStore);
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'spaceStore') return;
     spaceStore.dispatch(message).then(spaces => sendResponse({ success: true, spaces }), error => sendResponse({ success: false, error: error.message }));

@@ -56,6 +56,18 @@ const spacesList = document.getElementById('spacesList');
 const spaceSwitcher = document.getElementById('spaceSwitcher');
 const addSpaceBtn = document.getElementById('addSpaceBtn');
 const newTabBtn = document.getElementById('newTabBtn');
+const spotlightBtn = document.getElementById('spotlightBtn');
+spotlightBtn?.addEventListener('click', async () => {
+    const status = document.getElementById('spotlightStatus');
+    spotlightBtn.disabled = true;
+    status.textContent = 'Connecting to Spotlight…';
+    try {
+        const response = await chrome.runtime.sendMessage({ type: 'spotlightBridgeLaunch', windowId: currentWindow.id });
+        if (!response?.ok) throw new Error(response?.error?.message || 'Spotlight did not respond.');
+        status.textContent = '';
+    } catch (error) { status.textContent = `${error.message} Pair it in Settings.`; }
+    finally { spotlightBtn.disabled = false; }
+});
 const spaceTemplate = document.getElementById('spaceTemplate');
 
 // Global state
@@ -764,6 +776,14 @@ async function initSidebar() {
     sidebarReady = true;
     refreshCoordinator.schedule();
     chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'session' && changes.activeSpaces && sidebarReady) {
+            const nextId = changes.activeSpaces.newValue?.[currentWindow.id];
+            if (nextId && nextId !== activeSpaceId && spaces.some(space => space.id === nextId)) {
+                activeSpaceId = nextId;
+                refreshCoordinator.schedule();
+            }
+            return;
+        }
         if (area !== 'local' || !changes.spaces || !sidebarReady) return;
         scheduleStoredSpacesRefresh();
     });

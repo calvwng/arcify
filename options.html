@@ -184,6 +184,18 @@
                 </div>
             </div>
         </section>
+        <section class="settings-section" aria-labelledby="spotlightBridgeHeading">
+            <h2 id="spotlightBridgeHeading">Spotlight companion</h2>
+            <p>Pair this Arcify build with your Spotlight fork. IDs are local to this Chrome profile.</p>
+            <p>Arcify extension ID: <strong id="bridgeOwnId"></strong></p>
+            <label for="bridgePeerId">Spotlight extension ID</label>
+            <input id="bridgePeerId" type="text" maxlength="32" spellcheck="false" autocomplete="off" placeholder="32-letter ID from chrome://extensions">
+            <button id="bridgeSave" type="button">Save pairing</button>
+            <button id="bridgeCheck" type="button">Check connection</button>
+            <button id="bridgeDisconnect" type="button">Disconnect</button>
+            <p id="bridgeStatus" role="status" aria-live="polite"></p>
+            <p>Pair only a build you trust: Spotlight can read window tabs and Arcify bookmarks, select spaces, and open or navigate tabs. Enter this Arcify ID in Spotlight settings too.</p>
+        </section>
     </main>
 
     <div id="saveToast" class="save-toast" role="status" aria-live="polite" aria-atomic="true">

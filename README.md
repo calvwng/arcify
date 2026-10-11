@@ -260,3 +260,10 @@ coverage lives in `tests/e2e/independent-spaces.test.js` alongside the space, ta
 bookmark, and drag-and-drop suites.
 
 With **Sync spaces to Chrome tab groups** off, right-click a top-level folder and choose **New Folder** to create a child folder. Spaces support two folder levels (parent → child). Turning sync on disables new nested-folder creation and preserves existing folders.
+
+### Optional Spotlight companion
+
+The paired Spotlight fork adds window-aware search over Arcify's authoritative
+spaces without depending on Chrome tab groups. Setup, protocol, and update steps:
+[Spotlight bridge guide](docs/spotlight-bridge.md). Browser verification limits and
+manual acceptance checks: [validation record](docs/bridge-validation.md).
