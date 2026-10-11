@@ -168,6 +168,7 @@ async function replaceBookmarkUrlWithCurrentUrl(tab, tabElement) {
         if (favicon) {
             favicon.classList.remove('pinned-back');
             favicon.title = '';
+            favicon.removeAttribute('aria-label');
         }
         const slash = tabElement.querySelector('.tab-url-changed-slash');
         if (slash) slash.classList.remove('visible');
@@ -883,7 +884,7 @@ function createSpaceElement(space) {
     }
 
     // Initialize chevron state
-    updateChevronState(spaceElement, pinnedSection);
+    updateChevronState(spaceContainer, pinnedSection);
 
 
 
@@ -904,7 +905,7 @@ function createSpaceElement(space) {
         }
 
         // Update chevron state
-        updateChevronState(spaceElement, pinnedSection);
+        updateChevronState(spaceContainer, pinnedSection);
     });
 
     // Set up containers
@@ -923,6 +924,30 @@ function createSpaceElement(space) {
     // Set up clean tabs button
     const cleanBtn = spaceElement.querySelector('.clean-tabs-btn');
     cleanBtn.addEventListener('click', () => cleanTemporaryTabs(space.id));
+
+    // Keep the announced dropdown state aligned with CSS hover and focus visibility.
+    const optionsContainer = spaceElement.querySelector('.space-options-container');
+    const optionsButton = optionsContainer.querySelector('.space-options');
+    let optionsHovered = false;
+    const syncOptionsExpanded = () => {
+        optionsButton.setAttribute('aria-expanded', String(
+            optionsHovered || optionsContainer.contains(document.activeElement)
+        ));
+    };
+    optionsContainer.addEventListener('mouseenter', () => {
+        optionsHovered = true;
+        syncOptionsExpanded();
+    });
+    optionsContainer.addEventListener('mouseleave', () => {
+        optionsHovered = false;
+        syncOptionsExpanded();
+    });
+    optionsContainer.addEventListener('focusin', syncOptionsExpanded);
+    optionsContainer.addEventListener('focusout', (event) => {
+        optionsButton.setAttribute('aria-expanded', String(
+            optionsHovered || optionsContainer.contains(event.relatedTarget)
+        ));
+    });
 
     // Set up options menu
     const newFolderBtn = spaceElement.querySelector('.new-folder-btn');
@@ -956,13 +981,14 @@ function createSpaceElement(space) {
     archiveButton.addEventListener('click', (e) => {
         e.stopPropagation(); // Prevent closing immediately if clicking outside logic exists
         spaceContent.classList.toggle('hidden');
-        const isVisible = popup.style.opacity == 1;
+        const isVisible = popup.classList.contains('visible');
         if (isVisible) {
             popup.classList.toggle('visible');
         } else {
             showArchivedTabsPopup(space.id); // Populate and show
             popup.classList.toggle('visible');
         }
+        archiveButton.setAttribute('aria-expanded', String(popup.classList.contains('visible')));
     });
 
     // Add to DOM
@@ -1115,6 +1141,7 @@ async function updateSpaceSwitcher() {
     spaces.forEach(space => {
         const button = document.createElement('button');
         button.textContent = space.name;
+        button.setAttribute('aria-label', `Switch to space ${space.name}`);
         button.dataset.spaceId = space.id; // Store space ID
         button.classList.toggle('active', space.id === activeSpaceId);
         button.draggable = true; // Make the button draggable
@@ -1160,6 +1187,7 @@ async function updateSpaceSwitcher() {
         } else {
             const button = document.createElement('button');
             button.textContent = spaceFolder.title;
+            button.setAttribute('aria-label', `Create space from ${spaceFolder.title}`);
             button.addEventListener('click', async () => {
                 const newTab = await ChromeHelper.createNewTab();
                 await createSpaceFromInactive(spaceFolder.title, newTab);
@@ -1247,6 +1275,7 @@ function openFolder(folderElement) {
     folderElement.classList.remove('collapsed');
     folderContent.classList.remove('collapsed');
     folderToggle.classList.remove('collapsed');
+    folderToggle.setAttribute('aria-expanded', String(!folderElement.classList.contains('collapsed')));
 
     // Update icon to show folder is open
     if (folderIcon) {
@@ -2277,6 +2306,7 @@ async function createNewFolder(spaceElement) {
     folderElement.classList.toggle('collapsed');
     folderContent.classList.toggle('collapsed');
     folderToggle.classList.toggle('collapsed');
+    folderToggle.setAttribute('aria-expanded', String(!folderElement.classList.contains('collapsed')));
 
     // Set up initial display for new folder
     folderNameInput.style.display = 'inline-block';
@@ -2288,6 +2318,7 @@ async function createNewFolder(spaceElement) {
         folderElement.classList.toggle('collapsed');
         folderContent.classList.toggle('collapsed');
         folderToggle.classList.toggle('collapsed');
+        folderToggle.setAttribute('aria-expanded', String(!folderElement.classList.contains('collapsed')));
         folderIcon.innerHTML = folderElement.classList.contains('collapsed') ? FOLDER_CLOSED_ICON : FOLDER_OPEN_ICON;
         syncCollapsedFolderTabs(folderElement);
     });
@@ -2418,6 +2449,7 @@ async function loadTabs(space, pinnedContainer, tempContainer) {
                             folderElement.classList.toggle('collapsed');
                             folderContent.classList.toggle('collapsed');
                             folderToggle.classList.toggle('collapsed');
+                            folderToggle.setAttribute('aria-expanded', String(!folderElement.classList.contains('collapsed')));
                             updateFolderIcon(folderElement);
                             updateFolderIcon(folderElement);
                             syncCollapsedFolderTabs(folderElement);
@@ -2603,6 +2635,7 @@ function updateChevronState(spaceElement, pinnedContainer) {
     if (!chevronButton) {
         return;
     }
+    chevronButton.setAttribute('aria-expanded', String(!isCollapsed));
 
     if (isCollapsed) {
         chevronButton.classList.add('collapsed');
@@ -2778,6 +2811,8 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             const enabled = await canBackToPinned();
             favicon.classList.toggle('pinned-back', enabled);
             favicon.title = enabled ? 'Back to Pinned URL' : '';
+            if (enabled) favicon.setAttribute('aria-label', favicon.title);
+            else favicon.removeAttribute('aria-label');
             urlChangedSlash.classList.toggle('visible', enabled);
         };
 
@@ -2803,6 +2838,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     actionButton.classList.add(isBookmarkOnly ? 'tab-remove' : 'tab-close');
     actionButton.textContent = isBookmarkOnly ? '−' : '×';
     actionButton.title = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
+    actionButton.setAttribute('aria-label', actionButton.title);
     actionButton.addEventListener('click', async (e) => {
         e.stopPropagation();
         const activeSpace = spaces.find(s => s.id === activeSpaceId);
@@ -3222,6 +3258,7 @@ async function createNewSpace() {
         const inputContainer = document.getElementById('addSpaceInputContainer');
         const spaceSwitcher = document.getElementById('spaceSwitcher');
         addSpaceBtn.classList.remove('active');
+        addSpaceBtn.setAttribute('aria-expanded', 'false');
         inputContainer.classList.remove('visible');
         spaceSwitcher.style.opacity = '1';
         spaceSwitcher.style.visibility = 'visible';
@@ -3396,6 +3433,8 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                     const shouldEnableBack = Boolean(pinnedUrl && tab.url && Utils.getPinnedUrlKey(tab.url) !== Utils.getPinnedUrlKey(pinnedUrl));
                     faviconElement.classList.toggle('pinned-back', shouldEnableBack);
                     faviconElement.title = shouldEnableBack ? 'Back to Pinned URL' : '';
+                    if (shouldEnableBack) faviconElement.setAttribute('aria-label', faviconElement.title);
+                    else faviconElement.removeAttribute('aria-label');
                     const slash = tabElement.querySelector('.tab-url-changed-slash');
                     if (slash) slash.classList.toggle('visible', shouldEnableBack);
                 }

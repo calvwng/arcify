@@ -40,6 +40,7 @@ export function setupDOMElements(createNewSpace) {
 
         // Toggle visibility classes
         inputContainer.classList.toggle('visible');
+        addSpaceBtn.setAttribute('aria-expanded', String(!isInputVisible));
         addSpaceBtn.classList.toggle('active');
 
         // Toggle space switcher visibility
@@ -50,6 +51,7 @@ export function setupDOMElements(createNewSpace) {
             spaceNameInput.value = '';
             spaceSwitcher.style.opacity = '0';
             spaceSwitcher.style.visibility = 'hidden';
+            spaceNameInput.focus();
         }
     });
 
@@ -104,6 +106,7 @@ export function showSpaceNameInput() {
 
     addSpaceBtn.classList.toggle('active');
     addSpaceInputContainer.classList.toggle('visible');
+    addSpaceBtn.setAttribute('aria-expanded', String(addSpaceInputContainer.classList.contains('visible')));
     const errorPopup = document.createElement('div');
     errorPopup.className = 'error-popup';
     errorPopup.textContent = 'A space with this name already exists';
@@ -364,6 +367,7 @@ export async function showArchivedTabsPopup(activeSpaceId) {
     toggleWrapper.className = 'archiving-toggle';
     const toggle = document.createElement('input');
     toggle.type = 'checkbox';
+    toggle.setAttribute('role', 'switch');
     toggle.checked = archivingEnabled;
     const slider = document.createElement('span');
     slider.className = 'archiving-toggle-slider';
@@ -444,6 +448,7 @@ export async function showArchivedTabsPopup(activeSpaceId) {
             const restoreButton = document.createElement('button');
             restoreButton.innerHTML = RESTORE_ICON;
             restoreButton.className = 'tab-restore';
+            restoreButton.setAttribute('aria-label', 'Restore archived tab');
             restoreButton.style.marginLeft = 'auto';
             item.addEventListener('click', (e) => {
                 e.stopPropagation();
