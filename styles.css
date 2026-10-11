@@ -334,7 +334,8 @@ h3 {
     z-index: 1000;
 }
 
-.space-options-container:hover .space-options-dropdown {
+.space-options-container:hover .space-options-dropdown,
+.space-options-container:focus-within .space-options-dropdown {
     display: flex;
 }
 
@@ -2149,4 +2150,14 @@ h3 {
 .space-actions {
     display: flex;
     align-items: center;
+}
+/* Visible keyboard focus, including the visible tracks of hidden switch inputs. */
+button:focus-visible,
+input:focus-visible,
+#newSpaceName:focus-visible,
+select:focus-visible,
+.ios-toggle:focus-visible + .toggle-label,
+.archiving-toggle input:focus-visible + .archiving-toggle-slider {
+    outline: 2px solid var(--chrome-blue-color, #8bb3f3);
+    outline-offset: 2px;
 }
