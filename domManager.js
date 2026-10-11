@@ -1,3 +1,4 @@
+import { firstUnusedColor } from './space-colors.js';
 /**
  * DOMManager - Sidebar DOM manipulation and UI component management
  * 
@@ -23,13 +24,39 @@ const addSpaceBtn = document.getElementById('addSpaceBtn');
 const newTabBtn = document.getElementById('newTabBtn');
 const spaceTemplate = document.getElementById('spaceTemplate');
 
-export function setupDOMElements(createNewSpace) {
+export function setupDOMElements(createNewSpace, getSpaces = () => []) {
+    // Mouse-wheel scroll support for the space chip strip.
+    //
+    // Why this handler exists: the strip has `overflow-x: auto`, so trackpad
+    // horizontal swipes already scroll it natively (with momentum). But a
+    // standard vertical mouse wheel has no horizontal axis, so users with a
+    // mouse couldn't scroll the chips at all. This handler translates vertical
+    // wheel ticks into horizontal scrollLeft to fix that.
+    //
+    // Why it used to break chip scrolling: a later "swipe gesture" feature
+    // added a wheel listener on #sidebar-container that switches the active
+    // space whenever |deltaX| > 25. Because the chip strip lives inside
+    // #sidebar-container, every wheel event here also bubbled into that
+    // handler. Result: horizontal trackpad swipes that were meant to scroll
+    // the chips would instead switch spaces mid-gesture, and the original
+    // version of this handler (which preventDefault'd everything and only
+    // read deltaY) killed native momentum and ignored deltaX, making
+    // trackpad scroll feel slow and unpredictable.
+    //
+    // Two guards make the fix robust:
+    //   1. If the gesture is primarily horizontal, do nothing — let the
+    //      browser's native overflow-x scrolling handle it (this keeps
+    //      momentum and the correct direction on trackpads).
+    //   2. Always stopPropagation so the outer space-switch handler never
+    //      sees chip-strip gestures, regardless of axis.
     spaceSwitcher.addEventListener('wheel', (event) => {
+        if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+            event.stopPropagation();
+            return;
+        }
         event.preventDefault();
-
-        const scrollAmount = event.deltaY;
-
-        spaceSwitcher.scrollLeft += scrollAmount;
+        event.stopPropagation();
+        spaceSwitcher.scrollLeft += event.deltaY;
     }, { passive: false });
 
     // Add event listeners for buttons
@@ -49,6 +76,13 @@ export function setupDOMElements(createNewSpace) {
             spaceSwitcher.style.visibility = 'visible';
         } else {
             spaceNameInput.value = '';
+            document.getElementById('createSpaceBtn').disabled = true;
+            const select = document.getElementById('spaceColor');
+            const palette = [...select.options].map(option => option.value);
+            select.value = firstUnusedColor(getSpaces(), palette);
+            document.querySelectorAll('#createSpaceColorSwatch .color-swatch').forEach(swatch => {
+                swatch.classList.toggle('selected', swatch.dataset.color === select.value);
+            });
             spaceSwitcher.style.opacity = '0';
             spaceSwitcher.style.visibility = 'hidden';
             spaceNameInput.focus();
@@ -57,8 +91,7 @@ export function setupDOMElements(createNewSpace) {
 
     document.getElementById('createSpaceBtn').addEventListener('click', createNewSpace);
     newTabBtn.addEventListener('click', () => {
-        // Trigger spotlight instead of creating a new tab
-        chrome.runtime.sendMessage({ command: "toggleSpotlightNewTab" });
+        chrome.tabs.create({});
     });
 
     const createSpaceColorSwatch = document.getElementById('createSpaceColorSwatch');
@@ -234,7 +267,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
                 // Set the space as active, but prevent it from auto-activating a different tab
                 await setActiveSpace(space.id, false);
                 // Explicitly activate the tab that was just moved
-                await chrome.tabs.update(tab.id, { active: true });
+                await Utils.focusTab(tab.id);
             });
             submenu.appendChild(submenuItem);
         });
@@ -374,7 +407,7 @@ export async function showArchivedTabsPopup(activeSpaceId) {
     toggleWrapper.appendChild(toggle);
     toggleWrapper.appendChild(slider);
     toggleLabel.appendChild(toggleWrapper);
-    toggleLabel.appendChild(document.createTextNode('Enable Archiving'));
+    toggleLabel.appendChild(document.createTextNode('Auto-archive inactive tabs'));
     controls.appendChild(toggleLabel);
 
     // Archive time input (styled) - display in hours, store in minutes
@@ -409,18 +442,8 @@ export async function showArchivedTabsPopup(activeSpaceId) {
 
     // --- End Archiving Controls ---
 
-    if (!archivingEnabled) {
-        message.textContent = 'Tab Archiving is disabled. Use the toggle above to enable.';
-        list.style.display = 'none';
-        return;
-    }
-
-    if (!(await Utils.isArchivingEnabled())) {
-        message.textContent = 'Tab Archiving is disabled. Go to extension settings to enable.';
-        list.style.display = 'none';
-        return;
-    }
-
+    // Manual archives remain restorable even when automatic cleanup is off.
+    message.style.display = 'block';
     const allArchived = await Utils.getArchivedTabs();
     if (allArchived.length === 0) {
         message.textContent = 'No archived tabs.';
@@ -455,6 +478,7 @@ export async function showArchivedTabsPopup(activeSpaceId) {
                 Utils.restoreArchivedTab(archivedTab);
                 item.remove();
                 if (list.children.length === 0) {
+                    message.textContent = 'No archived tabs.';
                     message.style.display = 'block';
                     list.style.display = 'none';
                 }
@@ -496,7 +520,9 @@ export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabTo
                 const spaces = result.spaces || [];
                 Logger.log("[QuickPin] Loaded spaces from storage:", spaces);
 
-                const getTabAndToggle = (tabToToggle) => {
+                const getTabAndToggle = async (tabToToggle) => {
+                    const sidebarWindow = await chrome.windows.getCurrent();
+                    if (tabToToggle?.windowId !== sidebarWindow.id) return;
                     if (!tabToToggle) {
                         Logger.error("[QuickPin] No tab found to toggle.");
                         return;
@@ -509,8 +535,7 @@ export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabTo
 
                     if (spaceWithTempTab) {
                         Logger.log(`[QuickPin] Tab ${tabToToggle.id} is a temporary tab in space "${spaceWithTempTab.name}". Pinning it.`);
-                        moveTabToSpace(tabToToggle.id, spaceWithTempTab.id, true);
-                        moveTabToPinned(spaceWithTempTab, tabToToggle);
+                        await moveTabToPinned(spaceWithTempTab, tabToToggle);
                     } else {
                         const spaceWithBookmark = spaces.find(space =>
                             space.spaceBookmarks.includes(tabToToggle.id)
@@ -518,8 +543,7 @@ export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabTo
 
                         if (spaceWithBookmark) {
                             Logger.log(`[QuickPin] Tab ${tabToToggle.id} is a bookmarked tab in space "${spaceWithBookmark.name}". Unpinning it.`);
-                            moveTabToSpace(tabToToggle.id, spaceWithBookmark.id, false);
-                            moveTabToTemp(spaceWithBookmark, tabToToggle);
+                            await moveTabToTemp(spaceWithBookmark, tabToToggle);
                         } else {
                             Logger.warn(`[QuickPin] Tab ${tabToToggle.id} not found in any space as temporary or bookmarked.`);
                         }
@@ -528,7 +552,7 @@ export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabTo
 
                 if (request.command === "quickPinToggle") {
                     Logger.log("[QuickPin] Handling quickPinToggle for active tab.");
-                    chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
+                    chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
                         getTabAndToggle(tabs[0]);
                     });
                 } else if (request.command === "toggleSpacePin" && request.tabId) {
@@ -563,31 +587,17 @@ export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabTo
             showUrlCopyToast();
             sendResponse({ success: true });
             return false; // Synchronous response
-        } else if (request.action === "spotlightOpened") {
-            Logger.log("[Spotlight] Spotlight opened with mode:", request.mode);
-            // Highlight new tab button if spotlight is in new-tab mode
-            const newTabBtn = document.getElementById('newTabBtn');
-            if (request.mode === 'new-tab' && newTabBtn) {
-                newTabBtn.classList.add('spotlight-active');
-            }
-        } else if (request.action === "spotlightClosed") {
-            Logger.log("[Spotlight] Spotlight closed");
-            // Remove highlighting from new tab button
-            const newTabBtn = document.getElementById('newTabBtn');
-            if (newTabBtn) {
-                newTabBtn.classList.remove('spotlight-active');
-            }
         } else if (request.action === "activatePinnedTab") {
-            Logger.log("[Spotlight] Activating pinned tab:", request);
+            Logger.log("[Sidebar] Activating pinned tab:", request);
 
             // Switch to the space if needed
             if (request.spaceId && currentActiveSpaceId !== request.spaceId) {
-                Logger.log("[Spotlight] Switching to space:", request.spaceId, request.spaceName);
+                Logger.log("[Sidebar] Switching to space:", request.spaceId, request.spaceName);
                 setActiveSpaceFunc(request.spaceId);
             }
 
             // Use the utility function to handle pinned tab activation
-            activatePinnedTabByURL(request.bookmarkUrl, request.spaceId, request.spaceName);
+            activatePinnedTabByURL(request.bookmarkUrl, request.spaceId, request.spaceName, request.bookmarkId || null);
         }
     });
 }

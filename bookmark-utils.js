@@ -1,3 +1,4 @@
+import { getSpaceTabs, spaceRequest } from './space-client.js';
 /**
  * Bookmark Utils - Consolidated bookmark operations for Arcify Chrome Extension
  * 
@@ -82,11 +83,11 @@ export const BookmarkUtils = {
      * @param {string|Object} folderOrId - ID of the folder or the folder node itself
      * @param {Object} options - Options for filtering and processing
      * @param {boolean} options.includeTabIds - Whether to include tab IDs for matching tabs
-     * @param {number} options.groupId - Group ID to match tabs against (if includeTabIds is true)
+     * @param {string} options.spaceId - Space ID to match tabs against (if includeTabIds is true)
      * @returns {Promise<Array>} Array of bookmark objects
      */
     async getBookmarksFromFolderRecursive(folderOrId, options = {}) {
-        const { includeTabIds = false, groupId = null } = options;
+        const { includeTabIds = false, spaceId = null } = options;
         const bookmarks = [];
 
         let folderNode;
@@ -101,8 +102,8 @@ export const BookmarkUtils = {
 
         // Get tabs once if needed for matching
         let tabs = [];
-        if (includeTabIds && groupId !== null) {
-            tabs = await chrome.tabs.query({ groupId: groupId });
+        if (includeTabIds && spaceId !== null) {
+            tabs = await getSpaceTabs(spaceId);
         }
 
         for (const item of items) {
@@ -134,100 +135,12 @@ export const BookmarkUtils = {
     },
 
     /**
-     * Recursively find a bookmark by URL and/or title within a folder and all its subfolders
-     * @param {string} folderId - The folder ID to search in
-     * @param {Object} searchCriteria - Search criteria object with url and/or title properties
-     * @param {string} [searchCriteria.url] - URL to search for
-     * @param {string} [searchCriteria.title] - Title to search for
-     * @returns {Promise<Object|null>} Object with bookmark, parentFolderId, and folderPath, or null if not found
-     */
-    async findBookmarkInFolderRecursive(folderId, searchCriteria) {
-        const { url, title } = searchCriteria;
-        const searchDesc = url ? `URL: ${url}` : title ? `title: ${title}` : 'unknown criteria';
-        Logger.log(`[BookmarkUtils] Searching for bookmark with ${searchDesc} in folder: ${folderId}`);
-
-        if (!folderId || (!url && !title)) {
-            Logger.warn('[BookmarkUtils] Missing folderId or search criteria (url/title) for recursive search');
-            return null;
-        }
-
-        try {
-            const items = await chrome.bookmarks.getChildren(folderId);
-            Logger.log(`[BookmarkUtils] Found ${items.length} items in folder ${folderId}`);
-
-            for (const item of items) {
-                if (item.url) {
-                    // This is a bookmark - check if it matches search criteria
-                    let matches = false;
-
-                    if (url && item.url === url) {
-                        matches = true;
-                    }
-
-                    if (title && item.title === title) {
-                        matches = true;
-                    }
-
-                    if (matches) {
-                        Logger.log(`[BookmarkUtils] Found matching bookmark: ${item.title} in folder ${folderId}`);
-                        return {
-                            bookmark: item,
-                            parentFolderId: folderId,
-                            folderPath: folderId // Could be enhanced to return full path
-                        };
-                    }
-                } else {
-                    // This is a folder - recurse into it
-                    Logger.log(`[BookmarkUtils] Recursing into subfolder: ${item.title} (${item.id})`);
-                    const result = await this.findBookmarkInFolderRecursive(item.id, searchCriteria);
-                    if (result) {
-                        Logger.log(`[BookmarkUtils] Found bookmark in subfolder: ${item.title}`);
-                        return result;
-                    }
-                }
-            }
-
-            Logger.log(`[BookmarkUtils] Bookmark not found in folder ${folderId}`);
-            return null;
-
-        } catch (error) {
-            Logger.error(`[BookmarkUtils] Error searching folder ${folderId}:`, error);
-            return null;
-        }
-    },
-
-    /**
-     * Find an item by URL in an array of objects with url property
-     * @param {Array} items - Array of objects with url property (bookmarks, tabs, etc.)
-     * @param {string} url - URL to search for
-     * @returns {Object|null} The matching item or null
-     */
-    _findByUrl(items, url) {
-        if (!items || !url) return null;
-        return items.find(item => item.url === url) || null;
-    },
-
-    /**
-     * Find a bookmark by URL in an array of bookmarks
-     */
-    findBookmarkByUrl(bookmarks, url) {
-        return this._findByUrl(bookmarks, url);
-    },
-
-    /**
-     * Find a tab by URL in an array of tabs
-     */
-    findTabByUrl(tabs, url) {
-        return this._findByUrl(tabs, url);
-    },
-
-    /**
      * Open bookmark as active tab, handling all UI updates and data management
      * @param {Object} bookmarkData - Bookmark data object
      * @param {string} bookmarkData.url - Bookmark URL
      * @param {string} bookmarkData.title - Bookmark title
      * @param {string} bookmarkData.spaceName - Space name the bookmark belongs to
-     * @param {number} targetSpaceId - Space ID to open the tab in
+     * @param {string} targetSpaceId - Space ID to open the tab in
      * @param {HTMLElement} replaceElement - DOM element to replace with active tab element (optional)
      * @param {Object} context - Context object with required functions and data
      * @returns {Object} The created Chrome tab object
@@ -241,12 +154,12 @@ export const BookmarkUtils = {
             createTabElement,
             activateTabInDOM,
             Utils,
-            reconcileSpaceTabOrdering
+            persistSpaceTabOrder
         } = context;
 
         Logger.log('[BookmarkUtils] Opening bookmark as tab:', bookmarkData.url, targetSpaceId);
 
-        // Create new tab with bookmark URL in the target group
+        // Create the bookmark tab and assign its target space
         const newTab = await chrome.tabs.create({
             url: bookmarkData.url,
             active: true,
@@ -258,8 +171,26 @@ export const BookmarkUtils = {
             await Utils.setTabNameOverride(newTab.id, bookmarkData.url, bookmarkData.title);
         }
 
-        // Immediately group the new tab
-        await chrome.tabs.group({ tabIds: [newTab.id], groupId: targetSpaceId });
+        if (isPinned) {
+            // Track pinned URL/bookmarkId for Arc-like "Back to Pinned URL" behavior.
+            if (Utils && typeof Utils.setPinnedTabState === 'function') {
+                await Utils.setPinnedTabState(newTab.id, {
+                    pinnedUrl: bookmarkData.url,
+                    bookmarkId: bookmarkData.bookmarkId || null
+                });
+            }
+        }
+
+        // Assign the new tab in extension storage
+        await spaceRequest('assign', { tabId: newTab.id, spaceId: targetSpaceId, pinned: isPinned });
+        for (const space of spaces) {
+            space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== newTab.id);
+            space.temporaryTabs = space.temporaryTabs.filter(id => id !== newTab.id);
+        }
+        if (!isPinned) {
+            spaces.find(s => s.id === targetSpaceId)?.temporaryTabs.push(newTab.id);
+            await saveSpaces();
+        }
 
         if (isPinned) {
             // Update space data - add to spaceBookmarks for pinned tabs
@@ -270,20 +201,11 @@ export const BookmarkUtils = {
                 }
                 saveSpaces();
             }
-
-            // Track pinned URL/bookmarkId for Arc-like "Back to Pinned URL" behavior.
-            if (Utils && typeof Utils.setPinnedTabState === 'function') {
-                await Utils.setPinnedTabState(newTab.id, {
-                    pinnedUrl: bookmarkData.url,
-                    bookmarkId: bookmarkData.bookmarkId || null
-                });
-            }
         }
 
-        // Ensure the tab is placed in the correct position inside the group:
-        // Chrome should always be [space bookmarks][temporary], regardless of invertTabOrder.
-        if (typeof reconcileSpaceTabOrdering === 'function') {
-            await reconcileSpaceTabOrdering(targetSpaceId, { source: 'arcify', movedTabId: newTab.id });
+        // Persist the bookmark section order independently of the native tab strip.
+        if (typeof persistSpaceTabOrder === 'function') {
+            await persistSpaceTabOrder(targetSpaceId, { source: 'arcify', movedTabId: newTab.id });
         }
 
         // Replace bookmark-only element with active tab element if provided
@@ -315,139 +237,61 @@ export const BookmarkUtils = {
     },
 
     /**
-     * Search and remove bookmark by URL from a folder structure recursively
-     * @param {string} folderId - ID of the folder to search in
-     * @param {string} tabUrl - URL of the bookmark to remove
-     * @param {Object} options - Options for the removal operation
-     * @param {boolean} options.removeTabElement - Whether to also remove the tab element from DOM
-     * @param {Element} options.tabElement - The tab element to remove if removeTabElement is true
-     * @param {boolean} options.logRemoval - Whether to log the removal
-     * @returns {Promise<boolean>} True if bookmark was found and removed
-     */
-    async removeBookmarkByUrl(folderId, tabUrl, options = {}) {
-        const {
-            removeTabElement = false,
-            tabElement = null,
-            logRemoval = false
-        } = options;
-
-        const items = await chrome.bookmarks.getChildren(folderId);
-        for (const item of items) {
-            if (item.url === tabUrl) {
-                if (logRemoval) {
-                    Logger.log('[BookmarkUtils] Removing bookmark:', item);
-                }
-                await chrome.bookmarks.remove(item.id);
-
-                if (removeTabElement && tabElement) {
-                    tabElement.remove();
-                }
-
-                return true; // Bookmark found and removed
-            } else if (!item.url) {
-                // This is a folder, search recursively
-                const found = await this.removeBookmarkByUrl(item.id, tabUrl, options);
-                if (found) return true;
-            }
-        }
-        return false; // Bookmark not found
-    },
-
-    /**
      * Match tabs with bookmarks in a folder and return tab IDs
      * Processes bookmark folder recursively and finds corresponding tabs
      * @param {Object} folder - Bookmark folder object
-     * @param {number} groupId - Tab group ID to match against
+     * @param {string} spaceId - Space ID to match against
      * @param {Function} setTabNameOverride - Function to set tab name overrides
+     * @param {Function} setPinnedTabState - Function to persist tab->bookmark binding
+     * @param {Set} claimedTabIds - Tab IDs already bound to a bookmark in this run (shared across recursion)
      * @returns {Promise<Array>} Array of tab IDs that match bookmarks
      */
-    async matchTabsWithBookmarks(folder, groupId, setTabNameOverride = null) {
+    async matchTabsWithBookmarks(folder, spaceId, setTabNameOverride = null, setPinnedTabState = null, claimedTabIds = null, getUrlKey = null, windowId = null) {
         const bookmarks = [];
-        // Use children if already available (from getSubTree), otherwise fetch them
         const items = folder.children || await chrome.bookmarks.getChildren(folder.id);
-        const tabs = await chrome.tabs.query({ groupId: groupId });
+        const { spaces = [] } = await chrome.storage.local.get('spaces');
+        const pinnedIds = new Set(spaces.find(s => s.id === spaceId)?.spaceBookmarks || []);
+        const tabs = (await getSpaceTabs(spaceId)).filter(tab => !tab.pinned && pinnedIds.has(tab.id) && (windowId === null || tab.windowId === windowId));
+        const claimed = claimedTabIds || new Set();
+        const { pinnedTabStatesById = {} } = await chrome.storage.local.get('pinnedTabStatesById');
 
         for (const item of items) {
             if (item.url) {
-                // This is a bookmark
-                const tab = tabs.find(t => t.url === item.url);
+                // This is a bookmark. Pick the first matching tab that hasn't already
+                // been bound to another bookmark in this run, so URL twins don't both
+                // get claimed by a single bookmark.
+                const available = tabs.filter(t => !claimed.has(t.id));
+                let tab = available.find(t => pinnedTabStatesById[t.id]?.bookmarkId === item.id)
+                    || available.find(t => t.url === item.url && !pinnedTabStatesById[t.id]?.bookmarkId);
+                // Legacy recovery is limited to already-pinned members without a binding.
+                // Ordinary temporary tabs must never be promoted by a matching URL.
+                if (!tab && getUrlKey) {
+                    const targetKey = getUrlKey(item.url);
+                    tab = available.find(t => !pinnedTabStatesById[t.id]?.bookmarkId && getUrlKey(t.url) === targetKey);
+                }
                 if (tab) {
+                    claimed.add(tab.id);
                     bookmarks.push(tab.id);
                     // Set tab name override with the bookmark's title if needed
                     if (item.title && item.title !== tab.title && setTabNameOverride) {
                         await setTabNameOverride(tab.id, tab.url, item.title);
                         Logger.log(`[BookmarkUtils] Override set for tab ${tab.id} from bookmark: ${item.title}`);
                     }
+                    // Persist tab->bookmark binding so the renderer's primary matcher
+                    // (byBookmarkId) survives across sessions and isn't displaced by
+                    // newly opened URL twins.
+                    if (setPinnedTabState) {
+                        await setPinnedTabState(tab.id, { pinnedUrl: item.url, bookmarkId: item.id });
+                    }
                 }
             } else {
                 // This is a folder, recursively process it
-                const subFolderBookmarks = await this.matchTabsWithBookmarks(item, groupId, setTabNameOverride);
+                const subFolderBookmarks = await this.matchTabsWithBookmarks(item, spaceId, setTabNameOverride, setPinnedTabState, claimed, getUrlKey, windowId);
                 bookmarks.push(...subFolderBookmarks);
             }
         }
 
         return bookmarks;
-    },
-
-    /**
-     * Update bookmark title if needed (recursive search and update)
-     * @param {Object} tab - Tab object
-     * @param {Object} activeSpace - Active space object
-     * @param {string} newTitle - New title to set
-     * @returns {Promise<boolean>} True if bookmark was found and updated
-     */
-    async updateBookmarkTitle(tab, activeSpace, newTitle) {
-        Logger.log(`[BookmarkUtils] Attempting to update bookmark for tab ${tab.id} in space ${activeSpace.name} to title: ${newTitle}`);
-
-        try {
-            // Find the space folder - don't create it, that's LocalStorage's responsibility
-            const arcifyFolder = await this.findArcifyFolder();
-            if (!arcifyFolder) {
-                Logger.error(`[BookmarkUtils] Arcify folder not found for space ${activeSpace.name}.`);
-                return false;
-            }
-
-            const children = await chrome.bookmarks.getChildren(arcifyFolder.id);
-            const spaceFolder = children.find(f => f.title === activeSpace.name && !f.url);
-
-            if (!spaceFolder) {
-                Logger.error(`[BookmarkUtils] Space folder ${activeSpace.name} not found.`);
-                return false;
-            }
-
-            // Recursive function to find and update the bookmark
-            const findAndUpdate = async (folderId) => {
-                const items = await chrome.bookmarks.getChildren(folderId);
-                for (const item of items) {
-                    if (item.url && item.url === tab.url) {
-                        // Found the bookmark
-                        // Avoid unnecessary updates if title is already correct
-                        if (item.title !== newTitle) {
-                            Logger.log(`[BookmarkUtils] Found bookmark ${item.id} for URL ${tab.url}. Updating title to "${newTitle}"`);
-                            await chrome.bookmarks.update(item.id, { title: newTitle });
-                        } else {
-                            Logger.log(`[BookmarkUtils] Bookmark ${item.id} title already matches "${newTitle}". Skipping update.`);
-                        }
-                        return true; // Found
-                    } else if (!item.url) {
-                        // It's a subfolder, search recursively
-                        const found = await findAndUpdate(item.id);
-                        if (found) return true; // Stop searching if found in subfolder
-                    }
-                }
-                return false; // Not found in this folder
-            };
-
-            const updated = await findAndUpdate(spaceFolder.id);
-            if (!updated) {
-                Logger.log(`[BookmarkUtils] Bookmark for URL ${tab.url} not found in space folder ${activeSpace.name}.`);
-            }
-
-            return updated;
-        } catch (error) {
-            Logger.error(`[BookmarkUtils] Error updating bookmark for tab ${tab.id}:`, error);
-            return false;
-        }
     },
 
     /**
