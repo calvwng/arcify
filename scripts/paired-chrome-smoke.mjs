@@ -14,6 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer';
 import { performVisibleAction } from './paired-chrome-ui.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
 
@@ -333,7 +334,28 @@ try {
             const target = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === `chrome-extension://${id}/background.js`, { timeout: 30_000 });
             await blockExternalHttps(target);
             const worker = await target.worker();
-            const actual = await worker.evaluate(() => ({ id: chrome.runtime.id, manifest: chrome.runtime.getManifest() }));
+            const diagnostics = await target.createCDPSession();
+            report.workerContexts ||= [];
+            const workerExceptions = [];
+            diagnostics.on('Runtime.executionContextCreated', event => report.workerContexts.push({ extension: name, type: 'context', ...event.context }));
+            diagnostics.on('Runtime.exceptionThrown', event => {
+                workerExceptions.push(event.exceptionDetails);
+                report.workerContexts.push({ extension: name, type: 'exception', ...event.exceptionDetails });
+            });
+            let actual;
+            try {
+                await diagnostics.send('Runtime.enable');
+                const started = Date.now();
+                actual = await waitForExtensionWorkerIdentity(worker, id, async observation => {
+                    report.workerReadiness ||= [];
+                    report.workerReadiness.push({ extension: name, targetUrl: target.url(), elapsedMs: Date.now() - started, observedAt: new Date().toISOString(), ...observation });
+                    await saveReport();
+                });
+            } finally {
+                await diagnostics.detach().catch(error => report.diagnostics.push({ type: 'worker-diagnostics-detach', message: error.message }));
+                await saveReport();
+            }
+            assertNoWorkerExceptions(workerExceptions);
             assert.equal(actual.id, id);
             report.extensions[name] = { id, name: actual.manifest.name, version: actual.manifest.version, workerUrl: target.url() };
         }
