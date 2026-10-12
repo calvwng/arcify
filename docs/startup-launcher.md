@@ -12,14 +12,14 @@ The launcher never opens the sidebar automatically. Chrome requires a real user 
 
 ## Startup and restore behavior
 
-- One launch attempt per browser session, only after `runtime.onStartup`. Installation, an extension reload, worker suspension/resumption, subsequent windows and changing the setting do not independently create launcher tabs.
-- A short 750 ms quiet period allows startup tabs to restore. A stored pending request and a separate one-shot alarm cover service-worker interruption; existing auto-archive startup/alarm hooks continue unchanged.
+- At most one successfully created launcher per browser session, only after `runtime.onStartup`. Installation, an extension reload, worker suspension/resumption, subsequent windows and changing the setting do not independently create launcher tabs.
+- A short 750 ms quiet period allows startup tabs to restore. Background restore events do not continually reset this timer. A stored pending request and a separate one-shot alarm cover service-worker interruption; existing auto-archive startup/alarm hooks continue unchanged.
 - Only ordinary, non-incognito browser windows with existing tabs qualify. Arcify never creates a browser window for the launcher. If none exist yet, it waits for one.
-- In the initially focused normal window, the new tab may be foreground during the first three seconds, provided the active tab still matches and no tab activation, navigation/loading or window-focus change has been observed. Later readiness or an interrupted worker uses a background tab. No existing window is focused, and no browsing tab is navigated or removed.
+- The first focused normal window can become the startup candidate even if it appears after the startup event. Its new tab may be foreground during the first three seconds, after a short stable period, provided the selected tab and URL still match. Changing the candidate tab, navigating it elsewhere, or focusing another window suppresses foreground. Ordinary page loading, background-tab restoration, and repeated activation/focus for the same candidate do not count as user activity. Later readiness or an interrupted worker uses a background tab. No existing window is focused, and no browsing tab is navigated or removed.
 - Existing or pending launcher tabs are reused without activation. If a restored launcher arrives after a new one was created, only the redundant tab created by this startup can be removed, and only while it is still the launcher with no outbound navigation pending and another tab remains in that window. A window is never closed just to remove a redundant helper. Manually opened/restored tabs are never deleted. Closing the launcher does not trigger another launch in the same session.
-- A failed tab-create operation is reported without blindly retrying an operation that might have already been accepted.
+- A definite tab-create API rejection restores the pending request. Each retry rescans windows and existing launchers first; timer retries back off and stop after the initial 30-second recovery window. Later window/tab readiness events can resume a still-pending request, but can never take foreground after the three-second startup deadline. An interrupted, unresolved create retains its claim rather than being blindly replayed. Alarm cleanup is best-effort and cannot prevent creating the tab.
 
-Chrome does not expose a single definitive “session restore finished” event or all user interactions inside webpages to an extension with these permissions. The bounded initial-window check avoids delayed focus stealing and treats observable activity conservatively. Extremely late restore is handled by the duplicate check, rather than waiting indefinitely before showing the launcher.
+Chrome does not expose a single definitive “session restore finished” event or all user interactions inside webpages to an extension with these permissions. The bounded candidate check avoids delayed focus stealing while separating initial restoration from actual candidate changes. An already-restored inactive launcher remains inactive: it is reused without creating or selecting another tab, so this setting does not guarantee a visible prompt for that restored-tab case. Extremely late restore is handled by the duplicate check, rather than waiting indefinitely before showing the launcher.
 
 ## Isolation
 
@@ -30,6 +30,8 @@ The page uses only local assets and a small standalone script and stylesheet. It
 ## Verification
 
 Automated unit/API/DOM regressions cover disabled defaults, saving/restoring the option without erasing other settings, startup foreground/background decisions, late windows, session persistence, existing/pending/late restored launcher reuse, repeated events, closing/no reopening, outbound navigation safety, API errors, synthetic-click rejection, synchronous button-to-API ordering, tab-ID targeting, accessibility markup and classification/archive exclusion. Production and development builds include the launcher page. Mocked trusted events do not demonstrate real browser user activation.
+
+The cold-start ordering and failure fixes reproduce in API fixtures. A reported Helium restart used the current build, but live Helium tabs/session state were unavailable to the supported inspection tools, so these reproductions do not establish the exact cause on that computer.
 
 Real-browser acceptance must use a sandboxed, permitted Chrome environment. Cloud browser execution was policy-blocked in this development environment; no sandbox/security bypass was attempted and no real-click side-panel success is claimed.
 

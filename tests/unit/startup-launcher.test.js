@@ -17,7 +17,7 @@ const area = data => ({
 });
 function fixture({ enabled, session = {}, windows, tabs } = {}) {
     const sync = { existingPreference: 'unchanged', ...(enabled === undefined ? {} : { startupLauncherEnabled: enabled }) };
-    const state = { sync, session, time: 1000, created: [], removed: [], errors: [], alarms: new Map(), timers: new Map(),
+    const state = { sync, session, time: 1000, created: [], removed: [], errors: [], alarms: new Map(), timers: new Map(), timerDelays: [],
         windows: windows ?? [{ id: 1, type: 'normal', focused: true }],
         tabs: tabs ?? [{ id: 10, windowId: 1, url: 'https://example.test/', active: true }] };
     let nextTimer = 0;
@@ -40,7 +40,12 @@ function fixture({ enabled, session = {}, windows, tabs } = {}) {
         }
     };
     const makeController = () => registerStartupLauncher(browser, { now: () => state.time,
-        setTimer: callback => { state.timers.set(++nextTimer, callback); return nextTimer; },
+        setTimer: (callback, delay) => {
+            state.timerDelays.push(delay);
+            const id = ++nextTimer;
+            state.timers.set(id, () => { state.timers.delete(id); return callback(); });
+            return id;
+        },
         clearTimer: id => state.timers.delete(id), reportError: error => state.errors.push(error) });
     return { state, browser, controller: makeController(), makeController };
 }
@@ -135,6 +140,7 @@ test('startup before a normal window exists waits and later opens in the backgro
     app.state.tabs.push({ id: 20, windowId: 2, url: 'https://popup.test/' }, { id: 30, windowId: 3, url: 'chrome://newtab/' });
     await app.controller.flush();
     assert.equal(app.state.created.length, 0);
+    app.state.time += 4000;
     app.state.windows.push({ id: 4, type: 'normal', focused: true });
     app.state.tabs.push({ id: 40, windowId: 4, url: 'https://browsing.test/', active: true });
     await app.browser.windows.onCreated.emit(app.state.windows[2]);
@@ -146,7 +152,7 @@ test('no focus stealing after observed interaction or late readiness', async () 
     for (const interaction of ['activation', 'navigation', 'focus', 'late', 'differentActiveTab']) {
         const app = fixture({ enabled: true });
         await app.controller.start();
-        if (interaction === 'activation') await app.browser.tabs.onActivated.emit({ tabId: 10, windowId: 1 });
+        if (interaction === 'activation') await app.browser.tabs.onActivated.emit({ tabId: 20, windowId: 1 });
         if (interaction === 'navigation') await app.browser.tabs.onUpdated.emit(10, { url: 'https://next.test/' }, app.state.tabs[0]);
         if (interaction === 'focus') await app.browser.windows.onFocusChanged.emit(2);
         if (interaction === 'late') app.state.time += 4000;
@@ -179,11 +185,16 @@ test('turning the setting off cancels a pending startup and enabling mid-session
     assert.deepEqual(disabled.state.created, []);
 });
 
-test('a rejected create is reported and is not blindly repeated', async () => {
+test('a definite rejected create restores pending state and recovers after a fresh scan', async () => {
     const app = fixture({ enabled: true }); app.state.createError = true;
-    await app.controller.start(); await app.controller.flush(); await app.controller.flush();
+    await app.controller.start(); await app.controller.flush();
     assert.equal(app.state.created.length, 1);
     assert.equal(app.state.errors.length, 1);
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].pending, true);
+    app.state.createError = false;
+    await app.controller.flush(); await app.controller.flush();
+    assert.equal(app.state.created.length, 2);
+    assert.equal(app.state.tabs.filter(tab => tab.url === launcherUrl).length, 1);
 });
 
 test('launcher identity is exact and supports query, hash and pending URLs', () => {
@@ -219,7 +230,11 @@ test('navigation observed during initial window lookup prevents foreground inter
     const original = app.browser.windows.getAll;
     let first = true;
     app.browser.windows.getAll = async () => {
-        if (first) { first = false; await app.browser.tabs.onUpdated.emit(10, { status: 'loading' }, app.state.tabs[0]); }
+        if (first) {
+            first = false;
+            app.state.tabs[0].url = 'https://user-navigation.test/';
+            await app.browser.tabs.onUpdated.emit(10, { url: app.state.tabs[0].url }, app.state.tabs[0]);
+        }
         return original();
     };
     await app.controller.start(); await app.controller.flush();
@@ -231,7 +246,7 @@ test('activity during the final persistence step still prevents foreground inter
     await app.controller.start();
     const original = app.browser.alarms.clear;
     app.browser.alarms.clear = async name => {
-        await app.browser.tabs.onActivated.emit({ tabId: 10, windowId: 1 });
+        await app.browser.tabs.onActivated.emit({ tabId: 20, windowId: 1 });
         return original(name);
     };
     await app.controller.flush();
@@ -258,4 +273,178 @@ test('startup quiet-period timer performs the launch and a later alarm cannot re
     assert.equal(app.state.created.length, 1);
     await app.browser.alarms.onAlarm.emit({ name: STARTUP_LAUNCHER_ALARM });
     assert.equal(app.state.created.length, 1);
+});
+
+test('first normal window ready after onStartup gets a foreground launcher after its quiet period', async () => {
+    const app = fixture({ enabled: true, windows: [], tabs: [] });
+    await app.browser.runtime.onStartup.emit();
+    app.state.windows.push({ id: 1, type: 'normal', focused: true });
+    app.state.tabs.push({ id: 10, windowId: 1, active: true, url: 'chrome://newtab/' });
+    await app.browser.windows.onCreated.emit(app.state.windows[0]);
+    await app.browser.tabs.onCreated.emit(app.state.tabs[0]);
+    await app.browser.tabs.onActivated.emit({ tabId: 10, windowId: 1 });
+    await app.browser.windows.onFocusChanged.emit(1);
+    app.state.time += 750;
+    await [...app.state.timers.values()][0]();
+    assert.equal(app.state.created.length, 0, 'Capture a stable first-window candidate before taking foreground');
+    app.state.time += 750;
+    await [...app.state.timers.values()][0]();
+    assert.deepEqual(app.state.created, [{ windowId: 1, url: launcherUrl, active: true }]);
+});
+
+test('ordinary startup loading and redundant initial activation/focus do not hide the launcher', async () => {
+    const app = fixture({ enabled: true });
+    await app.controller.start();
+    await app.browser.tabs.onUpdated.emit(99, { status: 'loading', url: 'https://background-restore.test/' }, { id: 99, windowId: 1 });
+    await app.browser.tabs.onUpdated.emit(10, { status: 'loading', url: app.state.tabs[0].url }, app.state.tabs[0]);
+    await app.browser.tabs.onUpdated.emit(10, { status: 'complete' }, app.state.tabs[0]);
+    await app.browser.tabs.onActivated.emit({ tabId: 10, windowId: 1 });
+    await app.browser.windows.onFocusChanged.emit(-1);
+    await app.browser.windows.onFocusChanged.emit(1);
+    await app.controller.flush();
+    assert.equal(app.state.created[0].active, true);
+});
+
+test('an initially unfocused startup window waits briefly for focus, but never beyond the deadline', async () => {
+    for (const receivesFocus of [true, false]) {
+        const app = fixture({ enabled: true, windows: [{ id: 1, type: 'normal', focused: false }] });
+        await app.controller.start(); await app.controller.flush();
+        assert.equal(app.state.created.length, 0);
+        if (receivesFocus) {
+            app.state.windows[0].focused = true;
+            await app.browser.windows.onFocusChanged.emit(1);
+            await app.controller.flush(); // Capture the initial candidate.
+        } else app.state.time += 4000;
+        await app.controller.flush();
+        assert.equal(app.state.created[0].active, receivesFocus);
+    }
+});
+
+test('changing the late first-window candidate during its quiet period prevents foreground', async () => {
+    const app = fixture({ enabled: true, windows: [], tabs: [] });
+    await app.controller.start();
+    app.state.windows.push({ id: 1, type: 'normal', focused: true });
+    app.state.tabs.push({ id: 10, windowId: 1, active: true, url: 'chrome://newtab/' });
+    await app.controller.flush(); // Capture, do not open yet.
+    await app.browser.tabs.onActivated.emit({ tabId: 11, windowId: 1 });
+    await app.controller.flush();
+    assert.equal(app.state.created[0].active, false);
+});
+
+test('an alarm cleanup failure cannot consume the startup before tab creation', async () => {
+    const app = fixture({ enabled: true });
+    app.browser.alarms.clear = async () => { throw Error('Temporary alarm API failure'); };
+    await app.controller.start(); await app.controller.flush();
+    assert.equal(app.state.created.length, 1);
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].createdTabId, 101);
+    assert.equal(app.state.errors.length, 1);
+});
+
+test('failed initial window lookup preserves the pending request and can acquire the first window later', async () => {
+    const app = fixture({ enabled: true });
+    const getAll = app.browser.windows.getAll;
+    app.browser.windows.getAll = async () => { throw Error('Windows not yet available'); };
+    await app.controller.start();
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].pending, true);
+    app.browser.windows.getAll = getAll;
+    await app.controller.flush(); await app.controller.flush();
+    assert.equal(app.state.created[0].active, true);
+});
+
+test('automatic retries back off and stop after the startup recovery deadline', async () => {
+    const app = fixture({ enabled: true }); app.state.createError = true;
+    await app.controller.start();
+    while (app.state.timers.size) {
+        assert(app.state.created.length < 15, 'Retry loop must be bounded');
+        app.state.time += app.state.timerDelays.at(-1);
+        await [...app.state.timers.values()][0]();
+    }
+    assert.equal(app.state.time, 31000, 'The last retry is scheduled no later than the 30-second bound');
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].pending, true);
+    assert.equal(app.state.alarms.size, 0);
+    app.state.createError = false;
+    await app.browser.windows.onCreated.emit(app.state.windows[0]);
+    await app.controller.flush();
+    assert.equal(app.state.created.at(-1).active, false, 'Late recovery cannot take foreground');
+    assert.equal(app.state.tabs.filter(tab => tab.url === launcherUrl).length, 1);
+});
+
+test('recovery after rejection reuses a restored launcher instead of creating a duplicate', async () => {
+    const app = fixture({ enabled: true }); app.state.createError = true;
+    await app.controller.start(); await app.controller.flush();
+    app.state.tabs.push({ id: 60, windowId: 1, url: launcherUrl, active: false });
+    app.state.createError = false;
+    await app.controller.flush();
+    assert.equal(app.state.created.length, 1, 'Only the original rejected create was attempted');
+    assert.equal(app.state.tabs.find(tab => tab.id === 60).active, false);
+    assert.equal(app.state.timers.size, 0);
+});
+
+test('a stream of background restore events cannot postpone an already scheduled startup launch', async () => {
+    const app = fixture({ enabled: true });
+    await app.controller.start();
+    const timerId = [...app.state.timers.keys()][0];
+    for (let id = 20; id < 30; id++) {
+        await app.browser.tabs.onCreated.emit({ id, windowId: 1, active: false });
+        await app.browser.tabs.onUpdated.emit(id, { status: 'complete' }, { id, windowId: 1, active: false });
+    }
+    // Drain the observation queue without directly invoking reconciliation.
+    await app.browser.windows.onCreated.emit({ id: 1, type: 'normal' });
+    assert.deepEqual([...app.state.timers.keys()], [timerId]);
+    assert.equal(app.state.timerDelays.length, 1);
+    app.state.time += 750;
+    await app.state.timers.get(timerId)();
+    assert.equal(app.state.created[0].active, true);
+});
+
+test('an initial active tab with no URL waits for readiness before becoming the startup candidate', async () => {
+    const app = fixture({ enabled: true, tabs: [{ id: 10, windowId: 1, active: true }] });
+    await app.controller.start(); await app.controller.flush();
+    assert.equal(app.state.created.length, 0);
+    app.state.tabs[0].url = 'chrome://newtab/';
+    await app.browser.tabs.onUpdated.emit(10, { url: 'chrome://newtab/' }, app.state.tabs[0]);
+    await app.controller.flush(); await app.controller.flush();
+    assert.equal(app.state.created[0].active, true);
+});
+
+test('failure to arm the fallback alarm does not stop the startup timer', async () => {
+    const app = fixture({ enabled: true });
+    app.browser.alarms.create = async () => { throw Error('Alarm not ready'); };
+    await app.controller.start();
+    await [...app.state.timers.values()][0]();
+    assert.equal(app.state.created[0].active, true);
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].createdTabId, 101);
+});
+
+test('navigation away from a newly created startup tab before capture also suppresses foreground', async () => {
+    const app = fixture({ enabled: true, windows: [], tabs: [] });
+    await app.controller.start();
+    app.state.windows.push({ id: 1, type: 'normal', focused: true });
+    app.state.tabs.push({ id: 10, windowId: 1, active: true, url: 'chrome://newtab/' });
+    await app.browser.tabs.onCreated.emit(app.state.tabs[0]);
+    app.state.tabs[0].url = 'https://user-navigation.test/';
+    await app.browser.tabs.onUpdated.emit(10, { url: app.state.tabs[0].url }, app.state.tabs[0]);
+    await app.controller.flush(); await app.controller.flush();
+    assert.equal(app.state.created[0].active, false);
+});
+
+test('worker restart does not replay an unresolved create with an unknown result', async () => {
+    const app = fixture({ enabled: true });
+    let completeCreate;
+    app.browser.tabs.create = options => {
+        app.state.created.push(options);
+        return new Promise(resolve => { completeCreate = () => {
+            const tab = { ...options, id: 101 }; app.state.tabs.push(tab); resolve(tab);
+        }; });
+    };
+    await app.controller.start();
+    const pending = app.controller.flush();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(app.state.created.length, 1);
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].pending, false);
+    const restarted = app.makeController();
+    await restarted.ready; await restarted.flush();
+    assert.equal(app.state.created.length, 1);
+    completeCreate(); await pending;
+    assert.equal(app.state.tabs.filter(tab => tab.url === launcherUrl).length, 1);
 });

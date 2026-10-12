@@ -5,6 +5,7 @@ export const STARTUP_LAUNCHER_SESSION = 'arcifyStartupLauncherSession';
 export const STARTUP_LAUNCHER_ALARM = 'arcifyStartupLauncher';
 const SETTLE_MS = 750;
 const FOREGROUND_MS = 3000;
+const RETRY_WINDOW_MS = 30000;
 
 // This controller creates an ordinary tab only. Opening the side panel is reserved
 // for a real click in that tab. Session storage survives service-worker suspension.
@@ -15,7 +16,13 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
     let chain = Promise.resolve();
     let timer;
     let startupView = null;
-    let activity = 0;
+    let foregroundUntil = 0;
+    let foregroundSuppressed = false;
+    let observedFocus;
+    const observedActiveTabs = new Map();
+    const observedNavigations = new Map();
+    const initialTabUrls = new Map();
+    const changedBeforeCapture = new Set();
     const enqueue = task => {
         const result = chain.then(task);
         chain = result.catch(reportError);
@@ -29,15 +36,40 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
     const clearWake = async () => {
         clearTimer(timer);
         timer = undefined;
-        await browser.alarms.clear(STARTUP_LAUNCHER_ALARM);
+        // Alarm housekeeping must not consume an otherwise valid startup request.
+        try { await browser.alarms.clear(STARTUP_LAUNCHER_ALARM); } catch (error) { reportError(error); }
     };
-    const schedule = async state => {
+    const schedule = async (state, delay = SETTLE_MS) => {
         clearTimer(timer);
-        timer = setTimer(() => enqueue(reconcile), SETTLE_MS);
+        timer = setTimer(() => { timer = undefined; return enqueue(reconcile); }, delay);
         // The timer makes startup prompt; an alarm is the durable fallback if the
         // worker is suspended. Chrome may delay alarms, so a late launch stays quiet.
-        if (state.pending) await browser.alarms.create(STARTUP_LAUNCHER_ALARM, { when: state.fallbackAt });
+        if (state.pending && state.fallbackAt > now()) {
+            try { await browser.alarms.create(STARTUP_LAUNCHER_ALARM, { when: state.fallbackAt }); }
+            catch (error) { reportError(error); }
+        }
     };
+    const tabUrl = tab => tab?.pendingUrl || tab?.url || '';
+    const mayForeground = () => foregroundUntil > 0 && now() <= foregroundUntil && !foregroundSuppressed;
+    function captureStartupView(windows, tabs) {
+        if (startupView || !mayForeground()) return false;
+        const window = windows.find(window => window.focused);
+        const tab = tabs.find(tab => tab.windowId === window?.id && tab.active);
+        if (!window || !tab) return false;
+        if (!tabUrl(tab)) {
+            if (!initialTabUrls.has(tab.id)) initialTabUrls.set(tab.id, '');
+            return false;
+        }
+        startupView = { windowId: window.id, tabId: tab.id, url: tabUrl(tab) };
+        // Events may have arrived while an initial API snapshot was in flight.
+        if ((observedFocus >= 0 && observedFocus !== window.id)
+            || (observedActiveTabs.has(window.id) && observedActiveTabs.get(window.id) !== tab.id)
+            || changedBeforeCapture.has(tab.id)
+            || (observedNavigations.has(tab.id) && observedNavigations.get(tab.id) !== startupView.url)) {
+            foregroundSuppressed = true;
+        }
+        return true;
+    }
 
     async function reconcile() {
         const state = await readState();
@@ -86,60 +118,108 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
             await clearWake();
             return; // onCreated resumes this persisted pending request.
         }
+        // onStartup is delivered at profile readiness, which can precede the
+        // first browser window/focus/tab URL. Give the first ready candidate the
+        // same quiet period, without waiting beyond the startup deadline.
+        if (!startupView && mayForeground()) {
+            captureStartupView(windows, tabs);
+            await schedule(state, Math.max(1, Math.min(SETTLE_MS, foregroundUntil - now() + 1)));
+            return;
+        }
         const activeTab = tabs.find(tab => tab.windowId === target.id && tab.active);
-        const active = Boolean(startupView && now() <= startupView.until && activity === startupView.activity
-            && target.focused && target.id === startupView.windowId && activeTab?.id === startupView.tabId);
+        const active = Boolean(startupView && mayForeground() && target.focused
+            && target.id === startupView.windowId && activeTab?.id === startupView.tabId
+            && tabUrl(activeTab) === startupView.url);
         // Claim before creation: neither a second event nor a worker restart can
         // create another tab if Chrome has already accepted the create operation.
         await writeState({ pending: false });
         await clearWake();
+        let tab;
         try {
-            const tab = await browser.tabs.create({ windowId: target.id,
+            tab = await browser.tabs.create({ windowId: target.id,
                 url: browser.runtime.getURL(STARTUP_LAUNCHER_PATH),
-                active: active && activity === startupView.activity && now() <= startupView.until });
-            await writeState({ pending: false, createdTabId: tab.id });
-            await reconcile(); // Catch a restore that raced the create call.
+                active: active && mayForeground() });
         } catch (error) {
-            // Do not retry a possibly accepted create. A later browser startup can
-            // try again; existing browsing tabs and saved settings remain intact.
             reportError(error);
+            // A definite API rejection did not satisfy this request. Restore it
+            // and always rescan tabs/windows before another attempt. The claim
+            // still protects an interrupted, unresolved create from blind replay.
+            const retry = { ...state, pending: true, failures: (state.failures || 0) + 1 };
+            await writeState(retry);
+            const remaining = (state.retryUntil || state.fallbackAt || 0) - now();
+            if (remaining > 0) {
+                await schedule(retry, Math.min(1000 * 2 ** Math.min(retry.failures - 1, 3), 5000, remaining));
+            }
+            return;
         }
+        await writeState({ pending: false, createdTabId: tab.id });
+        await reconcile(); // Catch a restore that raced the create call.
     }
 
     function start() {
         const startedAt = now();
-        const initialActivity = activity;
         return enqueue(async () => {
             if (await readState()) return; // At most once in this browser session.
             if (!await isEnabled()) {
                 await writeState({ pending: false });
                 return;
             }
-            const windows = await normalWindows();
-            const focused = windows.find(window => window.focused);
-            const tabs = focused ? await browser.tabs.query({ windowId: focused.id }) : [];
-            const activeTab = tabs.find(tab => tab.active);
-            if (focused && activeTab) startupView = { windowId: focused.id, tabId: activeTab.id,
-                activity: initialActivity, until: startedAt + FOREGROUND_MS };
-            const state = { pending: true, fallbackAt: startedAt + 30000 };
+            foregroundUntil = startedAt + FOREGROUND_MS;
+            observedFocus = undefined;
+            observedActiveTabs.clear();
+            observedNavigations.clear();
+            initialTabUrls.clear();
+            changedBeforeCapture.clear();
+            const state = { pending: true, fallbackAt: startedAt + RETRY_WINDOW_MS, retryUntil: startedAt + RETRY_WINDOW_MS };
             await writeState(state);
+            try {
+                const windows = await normalWindows();
+                const focused = windows.find(window => window.focused);
+                const tabs = focused ? await browser.tabs.query({ windowId: focused.id }) : [];
+                captureStartupView(windows, tabs);
+            } catch (error) { reportError(error); }
             await schedule(state);
         });
     }
 
     const onTab = tab => enqueue(async () => {
         const state = await readState();
-        if (state?.pending || (state?.createdTabId && isStartupLauncherTab(tab, browser))) await schedule(state);
+        // Background restores must not keep postponing a ready startup candidate
+        // until its foreground deadline expires. Reconciliation rescans all tabs.
+        if ((state?.pending && timer === undefined)
+            || (state?.createdTabId && isStartupLauncherTab(tab, browser))) await schedule(state);
     });
     browser.runtime.onStartup.addListener(start);
     browser.windows.onCreated.addListener(() => onTab());
-    browser.windows.onFocusChanged.addListener(() => { activity++; });
-    browser.tabs.onActivated.addListener(() => { activity++; });
-    browser.tabs.onCreated.addListener(onTab);
+    browser.windows.onFocusChanged.addListener(windowId => {
+        if (!mayForeground()) return;
+        observedFocus = windowId;
+        if (startupView && windowId >= 0 && windowId !== startupView.windowId) foregroundSuppressed = true;
+    });
+    browser.tabs.onActivated.addListener(({ windowId, tabId }) => {
+        if (!mayForeground()) return;
+        observedActiveTabs.set(windowId, tabId);
+        if (startupView?.windowId === windowId && tabId !== startupView.tabId) foregroundSuppressed = true;
+    });
+    browser.tabs.onCreated.addListener(tab => {
+        if (mayForeground() && !startupView) initialTabUrls.set(tab.id, tabUrl(tab));
+        return onTab(tab);
+    });
     browser.tabs.onUpdated.addListener((id, change, tab) => {
-        // Count navigation even while start() is awaiting its initial snapshot.
-        // Conservatively treat restoration/loading activity as a reason to stay quiet.
-        if (change.url || change.status === 'loading') activity++;
+        // Loading/restoring tabs and duplicate initial focus/activation events are
+        // not evidence of user activity. Only changes to the candidate suppress it.
+        if (change.url && mayForeground()) {
+            if (!startupView) {
+                // A real navigation during the initial read must not be mistaken
+                // for the baseline just because the query returns its new URL.
+                // The first URL of a known newly created/URL-less tab is readiness.
+                const initial = initialTabUrls.get(id);
+                const expected = observedNavigations.get(id) || initial;
+                if (initial === undefined || (expected && change.url !== expected)) changedBeforeCapture.add(id);
+            }
+            observedNavigations.set(id, change.url);
+            if (startupView?.tabId === id && change.url !== startupView.url) foregroundSuppressed = true;
+        }
         if (change.url || change.status === 'complete') onTab(tab);
     });
     browser.alarms.onAlarm.addListener(alarm => {
