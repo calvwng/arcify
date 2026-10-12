@@ -153,6 +153,14 @@ That smoke check compares the paired protocol sources byte-for-byte and routes
 real client/server modules through mocked Chrome APIs to verify snapshots,
 window-scoped opens, and version rejection.
 
-These are builds and mocked/unit/integration tests. They are **not evidence of
-extensions loaded into real Chrome**. See the explicit browser verification gap
-and required manual checks in [bridge-validation.md](bridge-validation.md).
+These commands are builds and mocked/unit/integration tests, **not evidence of
+extensions loaded into real Chrome**.
+
+The separate `Paired extension smoke` GitHub Actions job builds both pinned
+revisions and runs `npm run test:paired-chrome` on an independently provisioned
+runner. Its JSON report and screenshots document actual Chrome coverage, including
+the tested revisions and IDs. It never disables sandbox/web security or bypasses
+an installation policy. The paired PRs link the exact run and its result.
+
+See [bridge-validation.md](bridge-validation.md) for the interactive cloud-browser
+policy restriction, CI coverage boundaries, and remaining manual checks.

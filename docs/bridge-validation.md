@@ -18,7 +18,7 @@
 - Node v24.19.0 / npm 11.9.0, Linux cloud VM. Initial install needed a writable npm
   cache (`--cache /tmp/npm-arcify-cache`); this was an environment setup issue.
 
-## Real-browser evidence and blocker
+## Interactive cloud-browser blocker
 
 The supported cloud Chromium browser was inspected. Opening the required
 `chrome://extensions/` page was rejected with:
@@ -34,7 +34,44 @@ real-Chrome extension behavior is claimed as passing.** The same restriction
 prevents extension reload/worker-stop inspection through that route. Automated
 mocked checks do not substitute for this missing evidence.
 
-## Manual acceptance matrix (all pending real Chrome)
+On 2026-10-12 the user reported enabling Developer mode. Selecting the existing,
+user-opened Extensions tab still received the same browser-tool URL denial. The
+user then reported that manual **Load unpacked** was blocked by browser policy.
+No policy, browser flags, alternate local browser, or profile was used to bypass
+either restriction.
+
+## Independently provisioned paired CI
+
+The dedicated `Paired extension smoke` workflow uses an independent GitHub-hosted
+runner, not the managed interactive cloud browser above. It builds the exact
+Arcify PR head and the pinned Spotlight companion revision, then runs
+`npm run test:paired-chrome`. The workflow and its generated JSON evidence record
+the actual source revisions, Chrome version, extension IDs, and tested cases.
+The peer pin must be updated deliberately when a paired source change is tested.
+
+The fixture uses Puppeteer's supported unpacked-extension API in an isolated
+temporary profile with the browser sandbox and web security intact. It does not
+reuse the legacy E2E helper's security-disabling flags. A sandbox or extension
+installation-policy failure is a failed/blocked run, never a passing skip or a
+reason to relax protections. Do not run this fixture to evade an environment's
+extension policy.
+
+The job uploads machine-readable results and screenshots, including successful
+checkpoints. Read the exact-head run and artifacts linked in the paired PRs for
+actual outcomes; adding a fixture does not itself establish a pass. Real Chrome
+API setup/inspection, cross-extension message assertions, and visible UI actions
+are identified separately. Existing mocked bridge tests remain a separate layer.
+
+CI under a virtual display is not manual acceptance: a `sidebar.html` tab is not Chrome's native
+side panel. Command registration is not an OS-level shortcut invocation. Native
+side-panel docking/focus, browser-chrome shortcuts, ordinary session restoration,
+and any matrix case absent from the generated results remain pending below.
+
+## Manual acceptance matrix
+
+This is the full acceptance checklist, not a list of CI passes. Consult generated
+CI results for the subset exercised automatically; remaining interactive cases
+still require a browser where extension installation is permitted.
 
 Use a test profile, both paired builds, two normal windows, at least two spaces
 including an empty one, and equal-URL bookmarks in different spaces. Record Chrome
