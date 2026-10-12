@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer';
 import { performVisibleAction, replaceInputText } from './paired-chrome-ui.mjs';
-import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker } from './paired-chrome-worker.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
 
@@ -624,11 +624,56 @@ try {
         for (const name of ['arcify', 'spotlight']) {
             const id = name === 'arcify' ? arcifyId : spotlightId;
             const page = name === 'arcify' ? arcifyOptions : spotlightOptions;
-            const worker = browser.targets().find(target => target.type() === 'service_worker' && target.url() === `chrome-extension://${id}/background.js`);
-            assert(worker);
-            await page.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 50); });
-            await poll(async () => browser.targets().includes(worker), present => !present, `extension ${id} worker replaced`);
-            await browser.waitForTarget(target => target !== worker && target.type() === 'service_worker' && target.url() === `chrome-extension://${id}/background.js`, { timeout: 30_000 });
+            const url = `chrome-extension://${id}/background.js`;
+            const workerTarget = browser.targets().find(target => target.type() === 'service_worker' && target.url() === url);
+            assert(workerTarget);
+            const worker = await workerTarget.worker();
+            const targetsCdp = await browser.target().createCDPSession();
+            const viewCdp = await page.target().createCDPSession();
+            const defaultContexts = new Set();
+            let collectingInitialContexts = true;
+            const view = { url: page.url(), contexts: [], invalidations: [] };
+            viewCdp.on('Runtime.executionContextCreated', ({ context }) => {
+                view.contexts.push(context);
+                if (collectingInitialContexts && context.auxData?.isDefault) defaultContexts.add(context.id);
+            });
+            viewCdp.on('Runtime.executionContextDestroyed', event => {
+                if (defaultContexts.has(event.executionContextId)) view.invalidations.push(event);
+            });
+            viewCdp.on('Runtime.executionContextsCleared', () => view.invalidations.push({ allContextsCleared: true }));
+            report.extensionReloads ||= [];
+            const evidence = { name, view, observations: [] };
+            report.extensionReloads.push(evidence);
+            try {
+                await viewCdp.send('Runtime.enable');
+                collectingInitialContexts = false;
+                assert(defaultContexts.size > 0, 'The original extension options realm must be observed before reload.');
+                const readTargets = async () => (await targetsCdp.send('Target.getTargets')).targetInfos;
+                const original = await reloadObservedExtension({ url, readTargets,
+                    releaseObservers: async () => {
+                        const network = await networkTargets.get(workerTarget);
+                        assert(network, 'The fixture-owned worker network session must be tracked.');
+                        evidence.detachedNetworkSessionId = network.id();
+                        await network.detach();
+                        networkTargets.delete(workerTarget);
+                        evidence.detachedWorkerSessionId = worker.client.id();
+                        await worker.client.detach();
+                    },
+                    reload: () => ui(page, `Reload ${name} extension`, () => page.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 50); })),
+                    viewInvalidated: async () => { view.closed = page.isClosed(); return view.closed || view.invalidations.length > 0; },
+                    record: async observation => { evidence.observations.push({ ...observation, observedAt: new Date().toISOString() }); await saveReport(); }
+                });
+                const after = await poll(readTargets, targets => targets.some(target => target.type === 'service_worker' && target.url === url && target.targetId !== original.targetId), 'the reloaded extension worker');
+                evidence.replacement = findExactWorkerTarget(after, url);
+                assert.notEqual(evidence.replacement.targetId, original.targetId);
+                const replacement = await browser.waitForTarget(target => target !== workerTarget && target.type() === 'service_worker' && target.url() === url);
+                await blockExternalHttps(replacement);
+                evidence.identity = await waitForExtensionWorkerIdentity(await replacement.worker(), id);
+            } finally {
+                await viewCdp.detach().catch(error => report.diagnostics.push({ type: 'reload-view-detach', message: error.message }));
+                await targetsCdp.detach();
+                await saveReport();
+            }
             // Reload may close/invalidate the original extension view. Start a
             // fresh options document instead of relying on its old Page object.
             const reopened = await observePage(await browser.newPage());

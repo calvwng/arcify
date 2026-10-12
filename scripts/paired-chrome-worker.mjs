@@ -70,3 +70,29 @@ export async function terminateObservedWorker({ worker, url, readTargets, releas
     } while (now() < deadline);
     throw new Error(`Worker close did not destroy raw Chrome target ${before.targetId}; remaining targets: ${JSON.stringify(last)}`);
 }
+
+export async function reloadObservedExtension({ url, readTargets, releaseObservers, reload, viewInvalidated, record }, {
+    timeout = 20_000, interval = 100, now = Date.now,
+    sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
+} = {}) {
+    const before = findExactWorkerTarget(await readTargets(), url);
+    await record({ phase: 'before-reload', target: before });
+    await releaseObservers();
+    const unobserved = findExactWorkerTarget(await readTargets(), url);
+    assert.equal(unobserved.targetId, before.targetId, 'Observer detachment must not be counted as the extension reload.');
+    assert.equal(await viewInvalidated(), false, 'The original options realm must still be valid before invoking reload.');
+    await record({ phase: 'observers-released', target: unobserved, originalViewValid: true });
+    await reload();
+    const deadline = now() + timeout;
+    let last;
+    do {
+        last = { targets: await readTargets(), viewInvalidated: await viewInvalidated() };
+        if (!last.targets.some(target => target.targetId === before.targetId) && last.viewInvalidated) {
+            await record({ phase: 'reload-observed', oldTargetId: before.targetId, ...last });
+            return before;
+        }
+        if (now() >= deadline) break;
+        await sleep(interval);
+    } while (now() < deadline);
+    throw new Error(`Extension reload did not invalidate its original view and raw worker ${before.targetId}; last observation: ${JSON.stringify(last)}`);
+}

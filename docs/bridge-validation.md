@@ -124,6 +124,12 @@ disappear from Chrome's raw `Target.getTargets` list and a distinct exact-URL wo
 with the correct runtime identity after wake. Replaying the same bridge request
 must return the original tab without creating a duplicate. This case is mandatory;
 it no longer relies on an optional ServiceWorker-domain capability or a skip.
+The separate extension-reload case detaches its worker observers without stopping
+the worker, verifies the original raw worker/view are still present, invokes the
+real `chrome.runtime.reload()`, and requires original options-context invalidation
+plus a distinct worker identity. It then reconnects through fresh settings pages
+and verifies preserved space IDs/membership; a worker restart alone cannot pass
+this reload case.
 
 The job uploads machine-readable results and screenshots, including successful
 checkpoints. Read the exact-head run and artifacts linked in the paired PRs for

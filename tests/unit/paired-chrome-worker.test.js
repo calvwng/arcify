@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker } from '../../scripts/paired-chrome-worker.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension } from '../../scripts/paired-chrome-worker.mjs';
 const id = 'a'.repeat(32), url = `chrome-extension://${id}/background.js`;
 const ready = { url, hasRuntime: true, id, manifest: { name: 'Fixture', version: '1.0.0' } };
 const starting = { url, hasRuntime: false, id: null, manifest: null };
@@ -101,4 +101,47 @@ test('raw worker selection rejects absent, ambiguous, wrong-type and missing-ID 
     for (const targets of [[], [oldTarget, newTarget], [{ ...oldTarget, type: 'page' }], [{ ...oldTarget, targetId: '' }]]) {
         assert.throws(() => findExactWorkerTarget(targets, url));
     }
+});
+
+function reloadHarness({ detached = oldTarget, targets = [newTarget], invalidated = true, invalidatedBefore = false } = {}) {
+    let reads = 0, time = 0, dispatched = false;
+    const calls = [], records = [];
+    return { calls, records,
+        args: { url,
+            readTargets: async () => { calls.push('raw-targets'); return ++reads === 1 ? [oldTarget] : reads === 2 ? [detached] : targets; },
+            releaseObservers: async () => calls.push('release-observers'),
+            reload: async () => { dispatched = true; calls.push('runtime.reload'); },
+            viewInvalidated: async () => dispatched ? invalidated : invalidatedBefore,
+            record: async value => records.push(value) },
+        options: { timeout: 200, interval: 100, now: () => time, sleep: async duration => { time += duration; } }
+    };
+}
+test('extension reload requires original view invalidation and old raw worker destruction after one reload', async () => {
+    const h = reloadHarness();
+    assert.deepEqual(await reloadObservedExtension(h.args, h.options), oldTarget);
+    assert.deepEqual(h.calls, ['raw-targets', 'release-observers', 'raw-targets', 'runtime.reload', 'raw-targets']);
+    assert.equal(h.records.at(-1).phase, 'reload-observed');
+});
+test('observer detachment or a pre-call natural restart cannot stand in for runtime.reload', async () => {
+    const h = reloadHarness({ detached: newTarget });
+    await assert.rejects(reloadObservedExtension(h.args, h.options), /detachment must not be counted/);
+    assert.equal(h.calls.includes('runtime.reload'), false);
+});
+for (const options of [{ invalidated: false }, { targets: [oldTarget] }]) {
+    test(`reload rejects incomplete lifecycle evidence ${JSON.stringify(options)}`, async () => {
+        const h = reloadHarness(options);
+        await assert.rejects(reloadObservedExtension(h.args, h.options), /did not invalidate/);
+        assert.equal(h.calls.filter(call => call === 'runtime.reload').length, 1);
+    });
+}
+test('reload dispatch errors are retained without replay or successful lifecycle claim', async () => {
+    const h = reloadHarness(); h.args.reload = async () => { throw new Error('reload denied'); };
+    await assert.rejects(reloadObservedExtension(h.args, h.options), /reload denied/);
+    assert.equal(h.records.some(record => record.phase === 'reload-observed'), false);
+});
+
+test('view invalidation before reload dispatch cannot prove an extension reload', async () => {
+    const h = reloadHarness({ invalidatedBefore: true });
+    await assert.rejects(reloadObservedExtension(h.args, h.options), /realm must still be valid/);
+    assert.equal(h.calls.includes('runtime.reload'), false);
 });
