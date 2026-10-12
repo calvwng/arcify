@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer';
-import { performVisibleAction, replaceInputText } from './paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
@@ -666,6 +666,21 @@ try {
                     viewInvalidated: async () => { view.closed = page.isClosed(); return view.closed || view.invalidations.length > 0; },
                     record: async observation => { evidence.observations.push({ ...observation, observedAt: new Date().toISOString() }); await saveReport(); }
                 });
+                // A reloaded MV3 worker need not stay running without an event.
+                // Reconnect through the same fresh settings/peer check a user uses.
+                const reopened = await observePage(await browser.newPage());
+                await reopened.goto(`chrome-extension://${id}/options.html`);
+                if (name === 'arcify') arcifyOptions = reopened; else spotlightOptions = reopened;
+                if (!page.isClosed()) await page.close();
+                if (name === 'arcify') {
+                    await spotlightOptions.waitForSelector('#refresh-connection:not([disabled])');
+                    await clickUI(spotlightOptions, '#refresh-connection');
+                    await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
+                } else {
+                    await arcifyOptions.waitForSelector('#bridgeCheck:not([disabled])');
+                    await clickUI(arcifyOptions, '#bridgeCheck');
+                    await arcifyOptions.waitForSelector('#bridgeStatus[data-state="connected"]');
+                }
                 const after = await poll(readTargets, targets => targets.some(target => target.type === 'service_worker' && target.url === url && target.targetId !== original.targetId), 'the reloaded extension worker');
                 evidence.replacement = findExactWorkerTarget(after, url);
                 assert.notEqual(evidence.replacement.targetId, original.targetId);
@@ -677,12 +692,6 @@ try {
                 await targetsCdp.detach();
                 await saveReport();
             }
-            // Reload may close/invalidate the original extension view. Start a
-            // fresh options document instead of relying on its old Page object.
-            const reopened = await observePage(await browser.newPage());
-            await reopened.goto(`chrome-extension://${id}/options.html`);
-            if (name === 'arcify') arcifyOptions = reopened; else spotlightOptions = reopened;
-            if (!page.isClosed()) await page.close().catch(() => {});
         }
         await spotlightOptions.waitForSelector('#refresh-connection:not([disabled])');
         await clickUI(spotlightOptions, '#refresh-connection'); await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
@@ -690,7 +699,7 @@ try {
         assert.deepEqual(after.spaces.map(space => space.id), before.spaces.map(space => space.id));
         for (const tabId of [fixture.sourceA, fixture.alpha]) assert.equal(after.tabs.find(tab => tab.id === tabId)?.spaceId, before.tabs.find(tab => tab.id === tabId)?.spaceId);
         const replayed = await bridge('activateTab', { tabId: fixture.alpha }); assert.equal(replayed.tabId, fixture.alpha);
-        await screenshot(spotlightOptions, 'connected-after-both-extension-reloads');
+        await ui(spotlightOptions, 'Capture connected settings after reloads', () => screenshot(spotlightOptions, 'connected-after-both-extension-reloads'));
         return { reloadedExtensionIds: [arcifyId, spotlightId], stableSpaceIds: after.spaces.map(space => space.id), note: 'Extension reload is distinct from service-worker suspension and from a full Chrome restart. Existing page content scripts require a page refresh after extension reload.' };
     });
     await step(stepNames[13], async () => {
@@ -707,8 +716,13 @@ try {
 } catch (error) {
     report.status = 'failed'; report.failure = { message: error.message, stack: error.stack };
     console.error(error.stack || error);
+    await saveReport();
     if (browser) {
-        for (const [index, page] of (await browser.pages().catch(() => [])).entries()) await screenshot(page, `failure-page-${index + 1}`, false);
+        report.optionalFailureCaptures = [];
+        for (const [index, page] of (await browser.pages().catch(() => [])).entries()) {
+            const label = `failure-page-${index + 1}`;
+            report.optionalFailureCaptures.push(await captureVisibleFailurePage(page, label, () => screenshot(page, label)));
+        }
     }
     process.exitCode = 1;
 } finally {

@@ -36,3 +36,21 @@ export async function replaceInputText(page, input, text) {
     await input.press('Backspace');
     await input.type(text);
 }
+
+// Optional failure evidence must not change the failed UI or mask its error.
+export async function captureVisibleFailurePage(page, label, capture) {
+    const observation = { label, url: null, observedAt: new Date().toISOString(), closed: null };
+    try {
+        observation.url = page.url();
+        observation.closed = page.isClosed();
+        if (observation.closed) return { ...observation, status: 'not_captured', reason: 'page already closed' };
+        observation.visibility = await page.evaluate(() => document.visibilityState);
+        if (observation.visibility !== 'visible') {
+            return { ...observation, status: 'not_captured', reason: 'background page left unchanged; optional capture would require foregrounding or may stall' };
+        }
+        await capture();
+        return { ...observation, status: 'captured' };
+    } catch (error) {
+        return { ...observation, status: 'capture_failed', error: error.message };
+    }
+}

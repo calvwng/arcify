@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { performVisibleAction, replaceInputText } from '../../scripts/paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from '../../scripts/paired-chrome-ui.mjs';
 
 function harness() {
     const calls = [], records = [];
@@ -90,4 +90,38 @@ test('input focus failure cannot send selection or typing events', async () => {
     h.input.focus = async () => { throw new Error('field gone'); };
     await assert.rejects(replaceInputText(h.page, h.input, 'replacement'), /field gone/);
     assert.deepEqual(h.calls, []);
+});
+
+function failurePage(visibility = 'visible', closed = false) {
+    return { url: () => 'https://fixture.test', isClosed: () => closed,
+        evaluate: async () => visibility,
+        bringToFront: () => { throw new Error('must not foreground failure evidence'); } };
+}
+for (const [visibility, closed] of [['hidden', false], ['visible', true]]) {
+    test(`optional failure capture records ${closed ? 'closed' : 'hidden'} page without activating or capturing it`, async () => {
+        let captures = 0;
+        const result = await captureVisibleFailurePage(failurePage(visibility, closed), 'failure', async () => { captures++; });
+        assert.equal(captures, 0); assert.equal(result.status, 'not_captured');
+        assert.equal(result.url, 'https://fixture.test'); assert.equal(result.closed, closed);
+        assert(result.reason); assert(result.observedAt);
+    });
+}
+test('optional visible failure page is captured once, without activating it', async () => {
+    let captures = 0;
+    const result = await captureVisibleFailurePage(failurePage(), 'failure', async () => { captures++; });
+    assert.equal(captures, 1); assert.equal(result.status, 'captured');
+});
+test('optional capture and visibility failures are evidence, not replacement exceptions', async () => {
+    const failedCapture = await captureVisibleFailurePage(failurePage(), 'failure', async () => { throw new Error('capture timeout'); });
+    assert.equal(failedCapture.status, 'capture_failed'); assert.equal(failedCapture.error, 'capture timeout');
+    const page = failurePage(); page.evaluate = async () => { throw new Error('renderer unavailable'); };
+    const failedProbe = await captureVisibleFailurePage(page, 'failure', async () => { throw new Error('must not capture'); });
+    assert.equal(failedProbe.error, 'renderer unavailable');
+});
+
+test('a stale page metadata probe cannot mask the original fixture failure', async () => {
+    const page = failurePage(); page.url = () => { throw new Error('page unavailable'); };
+    const result = await captureVisibleFailurePage(page, 'failure', async () => { throw new Error('must not capture'); });
+    assert.equal(result.status, 'capture_failed'); assert.equal(result.error, 'page unavailable');
+    assert.equal(result.url, null);
 });
