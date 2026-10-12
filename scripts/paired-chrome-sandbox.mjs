@@ -136,7 +136,9 @@ export function validateChromeRuntimePackage({ ownerOutput, metadataOutput, chec
     const owners = ownerOutput.trim().split(/\r?\n/);
     assert.equal(owners.length, 1, 'Chrome must have one unambiguous registered package owner');
     assert.match(owners[0], /^google-chrome-stable(?::(?:amd64|arm64))?: \/opt\/google\/chrome\/chrome$/, 'Chrome must belong to preinstalled google-chrome-stable');
-    const fields = metadataOutput.trimEnd().split(/\r?\n/);
+    // Remove only dpkg-query's final record delimiter. Homepage is optional in
+    // installed package metadata; trimEnd() would erase that empty sixth field.
+    const fields = metadataOutput.replace(/\r?\n$/, '').split(/\r?\n/);
     assert.equal(fields.length, 6, 'Chrome package metadata must have exactly six fields');
     const [name, status, version, architecture, maintainer, homepage] = fields;
     assert.equal(name, PACKAGE);
@@ -144,12 +146,12 @@ export function validateChromeRuntimePackage({ ownerOutput, metadataOutput, chec
     const parsedVersion = /^(\d+\.\d+\.\d+\.\d+)(?:-[A-Za-z0-9.+~]+)?$/.exec(version);
     assert(parsedVersion, 'Installed Chrome must have a recognizable four-part browser version');
     assert(['amd64', 'arm64'].includes(architecture), 'Installed Chrome architecture must be recognized');
-    assert(maintainer && homepage, 'Chrome package maintainer and homepage must be recorded');
+    assert(maintainer, 'Chrome package maintainer must be recorded');
     const matches = checksumText.split(/\r?\n/).map(line => /^([a-f0-9]{32})\s+\*?(\S+)$/.exec(line.trim()))
         .filter(match => match?.[2] === 'opt/google/chrome/chrome');
     assert.equal(matches.length, 1, 'Installed package checksum must identify the exact Chrome executable once');
     assert.equal(actualMd5, matches[0][1], 'Chrome bytes differ from the installed package checksum');
-    return { name, status, version, browserVersion: parsedVersion[1], architecture, maintainer, homepage,
+    return { name, status, version, browserVersion: parsedVersion[1], architecture, maintainer, homepage: homepage || null,
         registeredOwner: owners[0], checksumFile: CHECKSUM_PATH, expectedMd5: matches[0][1], actualMd5, checksumMatches: true,
         trustBasis: 'Correspondence with the preinstalled OS package registration and MD5 record at inspection time only. Not independent signature verification, an immutable executable/path guarantee, or protection against later replacement under writable /opt.' };
 }
@@ -257,7 +259,8 @@ export function validateChromeLaunchArguments(args) {
         'zygote-cmd-prefix', 'gpu-launcher', 'service-sandbox-type']);
     for (const arg of args) {
         assert.equal(typeof arg, 'string', 'Every Chrome argument must be a string');
-        const switchName = /^--?([^=]+)(?:=|$)/.exec(arg)?.[1];
+        // Chromium trims surrounding whitespace before parsing POSIX switches.
+        const switchName = /^--?([^=]+)(?:=|$)/.exec(arg.trim())?.[1];
         assert(!forbidden.has(switchName), `Security-disabling browser argument detected: ${arg}`);
     }
     return args;

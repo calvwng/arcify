@@ -153,11 +153,20 @@ test('installed Chrome package rejects wrong/ambiguous owner, helper-only checks
 test('installed Chrome package version/status/architecture metadata is unambiguous and complete', () => {
     const fields = runtimePackage().metadataOutput.trimEnd().split('\n');
     for (const [index, bad] of [[0, 'chromium'], [1, 'config-files'], [2, '145'], [2, '145.0.7632.46-junk extra'],
-        [3, 'unknown'], [4, ''], [5, '']]) {
+        [3, 'unknown'], [4, '']]) {
         const changed = [...fields]; changed[index] = bad;
         assert.throws(() => validateChromeRuntimePackage({ ...runtimePackage(), metadataOutput: changed.join('\n') }));
     }
     assert.throws(() => validateChromeRuntimePackage({ ...runtimePackage(), metadataOutput: `${fields.join('\n')}\nextra` }));
+});
+test('actual runner Chrome 154 metadata preserves the optional empty Homepage field', () => {
+    const metadataOutput = 'google-chrome-stable\ninstalled\n154.0.8037.97-1\namd64\nChrome Linux Team <chromium-dev@chromium.org>\n\n';
+    const evidence = validateChromeRuntimePackage({ ...runtimePackage(), metadataOutput });
+    assert.equal(evidence.browserVersion, '154.0.8037.97');
+    assert.equal(evidence.homepage, null);
+    assert.equal(evidence.checksumMatches, true);
+    assert.throws(() => validateChromeRuntimePackage({ ...runtimePackage(), metadataOutput, actualMd5: 'b'.repeat(32) }));
+    assert.throws(() => validateChromeRuntimePackage({ ...runtimePackage(), metadataOutput: metadataOutput + '\n' }));
 });
 test('actual Chrome process must use fixed installed executable and the existing named AppArmor attachment', () => {
     for (const text of ['chrome (unconfined)\n', 'chrome (enforce)']) {
@@ -226,7 +235,7 @@ test('launch guard rejects security-disabling flags before launch and in recorde
         'unsafely-treat-insecure-origin-as-secure', 'renderer-cmd-prefix', 'utility-cmd-prefix', 'zygote-cmd-prefix',
         'gpu-launcher', 'service-sandbox-type'];
     for (const flag of forbidden) {
-        for (const arg of [`--${flag}`, `--${flag}=false`, `-${flag}`, `-${flag}=false`]) {
+        for (const arg of [`--${flag}`, `--${flag}=false`, `-${flag}`, `-${flag}=false`, ` \t--${flag}\r\n`, `\t-${flag}=false `]) {
             assert.throws(() => validateChromeLaunchArguments([arg]), /Security-disabling/);
             assert.throws(() => validateChromeLaunchArguments([CHROME_EXECUTABLE, '--remote-debugging-pipe', arg]), /Security-disabling/);
         }
