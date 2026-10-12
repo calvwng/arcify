@@ -22,7 +22,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '5eedd3463580013ec03e88e23bac17b475770e5b';
+const PINNED_SPOTLIGHT = '63288bebc3c6e01fbc481c8ccb360a06bbf7bec0';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -57,7 +57,7 @@ const report = {
         'Service-worker stop/wake is conditional on Chrome exposing that extension worker through the ServiceWorker DevTools domain; an unavailable capability is explicitly skipped.'
     ]
 };
-let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage;
+let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
 const networkTargets = new WeakMap();
 const networkSessions = [];
@@ -210,6 +210,19 @@ async function clickResult(page, title) {
         return [...root.querySelectorAll('[data-testid="spotlight-result"]')].find(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
     }, title);
     const element = result.asElement(); assert(element); await element.click(); await result.dispose();
+}
+async function assertSidebarSpace(spaceId) {
+    assert(sidebarFixture?.page && !sidebarFixture.page.isClosed(), 'Rendered sidebar fixture must remain open.');
+    await sidebarFixture.page.waitForFunction(spaceId => {
+        const visible = [...document.querySelectorAll('#spacesList > .space')].filter(space => getComputedStyle(space).display !== 'none');
+        const selected = [...document.querySelectorAll('#spaceSwitcher > button.active')];
+        return visible.length === 1 && visible[0].dataset.spaceId === spaceId && visible[0].classList.contains('active') &&
+            selected.length === 1 && selected[0].dataset.spaceId === spaceId;
+    }, {}, spaceId);
+    return sidebarFixture.page.evaluate(() => ({
+        visibleSpaceIds: [...document.querySelectorAll('#spacesList > .space')].filter(space => getComputedStyle(space).display !== 'none').map(space => space.dataset.spaceId),
+        selectedSpaceIds: [...document.querySelectorAll('#spaceSwitcher > button.active')].map(button => button.dataset.spaceId)
+    }));
 }
 async function enterUrl(page, url) {
     await search(page, url);
@@ -382,6 +395,12 @@ try {
         return { windowA: a.windowId, windowB: b.windowId, spaceOrder: a.spaces.map(space => space.id), duplicateBookmarkIds: fixture.bookmarks };
     });
     await step(stepNames[3], async () => {
+        // Keep the real sidebar document mounted while Spotlight changes spaces.
+        // Checking snapshots alone misses a stale visible space and selected chip.
+        sidebarFixture = await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`);
+        await sidebarFixture.page.waitForSelector('#spacesList > .space');
+        await activate(fixture.sourceA);
+        await assertSidebarSpace(fixture.spaces.work);
         const beforeCount = (await tabsIn(fixture.windowA)).length;
         await launchOverlay(); await search(sourcePage, 'Pair Alpha Target');
         await sourcePage.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot?.textContent.includes('Pair Alpha Target'));
@@ -390,22 +409,33 @@ try {
         const state = await snapshot(); assert.equal(state.activeSpaceId, fixture.spaces.personal);
         assert.equal((await tabsIn(fixture.windowA)).length, beforeCount);
         assert.equal((await snapshot(fixture.windowB)).activeSpaceId, fixture.spaces.work);
-        return { selectedTabId: fixture.alpha, selectedSpaceId: state.activeSpaceId, tabCountUnchanged: true };
+        const renderedSidebar = await assertSidebarSpace(fixture.spaces.personal);
+        await screenshot(sidebarFixture.page, 'sidebar-rendered-nonempty-space-after-spotlight-selection');
+        return { selectedTabId: fixture.alpha, selectedSpaceId: state.activeSpaceId, renderedSidebar, tabCountUnchanged: true };
     });
     await step(stepNames[4], async () => {
         const opened = [];
+        const renderedBookmarkTitles = [];
         for (const [title, bookmarkId] of [['Pair Twin One', fixture.bookmarks.one], ['Pair Twin Two', fixture.bookmarks.two], ['Pair Twin One', fixture.bookmarks.one]]) {
             await launchOverlay(); await search(sourcePage, 'Pair Twin');
             await screenshot(sourcePage, `bookmark-search-${title}`); await clickResult(sourcePage, title);
             const state = await poll(snapshot, state => state.bookmarks.find(bookmark => bookmark.id === bookmarkId)?.tabId, `bookmark ${bookmarkId} binding`);
             const id = state.bookmarks.find(bookmark => bookmark.id === bookmarkId).tabId;
             await poll(() => tab(id), tab => tab.active, `bookmark ${bookmarkId} activation`); opened.push(id);
+            await assertSidebarSpace(fixture.spaces.work);
+            await poll(() => tab(id), tab => tab.status === 'complete' && tab.title === 'Pair Shared URL', 'live page title differs from its saved bookmark title');
+            await sidebarFixture.page.waitForFunction(({ id, title, spaceId }) => {
+                const space = [...document.querySelectorAll('#spacesList > .space')].find(space => space.dataset.spaceId === spaceId);
+                return space?.querySelector(`.pinned-tabs .tab[data-tab-id="${id}"] .tab-title-display`)?.textContent === title;
+            }, {}, { id, title, spaceId: fixture.spaces.work });
+            renderedBookmarkTitles.push({ bookmarkId, tabId: id, title });
         }
         assert.notEqual(opened[0], opened[1]); assert.equal(opened[0], opened[2]);
         const duplicateTabs = (await tabsIn(fixture.windowA)).filter(tab => tab.url === `${fixture.base}/duplicate`);
         assert.equal(duplicateTabs.length, 2);
         fixture.duplicateTabs = opened.slice(0, 2);
-        return { bookmarkIds: fixture.bookmarks, tabIds: fixture.duplicateTabs, repeatReusedExactIdentity: true };
+        await screenshot(sidebarFixture.page, 'sidebar-reopened-duplicate-bookmarks-keep-saved-titles');
+        return { bookmarkIds: fixture.bookmarks, tabIds: fixture.duplicateTabs, renderedBookmarkTitles, repeatReusedExactIdentity: true };
     });
     await step(stepNames[5], async () => {
         const count = (await tabsIn(fixture.windowA)).length;
@@ -422,6 +452,8 @@ try {
         await search(helper.page, 'Pair Empty'); const count = (await tabsIn(fixture.windowA)).length;
         await screenshot(helper.page, 'helper-search-empty-space'); await clickResult(helper.page, 'Pair Empty');
         await poll(snapshot, state => state.activeSpaceId === fixture.spaces.empty, 'empty-space selection');
+        const renderedSidebar = await assertSidebarSpace(fixture.spaces.empty);
+        await screenshot(sidebarFixture.page, 'sidebar-rendered-empty-space-after-spotlight-selection');
         assert.equal((await tabsIn(fixture.windowA)).length, count);
         assert.equal(helper.page.isClosed(), false); assert.equal((await tab(helper.tab.id)).id, helper.tab.id);
         await screenshot(helper.page, 'empty-space-helper-remains-open');
@@ -431,7 +463,7 @@ try {
         assert.equal(destination.spaceId, fixture.spaces.empty); assert.notEqual(destination.id, helper.tab.id);
         await poll(() => tabsIn(fixture.windowA), tabs => !tabs.some(tab => tab.id === helper.tab.id), 'helper closure after successful new tab');
         await screenshot(await pageForUrl(`${fixture.base}/helper-open`), 'helper-created-owned-tab');
-        return { emptySpaceId: fixture.spaces.empty, helperTabId: helper.tab.id, destinationTabId: destination.id };
+        return { emptySpaceId: fixture.spaces.empty, renderedSidebar, helperTabId: helper.tab.id, destinationTabId: destination.id };
     });
     await step(stepNames[7], async () => {
         const newtab = await newTabPage('chrome://newtab/');
@@ -443,7 +475,8 @@ try {
         return identity;
     });
     await step(stepNames[8], async () => {
-        const sidebar = await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`);
+        const sidebar = sidebarFixture;
+        await activate(sidebar.tab.id);
         await sidebar.page.waitForSelector('#spotlightBtn');
         await sidebar.page.waitForSelector('#spacesList > .space');
         const before = new Set((await tabsIn(fixture.windowA)).map(tab => tab.id));

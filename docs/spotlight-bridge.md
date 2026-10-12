@@ -163,8 +163,13 @@ transaction guarantee across full browser restarts. Clients always generate new
 request IDs and never replay actions on reconnect.
 
 Only `http:`, `https:`, `file:`, `chrome:`, and exact `about:blank` navigation URLs
-are accepted, subject to Chrome's own restrictions. Default-engine searches use
-an Arcify-owned blank tab then Spotlight's existing `chrome.search` API.
+are accepted, subject to Chrome's own restrictions. New-tab default-engine searches use an Arcify-owned blank tab then Spotlight's
+existing `chrome.search` API. Current-tab text searches validate the exact source
+against a fresh authenticated snapshot, check its live window and the configured
+peer, then call `chrome.search` once. They never blank the existing page while
+waiting for a bridge response. The sidebar's bridge launch ensures Spotlight is
+open rather than toggling an already-open overlay closed. Closed saved-pin opens
+initialize the same title override and exact bookmark binding as sidebar opens.
 
 ## Verification commands
 

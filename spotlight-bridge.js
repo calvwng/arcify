@@ -104,8 +104,15 @@ export async function runBridgeAction(store, request, snapshot) {
     }
     // Create inactive first so the onActivated event cannot select an incidental opener's space.
     const tab = await chrome.tabs.create({ windowId, url: bookmark?.url || request.url, active: false });
+    if (bookmark) {
+        // Initialize the same exact-bookmark metadata as sidebar reopening before
+        // publishing membership, so the first rendered row retains its saved name.
+        if (bookmark.title && tab.title !== bookmark.title) {
+            await Utils.setTabNameOverride(tab.id, bookmark.url, bookmark.title);
+        }
+        await Utils.setPinnedTabState(tab.id, { bookmarkId: bookmark.id, pinnedUrl: bookmark.url });
+    }
     await store.applyAction({ action: 'assign', tabId: tab.id, spaceId, pinned: Boolean(bookmark) });
-    if (bookmark) await Utils.setPinnedTabState(tab.id, { bookmarkId: bookmark.id, pinnedUrl: bookmark.url });
     await store.applyAction({ action: 'activate', windowId, spaceId });
     return { tabId: await focus(tab.id) };
 }

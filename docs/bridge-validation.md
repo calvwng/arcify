@@ -101,6 +101,22 @@ requirement is relaxed. The pinned-row glyph/accessible-label correction retains
 existing close-versus-delete handlers. New tests cover these states with mocked
 Chrome/DOM APIs; browser interaction for the updated UI remains pending.
 
+## Four-finding regression follow-up
+
+The follow-up regression suite imports the actual sidebar/coordinator, overlay,
+bridge client/action router and server modules. DOM implementations and Chrome
+APIs are substituted in these tests; they are not paired-browser evidence.
+Coverage includes empty/nonempty active-view changes in either event order,
+overlapping reads/renders and busy editors/drags; a current-tab search timeout
+that leaves the original page intact; repeated launch, pending close teardown and
+lost worker tracking; and exact saved-pin title/binding initialization before
+membership is published. The wire protocol remains v1.
+
+The paired fixture now also waits for the rendered sidebar's visible space and
+selected space chip after Spotlight actions, and verifies saved bookmark titles
+after the opened pages load with different document titles. These assertions do
+not establish a browser pass until the guarded job actually reaches them.
+
 ## Manual acceptance matrix
 
 This is the full acceptance checklist, not a list of CI passes. Consult generated
@@ -117,17 +133,21 @@ Repeat relevant cases with Chrome group sync **off** and **on**.
 2. Pair IDs in both settings. Check clear connected status; test typo/self-ID,
    missing/disabled companion, unpairing, protocol mismatch, and reconnection.
 3. Search/select a live tab in another space; assert exactly one existing tab is
-   activated, Arcify selects its owner, and the other window is unchanged.
+   activated, Arcify selects its owner in both logical state and the visible
+   sidebar/space chip, and the other window is unchanged.
 4. Search/select each of two same-URL bookmarks in different spaces and nested
    folders. Confirm correct bookmark identity, no duplicate live pin after repeated
    selection, and no collision with an ordinary same-URL tab.
+   Reopened pins must retain their saved custom row titles after the page loads.
 5. Switch to an empty space through Spotlight. It stays empty and selected. Open
    a URL/default-engine search/new tab; it belongs to that selected space only.
 6. Open current-tab and new-tab overlays using Alt+L and Alt+T (or configured
    shortcuts). Check focus, keyboard selection, Enter/Escape, close/cancel, repeated
    clicks, and updated results while a slower prior search is still outstanding.
 7. Launch from **Search with Spotlight** in each Arcify sidebar. Confirm window
-   targeting/focus; confirm the original New Tab button still works.
+   targeting/focus, repeated launches keep the overlay open, and reopening during
+   close animation or after worker restart stays visible. Normal shortcuts still
+   toggle. Confirm the original New Tab button still works.
 8. Open new tabs from each window while editing/sidebar refresh is pending;
    confirm membership/order and that stale snapshots never erase newer tabs.
 9. Reload either extension; refresh existing content-script pages; suspend/stop
@@ -142,5 +162,7 @@ Repeat relevant cases with Chrome group sync **off** and **on**.
 12. Induce a response timeout after an action. Verify visible error, no automatic
     retry/native fallback, fresh state on next search, and no duplicate action when
     the same request ID is delivered again within the same browser session.
+    For a current-tab text search, timeout during its fresh snapshot check must
+    preserve the original page without navigating it to an intermediate blank URL.
 
 Final automated counts and paired draft PR links are recorded in the PR descriptions.

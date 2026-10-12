@@ -13,7 +13,11 @@ export class RefreshCoordinator {
         this.cancelFn = cancel;
         this.bookmarkGeneration = 0;
         this.handledBookmarkGeneration = 0;
-        this.spacesDirty = false;
+        this.spacesGeneration = 0;
+        this.handledSpacesGeneration = 0;
+        this.activeViewGeneration = 0;
+        this.handledActiveViewGeneration = 0;
+        this.renderDirty = false;
         this.running = false;
         this.timer = null;
         this.retryCount = 0;
@@ -26,9 +30,24 @@ export class RefreshCoordinator {
     }
 
     invalidateSpaces() {
-        this.spacesDirty = true;
+        this.spacesGeneration++;
         this.retryCount = 0;
         this.schedule();
+    }
+
+    invalidateActiveView() {
+        this.activeViewGeneration++;
+        this.retryCount = 0;
+        this.schedule();
+    }
+
+    get spacesDirty() {
+        return this.spacesGeneration > this.handledSpacesGeneration;
+    }
+
+    hasWork() {
+        return this.renderDirty || this.spacesDirty || this.bookmarkGeneration > this.handledBookmarkGeneration ||
+            this.activeViewGeneration > this.handledActiveViewGeneration;
     }
 
     schedule(delay = this.delay) {
@@ -46,25 +65,34 @@ export class RefreshCoordinator {
 
     async drain() {
         if (this.running) return;
-        const hasBookmarkWork = this.bookmarkGeneration > this.handledBookmarkGeneration;
-        if (!hasBookmarkWork && !this.spacesDirty) return;
+        if (!this.hasWork()) return;
         if (this.isBusy()) return;
 
         this.running = true;
         const generation = this.bookmarkGeneration;
+        const spacesGeneration = this.spacesGeneration;
+        const activeViewGeneration = this.activeViewGeneration;
+        // A render must not commit or acknowledge work superseded while it awaited
+        // storage, bookmark trees, or tabs. Busy work is resumed by its idle hook.
+        const isCurrent = () => !this.isBusy() && generation === this.bookmarkGeneration &&
+            spacesGeneration === this.spacesGeneration && activeViewGeneration === this.activeViewGeneration;
         let failed = false;
         try {
             const next = await this.readSpaces();
-            if (this.isBusy()) return;
+            if (!isCurrent()) return;
             const adoption = await this.adoptSpaces(next);
-            if (this.isBusy() || adoption?.completed === false) return;
-            const metadataNeedsRender = typeof adoption === 'object' ? adoption.needsRender : adoption;
-            if (metadataNeedsRender || generation > this.handledBookmarkGeneration) {
-                const renderCompleted = await this.render();
-                if (renderCompleted === false || this.isBusy()) return;
+            if (adoption?.completed === false) return;
+            this.renderDirty ||= Boolean(typeof adoption === 'object' ? adoption.needsRender : adoption);
+            if (!isCurrent()) return;
+            if (this.renderDirty || generation > this.handledBookmarkGeneration ||
+                activeViewGeneration > this.handledActiveViewGeneration) {
+                const renderCompleted = await this.render({ isCurrent });
+                if (renderCompleted === false || !isCurrent()) return;
             }
-            this.spacesDirty = false;
+            this.renderDirty = false;
+            this.handledSpacesGeneration = spacesGeneration;
             this.handledBookmarkGeneration = generation;
+            this.handledActiveViewGeneration = activeViewGeneration;
             this.retryCount = 0;
         } catch (error) {
             failed = true;
@@ -76,8 +104,9 @@ export class RefreshCoordinator {
             }
         } finally {
             this.running = false;
+            // Include early exits: a queued wake may already have fired during the
+            // previous drain and found it running. Never lose that newer work.
+            if (!failed && !this.isBusy() && this.hasWork()) this.schedule();
         }
-
-        if (!failed && (this.spacesDirty || this.bookmarkGeneration > this.handledBookmarkGeneration)) this.schedule();
     }
 }

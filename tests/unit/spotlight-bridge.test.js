@@ -325,6 +325,38 @@ test('openBookmark opens and binds the closed duplicate identity without stealin
     assert.equal(writes('tab.create').length, 1);
 });
 
+test('opening a renamed saved pin initializes exact title and binding before publishing membership', async () => {
+    const store = await makeStore({ install: true });
+    nodes.find(node => node.id === 'twin-2').title = 'Renamed saved twin';
+    local.tabNameOverridesById = { 4: { name: 'Keep the other twin', originalDomain: 'same.test' } };
+    const applyAction = store.applyAction.bind(store);
+    let checkedBeforeAssign = false;
+    store.applyAction = async action => {
+        if (action.action === 'assign') {
+            assert.deepEqual(local.tabNameOverridesById[action.tabId], { name: 'Renamed saved twin', originalDomain: 'same.test' });
+            assert.deepEqual(local.pinnedTabStatesById[action.tabId], { bookmarkId: 'twin-2', pinnedUrl: DUPLICATE_URL });
+            checkedBeforeAssign = true;
+        }
+        return applyAction(action);
+    };
+    const handle = createSpotlightBridge(store);
+    const result = await handle(request('openBookmark', { spaceId: 'a', bookmarkId: 'twin-2' }), SENDER);
+    await settle(store);
+    assert.equal(result.ok, true);
+    assert.equal(checkedBeforeAssign, true);
+    assert.deepEqual(local.tabNameOverridesById[4], { name: 'Keep the other twin', originalDomain: 'same.test' });
+    assert.equal(local.tabNameOverridesById[result.tabId].name, 'Renamed saved twin');
+    assert.equal(result.snapshot.bookmarks.find(bookmark => bookmark.id === 'twin-2').tabId, result.tabId);
+    assert.equal(nodes.find(node => node.id === 'twin-1').title, 'First favorite');
+    // Reusing the pin does not reset its navigation or overwrite its own override.
+    getTab(result.tabId).url = 'https://navigated-away.test/';
+    const reused = await handle(request('openBookmark', { spaceId: 'a', bookmarkId: 'twin-2' }, 'reopen-renamed'), SENDER);
+    assert.equal(reused.tabId, result.tabId);
+    assert.equal(getTab(result.tabId).url, 'https://navigated-away.test/');
+    assert.equal(local.tabNameOverridesById[result.tabId].name, 'Renamed saved twin');
+    assert.equal(writes('tab.create').length, 1);
+});
+
 test('a bookmark opened in another window gets a new local binding', async () => {
     const store = await makeStore();
     const result = await createSpotlightBridge(store)(request('openBookmark', { windowId: 2, spaceId: 'a', bookmarkId: 'twin-1' }), SENDER);

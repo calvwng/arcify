@@ -74,6 +74,9 @@ const spaceTemplate = document.getElementById('spaceTemplate');
 // Global state
 let spaces = [];
 let activeSpaceId = null;
+// Session selection may arrive before the selected bookmark-space is adopted.
+// Keep the intent separate so missing metadata cannot erase it via fallback.
+let pendingActiveSpaceId = null;
 let previousSpaceId = null;
 let isCreatingSpace = false;
 let isOpeningBookmark = false;
@@ -681,9 +684,14 @@ const refreshCoordinator = new RefreshCoordinator({
         return spaceRequest('get');
     },
     adoptSpaces: next => adoptStoredSpaces(next, { render: false }),
-    render: async () => {
-        await activateSpaceInDOM(activeSpaceId, spaces, updateSpaceSwitcher);
-        return refreshActiveSpaceUI();
+    render: async ({ isCurrent }) => {
+        const spaceId = activeSpaceId;
+        const canCommit = () => isCurrent() && activeSpaceId === spaceId;
+        if (await refreshActiveSpaceUI({ canCommit }) === false || !canCommit()) return false;
+        activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher);
+        syncCollapsedFoldersInActiveSpace();
+        if (ownerOf(spaces, activeChromeTabId)?.id === spaceId) scrollToTab(activeChromeTabId, 0);
+        return true;
     },
     isBusy: () => !sidebarReady || isDraggingTab || isOpeningBookmark || pendingSaveCount > 0 || pendingMutationCount > 0 || editorSessions?.isActive(),
     onError: error => Logger.warn('Could not refresh external changes:', error)
@@ -701,7 +709,7 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
     }
     const projection = list => JSON.stringify(list.map(({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
         ({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs })));
-    const needsRender = projection(spaces) !== projection(next);
+    let needsRender = projection(spaces) !== projection(next);
     const old = spaces;
     const oldMetadata = new Map(old.map(s => [s.id, { name: s.name, color: s.color }]));
     spaces = next.map(space => {
@@ -733,6 +741,11 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
             element?.remove();
             createSpaceElement(space);
         }
+    }
+    if (pendingActiveSpaceId && spaces.some(space => space.id === pendingActiveSpaceId)) {
+        needsRender ||= activeSpaceId !== pendingActiveSpaceId;
+        activeSpaceId = pendingActiveSpaceId;
+        pendingActiveSpaceId = null;
     }
     if (!spaces.some(s => s.id === activeSpaceId)) activeSpaceId = spaces[0]?.id;
     if (needsRender && render) {
@@ -779,9 +792,14 @@ async function initSidebar() {
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'session' && changes.activeSpaces && sidebarReady) {
             const nextId = changes.activeSpaces.newValue?.[currentWindow.id];
-            if (nextId && nextId !== activeSpaceId && spaces.some(space => space.id === nextId)) {
-                activeSpaceId = nextId;
-                refreshCoordinator.schedule();
+            if (nextId && (nextId !== activeSpaceId || pendingActiveSpaceId)) {
+                if (spaces.some(space => space.id === nextId)) {
+                    activeSpaceId = nextId;
+                    pendingActiveSpaceId = null;
+                } else {
+                    pendingActiveSpaceId = nextId;
+                }
+                refreshCoordinator.invalidateActiveView();
             }
             return;
         }
@@ -1366,13 +1384,17 @@ async function setActiveSpace(spaceId, updateTab = true) {
         if (activeEditor) document.activeElement.blur();
         editorSessions.dispose('folder-pending', activeSpaceId);
     }
+    pendingActiveSpaceId = null;
     activeSpaceId = spaceId;
     await pendingSpaceSaves;
     await spaceRequest('activate', { windowId: currentWindow.id, spaceId });
+    if (activeSpaceId !== spaceId) return;
     await activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher);
     await refreshActiveSpaceUI();
+    if (activeSpaceId !== spaceId) return;
     if (updateTab) {
         const tabs = (await getOwnedTabs(spaceId)).filter(t => t.windowId === currentWindow.id);
+        if (activeSpaceId !== spaceId) return;
         const tab = tabs.find(t => t.id === space.lastTab) || tabs[tabs.length - 1];
         if (tab) {
             await chrome.tabs.update(tab.id, { active: true });
@@ -2331,18 +2353,18 @@ async function createNewFolder(spaceElement, parentFolderElement = null) {
 }
 
 const spaceRenderTasks = new Map();
-async function loadTabs(space, pinnedContainer, tempContainer) {
+async function loadTabs(space, pinnedContainer, tempContainer, canCommit = () => !editorSessions.isActive()) {
     const previous = spaceRenderTasks.get(space.id) || Promise.resolve();
     const run = previous.catch(error => Logger.warn('Previous space render failed', error)).then(async () => {
-        if (!pinnedContainer.isConnected) return;
-        return renderSpaceTabs(space, pinnedContainer, tempContainer);
+        if (!pinnedContainer.isConnected || !tempContainer.isConnected || !canCommit()) return false;
+        return renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit);
     });
     spaceRenderTasks.set(space.id, run);
     try { return await run; }
     finally { if (spaceRenderTasks.get(space.id) === run) spaceRenderTasks.delete(space.id); }
 }
 
-async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
+async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit) {
     Logger.log('Loading tabs for space:', space.id);
     Logger.log('Space bookmarks in space:', space.spaceBookmarks);
     const representedPinnedTabIds = new Set();
@@ -2547,6 +2569,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
         refreshCoordinator.invalidateSpaces();
         return false;
     }
+    if (!pinnedContainer.isConnected || !tempContainer.isConnected || !canCommit()) return false;
 
     pinnedContainer.querySelectorAll('.tab, .folder, .bookmark-association-error').forEach(el => {
         disposeEditorsInElement(el);
@@ -2566,8 +2589,11 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
 // Debounced UI refresh when settings change (e.g., invertTabOrder)
 let refreshActiveSpaceUITimeout = null;
 
-async function refreshActiveSpaceUI({ force = false } = {}) {
-    if (!force && (editorSessions.isActive() || pendingMutationCount > 0)) {
+async function refreshActiveSpaceUI({ force = false, canCommit = () => true } = {}) {
+    const spaceId = activeSpaceId;
+    const isCurrent = () => activeSpaceId === spaceId && canCommit() &&
+        (force || (!editorSessions.isActive() && !isDraggingTab && pendingMutationCount === 0));
+    if (!isCurrent()) {
         refreshCoordinator.invalidateSpaces();
         return false;
     }
@@ -2583,11 +2609,12 @@ async function refreshActiveSpaceUI({ force = false } = {}) {
         const tempContainer = spaceElement.querySelector('[data-tab-type="temporary"]');
         if (!pinnedContainer || !tempContainer) return true;
 
-        if (await loadTabs(space, pinnedContainer, tempContainer) === false) return false;
+        if (await loadTabs(space, pinnedContainer, tempContainer, isCurrent) === false || !isCurrent()) return false;
         updatePinnedSectionPlaceholders();
 
         // Restore active highlight if possible
         const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!isCurrent()) return false;
         if (activeTabs?.length) {
             activateTabInDOM(activeTabs[0].id);
         }
@@ -3413,12 +3440,15 @@ function handleTabActivated(activeInfo) {
             Logger.log("lasttab space", spaces);
         }
 
-        if (spaceWithTab && spaceWithTab.id !== activeSpaceId) {
+        // Until a pending session target is adopted, this tab's cached owner may
+        // still be its previous space. The authoritative session intent wins.
+        if (!pendingActiveSpaceId && spaceWithTab && spaceWithTab.id !== activeSpaceId) {
             // Switch to the space containing the tab
             activeSpaceId = spaceWithTab.id;
-            await activateSpaceInDOM(spaceWithTab.id, spaces, updateSpaceSwitcher);
-            await refreshActiveSpaceUI();
-            activateTabInDOM(activeInfo.tabId);
+            // Session and tab events can arrive in either order. Queue a view
+            // change independently of the metadata projection, and let the same
+            // busy/generation guards protect both event paths.
+            refreshCoordinator.invalidateActiveView();
         } else {
             // Activate only the tab in the current space
             activateTabInDOM(activeInfo.tabId);
