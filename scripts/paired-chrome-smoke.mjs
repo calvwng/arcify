@@ -362,9 +362,9 @@ try {
         for (const page of await browser.pages()) if (/installation-onboarding\.html/.test(page.url())) await page.close();
         arcifyOptions = await observePage(await browser.newPage());
         await arcifyOptions.goto(`chrome-extension://${arcifyId}/options.html`);
+        await screenshot(arcifyOptions, 'installed-arcify-options');
         spotlightOptions = await observePage(await browser.newPage());
         await spotlightOptions.goto(`chrome-extension://${spotlightId}/options.html`);
-        await screenshot(arcifyOptions, 'installed-arcify-options');
         return report.extensions;
     });
     await step(stepNames[1], async () => {
@@ -395,9 +395,10 @@ try {
         await typeUI(arcifyOptions, '#bridgePeerId', spotlightId);
         await clickUI(arcifyOptions, '#bridgeSave');
         await arcifyOptions.waitForSelector('#bridgeStatus[data-state="connected"]');
+        await screenshot(arcifyOptions, 'paired-arcify-options');
         await clickUI(spotlightOptions, '#refresh-connection');
         await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
-        await screenshot(arcifyOptions, 'paired-arcify-options'); await screenshot(spotlightOptions, 'paired-spotlight-options');
+        await screenshot(spotlightOptions, 'paired-spotlight-options');
         return { pairingOrders: ['arcify-first', 'spotlight-first'], unpairedError: unpaired.error.code, arcifyStatus: await arcifyOptions.$eval('#bridgeStatus', node => node.textContent), spotlightStatus: await spotlightOptions.$eval('#connection-status-message', node => node.textContent) };
     });
     await step(stepNames[2], async () => {
@@ -445,8 +446,11 @@ try {
         assert.deepEqual(a.spaces.find(space => space.id === fixture.spaces.empty).tabIds, []);
         assert.equal(a.bookmarks.filter(item => Object.values(fixture.bookmarks).includes(item.id)).length, 2);
         for (const id of [fixture.sourceA, fixture.alpha, fixture.sourceB, fixture.beta]) assert.equal((await tab(id)).groupId, -1);
+        await ui(sourcePage, 'Capture local window A', () => screenshot(sourcePage, 'local-window-a'));
+        const sourceBPage = await pageForUrl(`${base}/source-b`);
+        await ui(sourceBPage, 'Capture local window B', () => screenshot(sourceBPage, 'local-window-b'));
+        await activate(fixture.sourceA);
         fixture.windowBBaseline = await windowBState();
-        await screenshot(sourcePage, 'local-window-a'); await screenshot(await pageForUrl(`${base}/source-b`), 'local-window-b');
         return { windowA: a.windowId, windowB: b.windowId, spaceOrder: a.spaces.map(space => space.id), duplicateBookmarkIds: fixture.bookmarks };
     });
     await step(stepNames[3], async () => {
@@ -637,7 +641,8 @@ try {
         const spotlight = await spotlightOptions.evaluate(() => chrome.commands.getAll());
         for (const name of ['toggleSpotlight', 'toggleSpotlightNewTab']) assert(spotlight.some(command => command.name === name));
         assert(arcify.some(command => command.name === '_execute_action'));
-        await screenshot(arcifyOptions, 'final-arcify-settings'); await screenshot(spotlightOptions, 'final-spotlight-settings');
+        await ui(arcifyOptions, 'Capture final Arcify settings', () => screenshot(arcifyOptions, 'final-arcify-settings'));
+        await ui(spotlightOptions, 'Capture final Spotlight settings', () => screenshot(spotlightOptions, 'final-spotlight-settings'));
         return { arcify, spotlight, actualOsShortcutPressTested: false, nativeSidePanelTested: false };
     });
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');
