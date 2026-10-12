@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer';
-import { SANDBOX_HELPER, inspectExistingSandboxHelper, validateChromeSandboxStatus } from './paired-chrome-sandbox.mjs';
+import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
+    validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI !== 'true') {
     throw new Error('This browser fixture is restricted to its dedicated GitHub Actions job. Do not run it locally.');
@@ -45,13 +46,14 @@ const report = {
     verification: 'Real Chrome with both production extension builds; no mocked Chrome APIs or transport.',
     environment: { githubActions: true, chromeMode: 'headed Chrome under Xvfb virtual display', runnerOS: process.env.RUNNER_OS, node: process.version,
         workflowSha: process.env.GITHUB_SHA, requestedArcifyHead: process.env.ARCIFY_TEST_HEAD,
-        pullRequestHead: process.env.ARCIFY_PR_HEAD || null, githubRunId: process.env.GITHUB_RUN_ID },
+        pullRequestHead: process.env.ARCIFY_PR_HEAD || null, githubRunId: process.env.GITHUB_RUN_ID,
+        imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, runnerUid: process.getuid?.() },
     checks: stepNames.map(name => ({ name, status: 'not_run' })), screenshots: [], diagnostics: [],
     limits: [
         'The sidebar UI is opened as sidebar.html in a regular tab; native Chrome side-panel mounting is not exercised.',
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
         'Independent overlay cases wait for the previous close animation to remove its host. Rapid close/reopen stress is not exercised.',
-        'The runner uses the existing stable Chrome setuid helper when needed. This older sandbox can be weaker than the namespace sandbox; the actual Chrome-reported mode is recorded. No helper is installed or modified.',
+        'The runner uses its installed stable Chrome and existing AppArmor policy, with actual Namespace/PID/network/seccomp sandbox evidence required. No privileged helper is selected, installed or modified. The runner image supplies the browser version; package/runtime evidence is recorded for each run.',
         'A disposable CI profile is used. No installed Chrome Web Store builds, existing user profiles, full browser-session restart, or manual extension-install UI are exercised.',
         'Optional external HTTPS autocomplete is blocked with DevTools Network request blocking; no fake suggestion responses are supplied.',
         'Service-worker stop/wake is conditional on Chrome exposing that extension worker through the ServiceWorker DevTools domain; an unavailable capability is explicitly skipped.'
@@ -252,26 +254,43 @@ try {
     if (process.env.ARCIFY_TEST_HEAD) assert.equal(report.environment.arcifyHead, process.env.ARCIFY_TEST_HEAD);
     report.environment.puppeteer = JSON.parse(await readFile(resolve(ROOT, 'node_modules/puppeteer/package.json'), 'utf8')).version;
     await step(stepNames[0], async () => {
-        assert.equal(process.env.CHROME_DEVEL_SANDBOX, SANDBOX_HELPER, 'Only the validated existing system helper may be selected for this browser step.');
+        validateNamespaceLaunchEnvironment(process.env, process.getuid?.());
+        assert.equal(puppeteer.executablePath('chrome'), CHROME_EXECUTABLE, 'The installed stable channel must resolve to the expected system browser.');
         try {
-            report.environment.sandboxHelper = await inspectExistingSandboxHelper();
+            report.environment.chromeRuntime = await inspectInstalledChromeRuntime(puppeteer.executablePath('chrome'));
         } catch (error) {
-            report.environment.sandboxHelper = error.sandboxEvidence || { path: SANDBOX_HELPER, validated: false };
+            report.environment.chromeRuntime = error.chromeRuntimeEvidence || { path: CHROME_EXECUTABLE, validated: false };
             throw error;
         }
         await saveReport();
         profile = await mkdtemp(resolve(process.env.RUNNER_TEMP || tmpdir(), 'paired-chrome-'));
         // enableExtensions enables Puppeteer's documented extension-debugging API.
-        // The already-validated CHROME_DEVEL_SANDBOX is inherited only from this
-        // workflow step. No permission, AppArmor, sysctl or other policy changes.
+        // Installed stable Chrome has the runner's existing AppArmor allowance.
+        // Require its namespace sandbox; do not select/repair a setuid helper or
+        // change permission, AppArmor, sysctl or other policy settings.
         // No sandbox-disabling or web-security-disabling fallback flags.
-        const launch = { headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, defaultViewport: { width: 1280, height: 900 } };
+        const launch = { channel: 'chrome', headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, defaultViewport: { width: 1280, height: 900 } };
         report.environment.requestedLaunch = { ...launch, userDataDir: '<fresh disposable runner profile>' };
+        validateChromeLaunchArguments(puppeteer.defaultArgs(launch));
         browser = await puppeteer.launch(launch);
-        report.environment.chromeVersion = await browser.version();
-        report.environment.chromeUserAgent = await browser.userAgent();
+        report.environment.chromeExecutable = browser.process().spawnfile;
         report.environment.chromeArguments = browser.process().spawnargs.map(arg => arg.startsWith('--user-data-dir=') ? '--user-data-dir=<disposable-profile>' : arg);
-        assert(!report.environment.chromeArguments.some(arg => /^--(no-sandbox|disable-setuid-sandbox|disable-namespace-sandbox|disable-seccomp-filter-sandbox|disable-gpu-sandbox|disable-web-security|single-process|no-zygote)(=|$)/.test(arg)), 'Security-disabling browser argument detected.');
+        assert.equal(report.environment.chromeExecutable, CHROME_EXECUTABLE, 'Unexpected actual spawned Chrome executable.');
+        validateChromeLaunchArguments(report.environment.chromeArguments);
+        try {
+            report.environment.chromeProcess = await inspectChromeProcessRuntime(browser.process().pid);
+        } catch (error) {
+            report.environment.chromeProcess = error.chromeProcessEvidence || { validated: false };
+            throw error;
+        }
+        report.environment.chromeVersion = await browser.version();
+        assert.equal(report.environment.chromeVersion, `Chrome/${report.environment.chromeRuntime.package.browserVersion}`, 'Actual Chrome version must match the recorded installed package.');
+        report.environment.chromeUserAgent = await browser.userAgent();
+        const browserSession = await browser.target().createCDPSession();
+        try {
+            report.environment.browserProtocol = await browserSession.send('Browser.getVersion');
+            assert.equal(report.environment.browserProtocol.product, report.environment.chromeVersion);
+        } finally { await browserSession.detach(); }
         browser.on('targetcreated', target => { blockExternalHttps(target).catch(error => report.diagnostics.push({ type: 'network-blocking', message: error.message })); });
         const sandboxPage = await observePage(await browser.newPage());
         await sandboxPage.goto('chrome://sandbox/', { waitUntil: 'domcontentloaded' });
@@ -288,7 +307,7 @@ try {
         await writeFile(resolve(OUTPUT, 'chrome-sandbox-status.txt'), sandboxStatus.bodyText);
         await screenshot(sandboxPage, 'actual-chrome-sandbox-status');
         // Preserve the diagnostic screenshot and raw report even if this fails.
-        report.environment.chromeSandbox.validation = validateChromeSandboxStatus(sandboxStatus);
+        report.environment.chromeSandbox.validation = validateChromeNamespaceSandboxStatus(sandboxStatus);
         report.environment.chromeSandbox.validated = true;
         await saveReport();
         await sandboxPage.close();

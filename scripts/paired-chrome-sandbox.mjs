@@ -8,6 +8,9 @@ import { access, lstat, readFile, realpath } from 'node:fs/promises';
 export const SANDBOX_HELPER = '/opt/google/chrome/chrome-sandbox';
 export const SANDBOX_PARENTS = ['/', '/opt', '/opt/google', '/opt/google/chrome'];
 export const SANDBOX_GUIDE = 'https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md';
+export const CHROME_EXECUTABLE = '/opt/google/chrome/chrome';
+export const CHROME_APPARMOR_PROFILE = '/etc/apparmor.d/chrome';
+export const CHROME_PARENTS = ['/', '/opt', '/opt/google', '/opt/google/chrome'];
 const PACKAGE = 'google-chrome-stable';
 const CHECKSUM_PATH = '/var/lib/dpkg/info/google-chrome-stable.md5sums';
 const CHECKSUM_PARENTS = ['/', '/var', '/var/lib', '/var/lib/dpkg', '/var/lib/dpkg/info'];
@@ -104,6 +107,171 @@ export async function inspectExistingSandboxHelper() {
     }
 }
 
+/**
+ * Ordinary installed Chrome is not a privileged helper. GitHub's image makes
+ * /opt recursively writable; record that fact rather than silently applying or
+ * relaxing the separate setuid-helper trust requirements above.
+ */
+export function validateChromeRuntimeMetadata(evidence) {
+    assert(Number.isSafeInteger(evidence?.runnerUid) && evidence.runnerUid > 0, 'Chrome requires an unprivileged runner');
+    assert.equal(evidence.path, CHROME_EXECUTABLE, 'Only the fixed preinstalled stable Chrome executable is authorized');
+    assert.equal(evidence.parents?.length, CHROME_PARENTS.length, 'Every Chrome parent must be recorded');
+    const ordinaryEntry = (metadata, path, kind) => {
+        assert.equal(metadata?.path, path);
+        assert.equal(metadata.realpath, path, `Canonical path must be exactly ${path}`);
+        assert.equal(metadata.kind, kind, `${path} must be a non-symlink ${kind}`);
+        assert.equal(metadata.uid, 0, `${path} must be root-owned`);
+        assert(Number.isInteger(metadata.mode), `${path} must have readable mode bits`);
+        assert.equal(typeof metadata.writable, 'boolean', `${path} write access must be recorded`);
+        assert.equal(metadata.executable, true, `${path} must be executable/traversable by the runner`);
+    };
+    CHROME_PARENTS.forEach((path, index) => ordinaryEntry(evidence.parents[index], path, 'directory'));
+    ordinaryEntry(evidence.executable, CHROME_EXECUTABLE, 'file');
+    assert.equal(mode(evidence.executable) & 0o6000, 0, 'Chrome must be an ordinary executable, without setuid or setgid');
+    return evidence;
+}
+
+/** Installed package correspondence, not immutable-path or remote-signature proof. */
+export function validateChromeRuntimePackage({ ownerOutput, metadataOutput, checksumText, actualMd5 }) {
+    const owners = ownerOutput.trim().split(/\r?\n/);
+    assert.equal(owners.length, 1, 'Chrome must have one unambiguous registered package owner');
+    assert.match(owners[0], /^google-chrome-stable(?::(?:amd64|arm64))?: \/opt\/google\/chrome\/chrome$/, 'Chrome must belong to preinstalled google-chrome-stable');
+    const fields = metadataOutput.trimEnd().split(/\r?\n/);
+    assert.equal(fields.length, 6, 'Chrome package metadata must have exactly six fields');
+    const [name, status, version, architecture, maintainer, homepage] = fields;
+    assert.equal(name, PACKAGE);
+    assert.equal(status, 'installed', 'Google Chrome stable package must be installed');
+    const parsedVersion = /^(\d+\.\d+\.\d+\.\d+)(?:-[A-Za-z0-9.+~]+)?$/.exec(version);
+    assert(parsedVersion, 'Installed Chrome must have a recognizable four-part browser version');
+    assert(['amd64', 'arm64'].includes(architecture), 'Installed Chrome architecture must be recognized');
+    assert(maintainer && homepage, 'Chrome package maintainer and homepage must be recorded');
+    const matches = checksumText.split(/\r?\n/).map(line => /^([a-f0-9]{32})\s+\*?(\S+)$/.exec(line.trim()))
+        .filter(match => match?.[2] === 'opt/google/chrome/chrome');
+    assert.equal(matches.length, 1, 'Installed package checksum must identify the exact Chrome executable once');
+    assert.equal(actualMd5, matches[0][1], 'Chrome bytes differ from the installed package checksum');
+    return { name, status, version, browserVersion: parsedVersion[1], architecture, maintainer, homepage,
+        registeredOwner: owners[0], checksumFile: CHECKSUM_PATH, expectedMd5: matches[0][1], actualMd5, checksumMatches: true,
+        trustBasis: 'Correspondence with the preinstalled OS package registration and MD5 record at inspection time only. Not independent signature verification, an immutable executable/path guarantee, or protection against later replacement under writable /opt.' };
+}
+
+async function optionalText(path) {
+    try { return { path, available: true, text: await readFile(path, 'utf8') }; }
+    catch (error) { return { path, available: false, error: { code: error.code || null, message: error.message } }; }
+}
+
+/** Reads the installed browser, package records and existing host policy; never launches Chrome. */
+export async function inspectInstalledChromeRuntime(executablePath) {
+    const evidence = { path: executablePath, runnerUid: process.getuid?.(), inspectedAt: new Date().toISOString(),
+        route: 'Preinstalled stable Chrome with its existing namespace sandbox; host policy and permissions unchanged.',
+        source: SANDBOX_GUIDE, parents: [],
+        limits: ['Writable executable/path metadata is recorded, not repaired. This ordinary browser is not being approved as a privileged helper.',
+            'AppArmor configuration text is not proof of loaded policy. Capture the actual browser process attachment after launch and require actual chrome://sandbox namespace diagnostics.'] };
+    try {
+        assert.equal(executablePath, CHROME_EXECUTABLE, 'Puppeteer chrome channel must resolve to the fixed installed executable');
+        for (const path of CHROME_PARENTS) evidence.parents.push(await entry(path));
+        evidence.executable = await entry(CHROME_EXECUTABLE);
+        validateChromeRuntimeMetadata(evidence);
+        const bytes = await readFile(CHROME_EXECUTABLE);
+        evidence.sha256 = createHash('sha256').update(bytes).digest('hex');
+        evidence.md5 = createHash('md5').update(bytes).digest('hex');
+        evidence.packageRecordParents = [];
+        for (const path of CHECKSUM_PARENTS) {
+            const metadata = await entry(path); assertTrustedEntry(metadata, path, 'directory');
+            evidence.packageRecordParents.push(metadata);
+        }
+        evidence.packageRecord = await entry(CHECKSUM_PATH);
+        assertTrustedEntry(evidence.packageRecord, CHECKSUM_PATH, 'file');
+        evidence.package = {
+            ownerOutput: packageQuery(['-S', CHROME_EXECUTABLE]),
+            metadataOutput: packageQuery(['-W', '-f=${Package}\n${db:Status-Status}\n${Version}\n${Architecture}\n${Maintainer}\n${Homepage}\n', PACKAGE])
+        };
+        evidence.package = { ...evidence.package, ...validateChromeRuntimePackage({ ...evidence.package,
+            checksumText: await readFile(CHECKSUM_PATH, 'utf8'), actualMd5: evidence.md5 }) };
+        evidence.apparmor = { configurationOnly: true, parents: [] };
+        for (const path of ['/', '/etc', '/etc/apparmor.d']) {
+            const metadata = await entry(path); assertTrustedEntry(metadata, path, 'directory');
+            evidence.apparmor.parents.push(metadata);
+        }
+        evidence.apparmor.profile = await entry(CHROME_APPARMOR_PROFILE);
+        assertTrustedEntry(evidence.apparmor.profile, CHROME_APPARMOR_PROFILE, 'file');
+        evidence.apparmor.text = await readFile(CHROME_APPARMOR_PROFILE, 'utf8');
+        assert(evidence.apparmor.text.trim(), 'Existing Chrome AppArmor profile must not be empty');
+        evidence.apparmor.sha256 = createHash('sha256').update(evidence.apparmor.text).digest('hex');
+        evidence.apparmor.enabled = await optionalText('/sys/module/apparmor/parameters/enabled');
+        evidence.apparmor.usernsRestriction = await optionalText('/proc/sys/kernel/apparmor_restrict_unprivileged_userns');
+        evidence.apparmor.loadedProfiles = await optionalText('/sys/kernel/security/apparmor/profiles');
+        assert.deepEqual(await entry(CHROME_EXECUTABLE), evidence.executable, 'Chrome changed during inspection; stop rather than race an update');
+        assert.deepEqual(await entry(CHECKSUM_PATH), evidence.packageRecord, 'Package checksum record changed during inspection');
+        assert.deepEqual(await entry(CHROME_APPARMOR_PROFILE), evidence.apparmor.profile, 'AppArmor configuration changed during inspection');
+        evidence.validated = true;
+        return evidence;
+    } catch (error) {
+        evidence.validated = false;
+        error.chromeRuntimeEvidence = evidence;
+        throw error;
+    }
+}
+
+/** Exact process identity and, when readable, the kernel's current AppArmor attachment. */
+export function validateChromeProcessMetadata(evidence) {
+    assert(Number.isSafeInteger(evidence?.pid) && evidence.pid > 0, 'A real Chrome process PID is required');
+    assert.equal(evidence.executablePath, CHROME_EXECUTABLE, 'Spawned process must execute the fixed installed Chrome binary');
+    assert.equal(evidence.apparmor?.path, `/proc/${evidence.pid}/attr/current`, 'AppArmor evidence must refer to the Chrome process');
+    assert.equal(typeof evidence.apparmor.available, 'boolean', 'AppArmor attachment availability must be explicit');
+    if (evidence.apparmor.available) {
+        assert.equal(typeof evidence.apparmor.text, 'string');
+        assert.match(evidence.apparmor.text.trim(), /^chrome \((?:unconfined|enforce)\)$/, 'Chrome must retain its existing chrome AppArmor attachment, not a bare unconfined or unrelated profile');
+    } else {
+        assert(evidence.apparmor.error?.message, 'Unavailable AppArmor attachment must include the read error');
+    }
+    return evidence;
+}
+
+export async function inspectChromeProcessRuntime(pid) {
+    const evidence = { pid, capturedAt: new Date().toISOString(),
+        source: 'Actual browser process /proc executable and AppArmor attr/current; not a renderer sandbox audit.' };
+    try {
+        assert(Number.isSafeInteger(pid) && pid > 0, 'A real Chrome process PID is required');
+        evidence.executablePath = await realpath(`/proc/${pid}/exe`);
+        evidence.apparmor = await optionalText(`/proc/${pid}/attr/current`);
+        validateChromeProcessMetadata(evidence);
+        evidence.validated = true;
+        return evidence;
+    } catch (error) {
+        evidence.validated = false;
+        error.chromeProcessEvidence = evidence;
+        throw error;
+    }
+}
+
+/** Check both Puppeteer's effective prelaunch args and the actual spawned args. */
+export function validateChromeLaunchArguments(args) {
+    assert(Array.isArray(args), 'Chrome arguments must be an array');
+    const forbidden = new Set(['no-sandbox', 'disable-setuid-sandbox', 'disable-namespace-sandbox',
+        'disable-seccomp-filter-sandbox', 'disable-gpu-sandbox', 'disable-landlock-sandbox',
+        'disable-webnn-compiler-sandbox', 'allow-sandbox-debugging', 'disable-web-security',
+        'single-process', 'no-zygote', 'no-zygote-sandbox', 'disable-site-isolation-trials',
+        'disable-site-isolation-for-policy', 'ignore-certificate-errors', 'ignore-certificate-errors-spki-list',
+        'allow-running-insecure-content', 'allow-insecure-localhost', 'reduce-security-for-testing',
+        'unsafely-treat-insecure-origin-as-secure', 'renderer-cmd-prefix', 'utility-cmd-prefix',
+        'zygote-cmd-prefix', 'gpu-launcher', 'service-sandbox-type']);
+    for (const arg of args) {
+        assert.equal(typeof arg, 'string', 'Every Chrome argument must be a string');
+        const switchName = /^--?([^=]+)(?:=|$)/.exec(arg)?.[1];
+        assert(!forbidden.has(switchName), `Security-disabling browser argument detected: ${arg}`);
+    }
+    return args;
+}
+
+export function validateNamespaceLaunchEnvironment(env, uid) {
+    assert(Number.isSafeInteger(uid) && uid > 0, 'Namespace Chrome must run as an ordinary unprivileged user');
+    assert(env && typeof env === 'object' && !Array.isArray(env), 'Chrome launch environment must be an object');
+    for (const name of ['CHROME_DEVEL_SANDBOX', 'PUPPETEER_EXECUTABLE_PATH']) {
+        assert(!Object.hasOwn(env, name), `${name} must be absent for the installed Chrome namespace route, even if empty`);
+    }
+    return env;
+}
+
 /** Validate exact diagnostic fields from real chrome://sandbox, not a text substring. */
 export function validateChromeSandboxStatus(status) {
     assert.equal(status?.url, 'chrome://sandbox/', 'Sandbox evidence must come from chrome://sandbox/');
@@ -127,4 +295,16 @@ export function validateChromeSandboxStatus(status) {
     return { layer1, pidNamespaces: true, networkNamespaces: true, seccompBpf: true,
         seccompTsync: rows.get('seccomp-bpf sandbox supports tsync') ?? null,
         evaluation: status.evaluation.trim(), statusSource: 'Actual Chrome diagnostic page, reporting renderer sandbox configuration; not an independent kernel/process audit.' };
+}
+
+/** The installed-browser route specifically requires namespaces; SUID is not a fallback. */
+export function validateChromeNamespaceSandboxStatus(status) {
+    const validation = validateChromeSandboxStatus(status);
+    assert.equal(validation.layer1, 'Namespace', 'Installed Chrome must report Namespace as its active layer-1 sandbox');
+    for (const row of status.rows) {
+        const key = row.name.trim().toLowerCase();
+        if (key === 'suid sandbox') assert.equal(row.value.trim(), 'No', 'Namespace evidence must not also report an active SUID sandbox');
+        if (key === 'namespace sandbox') assert.equal(row.value.trim(), 'Yes', 'Namespace evidence must not contradict its layer-1 status');
+    }
+    return validation;
 }

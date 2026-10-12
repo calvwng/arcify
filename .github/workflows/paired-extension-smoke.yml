@@ -65,15 +65,12 @@ jobs:
           git -C arcify-spotlight rev-parse HEAD
           npm run build --prefix arcify
           npm run build --prefix arcify-spotlight
-      - name: Install Puppeteer's matching Chrome for Testing
+      - name: Exercise the real pair with installed Chrome's namespace sandbox
         working-directory: arcify
-        run: npx puppeteer browsers install chrome
-      - name: Exercise the real pair with validated existing sandbox helper
-        working-directory: arcify
-        env:
-          # Preinstalled stable helper only; the fixture validates before launch.
-          CHROME_DEVEL_SANDBOX: /opt/google/chrome/chrome-sandbox
-        # Never install/repair/chmod/chown this privileged helper or change policy.
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
         # Do not add sandbox/web-security disabling flags or modify runner policy.
         # A browser launch denial must remain a failed run with its original error.
         run: |

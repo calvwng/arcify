@@ -57,20 +57,44 @@ reason to relax protections. Do not run this fixture to evade an environment's
 extension policy.
 
 The first independent run stopped before extension loading with `No usable
-sandbox!` on Ubuntu. The paired job now pins `ubuntu-24.04` and validates the
-runner's **already installed** `/opt/google/chrome/chrome-sandbox` before using it
-through `CHROME_DEVEL_SANDBOX` for the browser step only. It requires the expected
-root-owned setuid executable and a root-controlled path; it never installs a
-helper, changes permissions, edits AppArmor, or changes sysctl settings. An
-unexpected or missing helper fails the job. The exact Chrome for Testing build
-still comes from locked Puppeteer. Helper metadata and the browser's actual
-sandbox status are collected with the run evidence.
+sandbox!` on Ubuntu. Five later existing-setuid-helper attempts stopped before
+launch because the runner's `/opt` hierarchy and helper are writable mode 0777,
+and the helper lacks setuid. This matches the
+[runner image's `/opt` provisioning](https://github.com/actions/runner-images/blob/ubuntu24/20261004.327/images/ubuntu/scripts/build/configure-system.sh#L9-L13).
+Those failures exercised no paired behavior; the privileged-helper validator was
+not loosened and no helper permissions were repaired.
 
-This is Chromium's documented existing-helper approach, explicitly approved for
-this CI run. The setuid helper is an older sandbox mechanism with a different
-security tradeoff; it is not equivalent to the newer user-namespace sandbox.
-See [Chromium's guidance](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
-and [Puppeteer's Ubuntu troubleshooting](https://pptr.dev/troubleshooting#issues-with-apparmor-on-ubuntu).
+The approved repair uses Puppeteer's `channel: 'chrome'` with the Ubuntu 24.04
+image's **already installed Google Chrome stable**. Chromium documents an existing
+Ubuntu AppArmor allowance for that installed browser. `CHROME_DEVEL_SANDBOX` and
+executable-path overrides are rejected. Nothing installs or modifies a helper,
+changes permissions, edits AppArmor, or changes sysctl settings. The workflow keeps
+its automatic PR trigger, read-only contents permission and exact companion pin.
+
+Before launch the fixture records the fixed executable/metadata, installed package
+ownership/version/checksum and existing AppArmor profile. Writable `/opt` metadata
+is disclosed rather than treated as suitable for a privileged helper: this route
+runs an ordinary unprivileged browser and requires its namespace sandbox. Package
+checksums establish consistency with the runner installation, not independent
+remote signature verification. After launch it checks the actual executable,
+package/runtime version agreement, arguments and available process/profile evidence.
+Before installing either extension, real `chrome://sandbox` diagnostics must report
+**Namespace**, PID namespaces, network namespaces, seccomp-BPF and an adequate
+sandbox. SUID-only, missing/unknown/negative or ambiguous evidence fails closed.
+Raw diagnostics and screenshots are preserved on failure. No disabled-sandbox or
+web-security fallback is allowed.
+
+The installed stable browser version comes from the runner image rather than a
+Puppeteer-downloaded Chrome for Testing pin. Each report records image identifiers,
+actual browser and Puppeteer versions, both source revisions, and runtime evidence.
+The existing locked Puppeteer is tried first; its compatibility with that newer
+stable browser and extension-installation protocol must be established by an
+actual run, not inferred from the package version. A launch/compatibility failure
+remains a failed run until diagnosed and repaired within the permitted scope.
+
+See [Chromium's AppArmor guidance](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md),
+[Puppeteer's installed-channel option](https://pptr.dev/api/puppeteer.launchoptions)
+and [runtime extension installation](https://pptr.dev/guides/chrome-extensions).
 No successful startup or paired behavior is implied until the actual run passes.
 
 The job uploads machine-readable results and screenshots, including successful
