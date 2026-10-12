@@ -29,8 +29,8 @@ The supported cloud Chromium browser was inspected. Opening the required
 > "https:".
 
 The restriction was not bypassed with another automation technology or native
-route. **Neither baseline nor integrated unpacked extensions were loaded. No
-real-Chrome extension behavior is claimed as passing.** The same restriction
+route. **Neither baseline nor integrated unpacked extensions were loaded through this
+interactive browser.** The independently provisioned CI results below are separate. The same restriction
 prevents extension reload/worker-stop inspection through that route. Automated
 mocked checks do not substitute for this missing evidence.
 
@@ -95,7 +95,26 @@ remains a failed run until diagnosed and repaired within the permitted scope.
 See [Chromium's AppArmor guidance](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md),
 [Puppeteer's installed-channel option](https://pptr.dev/api/puppeteer.launchoptions)
 and [runtime extension installation](https://pptr.dev/guides/chrome-extensions).
-No successful startup or paired behavior is implied until the actual run passes.
+The first namespace attempt stopped at parsing an optional empty package Homepage
+field; preserving that field repaired the metadata parser without relaxing the
+identity or sandbox requirements. On 2026-10-12,
+[run 38238740053](https://github.com/calvwng/arcify/actions/runs/38238740053), Arcify
+`49394640056124e1551d22f4911b8e99a7cdc0dc` and Spotlight
+`63288bebc3c6e01fbc481c8ccb360a06bbf7bec0`, verified the actual namespace/PID/network/
+seccomp sandbox in Chrome **154.0.8037.97** with Puppeteer **24.37.1**, installed
+both production extensions and verified their workers/identities. That run had
+**1 passed, 1 failed, 12 not run, 0 skipped**: setup then timed out during a
+background options-page interaction, with the peer ID typed but not saved. The
+trace is consistent with the background-tab click stalling before dispatch. This
+is startup and installation evidence, not a complete paired acceptance pass.
+
+The fixture now explicitly foregrounds each intentional Puppeteer click/type/key
+interaction and verifies page visibility first. Action checkpoints record focus,
+pre-action visibility and completion/failure; individual protocol commands have a
+30-second deadline. Generic screenshots and background sidebar assertions do not
+foreground pages or change the selected space. The underlying real UI actions
+and behavior assertions remain unchanged; the next actual run must establish
+whether this resolves the interaction stall.
 
 The job uploads machine-readable results and screenshots, including successful
 checkpoints. Read the exact-head run and artifacts linked in the paired PRs for

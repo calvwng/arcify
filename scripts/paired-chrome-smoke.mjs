@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer';
+import { performVisibleAction } from './paired-chrome-ui.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
 
@@ -67,6 +68,15 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 const head = path => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: path, encoding: 'utf8' }).trim();
 const slug = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 async function saveReport() { await writeFile(resolve(OUTPUT, 'report.json'), JSON.stringify(report, null, 2)); }
+async function ui(page, label, action) {
+    return performVisibleAction(page, label, action, async checkpoint => {
+        report.uiActions ||= [];
+        report.uiActions.push(checkpoint);
+        await saveReport();
+    });
+}
+async function clickUI(page, selector) { return ui(page, `Click ${selector}`, () => page.click(selector)); }
+async function typeUI(page, selector, text) { return ui(page, `Type ${selector}`, () => page.type(selector, text)); }
 async function poll(read, accept, label, timeout = 20_000) {
     const deadline = Date.now() + timeout;
     let last;
@@ -191,27 +201,31 @@ async function newTabPage(url, windowId = fixture.windowA) {
     return { tab: created, page: await observePage(await target.page()) };
 }
 async function search(page, query) {
-    await page.waitForFunction(() => {
-        const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
-        const input = root.querySelector('[data-testid="spotlight-input"]');
-        return input && input.getBoundingClientRect().width > 0;
+    return ui(page, 'Type Spotlight query', async () => {
+        await page.waitForFunction(() => {
+            const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
+            const input = root.querySelector('[data-testid="spotlight-input"]');
+            return input && input.getBoundingClientRect().width > 0;
+        });
+        const handle = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
+        const input = handle.asElement(); assert(input);
+        await input.click({ clickCount: 3 });
+        await input.press('Control+A'); await input.press('Backspace'); await input.type(query);
+        await handle.dispose();
     });
-    const handle = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
-    const input = handle.asElement(); assert(input);
-    await input.click({ clickCount: 3 });
-    await input.press('Control+A'); await input.press('Backspace'); await input.type(query);
-    await handle.dispose();
 }
 async function clickResult(page, title) {
-    await page.waitForFunction(title => {
-        const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
-        return [...root.querySelectorAll('[data-testid="spotlight-result"]')].some(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
-    }, {}, title);
-    const result = await page.evaluateHandle(title => {
-        const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
-        return [...root.querySelectorAll('[data-testid="spotlight-result"]')].find(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
-    }, title);
-    const element = result.asElement(); assert(element); await element.click(); await result.dispose();
+    return ui(page, `Select ${title}`, async () => {
+        await page.waitForFunction(title => {
+            const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
+            return [...root.querySelectorAll('[data-testid="spotlight-result"]')].some(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
+        }, {}, title);
+        const result = await page.evaluateHandle(title => {
+            const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
+            return [...root.querySelectorAll('[data-testid="spotlight-result"]')].find(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
+        }, title);
+        const element = result.asElement(); assert(element); await element.click(); await result.dispose();
+    });
 }
 async function assertSidebarSpace(spaceId) {
     assert(sidebarFixture?.page && !sidebarFixture.page.isClosed(), 'Rendered sidebar fixture must remain open.');
@@ -220,7 +234,7 @@ async function assertSidebarSpace(spaceId) {
         const selected = [...document.querySelectorAll('#spaceSwitcher > button.active')];
         return visible.length === 1 && visible[0].dataset.spaceId === spaceId && visible[0].classList.contains('active') &&
             selected.length === 1 && selected[0].dataset.spaceId === spaceId;
-    }, {}, spaceId);
+    }, { polling: 50 }, spaceId);
     return sidebarFixture.page.evaluate(() => ({
         visibleSpaceIds: [...document.querySelectorAll('#spacesList > .space')].filter(space => getComputedStyle(space).display !== 'none').map(space => space.dataset.spaceId),
         selectedSpaceIds: [...document.querySelectorAll('#spaceSwitcher > button.active')].map(button => button.dataset.spaceId)
@@ -233,12 +247,12 @@ async function enterUrl(page, url) {
         return root.querySelector('[data-testid="spotlight-result"]')?.textContent.includes(new URL(url).pathname);
     }, {}, url);
     const input = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
-    await input.asElement().press('Enter'); await input.dispose();
+    await ui(page, 'Open typed URL', () => input.asElement().press('Enter')); await input.dispose();
 }
 async function launchOverlay(mode = 'new-tab') {
     // Distinct test cases begin after the previous overlay's close animation.
     // This is not a claim that rapid close/reopen races have been tested.
-    await sourcePage.waitForFunction(() => !document.getElementById('arcify-spotlight-host'));
+    await sourcePage.waitForFunction(() => !document.getElementById('arcify-spotlight-host'), { polling: 50 });
     await activate(fixture.sourceA);
     const response = await external(arcifyOptions, spotlightId, 'launch', { windowId: fixture.windowA, mode });
     assert.equal(response?.ok, true, JSON.stringify(response));
@@ -269,7 +283,7 @@ try {
         // Require its namespace sandbox; do not select/repair a setuid helper or
         // change permission, AppArmor, sysctl or other policy settings.
         // No sandbox-disabling or web-security-disabling fallback flags.
-        const launch = { channel: 'chrome', headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, defaultViewport: { width: 1280, height: 900 } };
+        const launch = { channel: 'chrome', headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, protocolTimeout: 30_000, defaultViewport: { width: 1280, height: 900 } };
         report.environment.requestedLaunch = { ...launch, userDataDir: '<fresh disposable runner profile>' };
         validateChromeLaunchArguments(puppeteer.defaultArgs(launch));
         browser = await puppeteer.launch(launch);
@@ -335,31 +349,31 @@ try {
         const controlWindow = await spotlightOptions.evaluate(async () => (await chrome.windows.getCurrent()).id);
         const unpaired = await external(spotlightOptions, arcifyId, 'hello', { windowId: controlWindow });
         assert.equal(unpaired.ok, false); assert.equal(unpaired.error.code, 'UNAUTHORIZED'); assert.equal('snapshot' in unpaired, false);
-        await arcifyOptions.waitForFunction(() => document.getElementById('bridgeStatus')?.textContent.includes('Standalone')); await arcifyOptions.type('#bridgePeerId', spotlightId); await arcifyOptions.click('#bridgeSave');
+        await arcifyOptions.waitForFunction(() => document.getElementById('bridgeStatus')?.textContent.includes('Standalone'), { polling: 50 }); await typeUI(arcifyOptions, '#bridgePeerId', spotlightId); await clickUI(arcifyOptions, '#bridgeSave');
         await poll(() => arcifyOptions.evaluate(() => chrome.storage.local.get('arcifyBridgePeerId')), result => result.arcifyBridgePeerId === spotlightId, 'Arcify pairing save');
         await arcifyOptions.waitForSelector('#bridgeStatus[data-state="pending"]');
         assert.equal(await arcifyOptions.$eval('#bridgeSavedPeerId', node => node.textContent), spotlightId);
         await screenshot(arcifyOptions, 'arcify-first-awaiting-approval');
         await spotlightOptions.waitForSelector('#arcify-peer-id:not([disabled])');
-        await spotlightOptions.type('#arcify-peer-id', arcifyId); await spotlightOptions.click('#save-connection');
+        await typeUI(spotlightOptions, '#arcify-peer-id', arcifyId); await clickUI(spotlightOptions, '#save-connection');
         await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
-        await arcifyOptions.click('#bridgeCheck');
+        await clickUI(arcifyOptions, '#bridgeCheck');
         await arcifyOptions.waitForFunction(() => document.getElementById('bridgeStatus').textContent.includes('Connected to Spotlight'));
         // Repeat in the opposite order: saving locally succeeds even while the
         // companion rejects hello. Neither save silently approves an unknown ID.
-        await arcifyOptions.click('#bridgeDisconnect');
+        await clickUI(arcifyOptions, '#bridgeDisconnect');
         await arcifyOptions.waitForSelector('#bridgeStatus[data-state="disabled"]');
-        await spotlightOptions.click('#disconnect-connection');
+        await clickUI(spotlightOptions, '#disconnect-connection');
         await spotlightOptions.waitForSelector('#connection-status[data-state="disabled"]');
-        await spotlightOptions.type('#arcify-peer-id', arcifyId);
-        await spotlightOptions.click('#save-connection');
+        await typeUI(spotlightOptions, '#arcify-peer-id', arcifyId);
+        await clickUI(spotlightOptions, '#save-connection');
         await spotlightOptions.waitForSelector('#connection-status[data-state="pending"]');
         assert((await spotlightOptions.$eval('#saved-peer-id', node => node.textContent)).includes(arcifyId));
         await screenshot(spotlightOptions, 'spotlight-first-awaiting-approval');
-        await arcifyOptions.type('#bridgePeerId', spotlightId);
-        await arcifyOptions.click('#bridgeSave');
+        await typeUI(arcifyOptions, '#bridgePeerId', spotlightId);
+        await clickUI(arcifyOptions, '#bridgeSave');
         await arcifyOptions.waitForSelector('#bridgeStatus[data-state="connected"]');
-        await spotlightOptions.click('#refresh-connection');
+        await clickUI(spotlightOptions, '#refresh-connection');
         await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
         await screenshot(arcifyOptions, 'paired-arcify-options'); await screenshot(spotlightOptions, 'paired-spotlight-options');
         return { pairingOrders: ['arcify-first', 'spotlight-first'], unpairedError: unpaired.error.code, arcifyStatus: await arcifyOptions.$eval('#bridgeStatus', node => node.textContent), spotlightStatus: await spotlightOptions.$eval('#connection-status-message', node => node.textContent) };
@@ -446,7 +460,7 @@ try {
             await sidebarFixture.page.waitForFunction(({ id, title, spaceId }) => {
                 const space = [...document.querySelectorAll('#spacesList > .space')].find(space => space.dataset.spaceId === spaceId);
                 return space?.querySelector(`.pinned-tabs .tab[data-tab-id="${id}"] .tab-title-display`)?.textContent === title;
-            }, {}, { id, title, spaceId: fixture.spaces.work });
+            }, { polling: 50 }, { id, title, spaceId: fixture.spaces.work });
             renderedBookmarkTitles.push({ bookmarkId, tabId: id, title });
         }
         assert.notEqual(opened[0], opened[1]); assert.equal(opened[0], opened[2]);
@@ -499,7 +513,7 @@ try {
         await sidebar.page.waitForSelector('#spotlightBtn');
         await sidebar.page.waitForSelector('#spacesList > .space');
         const before = new Set((await tabsIn(fixture.windowA)).map(tab => tab.id));
-        await screenshot(sidebar.page, 'sidebar-html-regular-tab-not-native-sidepanel'); await sidebar.page.click('#spotlightBtn');
+        await screenshot(sidebar.page, 'sidebar-html-regular-tab-not-native-sidepanel'); await clickUI(sidebar.page, '#spotlightBtn');
         const after = await poll(() => tabsIn(fixture.windowA), tabs => tabs.some(tab => !before.has(tab.id) && tab.url === `chrome-extension://${spotlightId}/newtab.html`), 'sidebar button helper launch');
         const helper = after.find(tab => !before.has(tab.id) && tab.url === `chrome-extension://${spotlightId}/newtab.html`);
         const helperPage = await pageForUrl(helper.url); await helperPage.waitForSelector('[data-testid="spotlight-input"]');
@@ -515,7 +529,7 @@ try {
         await arcifyOptions.reload({ waitUntil: 'domcontentloaded' });
         await arcifyOptions.waitForSelector('#syncTabGroups');
         assert.equal(await arcifyOptions.$eval('#syncTabGroups', element => element.checked), false);
-        await arcifyOptions.click('label.toggle-label[for="syncTabGroups"]');
+        await clickUI(arcifyOptions, 'label.toggle-label[for="syncTabGroups"]');
         await poll(() => Promise.all([tab(fixture.sourceA), tab(fixture.sourceB), tab(fixture.alpha)]), tabs => tabs.every(tab => tab.groupId >= 0), 'one-way group projection');
         const a = await tab(fixture.sourceA), b = await tab(fixture.sourceB), personal = await tab(fixture.alpha);
         assert.notEqual(a.groupId, b.groupId); assert.notEqual(a.groupId, personal.groupId);
@@ -524,7 +538,7 @@ try {
         assert.deepEqual(groups.map(group => group.windowId), [fixture.windowA, fixture.windowB, fixture.windowA]);
         assert.deepEqual((await snapshot()).spaces.map(space => space.id), order);
         await screenshot(arcifyOptions, 'group-sync-enabled-options');
-        await arcifyOptions.click('label.toggle-label[for="syncTabGroups"]');
+        await clickUI(arcifyOptions, 'label.toggle-label[for="syncTabGroups"]');
         await poll(() => arcifyOptions.evaluate(() => chrome.storage.sync.get('syncTabGroups')), settings => settings.syncTabGroups === false, 'group sync disabled');
         const opened = await bridge('openTab', { spaceId: fixture.spaces.work, url: `${fixture.base}/sync-off-open` });
         assert.equal((await tab(opened.tabId)).groupId, -1);
@@ -588,7 +602,7 @@ try {
             if (!page.isClosed()) await page.close().catch(() => {});
         }
         await spotlightOptions.waitForSelector('#refresh-connection:not([disabled])');
-        await spotlightOptions.click('#refresh-connection'); await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
+        await clickUI(spotlightOptions, '#refresh-connection'); await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
         const after = await snapshot();
         assert.deepEqual(after.spaces.map(space => space.id), before.spaces.map(space => space.id));
         for (const tabId of [fixture.sourceA, fixture.alpha]) assert.equal(after.tabs.find(tab => tab.id === tabId)?.spaceId, before.tabs.find(tab => tab.id === tabId)?.spaceId);
