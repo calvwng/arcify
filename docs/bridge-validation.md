@@ -56,6 +56,23 @@ installation-policy failure is a failed/blocked run, never a passing skip or a
 reason to relax protections. Do not run this fixture to evade an environment's
 extension policy.
 
+The first independent run stopped before extension loading with `No usable
+sandbox!` on Ubuntu. The paired job now pins `ubuntu-24.04` and validates the
+runner's **already installed** `/opt/google/chrome/chrome-sandbox` before using it
+through `CHROME_DEVEL_SANDBOX` for the browser step only. It requires the expected
+root-owned setuid executable and a root-controlled path; it never installs a
+helper, changes permissions, edits AppArmor, or changes sysctl settings. An
+unexpected or missing helper fails the job. The exact Chrome for Testing build
+still comes from locked Puppeteer. Helper metadata and the browser's actual
+sandbox status are collected with the run evidence.
+
+This is Chromium's documented existing-helper approach, explicitly approved for
+this CI run. The setuid helper is an older sandbox mechanism with a different
+security tradeoff; it is not equivalent to the newer user-namespace sandbox.
+See [Chromium's guidance](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
+and [Puppeteer's Ubuntu troubleshooting](https://pptr.dev/troubleshooting#issues-with-apparmor-on-ubuntu).
+No successful startup or paired behavior is implied until the actual run passes.
+
 The job uploads machine-readable results and screenshots, including successful
 checkpoints. Read the exact-head run and artifacts linked in the paired PRs for
 actual outcomes; adding a fixture does not itself establish a pass. Real Chrome

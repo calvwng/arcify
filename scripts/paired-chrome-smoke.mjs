@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer';
+import { SANDBOX_HELPER, inspectExistingSandboxHelper, validateChromeSandboxStatus } from './paired-chrome-sandbox.mjs';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI !== 'true') {
     throw new Error('This browser fixture is restricted to its dedicated GitHub Actions job. Do not run it locally.');
@@ -50,6 +51,7 @@ const report = {
         'The sidebar UI is opened as sidebar.html in a regular tab; native Chrome side-panel mounting is not exercised.',
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
         'Independent overlay cases wait for the previous close animation to remove its host. Rapid close/reopen stress is not exercised.',
+        'The runner uses the existing stable Chrome setuid helper when needed. This older sandbox can be weaker than the namespace sandbox; the actual Chrome-reported mode is recorded. No helper is installed or modified.',
         'A disposable CI profile is used. No installed Chrome Web Store builds, existing user profiles, full browser-session restart, or manual extension-install UI are exercised.',
         'Optional external HTTPS autocomplete is blocked with DevTools Network request blocking; no fake suggestion responses are supplied.',
         'Service-worker stop/wake is conditional on Chrome exposing that extension worker through the ServiceWorker DevTools domain; an unavailable capability is explicitly skipped.'
@@ -237,17 +239,46 @@ try {
     if (process.env.ARCIFY_TEST_HEAD) assert.equal(report.environment.arcifyHead, process.env.ARCIFY_TEST_HEAD);
     report.environment.puppeteer = JSON.parse(await readFile(resolve(ROOT, 'node_modules/puppeteer/package.json'), 'utf8')).version;
     await step(stepNames[0], async () => {
+        assert.equal(process.env.CHROME_DEVEL_SANDBOX, SANDBOX_HELPER, 'Only the validated existing system helper may be selected for this browser step.');
+        try {
+            report.environment.sandboxHelper = await inspectExistingSandboxHelper();
+        } catch (error) {
+            report.environment.sandboxHelper = error.sandboxEvidence || { path: SANDBOX_HELPER, validated: false };
+            throw error;
+        }
+        await saveReport();
         profile = await mkdtemp(resolve(process.env.RUNNER_TEMP || tmpdir(), 'paired-chrome-'));
         // enableExtensions enables Puppeteer's documented extension-debugging API.
-        // No --no-sandbox, --disable-web-security, policy edits, or fallback flags.
+        // The already-validated CHROME_DEVEL_SANDBOX is inherited only from this
+        // workflow step. No permission, AppArmor, sysctl or other policy changes.
+        // No sandbox-disabling or web-security-disabling fallback flags.
         const launch = { headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, defaultViewport: { width: 1280, height: 900 } };
         report.environment.requestedLaunch = { ...launch, userDataDir: '<fresh disposable runner profile>' };
         browser = await puppeteer.launch(launch);
         report.environment.chromeVersion = await browser.version();
         report.environment.chromeUserAgent = await browser.userAgent();
         report.environment.chromeArguments = browser.process().spawnargs.map(arg => arg.startsWith('--user-data-dir=') ? '--user-data-dir=<disposable-profile>' : arg);
-        assert(!report.environment.chromeArguments.some(arg => /^--(no-sandbox|disable-setuid-sandbox|disable-web-security|single-process|no-zygote)(=|$)/.test(arg)), 'Security-disabling browser argument detected.');
+        assert(!report.environment.chromeArguments.some(arg => /^--(no-sandbox|disable-setuid-sandbox|disable-namespace-sandbox|disable-seccomp-filter-sandbox|disable-gpu-sandbox|disable-web-security|single-process|no-zygote)(=|$)/.test(arg)), 'Security-disabling browser argument detected.');
         browser.on('targetcreated', target => { blockExternalHttps(target).catch(error => report.diagnostics.push({ type: 'network-blocking', message: error.message })); });
+        const sandboxPage = await observePage(await browser.newPage());
+        await sandboxPage.goto('chrome://sandbox/', { waitUntil: 'domcontentloaded' });
+        await sandboxPage.waitForFunction(() => document.querySelector('#sandbox-status tr') && document.getElementById('evaluation')?.textContent.trim());
+        const sandboxStatus = await sandboxPage.evaluate(() => ({
+            url: location.href, title: document.title, bodyText: document.body.innerText,
+            evaluation: document.getElementById('evaluation')?.textContent || '',
+            rows: [...document.querySelectorAll('#sandbox-status tr')].map(row => {
+                const cells = row.querySelectorAll('td');
+                return { name: cells[0]?.textContent || '', value: cells[1]?.textContent || '' };
+            })
+        }));
+        report.environment.chromeSandbox = { ...sandboxStatus, capturedAt: new Date().toISOString(), validated: false };
+        await writeFile(resolve(OUTPUT, 'chrome-sandbox-status.txt'), sandboxStatus.bodyText);
+        await screenshot(sandboxPage, 'actual-chrome-sandbox-status');
+        // Preserve the diagnostic screenshot and raw report even if this fails.
+        report.environment.chromeSandbox.validation = validateChromeSandboxStatus(sandboxStatus);
+        report.environment.chromeSandbox.validated = true;
+        await saveReport();
+        await sandboxPage.close();
         arcifyId = await browser.installExtension(resolve(ROOT, 'dist'));
         spotlightId = await browser.installExtension(resolve(COMPANION, 'dist'));
         assert.match(arcifyId, /^[a-p]{32}$/); assert.match(spotlightId, /^[a-p]{32}$/); assert.notEqual(arcifyId, spotlightId);

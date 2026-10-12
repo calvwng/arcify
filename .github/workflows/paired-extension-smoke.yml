@@ -7,6 +7,8 @@ on:
     paths:
       - '.github/workflows/paired-extension-smoke.yml'
       - 'scripts/paired-chrome-smoke.mjs'
+      - 'scripts/paired-chrome-sandbox.mjs'
+      - 'tests/unit/paired-chrome-sandbox.test.js'
       - 'spotlight-bridge*.js'
       - 'space-store.js'
       - 'space-bookmarks.js'
@@ -22,7 +24,7 @@ permissions:
 
 jobs:
   paired-chrome:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       CI: 'true'
@@ -65,8 +67,12 @@ jobs:
       - name: Install Puppeteer's matching Chrome for Testing
         working-directory: arcify
         run: npx puppeteer browsers install chrome
-      - name: Exercise the real pair with Chrome sandbox intact
+      - name: Exercise the real pair with validated existing sandbox helper
         working-directory: arcify
+        env:
+          # Preinstalled stable helper only; the fixture validates before launch.
+          CHROME_DEVEL_SANDBOX: /opt/google/chrome/chrome-sandbox
+        # Never install/repair/chmod/chown this privileged helper or change policy.
         # Do not add sandbox/web-security disabling flags or modify runner policy.
         # A browser launch denial must remain a failed run with its original error.
         run: |
