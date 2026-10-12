@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions } from '../../scripts/paired-chrome-worker.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker } from '../../scripts/paired-chrome-worker.mjs';
 const id = 'a'.repeat(32), url = `chrome-extension://${id}/background.js`;
 const ready = { url, hasRuntime: true, id, manifest: { name: 'Fixture', version: '1.0.0' } };
 const starting = { url, hasRuntime: false, id: null, manifest: null };
@@ -58,4 +58,47 @@ test('observed uncaught worker exceptions cannot be converted into a ready pass'
     assert.doesNotThrow(() => assertNoWorkerExceptions([]));
     assert.throws(() => assertNoWorkerExceptions([{ text: 'Uncaught', exception: { description: 'startup error' } }]), /startup error/);
     assert.throws(() => assertNoWorkerExceptions(undefined), /evidence must be present/);
+});
+
+const oldTarget = { type: 'service_worker', url, targetId: 'old-worker' };
+const newTarget = { type: 'service_worker', url, targetId: 'new-worker' };
+function terminationHarness(targetLists = [[oldTarget], []]) {
+    let index = 0, time = 0;
+    const calls = [], records = [];
+    return { calls, records,
+        args: { url, worker: { close: async () => calls.push('close') },
+            releaseNetwork: async () => calls.push('release-network'),
+            readTargets: async () => { calls.push('raw-targets'); return targetLists[Math.min(index++, targetLists.length - 1)]; },
+            record: async value => records.push(value) },
+        options: { timeout: 200, interval: 100, now: () => time, sleep: async duration => { time += duration; } }
+    };
+}
+test('worker termination releases the network observer, closes once and verifies raw target destruction', async () => {
+    const h = terminationHarness([[oldTarget], [oldTarget], [newTarget]]);
+    assert.deepEqual(await terminateObservedWorker(h.args, h.options), oldTarget);
+    assert.deepEqual(h.calls, ['raw-targets', 'release-network', 'close', 'raw-targets', 'raw-targets']);
+    assert.equal(h.records.at(-1).phase, 'old-target-gone');
+    assert.deepEqual(h.records.at(-1).matchingTargets, [newTarget]);
+});
+test('a resolved close or absent Puppeteer wrapper cannot replace raw target destruction', async () => {
+    const h = terminationHarness([[oldTarget]]);
+    await assert.rejects(terminateObservedWorker(h.args, h.options), /did not destroy raw Chrome target old-worker/);
+    assert.equal(h.calls.filter(call => call === 'close').length, 1);
+    assert.equal(h.records.some(record => record.phase === 'old-target-gone'), false);
+});
+for (const stage of ['releaseNetwork', 'close']) {
+    test(`failure during ${stage} stops the termination procedure without replay`, async () => {
+        const h = terminationHarness();
+        if (stage === 'close') h.args.worker.close = async () => { h.calls.push('failed-close'); throw new Error('blocked'); };
+        else h.args.releaseNetwork = async () => { throw new Error('blocked'); };
+        await assert.rejects(terminateObservedWorker(h.args, h.options), /blocked/);
+        assert.equal(h.calls.filter(call => call === 'raw-targets').length, 1);
+        assert.equal(h.records.length, stage === 'close' ? 2 : 1);
+    });
+}
+test('raw worker selection rejects absent, ambiguous, wrong-type and missing-ID identities', () => {
+    assert.deepEqual(findExactWorkerTarget([oldTarget], url), oldTarget);
+    for (const targets of [[], [oldTarget, newTarget], [{ ...oldTarget, type: 'page' }], [{ ...oldTarget, targetId: '' }]]) {
+        assert.throws(() => findExactWorkerTarget(targets, url));
+    }
 });

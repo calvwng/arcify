@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer';
 import { performVisibleAction, replaceInputText } from './paired-chrome-ui.mjs';
-import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions } from './paired-chrome-worker.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
 
@@ -58,7 +58,7 @@ const report = {
         'The runner uses its installed stable Chrome and existing AppArmor policy, with actual Namespace/PID/network/seccomp sandbox evidence required. No privileged helper is selected, installed or modified. The runner image supplies the browser version; package/runtime evidence is recorded for each run.',
         'A disposable CI profile is used. No installed Chrome Web Store builds, existing user profiles, full browser-session restart, or manual extension-install UI are exercised.',
         'Optional external HTTPS autocomplete is blocked with DevTools Network request blocking; no fake suggestion responses are supplied.',
-        'Service-worker stop/wake is conditional on Chrome exposing that extension worker through the ServiceWorker DevTools domain; an unavailable capability is explicitly skipped.'
+        "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
@@ -113,6 +113,7 @@ async function blockExternalHttps(target) {
             await session.send('Network.enable');
             await session.send('Network.setBlockedURLs', { urls: ['https://*'] });
             networkSessions.push(session);
+            return session;
         } catch (error) {
             await session.detach().catch(() => {});
             throw error;
@@ -583,31 +584,40 @@ try {
         return { wrongWindow: wrongWindow.error.code, unsafeUrl: invalid.error.code, wrongVersion: version.error.code };
     });
     await step(stepNames[11], async () => {
-        const cdp = await arcifyOptions.target().createCDPSession();
-        const versions = new Map();
-        cdp.on('ServiceWorker.workerVersionUpdated', ({ versions: updates }) => { for (const version of updates) versions.set(version.versionId, version); });
-        try { await cdp.send('ServiceWorker.enable'); }
-        catch (error) { await cdp.detach(); return { skipped: true, reason: `Chrome does not expose ServiceWorker domain here: ${error.message}` }; }
-        const deadline = Date.now() + 5000;
-        let version;
-        while (Date.now() < deadline && !version) {
-            version = [...versions.values()].find(version => version.scriptURL === `chrome-extension://${arcifyId}/background.js` && version.runningStatus === 'running');
-            if (!version) await sleep(100);
-        }
-        if (!version) { await cdp.detach(); return { skipped: true, reason: 'This Chrome build does not expose the extension worker version through ServiceWorker domain; no stop/restart claim.' }; }
-        const requestId = `ci-journal-${crypto.randomUUID()}`;
-        const payload = { spaceId: fixture.spaces.work, url: `${fixture.base}/journal-open` };
-        const first = await bridge('openTab', payload, requestId);
-        const worker = browser.targets().find(target => target.type() === 'service_worker' && target.url() === version.scriptURL);
-        assert(worker, 'Arcify worker target must exist before termination.');
-        await cdp.send('ServiceWorker.stopWorker', { versionId: version.versionId });
-        await poll(async () => browser.targets().includes(worker), present => !present, 'actual Arcify worker termination');
-        const repeated = await bridge('openTab', payload, requestId);
-        assert.equal(repeated.tabId, first.tabId);
-        assert.equal((await tabsIn(fixture.windowA)).filter(tab => tab.url === payload.url).length, 1);
-        await browser.waitForTarget(target => target !== worker && target.type() === 'service_worker' && target.url() === version.scriptURL, { timeout: 20_000 });
-        await cdp.detach();
-        return { stoppedVersionId: version.versionId, repeatedRequestId: requestId, originalAndReplayedTabId: first.tabId, realWorkerRestarted: true };
+        const url = `chrome-extension://${arcifyId}/background.js`;
+        const workerTarget = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === url);
+        const worker = await workerTarget.worker();
+        const cdp = await browser.target().createCDPSession();
+        const readTargets = async () => (await cdp.send('Target.getTargets')).targetInfos;
+        report.workerTermination = [];
+        try {
+            const requestId = `ci-journal-${crypto.randomUUID()}`;
+            const payload = { spaceId: fixture.spaces.work, url: `${fixture.base}/journal-open` };
+            const first = await bridge('openTab', payload, requestId);
+            const before = await terminateObservedWorker({ worker, url, readTargets,
+                releaseNetwork: async () => {
+                    const network = await networkTargets.get(workerTarget);
+                    assert(network, 'The fixture-owned worker network session must be tracked.');
+                    const sessionId = network.id();
+                    await network.detach();
+                    networkTargets.delete(workerTarget);
+                    return sessionId;
+                },
+                record: async observation => { report.workerTermination.push({ ...observation, observedAt: new Date().toISOString() }); await saveReport(); }
+            });
+            const repeated = await bridge('openTab', payload, requestId);
+            assert.equal(repeated.tabId, first.tabId);
+            assert.equal((await tabsIn(fixture.windowA)).filter(tab => tab.url === payload.url).length, 1);
+            const after = await poll(readTargets, targets => targets.some(target => target.type === 'service_worker' && target.url === url && target.targetId !== before.targetId), 'a distinct raw Chrome worker after wake');
+            const restarted = findExactWorkerTarget(after, url);
+            assert.notEqual(restarted.targetId, before.targetId);
+            const target = await browser.waitForTarget(target => target !== workerTarget && target.type() === 'service_worker' && target.url() === url);
+            await blockExternalHttps(target);
+            const identity = await waitForExtensionWorkerIdentity(await target.worker(), arcifyId);
+            report.workerTermination.push({ phase: 'restarted', target: restarted, identity, observedAt: new Date().toISOString() });
+            return { method: 'Puppeteer WebWorker.close', oldTargetId: before.targetId, restartedTargetId: restarted.targetId,
+                repeatedRequestId: requestId, originalAndReplayedTabId: first.tabId, realWorkerRestarted: true };
+        } finally { await cdp.detach(); await saveReport(); }
     });
     await step(stepNames[12], async () => {
         const before = await snapshot();

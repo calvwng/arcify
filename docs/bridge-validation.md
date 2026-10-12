@@ -116,6 +116,15 @@ foreground pages or change the selected space. The underlying real UI actions
 and behavior assertions remain unchanged; the next actual run must establish
 whether this resolves the interaction stall.
 
+Worker termination follows [Chrome's documented Puppeteer method](https://developer.chrome.com/docs/extensions/how-to/test/test-serviceworker-termination-with-puppeteer):
+release the fixture's worker Network observer, then call `WebWorker.close()`.
+Debugger sessions can keep workers alive, so a resolved stop command alone is
+not proof of termination. The fixture requires the exact old worker target ID to
+disappear from Chrome's raw `Target.getTargets` list and a distinct exact-URL worker
+with the correct runtime identity after wake. Replaying the same bridge request
+must return the original tab without creating a duplicate. This case is mandatory;
+it no longer relies on an optional ServiceWorker-domain capability or a skip.
+
 The job uploads machine-readable results and screenshots, including successful
 checkpoints. Read the exact-head run and artifacts linked in the paired PRs for
 actual outcomes; adding a fixture does not itself establish a pass. Real Chrome
