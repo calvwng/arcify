@@ -3,22 +3,30 @@ import assert from 'node:assert/strict';
 // Worker targets can appear before extension bindings are ready. Poll only the
 // read-only observation; never retry an exception or a mismatched identity.
 export async function waitForExtensionWorkerIdentity(worker, id, record = async () => {}, {
-    timeout = 20_000, interval = 100, now = Date.now,
+    timeout = 20_000, evaluationTimeout = 30_000, interval = 100, now = Date.now,
     sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 } = {}) {
     const expectedUrl = `chrome-extension://${id}/background.js`;
     const deadline = now() + timeout;
     let last;
     do {
-        last = await worker.evaluate(() => ({
-            url: globalThis.location?.href ?? null,
-            globalType: globalThis.constructor?.name ?? null,
-            chromeType: typeof globalThis.chrome,
-            hasRuntime: typeof globalThis.chrome?.runtime?.getManifest === 'function',
-            id: globalThis.chrome?.runtime?.id ?? null,
-            manifest: typeof globalThis.chrome?.runtime?.getManifest === 'function'
-                ? globalThis.chrome.runtime.getManifest() : null
-        }));
+        // The supported driver also waits for Inspector.workerScriptLoaded.
+        // Bound that wait even if Chrome never reports a finished script.
+        let evaluationTimer;
+        try {
+            last = await Promise.race([worker.evaluate(() => ({
+                url: globalThis.location?.href ?? null,
+                globalType: globalThis.constructor?.name ?? null,
+                chromeType: typeof globalThis.chrome,
+                hasRuntime: typeof globalThis.chrome?.runtime?.getManifest === 'function',
+                id: globalThis.chrome?.runtime?.id ?? null,
+                manifest: typeof globalThis.chrome?.runtime?.getManifest === 'function'
+                    ? globalThis.chrome.runtime.getManifest() : null
+            })), new Promise((_, reject) => {
+                evaluationTimer = setTimeout(() => reject(new Error(
+                    `Worker identity evaluation exceeded ${evaluationTimeout}ms, including script-load readiness.`)), evaluationTimeout);
+            })]);
+        } finally { clearTimeout(evaluationTimer); }
         await record(last);
         assert.equal(last.url, expectedUrl, 'Worker execution context must match its exact extension target.');
         if (last.id !== null) assert.equal(last.id, id, 'Worker runtime ID must match the installed extension.');
@@ -95,4 +103,22 @@ export async function reloadObservedExtension({ url, readTargets, releaseObserve
         await sleep(interval);
     } while (now() < deadline);
     throw new Error(`Extension reload did not invalidate its original view and raw worker ${before.targetId}; last observation: ${JSON.stringify(last)}`);
+}
+
+// Observe existing debugger sessions without attaching another worker debugger.
+export function observeTargetDiagnostics(session, source, record) {
+    const events = ['Target.targetCreated', 'Target.targetInfoChanged', 'Target.targetDestroyed',
+        'Target.targetCrashed', 'Inspector.targetCrashed', 'Inspector.detached', 'Inspector.workerScriptLoaded'];
+    const listeners = events.map(event => {
+        const listener = details => record({ source, event, details, observedAt: new Date().toISOString() });
+        session.on(event, listener);
+        return [event, listener];
+    });
+    return () => { for (const [event, listener] of listeners) session.off(event, listener); };
+}
+
+export function assertNoTargetCrashes(events) {
+    assert(Array.isArray(events), 'Target lifecycle evidence must be present.');
+    const crashes = events.filter(({ event }) => ['Target.targetCrashed', 'Inspector.targetCrashed'].includes(event));
+    assert.equal(crashes.length, 0, `Chrome target crash: ${JSON.stringify(crashes)}`);
 }

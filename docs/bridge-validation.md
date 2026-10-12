@@ -87,34 +87,53 @@ web-security fallback is allowed.
 The installed stable browser version comes from the runner image rather than a
 Puppeteer-downloaded Chrome for Testing pin. Each report records image identifiers,
 actual browser and Puppeteer versions, both source revisions, and runtime evidence.
-The existing locked Puppeteer is tried first; its compatibility with that newer
-stable browser and extension-installation protocol must be established by an
-actual run, not inferred from the package version. A launch/compatibility failure
-remains a failed run until diagnosed and repaired within the permitted scope.
+The paired job has its own locked Puppeteer Core **25.12.0** under
+`scripts/paired-chrome-runtime`, requiring Node >=22.12. It is installed only by
+this job; Arcify's root dependencies and legacy Node 20/22 tests remain unchanged.
+This version targets Chrome 154 in Puppeteer's supported-browser mapping. Actual
+compatibility and extension installation still require a successful run; matching
+versions alone are not acceptance evidence. A failure remains a failed run.
 
 See [Chromium's AppArmor guidance](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md),
 [Puppeteer's installed-channel option](https://pptr.dev/api/puppeteer.launchoptions)
 and [runtime extension installation](https://pptr.dev/guides/chrome-extensions).
-The first namespace attempt stopped at parsing an optional empty package Homepage
-field; preserving that field repaired the metadata parser without relaxing the
-identity or sandbox requirements. On 2026-10-12,
-[run 38238740053](https://github.com/calvwng/arcify/actions/runs/38238740053), Arcify
-`49394640056124e1551d22f4911b8e99a7cdc0dc` and Spotlight
-`63288bebc3c6e01fbc481c8ccb360a06bbf7bec0`, verified the actual namespace/PID/network/
-seccomp sandbox in Chrome **154.0.8037.97** with Puppeteer **24.37.1**, installed
-both production extensions and verified their workers/identities. That run had
-**1 passed, 1 failed, 12 not run, 0 skipped**: setup then timed out during a
-background options-page interaction, with the peer ID typed but not saved. The
-trace is consistent with the background-tab click stalling before dispatch. This
-is startup and installation evidence, not a complete paired acceptance pass.
+The first namespace run established actual sandboxed startup and both extension
+identities with Chrome **154.0.8037.97** / Puppeteer **24.37.1**. Subsequent runs
+found and corrected fixture input/focus, capture scheduling and debugger-observer
+lifecycle issues without changing extension runtime code or security guards.
 
-The fixture now explicitly foregrounds each intentional Puppeteer click/type/key
-interaction and verifies page visibility first. Action checkpoints record focus,
-pre-action visibility and completion/failure; individual protocol commands have a
-30-second deadline. Generic screenshots and background sidebar assertions do not
-foreground pages or change the selected space. The underlying real UI actions
-and behavior assertions remain unchanged; the next actual run must establish
-whether this resolves the interaction stall.
+[Run 38245774262](https://github.com/calvwng/arcify/actions/runs/38245774262), Arcify
+`245e0c675e90c3669f50d3511661d6e5322c1fcf` with Spotlight
+`63288bebc3c6e01fbc481c8ccb360a06bbf7bec0`, recorded **12 passed, 1 failed,
+1 not run, 0 skipped**, with 29 screenshots. Actual passes cover reciprocal
+pairing in both orders, multiwindow snapshots/isolation, live-tab overlay selection,
+rendered sidebar selection, distinct equal-URL saved pins/titles/reuse, current-tab
+URL navigation, empty-space/new-tab/helper flows, group sync off/on, malformed and
+unauthorized requests, and genuine worker termination plus duplicate-request
+journal replay. Reload destroyed the original view and worker but then waited for
+a replacement before sending a normal wake event. The fixture now reconnects via
+fresh settings and a real companion Check/Refresh request before requiring that
+replacement. Reload and final command checks have not yet passed as a full run.
+
+[Run 38247184764](https://github.com/calvwng/arcify/actions/runs/38247184764) at
+`b172596e825ed65df7d3eef0aac962e8b1a59cad` failed earlier: the initial worker
+identity evaluation timed out, with Crashpad diagnostics but no recorded target
+crash event. It has **0 passed, 1 failed, 13 not run, 0 skipped**. The native
+crash/hung-target cause is unconfirmed. The new isolated driver includes
+[Puppeteer's worker-script readiness fix](https://github.com/puppeteer/puppeteer/pull/15099),
+which waits for script execution before evaluation. This addresses a known timing
+hazard, not a proven fix for the native crash. Each identity evaluation also has a
+30-second deadline if script readiness never settles. Raw target lifecycle/crash
+and existing debugger-session events are now retained; a recorded crash fails the
+check. There is no mutation retry or alternate execution context.
+
+Intentional real Puppeteer input is foregrounded and visibility-checked; exact
+input focus precedes actual key events. Required screenshots remain fatal.
+Background sidebar assertions/captures do not activate the sidebar. Only optional
+failure-cleanup captures omit hidden/closed pages, recording their state/reason
+without changing focus or replacing the original error. These harness changes
+still need a complete actual paired run. Browser-free driver tests check the
+isolated version and reject environment-derived sandbox disabling.
 
 Worker termination follows [Chrome's documented Puppeteer method](https://developer.chrome.com/docs/extensions/how-to/test/test-serviceworker-termination-with-puppeteer):
 release the fixture's worker Network observer, then call `WebWorker.close()`.
@@ -127,9 +146,11 @@ it no longer relies on an optional ServiceWorker-domain capability or a skip.
 The separate extension-reload case detaches its worker observers without stopping
 the worker, verifies the original raw worker/view are still present, invokes the
 real `chrome.runtime.reload()`, and requires original options-context invalidation
-plus a distinct worker identity. It then reconnects through fresh settings pages
-and verifies preserved space IDs/membership; a worker restart alone cannot pass
-this reload case.
+plus destruction of the original raw worker target. Fresh settings and a normal
+companion request wake the reloaded extension; a distinct worker with exact
+runtime identity, connected status, ordered space IDs and the two selected tab
+memberships are mandatory. This does not verify every saved-pin binding, and a
+worker restart alone cannot pass the reload case.
 
 The job uploads machine-readable results and screenshots, including successful
 checkpoints. Read the exact-head run and artifacts linked in the paired PRs for

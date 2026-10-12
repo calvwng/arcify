@@ -12,9 +12,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import puppeteer from 'puppeteer';
+import puppeteer from './paired-chrome-runtime/index.mjs';
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
-import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension } from './paired-chrome-worker.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
 
@@ -50,7 +50,7 @@ const report = {
         workflowSha: process.env.GITHUB_SHA, requestedArcifyHead: process.env.ARCIFY_TEST_HEAD,
         pullRequestHead: process.env.ARCIFY_PR_HEAD || null, githubRunId: process.env.GITHUB_RUN_ID,
         imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, runnerUid: process.getuid?.() },
-    checks: stepNames.map(name => ({ name, status: 'not_run' })), screenshots: [], diagnostics: [],
+    checks: stepNames.map(name => ({ name, status: 'not_run' })), screenshots: [], diagnostics: [], targetLifecycle: [],
     limits: [
         'The sidebar UI is opened as sidebar.html in a regular tab; native Chrome side-panel mounting is not exercised.',
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
@@ -109,6 +109,7 @@ async function blockExternalHttps(target) {
     // observer must not make a later required setup falsely appear successful.
     const pending = (async () => {
         const session = await target.createCDPSession();
+        observeTargetDiagnostics(session, `network:${target.type()}:${target.url()}`, event => report.targetLifecycle.push(event));
         try {
             await session.send('Network.enable');
             await session.send('Network.setBlockedURLs', { urls: ['https://*'] });
@@ -145,6 +146,7 @@ async function step(name, operation) {
             assert.deepEqual(await windowBState(), fixture.windowBBaseline, 'An operation in window A changed window B tabs or memberships.');
             check.windowBUnchanged = true;
         }
+        assertNoTargetCrashes(report.targetLifecycle);
         check.status = detail?.skipped ? 'skipped' : 'passed';
         if (detail !== undefined) check.details = detail;
         console.log(`${check.status.toUpperCase()}: ${name}`);
@@ -270,12 +272,14 @@ try {
     report.environment.spotlightHead = head(COMPANION);
     assert.equal(report.environment.spotlightHead, PINNED_SPOTLIGHT, 'Companion must match the reviewed pinned commit.');
     if (process.env.ARCIFY_TEST_HEAD) assert.equal(report.environment.arcifyHead, process.env.ARCIFY_TEST_HEAD);
-    report.environment.puppeteer = JSON.parse(await readFile(resolve(ROOT, 'node_modules/puppeteer/package.json'), 'utf8')).version;
+    report.environment.puppeteer = JSON.parse(await readFile(resolve(ROOT, 'scripts/paired-chrome-runtime/node_modules/puppeteer-core/package.json'), 'utf8')).version;
+    assert.equal(report.environment.puppeteer, '25.12.0', 'Paired CI must use its isolated, reviewed browser driver.');
     await step(stepNames[0], async () => {
         validateNamespaceLaunchEnvironment(process.env, process.getuid?.());
-        assert.equal(puppeteer.executablePath('chrome'), CHROME_EXECUTABLE, 'The installed stable channel must resolve to the expected system browser.');
+        const chromeExecutable = await puppeteer.executablePath('chrome');
+        assert.equal(chromeExecutable, CHROME_EXECUTABLE, 'The installed stable channel must resolve to the expected system browser.');
         try {
-            report.environment.chromeRuntime = await inspectInstalledChromeRuntime(puppeteer.executablePath('chrome'));
+            report.environment.chromeRuntime = await inspectInstalledChromeRuntime(chromeExecutable);
         } catch (error) {
             report.environment.chromeRuntime = error.chromeRuntimeEvidence || { path: CHROME_EXECUTABLE, validated: false };
             throw error;
@@ -289,7 +293,7 @@ try {
         // No sandbox-disabling or web-security-disabling fallback flags.
         const launch = { channel: 'chrome', headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, protocolTimeout: 30_000, defaultViewport: { width: 1280, height: 900 } };
         report.environment.requestedLaunch = { ...launch, userDataDir: '<fresh disposable runner profile>' };
-        validateChromeLaunchArguments(puppeteer.defaultArgs(launch));
+        validateChromeLaunchArguments(await puppeteer.defaultArgs(launch));
         browser = await puppeteer.launch(launch);
         report.environment.chromeExecutable = browser.process().spawnfile;
         report.environment.chromeArguments = browser.process().spawnargs.map(arg => arg.startsWith('--user-data-dir=') ? '--user-data-dir=<disposable-profile>' : arg);
@@ -309,6 +313,9 @@ try {
             report.environment.browserProtocol = await browserSession.send('Browser.getVersion');
             assert.equal(report.environment.browserProtocol.product, report.environment.chromeVersion);
         } finally { await browserSession.detach(); }
+        const lifecycleSession = await browser.target().createCDPSession();
+        observeTargetDiagnostics(lifecycleSession, 'browser', event => report.targetLifecycle.push(event));
+        await lifecycleSession.send('Target.setDiscoverTargets', { discover: true });
         browser.on('targetcreated', target => { blockExternalHttps(target).catch(error => report.diagnostics.push({ type: 'network-blocking', message: error.message })); });
         const sandboxPage = await observePage(await browser.newPage());
         await sandboxPage.goto('chrome://sandbox/', { waitUntil: 'domcontentloaded' });
@@ -337,6 +344,7 @@ try {
             const target = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === `chrome-extension://${id}/background.js`, { timeout: 30_000 });
             await blockExternalHttps(target);
             const worker = await target.worker();
+            observeTargetDiagnostics(worker.client, `worker:${name}:${target.url()}`, event => report.targetLifecycle.push(event));
             const diagnostics = await target.createCDPSession();
             report.workerContexts ||= [];
             const workerExceptions = [];
@@ -712,6 +720,7 @@ try {
         return { arcify, spotlight, actualOsShortcutPressTested: false, nativeSidePanelTested: false };
     });
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');
+    assertNoTargetCrashes(report.targetLifecycle);
     report.status = report.checks.some(check => check.status === 'skipped') ? 'passed_with_skips' : 'passed';
 } catch (error) {
     report.status = 'failed'; report.failure = { message: error.message, stack: error.stack };

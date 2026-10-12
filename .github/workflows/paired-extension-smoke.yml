@@ -10,6 +10,7 @@ on:
       - 'scripts/paired-chrome-sandbox.mjs'
       - 'scripts/paired-chrome-ui.mjs'
       - 'scripts/paired-chrome-worker.mjs'
+      - 'scripts/paired-chrome-runtime/**'
       - 'tests/unit/paired-chrome-sandbox.test.js'
       - 'tests/unit/paired-chrome-ui.test.js'
       - 'tests/unit/paired-chrome-worker.test.js'
@@ -56,13 +57,17 @@ jobs:
           cache: npm
           cache-dependency-path: |
             arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
             arcify-spotlight/package-lock.json
       - name: Install locked dependencies
         env:
           PUPPETEER_SKIP_DOWNLOAD: 'true'
         run: |
           npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
           npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
       - name: Build the exact paired revisions
         run: |
           git -C arcify rev-parse HEAD

@@ -1,6 +1,7 @@
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
-import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension } from '../../scripts/paired-chrome-worker.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from '../../scripts/paired-chrome-worker.mjs';
 const id = 'a'.repeat(32), url = `chrome-extension://${id}/background.js`;
 const ready = { url, hasRuntime: true, id, manifest: { name: 'Fixture', version: '1.0.0' } };
 const starting = { url, hasRuntime: false, id: null, manifest: null };
@@ -144,4 +145,42 @@ test('view invalidation before reload dispatch cannot prove an extension reload'
     const h = reloadHarness({ invalidatedBefore: true });
     await assert.rejects(reloadObservedExtension(h.args, h.options), /realm must still be valid/);
     assert.equal(h.calls.includes('runtime.reload'), false);
+});
+
+
+test('target diagnostics record native crashes and exact raw lifecycle without sending commands', () => {
+    const session = new EventEmitter(), records = [];
+    session.send = () => { throw new Error('observation must not send commands'); };
+    const stop = observeTargetDiagnostics(session, 'browser', event => records.push(event));
+    const targetInfo = { targetId: 'real-worker-id', type: 'service_worker', url };
+    session.emit('Target.targetCreated', { targetInfo });
+    session.emit('Inspector.workerScriptLoaded', {});
+    session.emit('Target.targetCrashed', { targetId: targetInfo.targetId, status: 'crashed', errorCode: 11 });
+    assert.equal(records.length, 3); assert.deepEqual(records[0].details, { targetInfo });
+    assert.equal(records[2].source, 'browser'); assert(records[2].observedAt);
+    assert.throws(() => assertNoTargetCrashes(records), /Chrome target crash.*real-worker-id/);
+    stop(); session.emit('Target.targetDestroyed', { targetId: targetInfo.targetId });
+    assert.equal(records.length, 3);
+});
+test('worker Inspector crashes fail even if a context or script-loaded event exists', () => {
+    assert.throws(() => assertNoTargetCrashes([
+        { event: 'Inspector.workerScriptLoaded', details: {} },
+        { event: 'Inspector.targetCrashed', source: url, details: {} }
+    ]), /Chrome target crash/);
+});
+test('normal raw destruction and debugger detachment are retained without being called crashes', () => {
+    assert.doesNotThrow(() => assertNoTargetCrashes([
+        { event: 'Target.targetDestroyed', details: { targetId: 'old-worker' } },
+        { event: 'Inspector.detached', details: { reason: 'target_closed' } }
+    ]));
+    assert.throws(() => assertNoTargetCrashes(undefined), /evidence must be present/);
+});
+
+
+test('a script-load/evaluation promise that never settles fails within its own deadline without retry', async () => {
+    let calls = 0;
+    const worker = { evaluate() { calls++; return new Promise(() => {}); } };
+    await assert.rejects(waitForExtensionWorkerIdentity(worker, id, async () => {}, { evaluationTimeout: 10 }),
+        /Worker identity evaluation exceeded 10ms, including script-load readiness/);
+    assert.equal(calls, 1);
 });
