@@ -27,7 +27,9 @@ export async function performVisibleAction(page, label, action, record = async (
 
 // Puppeteer's press() accepts one key, not Playwright-style chord strings.
 export async function replaceInputText(page, input, text) {
-    await input.click({ clickCount: 3 });
+    // The centered panel grows/animates as results arrive. Focus the exact field
+    // instead of clicking coordinates that can move onto a result.
+    await input.focus();
     await page.keyboard.down('Control');
     try { await input.press('KeyA'); }
     finally { await page.keyboard.up('Control'); }

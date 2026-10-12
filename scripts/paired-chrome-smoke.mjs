@@ -212,6 +212,9 @@ async function search(page, query) {
         const handle = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
         const input = handle.asElement(); assert(input);
         await replaceInputText(page, input, query);
+        assert.equal(page.isClosed(), false, 'Typing a search query must leave its page open.');
+        const field = await input.evaluate(element => ({ value: element.value, focused: element.getRootNode().activeElement === element }));
+        assert.deepEqual(field, { value: query, focused: true }, 'Search typing must reach the exact focused input.');
         await handle.dispose();
     });
 }

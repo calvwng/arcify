@@ -64,7 +64,7 @@ function keyboardHarness(failedKey) {
     const calls = [];
     return { calls,
         page: { keyboard: { down: async key => calls.push(['down', key]), up: async key => calls.push(['up', key]) } },
-        input: { click: async options => calls.push(['click', options]),
+        input: { focus: async () => calls.push(['focus']),
             press: async key => { calls.push(['press', key]); if (key === failedKey) throw new Error('input unavailable'); },
             type: async text => calls.push(['type', text]) }
     };
@@ -72,15 +72,22 @@ function keyboardHarness(failedKey) {
 test('query replacement sends real separate modifier/key events before typing', async () => {
     const h = keyboardHarness();
     await replaceInputText(h.page, h.input, 'Pair Alpha Target');
-    assert.deepEqual(h.calls, [['click', { clickCount: 3 }], ['down', 'Control'], ['press', 'KeyA'], ['up', 'Control'], ['press', 'Backspace'], ['type', 'Pair Alpha Target']]);
+    assert.deepEqual(h.calls, [['focus'], ['down', 'Control'], ['press', 'KeyA'], ['up', 'Control'], ['press', 'Backspace'], ['type', 'Pair Alpha Target']]);
 });
 test('failed selection releases Control and does not erase/type/retry', async () => {
     const h = keyboardHarness('KeyA');
     await assert.rejects(replaceInputText(h.page, h.input, 'replacement'), /input unavailable/);
-    assert.deepEqual(h.calls, [['click', { clickCount: 3 }], ['down', 'Control'], ['press', 'KeyA'], ['up', 'Control']]);
+    assert.deepEqual(h.calls, [['focus'], ['down', 'Control'], ['press', 'KeyA'], ['up', 'Control']]);
 });
 test('failed clearing never types replacement text', async () => {
     const h = keyboardHarness('Backspace');
     await assert.rejects(replaceInputText(h.page, h.input, 'replacement'), /input unavailable/);
     assert.equal(h.calls.some(([event]) => event === 'type'), false);
+});
+
+test('input focus failure cannot send selection or typing events', async () => {
+    const h = keyboardHarness();
+    h.input.focus = async () => { throw new Error('field gone'); };
+    await assert.rejects(replaceInputText(h.page, h.input, 'replacement'), /field gone/);
+    assert.deepEqual(h.calls, []);
 });
