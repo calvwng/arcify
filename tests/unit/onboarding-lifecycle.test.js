@@ -22,7 +22,7 @@ function background(completed = false, onboardingVersion = undefined, version = 
         tabs: { create: async tab => opened.push(tab), onActivated: event, onUpdated: event, onRemoved: event }
     };
     runInNewContext(source, {
-        chrome, console, registerTourMessages() {},
+        chrome, console, registerTourMessages() {}, registerStartupLauncher() {},
         registerBookmarkListeners() {},
         registerSpotlightBridge() {},
         enqueueBookmarkOrder: async () => [],

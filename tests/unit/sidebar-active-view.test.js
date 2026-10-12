@@ -344,3 +344,14 @@ test('a newly discovered empty-space selection waits for editing and ignores ano
     input.dispatchEvent(new window.Event('blur'));
     await settled('new-while-editing');
 });
+
+test('real sidebar excludes startup launcher from native pinned favicons', async () => {
+    const launcher = { id: 800, windowId: 10, pinned: true, active: false,
+        url: chrome.runtime.getURL('startup-launcher.html'), title: 'Open Arcify sidebar' };
+    tabs.push(launcher);
+    await chrome.tabs.onCreated.emit(launcher);
+    await wait(200);
+    assert.equal(document.querySelector('#pinnedFavicons [data-tab-id="800"]'), null);
+    assert.equal(document.querySelector('#spacesList [data-tab-id="800"]'), null);
+    tabs.splice(tabs.indexOf(launcher), 1);
+});

@@ -98,6 +98,7 @@ async function saveOptions() {
 
   const settings = {
     defaultSpaceName: defaultSpaceNameSelect?.value || 'Home',
+    startupLauncherEnabled: getCheckboxValue(document.getElementById('startupLauncherEnabled'), false),
     autoArchiveEnabled: getCheckboxValue(document.getElementById('autoArchiveEnabled'), false),
     autoArchiveIdleMinutes: parseInt(autoArchiveIdleMinutesInput?.value, 10) || 360,
     syncTabGroups: getCheckboxValue(document.getElementById('syncTabGroups'), false),
@@ -143,6 +144,7 @@ async function restoreOptions() {
   await populateSpacesDropdown(settings.defaultSpaceName);
 
   // Restore checkbox values
+  setCheckboxValue(document.getElementById('startupLauncherEnabled'), settings.startupLauncherEnabled, false);
   setCheckboxValue(document.getElementById('autoArchiveEnabled'), settings.autoArchiveEnabled, false);
   setCheckboxValue(document.getElementById('syncTabGroups'), settings.syncTabGroups, false);
   setCheckboxValue(document.getElementById('invertTabOrder'), settings.invertTabOrder, true);
@@ -248,7 +250,7 @@ function setupAutoSave() {
   addListenerIfExists('defaultSpaceName', 'change', saveOptions);
 
   // Auto-save for checkboxes (most just save immediately)
-  const checkboxIds = ['syncTabGroups', 'invertTabOrder', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
+  const checkboxIds = ['startupLauncherEnabled', 'syncTabGroups', 'invertTabOrder', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
   checkboxIds.forEach(id => addListenerIfExists(id, 'change', saveOptions));
 
   // Auto-archive checkbox needs special handling to update visibility

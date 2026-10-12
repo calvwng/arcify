@@ -1,3 +1,4 @@
+import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { ownerOf, tabIds } from './space-store.js';
 import { getSpaceBookmarkById, getSpaceBookmarkTree } from './space-bookmarks.js';
 import { Utils } from './utils.js';
@@ -15,7 +16,7 @@ export async function getBridgeSnapshot(store, windowId) {
 
 async function readBridgeSnapshot(store, windowId) {
     if (await store.discoverBookmarkSpaces()) await store.persist();
-    const live = await chrome.tabs.query({ windowId });
+    const live = (await chrome.tabs.query({ windowId })).filter(tab => !isStartupLauncherTab(tab));
     const byId = new Map(live.map(tab => [tab.id, tab]));
     const bindings = await Utils.getPinnedTabStates();
     const spaces = store.spaces.map(space => ({

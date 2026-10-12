@@ -11,6 +11,16 @@ test('window-scoped space tabs retain extension order despite native order and d
     assert.deepEqual(selectWindowSpaceTabs(space, tabs, 10).map(t => t.id), [3]);
     assert.deepEqual(selectWindowSpaceTabs(space, tabs, 20).map(t => t.id), [2, 4, 1]);
 });
+test('launcher is omitted from rendered tabs even when membership is stale', () => {
+    globalThis.chrome = { runtime: { getURL: path => `chrome-extension://arcify/${path}` } };
+    const space = { spaceBookmarks: [1], temporaryTabs: [2, 3] };
+    const tabs = [
+        { id: 1, windowId: 1, url: 'chrome-extension://arcify/startup-launcher.html' },
+        { id: 2, windowId: 1, url: 'about:blank', pendingUrl: 'chrome-extension://arcify/startup-launcher.html' },
+        { id: 3, windowId: 1, url: 'https://example.test/' }
+    ];
+    assert.deepEqual(selectWindowSpaceTabs(space, tabs, 1).map(tab => tab.id), [3]);
+});
 test('reordering one window preserves other window slots and membership', () => {
     assert.deepEqual(mergeVisibleOrder([1, 2, 3, 4], [3, 1]), [3, 2, 1, 4]);
     assert.deepEqual(mergeVisibleOrder([1, 2, 3], [3, 1, 5]), [3, 2, 1, 5]);

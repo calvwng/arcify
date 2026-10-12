@@ -141,6 +141,22 @@ test('extension pages are removed when a blank helper tab finishes navigating', 
     await store.run(async () => { store.track(tabs[0]); await store.persist(); });
     assert.equal(ownerOf(local.spaces, 1), undefined);
 });
+test('startup launcher and pending launcher never enter spaces, snapshots or native groups', async () => {
+    sync.syncTabGroups = true;
+    tabs[0].url = 'chrome-extension://arcify/startup-launcher.html';
+    tabs[1].pendingUrl = 'chrome-extension://arcify/startup-launcher.html?restored=1';
+    tabs[1].url = 'about:blank';
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    assert.equal(ownerOf(local.spaces, 1), undefined);
+    assert.equal(ownerOf(local.spaces, 2), undefined);
+    assert.deepEqual(local.spaceTabSnapshot, []);
+    await syncSpaceGroups(local.spaces);
+    assert.deepEqual(mutations, []);
+    tabs[1].pendingUrl = undefined;
+    tabs[1].url = 'https://browsing.test/';
+    await store.run(async () => { store.track(tabs[1]); await store.persist(); });
+    assert.equal(ownerOf(local.spaces, 2)?.id, 'a', 'Normal navigation out of the launcher becomes a regular browsing tab');
+});
 test('migration recovers legacy groups whose IDs changed before the upgrade', async () => {
     delete local.spaceModelVersion;
     local.spaces = [space(42, [1])]; local.spaces[0].name = 'Work';
@@ -373,4 +389,22 @@ test('native tab moves refresh duplicate restoration positions without changing 
     assert.equal(ownerOf(local.spaces, 10).id, 'a');
     assert.equal(ownerOf(local.spaces, 20).id, 'b');
     assert.deepEqual(local.tabNameOverridesById, { 10: 'First', 20: 'Second' });
+});
+
+test('native-group imports, explicit assignment and stale patches cannot persist launcher membership', async () => {
+    tabs[0].url = chrome.runtime.getURL('startup-launcher.html');
+    tabs[0].groupId = 99;
+    groups.push({ id: 99, windowId: 1, title: 'Imported', color: 'blue' });
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    await store.dispatch({ action: 'import', windowId: 1 });
+    assert.equal(ownerOf(local.spaces, 1), undefined);
+    await store.dispatch({ action: 'assign', tabId: 1, spaceId: 'a', pinned: true });
+    assert.equal(ownerOf(local.spaces, 1), undefined);
+    const before = structuredClone(store.spaces);
+    const after = structuredClone(before);
+    after[0].temporaryTabs.push(1);
+    await store.dispatch({ action: 'patch', before, after });
+    assert.equal(ownerOf(local.spaces, 1), undefined);
+    assert.equal(local.spaceTabSnapshot.some(tab => tab.tabId === 1), false);
+    assert.equal(JSON.stringify(local.spaceWindowSnapshot).includes('startup-launcher.html'), false);
 });

@@ -1,3 +1,4 @@
+import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
 import { isPracticeUrl } from './tour-practice.js';
 import { syncSpaceGroups } from './tab-group-sync.js';
 import { LocalStorage } from './localstorage.js';
@@ -143,7 +144,7 @@ export class SpaceStore {
     track(tab) {
         this.liveTabs.set(tab.id, tab);
         const url = tab.url || tab.pendingUrl;
-        if (tab.pinned) {
+        if (tab.pinned || isStartupLauncherTab(tab)) {
             for (const space of this.spaces) for (const key of sections) space[key] = space[key].filter(id => id !== tab.id);
             return;
         }
@@ -198,7 +199,7 @@ export class SpaceStore {
             for (const id of keys.keys()) if (!liveWindows.has(id)) keys.delete(id);
         }
         for (const id of this.recoveryCandidates) if (tabs.has(id)) this.track(tabs.get(id));
-        this.restoreQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId));
+        this.restoreQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId) && !isStartupLauncherUrl(t.url));
         const metadata = await chrome.storage.local.get(['pinnedTabStatesById', 'tabNameOverridesById']);
         const pinnedStates = metadata.pinnedTabStatesById || {};
         const overrides = metadata.tabNameOverridesById || {};
@@ -212,7 +213,11 @@ export class SpaceStore {
         }
         const snapshot = [];
         for (const space of this.spaces) for (const section of sections) {
-            space[section] = [...new Set(space[section])].filter(id => tabs.has(id));
+            space[section] = [...new Set(space[section])].filter(id => {
+                if (!tabs.has(id)) return false;
+                if (isStartupLauncherTab(tabs.get(id))) { this.snapshotByTab.delete(id); return false; }
+                return true;
+            });
             space[section].forEach((id, order) => {
                 // An unresolved recovery tab has only a provisional space owner.
                 // Keep its original record instead of persisting that guess.
@@ -235,7 +240,7 @@ export class SpaceStore {
         for (const windowId of liveWindows) {
             if (!this.windowKeys.has(windowId)) this.windowKeys.set(windowId, crypto.randomUUID());
             const key = this.windowKeys.get(windowId);
-            if (!windowSnapshot.some(w => w.key === key)) windowSnapshot.push({ key, tabs: captureWindowTabs([...tabs.values()].filter(t => t.windowId === windowId)) });
+            if (!windowSnapshot.some(w => w.key === key)) windowSnapshot.push({ key, tabs: captureWindowTabs([...tabs.values()].filter(t => t.windowId === windowId && !isStartupLauncherTab(t))) });
         }
         this.savedWindows = windowSnapshot;
         await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot: [...snapshot, ...this.restoreQueue], spaceWindowSnapshot: windowSnapshot });

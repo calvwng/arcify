@@ -722,3 +722,14 @@ test('internal launch rejects a handshake with a different declared extension id
     assert.equal(result.error.code, 'INVALID_RESPONSE');
     assert.equal(sent.length, 1);
 });
+
+test('startup launcher is excluded from bridge tab classification even if native-pinned or pending', async () => {
+    const launcher = chrome.runtime.getURL('startup-launcher.html');
+    tabs.push({ id: 80, windowId: 1, url: launcher, title: 'Open Arcify sidebar', pinned: true },
+        { id: 81, windowId: 1, url: 'about:blank', pendingUrl: launcher, title: 'Loading' });
+    const store = await makeStore();
+    const snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(snapshot.tabs.some(tab => [80, 81].includes(tab.id)), false);
+    assert.equal(snapshot.spaces.some(space => space.tabIds.some(id => [80, 81].includes(id))), false);
+    assert.equal(snapshot.tabs.some(tab => tab.id === 5 && tab.pinned), true, 'Regular native pins stay available');
+});

@@ -1,5 +1,8 @@
 import { registerTourMessages } from './tour-state.js';
+import { registerStartupLauncher } from './startup-launcher.js';
+import { isStartupLauncherTab } from './startup-launcher-tab.js';
 registerTourMessages();
+registerStartupLauncher();
 /**
  * Background Service Worker (Manifest V3) - Core extension orchestrator
  *
@@ -233,6 +236,7 @@ async function runAutoArchiveCheck() {
         const tabsToArchive = [];
 
         for (const tab of tabs) {
+            if (isStartupLauncherTab(tab)) continue;
             // Skip audible, active, or recently active tabs
             if (tab.audible || tab.active) {
                 await updateTabLastActivity(tab.id); // Update activity for active/audible tabs
@@ -362,7 +366,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const tabs = await chrome.tabs.query({});
             const query = message.query?.toLowerCase() || '';
             const filteredTabs = tabs.filter(tab => {
-                if (!tab.title || !tab.url) return false;
+                if (!tab.title || !tab.url || isStartupLauncherTab(tab)) return false;
                 if (!query) return true;
                 return tab.title.toLowerCase().includes(query) ||
                     tab.url.toLowerCase().includes(query);
@@ -377,7 +381,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const activityData = storage[TAB_ACTIVITY_STORAGE_KEY] || {};
 
             const tabsWithActivity = tabs
-                .filter(tab => tab.url && tab.title)
+                .filter(tab => tab.url && tab.title && !isStartupLauncherTab(tab))
                 .map(tab => ({ ...tab, lastActivity: activityData[tab.id] || 0 }))
                 .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
                 .slice(0, message.limit || 5);

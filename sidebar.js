@@ -1,3 +1,4 @@
+import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { getSpaceBookmarkById, getSpaceBookmarkFolder, getSpaceBookmarkTree, removeSpacePin } from './space-bookmarks.js';
 import { initSidebarTour } from './sidebar-tour.js';
 /**
@@ -265,7 +266,7 @@ function reapplySpaceColors() {
 // Function to update pinned favicons
 async function updatePinnedFavicons() {
     const pinnedFavicons = document.getElementById('pinnedFavicons');
-    const pinnedTabs = await chrome.tabs.query({ pinned: true, windowId: currentWindow.id });
+    const pinnedTabs = (await chrome.tabs.query({ pinned: true, windowId: currentWindow.id })).filter(tab => !isStartupLauncherTab(tab));
 
     // Remove favicon elements for tabs that are no longer pinned
     Array.from(pinnedFavicons.children).forEach(element => {

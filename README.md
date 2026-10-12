@@ -13,6 +13,7 @@ A Chrome extension that replicates Arc browser's tab management system, providin
 - Keyboard shortcuts for quick access
 - Bookmark integration
 - Clean, minimal interface
+- [Optional one-click startup launcher](docs/startup-launcher.md) (off by default)
 
 ## Development Setup
 

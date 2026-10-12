@@ -1,3 +1,4 @@
+import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
 import { isPracticeUrl } from './tour-practice.js';
 import { getSpaceTabs, spaceRequest } from './space-client.js';
 /**
@@ -92,6 +93,7 @@ const Utils = {
     getSettings: async function () {
         const defaultSettings = {
             defaultSpaceName: 'Home',
+            startupLauncherEnabled: false, // Explicit opt-in; never opens the panel automatically
             autoArchiveEnabled: false, // Default: disabled
             autoArchiveIdleMinutes: 360, // Default: 6 hours
             syncTabGroups: false,
@@ -240,7 +242,7 @@ const Utils = {
 
     // Add a tab to the archive
     addArchivedTab: async function (tabData) { // tabData = { url, name, spaceId, archivedAt }
-        if (!tabData || !tabData.url || !tabData.name || !tabData.spaceId) return;
+        if (!tabData || !tabData.url || !tabData.name || !tabData.spaceId || isStartupLauncherUrl(tabData.url)) return;
 
         const archivedTabs = await this.getArchivedTabs();
 
@@ -273,7 +275,7 @@ const Utils = {
             const tab = await chrome.tabs.get(tabId);
             const spaces = await spaceRequest('get');
             const space = spaces.find(s => [...s.spaceBookmarks, ...s.temporaryTabs].includes(tabId));
-            if (!tab || !space) return;
+            if (!tab || !space || isStartupLauncherTab(tab)) return;
 
             const tabData = {
                 url: tab.url,
