@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer';
-import { performVisibleAction } from './paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText } from './paired-chrome-ui.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
@@ -210,8 +210,7 @@ async function search(page, query) {
         });
         const handle = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
         const input = handle.asElement(); assert(input);
-        await input.click({ clickCount: 3 });
-        await input.press('Control+A'); await input.press('Backspace'); await input.type(query);
+        await replaceInputText(page, input, query);
         await handle.dispose();
     });
 }

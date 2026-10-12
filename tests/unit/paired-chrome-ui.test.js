@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { performVisibleAction } from '../../scripts/paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText } from '../../scripts/paired-chrome-ui.mjs';
 
 function harness() {
     const calls = [], records = [];
@@ -58,4 +58,29 @@ test('a successful navigation or closing action needs no post-action page probe'
     }, h.record);
     assert.equal(result, 'selected');
     assert.equal(h.records.at(-1).phase, 'completed');
+});
+
+function keyboardHarness(failedKey) {
+    const calls = [];
+    return { calls,
+        page: { keyboard: { down: async key => calls.push(['down', key]), up: async key => calls.push(['up', key]) } },
+        input: { click: async options => calls.push(['click', options]),
+            press: async key => { calls.push(['press', key]); if (key === failedKey) throw new Error('input unavailable'); },
+            type: async text => calls.push(['type', text]) }
+    };
+}
+test('query replacement sends real separate modifier/key events before typing', async () => {
+    const h = keyboardHarness();
+    await replaceInputText(h.page, h.input, 'Pair Alpha Target');
+    assert.deepEqual(h.calls, [['click', { clickCount: 3 }], ['down', 'Control'], ['press', 'KeyA'], ['up', 'Control'], ['press', 'Backspace'], ['type', 'Pair Alpha Target']]);
+});
+test('failed selection releases Control and does not erase/type/retry', async () => {
+    const h = keyboardHarness('KeyA');
+    await assert.rejects(replaceInputText(h.page, h.input, 'replacement'), /input unavailable/);
+    assert.deepEqual(h.calls, [['click', { clickCount: 3 }], ['down', 'Control'], ['press', 'KeyA'], ['up', 'Control']]);
+});
+test('failed clearing never types replacement text', async () => {
+    const h = keyboardHarness('Backspace');
+    await assert.rejects(replaceInputText(h.page, h.input, 'replacement'), /input unavailable/);
+    assert.equal(h.calls.some(([event]) => event === 'type'), false);
 });

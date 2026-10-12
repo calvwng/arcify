@@ -24,3 +24,13 @@ export async function performVisibleAction(page, label, action, record = async (
         throw error;
     }
 }
+
+// Puppeteer's press() accepts one key, not Playwright-style chord strings.
+export async function replaceInputText(page, input, text) {
+    await input.click({ clickCount: 3 });
+    await page.keyboard.down('Control');
+    try { await input.press('KeyA'); }
+    finally { await page.keyboard.up('Control'); }
+    await input.press('Backspace');
+    await input.type(text);
+}
