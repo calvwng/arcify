@@ -14,6 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
+import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
@@ -336,6 +337,31 @@ try {
         report.environment.chromeSandbox.validated = true;
         await saveReport();
         await sandboxPage.close();
+        // Explicitly approved normal Developer-mode UI, scoped to this disposable
+        // CI profile. A policy-controlled/disabled setting is a hard stop.
+        const extensionsPage = await observePage(await browser.newPage());
+        await extensionsPage.goto('chrome://extensions/');
+        report.environment.developerModeUi = { observations: [] };
+        await ui(extensionsPage, 'Enable normal Chrome Developer mode', async () => {
+            report.environment.developerModeUi.result = await enableDeveloperModeViaUi({
+                read: () => extensionsPage.evaluate(readDeveloperModeDomState),
+                record: async observation => {
+                    report.environment.developerModeUi.observations.push({ ...observation, observedAt: new Date().toISOString() });
+                    await saveReport();
+                },
+                click: async () => {
+                    const handle = await extensionsPage.evaluateHandle(() => document.querySelector('extensions-manager')
+                        .shadowRoot.querySelector('extensions-toolbar').shadowRoot.querySelector('#devMode'));
+                    try {
+                        const fresh = await extensionsPage.evaluate(readDeveloperModeDomState);
+                        assert(developerModeStateReady(fresh) && !fresh.manager.inDevMode, 'Developer-mode state changed before real input; stop.');
+                        await handle.asElement().click();
+                    } finally { await handle.dispose(); }
+                }
+            });
+            await screenshot(extensionsPage, 'developer-mode-enabled-unmanaged-disposable-profile');
+        });
+        await extensionsPage.close();
         arcifyId = await browser.installExtension(resolve(ROOT, 'dist'));
         spotlightId = await browser.installExtension(resolve(COMPANION, 'dist'));
         assert.match(arcifyId, /^[a-p]{32}$/); assert.match(spotlightId, /^[a-p]{32}$/); assert.notEqual(arcifyId, spotlightId);
@@ -370,6 +396,14 @@ try {
             assert.equal(actual.id, id);
             report.extensions[name] = { id, name: actual.manifest.name, version: actual.manifest.version, workerUrl: target.url() };
         }
+        const installedSession = await browser.target().createCDPSession();
+        try {
+            report.installedExtensions = (await installedSession.send('Extensions.getExtensions')).extensions;
+            for (const name of ['arcify', 'spotlight']) {
+                const expected = { ...report.extensions[name], path: resolve(name === 'arcify' ? ROOT : COMPANION, 'dist') };
+                assert.equal(findInstalledExtension(report.installedExtensions, expected).enabled, true);
+            }
+        } finally { await installedSession.detach(); await saveReport(); }
         for (const page of await browser.pages()) if (/installation-onboarding\.html/.test(page.url())) await page.close();
         arcifyOptions = await observePage(await browser.newPage());
         await arcifyOptions.goto(`chrome-extension://${arcifyId}/options.html`);
@@ -653,9 +687,15 @@ try {
             });
             viewCdp.on('Runtime.executionContextsCleared', () => view.invalidations.push({ allContextsCleared: true }));
             report.extensionReloads ||= [];
-            const evidence = { name, view, observations: [] };
+            const evidence = { name, view, observations: [], registry: [] };
+            const expected = { ...report.extensions[name], path: resolve(name === 'arcify' ? ROOT : COMPANION, 'dist') };
+            const readRegistry = async () => (await targetsCdp.send('Extensions.getExtensions')).extensions;
+            const recordRegistry = async (phase, extensions) => { evidence.registry.push({ phase, extensions, observedAt: new Date().toISOString() }); await saveReport(); };
             report.extensionReloads.push(evidence);
             try {
+                const installedBefore = await readRegistry();
+                await recordRegistry('before-reload', installedBefore);
+                assert.equal(findInstalledExtension(installedBefore, expected).enabled, true);
                 await viewCdp.send('Runtime.enable');
                 collectingInitialContexts = false;
                 assert(defaultContexts.size > 0, 'The original extension options realm must be observed before reload.');
@@ -674,6 +714,7 @@ try {
                     viewInvalidated: async () => { view.closed = page.isClosed(); return view.closed || view.invalidations.length > 0; },
                     record: async observation => { evidence.observations.push({ ...observation, observedAt: new Date().toISOString() }); await saveReport(); }
                 });
+                await waitForEnabledExtension(readRegistry, expected, extensions => recordRegistry('after-unload', extensions));
                 // A reloaded MV3 worker need not stay running without an event.
                 // Reconnect through the same fresh settings/peer check a user uses.
                 const reopened = await observePage(await browser.newPage());
@@ -696,6 +737,8 @@ try {
                 await blockExternalHttps(replacement);
                 evidence.identity = await waitForExtensionWorkerIdentity(await replacement.worker(), id);
             } finally {
+                try { await recordRegistry('final', await readRegistry()); }
+                catch (error) { report.diagnostics.push({ type: 'reload-registry-read', message: error.message }); }
                 await viewCdp.detach().catch(error => report.diagnostics.push({ type: 'reload-view-detach', message: error.message }));
                 await targetsCdp.detach();
                 await saveReport();

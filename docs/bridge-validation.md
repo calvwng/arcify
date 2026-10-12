@@ -127,6 +127,38 @@ hazard, not a proven fix for the native crash. Each identity evaluation also has
 and existing debugger-session events are now retained; a recorded crash fails the
 check. There is no mutation retry or alternate execution context.
 
+[Run 38248990897](https://github.com/calvwng/arcify/actions/runs/38248990897), Arcify
+`34703b5df477b700364a8d2cf3a9cd9d09a48e29` with the same pinned Spotlight, used
+Core 25.12.0 successfully through the same **12 passed** checks, with **1 failed,
+1 not run, 0 skipped**, 26 screenshots and no recorded target crashes. Reload
+unloaded Arcify, then Chrome blocked its options URL with `ERR_BLOCKED_BY_CLIENT`.
+This is not a complete passing run or proof of the earlier crash's root cause.
+
+Chrome 154's [reload path](https://github.com/chromium/chromium/blob/154.0.8037.97/chrome/browser/extensions/chrome_extension_registrar_delegate.cc#L263-L294)
+reconstructs an unpacked extension without its CDP-install marker. Its
+[normal Developer-mode requirement](https://github.com/chromium/chromium/blob/154.0.8037.97/chrome/browser/extensions/extension_management.cc#L375-L395)
+then applies. This explains the observed behavior at source level; that run did
+not directly record the disabled reason.
+
+The approved setup now uses a **real click on Chrome's normal Developer mode
+toggle**, only in the fresh disposable GitHub CI profile and before installing
+the reviewed pair. It reads the actual Extensions page and waits for Chrome's
+profile response to permit unpacked loading; default `policy=false` values do not
+count as readiness. Manager, toolbar and toggle/ARIA values must agree, with no
+policy/child restriction or disabled control. A denied page, disabled/managed
+setting, failed click or failure to converge stops the run. Only one click is
+allowed; no private API mutation, profile-file edit, enforcement flag or OS policy
+change is used. The enabled/unmanaged UI gets a required screenshot. This does
+not change the managed interactive cloud browser or a user's browser/profile.
+
+Read-only `Extensions.getExtensions` evidence records each installed identity,
+path, version and enabled state before and after reload. Following the required
+old-view/worker destruction proof, the fixture waits for the same extension to
+be enabled before opening its fresh options page. It never retries a blocked
+navigation, reinstalls the extension, or enables a disabled extension through a
+workaround. Runtime identity, reconnection and membership assertions still must
+pass. The Developer-mode follow-up requires its own actual CI result.
+
 Intentional real Puppeteer input is foregrounded and visibility-checked; exact
 input focus precedes actual key events. Required screenshots remain fatal.
 Background sidebar assertions/captures do not activate the sidebar. Only optional
