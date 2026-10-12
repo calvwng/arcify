@@ -75,9 +75,13 @@ test('same-URL tabs remain distinct through pin, navigation, reload, close, reop
         expect(await page.$eval(row(b), el => el.dataset.bookmarkId)).toBe(second);
     }
 
-    // Closing B preserves B's bookmark and never redirects its row to A.
+    // The live pin's minus closes only B; its saved bookmark remains available.
+    expect(await page.$eval(`${row(b)} .tab-close`, el => ({ glyph: el.textContent, label: el.getAttribute('aria-label'), title: el.title })))
+        .toEqual({ glyph: '−', label: 'Close Tab (keep pin)', title: 'Close Tab (keep pin)' });
     await page.$eval(`${row(b)} .tab-close`, el => el.click());
     await page.waitForSelector(`.space.active .bookmark-only[data-bookmark-id="${second}"]`);
+    expect(await page.$eval(`.space.active .bookmark-only[data-bookmark-id="${second}"] .tab-remove`, el => ({ glyph: el.textContent, label: el.getAttribute('aria-label'), title: el.title })))
+        .toEqual({ glyph: '×', label: 'Remove Pin (delete bookmark)', title: 'Remove Pin (delete bookmark)' });
     await page.$eval(`.space.active .bookmark-only[data-bookmark-id="${second}"]`, el => el.click());
     await page.waitForFunction(({ second, a }) => {
         const el = document.querySelector(`.space.active .tab[data-bookmark-id="${second}"][data-tab-id]`);

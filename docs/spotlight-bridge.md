@@ -32,8 +32,12 @@ validating Spotlight.
    each checkout's **dist** directory. Do not load the repository root.
 4. Copy each extension's actual 32-letter ID shown by Chrome. In Arcify's options,
    use **Spotlight companion** to save the Spotlight ID. In Spotlight's options,
-   save Arcify's ID. Both sides must be paired.
-5. Click **Check connection** on both sides. Both must report protocol v1 connected.
+   save Arcify's ID. **Either side can be saved first.** A first save may show
+   **Awaiting approval**: its ID is saved locally, but the other extension has not
+   accepted the reciprocal ID yet. Save both IDs explicitly; neither side auto-trusts
+   an incoming request. The **Copy ID** buttons can help avoid transcription errors.
+5. After both saves, click **Check connection** in Arcify and **Refresh status** in
+   Spotlight. Both must report connected. A saved ID alone is not a live connection.
    The Arcify sidebar's **Search with Spotlight** button opens Spotlight in that
    sidebar's window. The original **New Tab** button keeps its existing behavior.
 6. Run the manual matrix in [bridge-validation.md](bridge-validation.md) with
@@ -60,6 +64,28 @@ upstream standalone behavior. A configured but missing/incompatible companion is
 an explicit error: it does not silently replay a workspace action through native
 Chrome APIs. After a timeout, inspect the tabs/refresh search before retrying;
 Chrome may already have completed the action.
+
+## Examples to try
+
+- Search for an Arcify space by name and select it. Empty spaces can be selected
+  without creating a tab; a subsequent new-tab URL/search opens in that space.
+- Search for a live tab in another space. Selecting it focuses that exact tab and
+  its owning space in the current window, without reopening its URL.
+- Search for a saved Arcify pin. Spotlight reuses its bound live tab in this window
+  or opens that exact bookmark. Equal URLs in different spaces remain distinct.
+- Use Spotlight's current-tab mode to navigate the same tab while preserving its
+  workspace. New-tab mode creates a tab in the selected Arcify space.
+- Use **Search with Spotlight** in the Arcify sidebar to launch Spotlight for that
+  window. Optional native tab-group sync does not determine bridge membership.
+
+### Pinned-row controls
+
+A live space pin shows **− / Close Tab (keep pin)**. It closes the live tab while
+retaining its saved bookmark. Its closed bookmark row shows **× / Remove Pin
+(delete bookmark)**; that action deletes the exact saved pin. It is not an archive
+or a promise of recovery. Ordinary temporary tabs retain **× / Close Tab**. This
+is the requested control mapping; the existing live/closed gating and handlers
+are unchanged.
 
 ## Wire contract
 

@@ -186,11 +186,20 @@
         </section>
         <section class="settings-section" aria-labelledby="spotlightBridgeHeading">
             <h2 id="spotlightBridgeHeading">Spotlight companion</h2>
-            <p>Pair this Arcify build with your Spotlight fork. IDs are local to this Chrome profile.</p>
-            <p>Arcify extension ID: <strong id="bridgeOwnId"></strong></p>
+            <p>Save each extension’s ID in the other extension. You can start on either side; the first save may show “Awaiting approval” until you save the other side too.</p>
+            <ol>
+                <li>Copy the Spotlight ID from Spotlight’s settings and save it below.</li>
+                <li>Copy this Arcify ID and save it in Spotlight’s settings.</li>
+                <li>Once both IDs are saved, check connection here and refresh status in Spotlight.</li>
+            </ol>
+            <label for="bridgeOwnId">This Arcify extension ID</label>
+            <input id="bridgeOwnId" type="text" readonly spellcheck="false" aria-describedby="bridgeCopyStatus">
+            <button id="bridgeCopyId" type="button">Copy Arcify ID</button>
+            <p id="bridgeCopyStatus" role="status" aria-live="polite">Paste this ID into Spotlight’s connection settings.</p>
             <label for="bridgePeerId">Spotlight extension ID</label>
             <input id="bridgePeerId" type="text" maxlength="32" spellcheck="false" autocomplete="off" placeholder="32-letter ID from chrome://extensions">
-            <button id="bridgeSave" type="button">Save pairing</button>
+            <p>Saved Spotlight ID: <strong id="bridgeSavedPeerId">None</strong>. Check connection uses this saved ID; save again to use an edited ID.</p>
+            <button id="bridgeSave" type="button">Save Spotlight ID and check</button>
             <button id="bridgeCheck" type="button">Check connection</button>
             <button id="bridgeDisconnect" type="button">Disconnect</button>
             <p id="bridgeStatus" role="status" aria-live="polite"></p>

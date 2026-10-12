@@ -84,6 +84,23 @@ side panel. Command registration is not an OS-level shortcut invocation. Native
 side-panel docking/focus, browser-chrome shortcuts, ordinary session restoration,
 and any matrix case absent from the generated results remain pending below.
 
+## User-reported local pairing check (2026-10-12)
+
+The user loaded the manual builds in their own Helium browser on Windows (Arcify
+`2ef8f9d7a38daf73870b4e0c49321d52da7d4a68`, Spotlight
+`05dca262001e09f420efeb2bcd3a86a32a4480f5`). The initial Spotlight screenshot showed
+Arcify's `UNAUTHORIZED` response because reciprocal setup was incomplete. The user
+reported that saving the Spotlight ID in Arcify, then saving Arcify's ID in
+Spotlight, connected successfully. This is a user-reported handshake result, not
+an automated paired acceptance run or verification of the full matrix below.
+
+The follow-up improves both settings pages: either side can save first, pending
+reciprocal approval is distinct from transport errors, and saved IDs are shown
+separately from unsaved edits. No sender validation or explicit two-sided trust
+requirement is relaxed. The pinned-row glyph/accessible-label correction retains
+existing close-versus-delete handlers. New tests cover these states with mocked
+Chrome/DOM APIs; browser interaction for the updated UI remains pending.
+
 ## Manual acceptance matrix
 
 This is the full acceptance checklist, not a list of CI passes. Consult generated

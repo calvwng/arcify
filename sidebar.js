@@ -20,6 +20,7 @@ import { SpacePatchQueue } from './space-patch-queue.js';
 import { RefreshCoordinator } from './refresh-coordinator.js';
 import { EditSessionRegistry } from './edit-sessions.js';
 import { isProtectedFavorite } from './favorite-safety.js';
+import { getTabRowAction } from './tab-row-action.js';
 import { selectWindowSpaceTabs, mergeVisibleOrder, mergeCapturedTemporaryOrder, canonicalOrderFromDisplay, saveBookmarkOperation } from './sidebar-tabs.js';
 import { ownerOf } from './space-store.js';
 import { canCreateFolder, createFolder } from './folder-policy.js';
@@ -2737,11 +2738,12 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     }
 
     // Set up action button
+    const rowAction = getTabRowAction({ isPinned, isBookmarkOnly });
     actionButton.classList.remove('tab-close');
-    actionButton.classList.add(isBookmarkOnly ? 'tab-remove' : 'tab-close');
-    actionButton.textContent = isBookmarkOnly ? '−' : '×';
-    actionButton.title = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
-    actionButton.setAttribute('aria-label', actionButton.title);
+    actionButton.classList.add(rowAction.className);
+    actionButton.textContent = rowAction.glyph;
+    actionButton.title = rowAction.label;
+    actionButton.setAttribute('aria-label', rowAction.label);
     actionButton.addEventListener('click', async (e) => {
         e.stopPropagation();
         const activeSpace = spaces.find(s => s.id === activeSpaceId);

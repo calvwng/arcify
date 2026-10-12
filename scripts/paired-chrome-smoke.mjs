@@ -22,7 +22,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '05dca262001e09f420efeb2bcd3a86a32a4480f5';
+const PINNED_SPOTLIGHT = '5eedd3463580013ec03e88e23bac17b475770e5b';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -305,13 +305,32 @@ try {
         assert.equal(unpaired.ok, false); assert.equal(unpaired.error.code, 'UNAUTHORIZED'); assert.equal('snapshot' in unpaired, false);
         await arcifyOptions.waitForFunction(() => document.getElementById('bridgeStatus')?.textContent.includes('Standalone')); await arcifyOptions.type('#bridgePeerId', spotlightId); await arcifyOptions.click('#bridgeSave');
         await poll(() => arcifyOptions.evaluate(() => chrome.storage.local.get('arcifyBridgePeerId')), result => result.arcifyBridgePeerId === spotlightId, 'Arcify pairing save');
+        await arcifyOptions.waitForSelector('#bridgeStatus[data-state="pending"]');
+        assert.equal(await arcifyOptions.$eval('#bridgeSavedPeerId', node => node.textContent), spotlightId);
+        await screenshot(arcifyOptions, 'arcify-first-awaiting-approval');
         await spotlightOptions.waitForSelector('#arcify-peer-id:not([disabled])');
         await spotlightOptions.type('#arcify-peer-id', arcifyId); await spotlightOptions.click('#save-connection');
         await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
         await arcifyOptions.click('#bridgeCheck');
         await arcifyOptions.waitForFunction(() => document.getElementById('bridgeStatus').textContent.includes('Connected to Spotlight'));
+        // Repeat in the opposite order: saving locally succeeds even while the
+        // companion rejects hello. Neither save silently approves an unknown ID.
+        await arcifyOptions.click('#bridgeDisconnect');
+        await arcifyOptions.waitForSelector('#bridgeStatus[data-state="disabled"]');
+        await spotlightOptions.click('#disconnect-connection');
+        await spotlightOptions.waitForSelector('#connection-status[data-state="disabled"]');
+        await spotlightOptions.type('#arcify-peer-id', arcifyId);
+        await spotlightOptions.click('#save-connection');
+        await spotlightOptions.waitForSelector('#connection-status[data-state="pending"]');
+        assert((await spotlightOptions.$eval('#saved-peer-id', node => node.textContent)).includes(arcifyId));
+        await screenshot(spotlightOptions, 'spotlight-first-awaiting-approval');
+        await arcifyOptions.type('#bridgePeerId', spotlightId);
+        await arcifyOptions.click('#bridgeSave');
+        await arcifyOptions.waitForSelector('#bridgeStatus[data-state="connected"]');
+        await spotlightOptions.click('#refresh-connection');
+        await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
         await screenshot(arcifyOptions, 'paired-arcify-options'); await screenshot(spotlightOptions, 'paired-spotlight-options');
-        return { unpairedError: unpaired.error.code, arcifyStatus: await arcifyOptions.$eval('#bridgeStatus', node => node.textContent), spotlightStatus: await spotlightOptions.$eval('#connection-status-message', node => node.textContent) };
+        return { pairingOrders: ['arcify-first', 'spotlight-first'], unpairedError: unpaired.error.code, arcifyStatus: await arcifyOptions.$eval('#bridgeStatus', node => node.textContent), spotlightStatus: await spotlightOptions.$eval('#connection-status-message', node => node.textContent) };
     });
     await step(stepNames[2], async () => {
         const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open' };
