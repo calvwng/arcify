@@ -78,6 +78,31 @@ Chrome may already have completed the action.
 - Use **Search with Spotlight** in the Arcify sidebar to launch Spotlight for that
   window. Optional native tab-group sync does not determine bridge membership.
 
+### Open the Arcify sidebar from Spotlight
+
+With matching capability-aware builds paired, search for **Open Arcify sidebar**
+in Spotlight's new-tab page or an ordinary HTTP(S) page's overlay. Select the
+command with a real click or Enter. Arcify opens its own native panel for that
+source tab; Spotlight does not close/navigate the page or create another tab.
+An unsupported browser, missing/revoked companion or uncertain reply leaves an
+error and a manual Arcify-toolbar fallback. There is no automatic retry.
+
+The existing off-by-default **Browser startup** setting in Arcify also coordinates
+an optional startup suggestion. When the unchanged, active startup tab is already
+Spotlight's new-tab page, Arcify offers a one-shot preselection. The page must be
+ready, visible, empty and untouched. Typing, changing selection, hiding/leaving the
+page or dismissing the suggestion cancels automatic selection. Spotlight never
+creates or foregrounds an extra startup tab. The existing launcher remains a
+fallback when a compatible suggestion is unavailable; intentional interaction or
+an uncertain delivered offer is consumed without creating a competing prompt.
+See [startup-launcher.md](startup-launcher.md) for the precise fallback rules.
+
+Chrome normally focuses its omnibox on a new tab. A selected Spotlight row does
+**not** guarantee that a bare startup Enter reaches it. Focus Spotlight if needed;
+Helium's initial focus and full startup/session restoration require manual checks.
+Outside the accepted startup offer, an empty-query sidebar command is not silently
+selected merely because other results are absent.
+
 ### Pinned-row controls
 
 A live space pin shows **− / Close Tab (keep pin)**. It closes the live tab while
@@ -92,7 +117,7 @@ are unchanged.
 Both repositories carry the same small `spotlight-bridge-protocol.js` /
 `shared/arcify-bridge-protocol.js` helper. Change the protocol in paired PRs.
 
-Every request has:
+Every ordinary workspace/launch request has:
 
 ```json
 {"type":"arcify-bridge","version":1,"requestId":"unique-id","command":"snapshot","windowId":123}
@@ -104,7 +129,13 @@ Every request has:
 - Arcify accepts `hello`, `snapshot`, `activateSpace {spaceId}`,
   `activateTab {tabId}`, `openTab {url,spaceId?}`,
   `navigateTab {tabId,url}`, and `openBookmark {spaceId,bookmarkId}`.
-- Spotlight accepts `hello` and `launch {mode}` where mode is `current-tab` or `new-tab`.
+- Spotlight accepts `hello`, `launch {mode}` where mode is `current-tab` or `new-tab`,
+  and `startupSuggestion {tabId}` for a single existing new-tab page.
+- Optional `hello.capabilities` advertises `openSidebar` from Arcify and
+  `startupSuggestion` from Spotlight. Absent capability means unsupported; older
+  v1 companions retain their existing behavior. `startupSuggestion` replies with
+  `accepted:true`, or `accepted:false` plus `user-interaction`, `not-ready` or
+  `not-eligible`. This offer never opens the panel by itself.
 - `openTab` without `spaceId` uses the authoritative active space for that window.
 - `openBookmark` checks the bookmark's current membership by ID, reuses only the
   same bookmark's live tab in that window, or creates one owned pin. Equal URLs in
@@ -113,7 +144,7 @@ Every request has:
 - Navigating a tab preserves its existing membership. Selecting an authoritative
   live result activates the existing tab/space rather than opening a URL duplicate.
 
-Success: `{type,version,requestId,role,ok:true,extensionId?,snapshot?,tabId?}`.
+Success: `{type,version,requestId,role,ok:true,extensionId?,snapshot?,tabId?,capabilities?,accepted?,reason?}`.
 Arcify returns a fresh snapshot on all successes and `tabId` for tab operations.
 Spotlight replies with its `extensionId` on hello. Failure:
 `{type,version,requestId,role,ok:false,error:{code,message}}`.
@@ -143,10 +174,33 @@ still requires its exact current bookmark/folder identity and never guesses.
 `externally_connectable.ids: ["*"]` allows arbitrary development/installed IDs to
 reach the listener, but does **not authorize them**. There are no web origin
 matches. Before reading workspace data or touching tabs, both runtimes require an
-exact ID match to `storage.local.arcifyBridgePeerId` and reject web sender origins.
+exact ID match to `storage.local.arcifyBridgePeerId` and reject web sender origins
+for these general workspace/launch requests.
 Pair only builds you trust: a paired Spotlight can read the window's tabs and
 Arcify bookmarks, select spaces, and open/navigate tabs. Pairing is profile-local,
 not synced. No discovery broadcast or auto-pairing occurs.
+
+The separate, sidebar-only gesture endpoint uses exactly
+`{type:"arcify-sidebar",version:1,requestId}`. No caller-supplied window, tab, URL
+or other field is accepted. A genuine renderer Enter/click sends directly to
+Arcify. Its listener performs one callback-style read of the current saved peer
+and immediately calls its own `sidePanel.open({tabId:sender.tab.id})`; it never
+passes this operation through the asynchronous workspace queue or a cached
+receiver-side trust decision. Chrome still enforces user activation. Responses
+carry the same type/version/requestId, `role:"arcify"`, and `ok`/structured error.
+No workspace snapshot is exposed by this endpoint.
+
+It accepts only the paired extension ID, active non-incognito top-level source tab
+and strict browser-supplied context: either the exact paired new-tab extension
+origin/path, or the paired content script's HTTP(S) URL/origin matching its source
+tab. Nested frames, opaque/file origins, mismatches and already-observed outbound
+navigation are rejected. This narrow content-script route does not change the
+general bridge's origin checks or expose a website message gateway. Sender tab
+metadata is Chrome's message-time snapshot, not a second live tab lookup after the
+storage callback; the stable tab ID is passed to Chrome, which resolves the target.
+Renderer pairing/capability preparation happens before interaction and is
+invalidated by pairing changes. Late replies cannot restore a revoked selection.
+No new manifest permission is required in either extension.
 
 Listeners register synchronously for MV3 worker startup. Every search/action
 fetches fresh state, including after worker suspension or extension reload. Arcify
@@ -154,7 +208,9 @@ serializes bridge mutations with its SpaceStore queue and composes the same
 activate/assign operations used by the sidebar. Events and stale sidebar patches
 therefore cannot replace the bridge's whole state with an older snapshot.
 
-Messages time out after five seconds. Actions are never automatically retried.
+Ordinary bridge and sidebar-command messages time out after five seconds. Startup
+coordination uses a shorter 1.5-second timeout and consumes uncertain delivery to
+avoid a second automatic prompt. Actions are never automatically retried.
 Arcify retains the last 100 action request IDs in `storage.session` to reject
 conflicting reuse and return a fresh snapshot for completed duplicates. An
 interrupted/pending request returns `UNCERTAIN_RESULT` rather than re-creating a

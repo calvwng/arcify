@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
+import { assertNativeSidebarEvidence, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
@@ -26,7 +27,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '63288bebc3c6e01fbc481c8ccb360a06bbf7bec0';
+const PINNED_SPOTLIGHT = '6fae7bbfd083c530b5c3c7198b82300188c9af5a';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -42,7 +43,12 @@ const stepNames = [
     'Real malformed and wrong-window requests are rejected',
     'MV3 worker stop/wake preserves duplicate-request journal',
     'Extension reload reconnects without changing space identities',
-    'Command registration is present (no OS shortcut assertion)'
+    'Command registration is present (no OS shortcut assertion)',
+    'Startup sidebar suggestion and trusted Enter open the native panel',
+    'Trusted Enter opens the sidebar with a genuinely cold Arcify worker',
+    'Ordinary overlay sidebar command opens the native panel',
+    'Sidebar command rejects non-gesture, malformed and revoked-peer requests',
+    'Startup suggestion preserves typing and manual selection'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -53,7 +59,8 @@ const report = {
         imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, runnerUid: process.getuid?.() },
     checks: stepNames.map(name => ({ name, status: 'not_run' })), screenshots: [], diagnostics: [], targetLifecycle: [],
     limits: [
-        'The sidebar UI is opened as sidebar.html in a regular tab; native Chrome side-panel mounting is not exercised.',
+        'Workspace rendering regressions use sidebar.html in a regular tab. Dedicated command checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking/focus and Helium behavior remain manual.',
+        'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
         'Independent overlay cases wait for the previous close animation to remove its host. Rapid close/reopen stress is not exercised.',
         'The runner uses its installed stable Chrome and existing AppArmor policy, with actual Namespace/PID/network/seccomp sandbox evidence required. No privileged helper is selected, installed or modified. The runner image supplies the browser version; package/runtime evidence is recorded for each run.',
@@ -265,6 +272,55 @@ async function launchOverlay(mode = 'new-tab') {
     assert.equal(response?.ok, true, JSON.stringify(response));
     await sourcePage.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('dialog')?.open);
     return sourcePage;
+}
+
+const sidebarSelector = '[data-result-type="arcify-sidebar-command"]';
+async function sidebarInput(page) {
+    const handle = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
+    assert(handle.asElement(), 'Spotlight input must exist.');
+    return handle;
+}
+async function waitSidebarCommand(page) {
+    await page.waitForFunction(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-result-type="arcify-sidebar-command"]'), { polling: 50 });
+}
+async function waitSidebarSuccess(page) {
+    await page.waitForFunction(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('.arcify-bridge-status')?.textContent.includes('Arcify sidebar opened.'), { polling: 50 });
+}
+async function nativePanelState() {
+    return arcifyOptions.evaluate(async () => ({
+        contexts: await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] }),
+        events: globalThis.__pairedSidebarEvents || []
+    }));
+}
+async function captureNativeSidebar(afterEvent, label) {
+    const state = await poll(nativePanelState, state => state.events.slice(afterEvent).some(event => event.type === 'opened' && event.windowId === fixture.windowA), 'a native sidePanel.onOpened event');
+    const populated = await poll(nativePanelState, state => state.contexts.some(context => context.contextType === 'SIDE_PANEL' && context.windowId === fixture.windowA), 'a native SIDE_PANEL context');
+    const context = assertNativeSidebarEvidence(populated.contexts, state.events, { extensionId: arcifyId, windowId: fixture.windowA, afterEvent });
+    const ordinary = await arcifyOptions.evaluate(() => chrome.tabs.query({}));
+    assert(!ordinary.some(tab => tab.url === `chrome-extension://${arcifyId}/sidebar.html`), 'No ordinary sidebar tab may substitute for native rendering evidence.');
+    const target = await browser.waitForTarget(target => target.url() === `chrome-extension://${arcifyId}/sidebar.html`);
+    const page = await observePage(await target.asPage());
+    const hosting = await page.evaluate(async () => ({ tab: await chrome.tabs.getCurrent() || null, windowId: (await chrome.windows.getCurrent()).id }));
+    assert.equal(hosting.tab, null, 'The selected rendering target must not be a normal tab.');
+    assert.equal(hosting.windowId, fixture.windowA, 'The native rendering target must belong to the source window.');
+    // Do not bring the panel to front: its native host must actually render it.
+    await page.waitForFunction(() => document.visibilityState === 'visible' && document.querySelector('#spacesList > .space') &&
+        document.querySelector('#spaceSwitcher')?.getBoundingClientRect().width > 0, { polling: 50 });
+    const rendered = await page.evaluate(() => ({ url: location.href, visibility: document.visibilityState,
+        selectedSpaces: [...document.querySelectorAll('#spaceSwitcher > button.active')].map(element => element.dataset.spaceId),
+        width: innerWidth, height: innerHeight }));
+    await screenshot(page, label);
+    return { context, openedEvents: state.events.slice(afterEvent), targetType: target.type(), hosting, rendered };
+}
+async function closeNativeSidebar() {
+    const before = (await nativePanelState()).events.length;
+    await arcifyOptions.evaluate(windowId => chrome.sidePanel.close({ windowId }), fixture.windowA);
+    await poll(nativePanelState, state => state.events.slice(before).some(event => event.type === 'closed' && event.windowId === fixture.windowA), 'native panel closure');
+}
+async function sidebarEnter(page, label) {
+    const input = await sidebarInput(page);
+    try { await ui(page, label, async () => { await input.asElement().focus(); await input.asElement().press('Enter'); }); }
+    finally { await input.dispose(); }
 }
 
 await mkdir(OUTPUT, { recursive: true });
@@ -760,8 +816,155 @@ try {
         assert(arcify.some(command => command.name === '_execute_action'));
         await ui(arcifyOptions, 'Capture final Arcify settings', () => screenshot(arcifyOptions, 'final-arcify-settings'));
         await ui(spotlightOptions, 'Capture final Spotlight settings', () => screenshot(spotlightOptions, 'final-spotlight-settings'));
-        return { arcify, spotlight, actualOsShortcutPressTested: false, nativeSidePanelTested: false };
+        return { arcify, spotlight, actualOsShortcutPressTested: false, nativeSidePanelTestedByThisCheck: false };
     });
+
+    await step(stepNames[14], async () => {
+        await arcifyOptions.evaluate(() => {
+            globalThis.__pairedSidebarEvents = [];
+            chrome.sidePanel.onOpened.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'opened', ...info, observedAt: Date.now() }));
+            chrome.sidePanel.onClosed.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'closed', ...info, observedAt: Date.now() }));
+        });
+        const helper = await newTabPage('chrome://newtab/');
+        await waitSidebarCommand(helper.page);
+        await helper.page.waitForSelector('[data-testid="spotlight-result"]:not([data-result-type="arcify-sidebar-command"])');
+        const focusBefore = await helper.page.evaluate(() => ({ focused: document.hasFocus(), activeElement: document.activeElement?.tagName, inputFocused: document.activeElement?.matches('[data-testid="spotlight-input"]') }));
+        const offered = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: helper.tab.id });
+        assert.equal(offered.ok, true, JSON.stringify(offered)); assert.equal(offered.accepted, true, JSON.stringify(offered));
+        await helper.page.waitForSelector(`${sidebarSelector}.selected`);
+        const repeated = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: helper.tab.id });
+        assert.equal(repeated.accepted, false, 'The same page must not accept a second startup preselection.');
+        const before = await tabsIn(fixture.windowA);
+        const eventCount = (await nativePanelState()).events.length;
+        await screenshot(helper.page, 'startup-sidebar-command-selected-before-explicit-input-focus');
+        await sidebarEnter(helper.page, 'Trusted Enter on startup sidebar suggestion (Spotlight focus explicit)');
+        await waitSidebarSuccess(helper.page);
+        const native = await captureNativeSidebar(eventCount, 'native-sidebar-opened-from-startup-suggestion');
+        assert.equal(helper.page.isClosed(), false); assert.equal((await tab(helper.tab.id)).url, `chrome-extension://${spotlightId}/newtab.html`);
+        assert.deepEqual((await tabsIn(fixture.windowA)).map(tab => tab.id), before.map(tab => tab.id), 'Opening a panel must not create or close a tab.');
+        await closeNativeSidebar(); await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+        return { startupOffer: offered, repeatedOffer: repeated, focusBefore, focusExplicitlySetForEnter: true, actualBrowserStartupTested: false, native };
+    });
+    await step(stepNames[15], async () => {
+        const helper = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`);
+        await waitSidebarCommand(helper.page);
+        await helper.page.waitForSelector('[data-testid="spotlight-result"]:not([data-result-type="arcify-sidebar-command"])');
+        const offered = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: helper.tab.id });
+        assert.equal(offered.accepted, true, JSON.stringify(offered));
+        await helper.page.waitForSelector(`${sidebarSelector}.selected`);
+        const preparedInput = await sidebarInput(helper.page);
+        await ui(helper.page, 'Prepare Spotlight focus before stopping Arcify worker', () => preparedInput.asElement().focus());
+        await helper.page.evaluate(() => {
+            globalThis.__pairedSidebarKey = null;
+            document.addEventListener('keydown', event => {
+                if (event.key === 'Enter') globalThis.__pairedSidebarKey = { trusted: event.isTrusted, observedAt: Date.now(), focusedInput: event.target.matches('[data-testid="spotlight-input"]') };
+            }, { capture: true, once: true });
+        });
+        const beforeTabs = await tabsIn(fixture.windowA);
+        const eventCount = (await nativePanelState()).events.length;
+        const url = `chrome-extension://${arcifyId}/background.js`;
+        const workerTarget = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === url);
+        const worker = await workerTarget.worker();
+        const session = await browser.target().createCDPSession();
+        const readTargets = async () => (await session.send('Target.getTargets')).targetInfos;
+        report.sidebarColdWorker = [];
+        const lifecycleStart = report.targetLifecycle.length;
+        try {
+            const old = await terminateObservedWorker({ worker, url, readTargets,
+                releaseNetwork: async () => { const network = await networkTargets.get(workerTarget); assert(network); const id = network.id(); await network.detach(); networkTargets.delete(workerTarget); return id; },
+                record: async observation => { report.sidebarColdWorker.push(observation); await saveReport(); }
+            });
+            // No bridge status/snapshot/search request between termination and this
+            // genuine key event: the selected row and capability are already ready.
+            const beforeInput = await readTargets();
+            assert.equal(beforeInput.filter(target => target.type === 'service_worker' && target.url === url).length, 0, 'No Arcify worker may already exist immediately before the cold Enter.');
+            const inputBoundary = Date.now();
+            report.sidebarColdWorker.push({ phase: 'before-trusted-enter', targets: beforeInput, inputBoundary });
+            // Focus is already prepared. Do not run ui(), a search/status read or
+            // any peer message between the raw absence proof and this real key.
+            await helper.page.keyboard.press('Enter');
+            const key = await helper.page.evaluate(() => globalThis.__pairedSidebarKey);
+            assert.equal(key?.trusted, true); assert.equal(key.focusedInput, true);
+            assert(!report.targetLifecycle.slice(lifecycleStart).some(event => event.event === 'Target.targetCreated' &&
+                event.details?.targetInfo?.url === url && Date.parse(event.observedAt) < key.observedAt), 'A replacement worker was observed before the real Enter event.');
+            report.sidebarColdWorker.push({ phase: 'trusted-enter-observed', key });
+            await waitSidebarSuccess(helper.page);
+            const native = await captureNativeSidebar(eventCount, 'native-sidebar-opened-after-cold-worker-enter');
+            const targets = await poll(readTargets, targets => targets.some(target => target.url === url && target.type === 'service_worker' && target.targetId !== old.targetId), 'sidebar command waking a distinct Arcify worker');
+            const replacement = findExactWorkerTarget(targets, url); assert.notEqual(replacement.targetId, old.targetId);
+            const target = await browser.waitForTarget(target => target !== workerTarget && target.type() === 'service_worker' && target.url() === url);
+            const identity = await waitForExtensionWorkerIdentity(await target.worker(), arcifyId);
+            assert.deepEqual((await tabsIn(fixture.windowA)).map(tab => tab.id), beforeTabs.map(tab => tab.id));
+            assert.equal(helper.page.isClosed(), false);
+            await closeNativeSidebar(); await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+            return { oldTargetId: old.targetId, replacement, identity, native };
+        } finally { await preparedInput.dispose(); await session.detach(); }
+    });
+    await step(stepNames[16], async () => {
+        // Both extensions were reloaded earlier. Refresh this existing webpage so
+        // it has a current Spotlight content script before exercising its command.
+        await sourcePage.reload({ waitUntil: 'domcontentloaded' });
+        await launchOverlay('current-tab'); await search(sourcePage, 'open arcify sidebar'); await waitSidebarCommand(sourcePage);
+        const before = await tabsIn(fixture.windowA); const eventCount = (await nativePanelState()).events.length;
+        await clickResult(sourcePage, 'Open Arcify sidebar'); await waitSidebarSuccess(sourcePage);
+        const native = await captureNativeSidebar(eventCount, 'native-sidebar-opened-by-overlay-command-click');
+        assert.deepEqual((await tabsIn(fixture.windowA)).map(tab => tab.id), before.map(tab => tab.id));
+        await closeNativeSidebar();
+        const input = await sidebarInput(sourcePage);
+        try { await ui(sourcePage, 'Dismiss overlay after sidebar command', () => input.asElement().press('Escape')); } finally { await input.dispose(); }
+        return { sourceTabId: fixture.sourceA, native, actualTrustedClick: true };
+    });
+    await step(stepNames[17], async () => {
+        const helper = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`); await waitSidebarCommand(helper.page);
+        const session = await helper.page.target().createCDPSession();
+        let nonGesture, malformed;
+        const eventCount = (await nativePanelState()).events.length;
+        try {
+            await poll(() => evaluateWithoutGesture(session, 'navigator.userActivation.isActive'), active => active === false, 'expired source activation for negative probe');
+            const request = { type: 'arcify-sidebar', version: 1, requestId: `no-gesture-${crypto.randomUUID()}` };
+            const expression = message => `new Promise(resolve => chrome.runtime.sendMessage(${JSON.stringify(arcifyId)}, ${JSON.stringify(message)}, response => resolve({response, transportError: chrome.runtime.lastError?.message || null})))`;
+            nonGesture = await evaluateWithoutGesture(session, expression(request));
+            assert.equal(nonGesture.transportError, null); assert.equal(nonGesture.response?.ok, false);
+            assert.equal(nonGesture.response.error?.code, 'OPEN_FAILED', 'A valid paired non-gesture request must reach Chrome gesture enforcement.');
+            assert.match(nonGesture.response.error.message, /user (?:gesture|action)/i);
+            malformed = await evaluateWithoutGesture(session, expression({ ...request, requestId: `bad-target-${crypto.randomUUID()}`, tabId: fixture.sourceB }));
+            assert.equal(malformed.response?.ok, false); assert.equal(malformed.response.error?.code, 'INVALID_REQUEST');
+        } finally { await session.detach(); }
+        assert.equal((await nativePanelState()).events.length, eventCount, 'Rejected requests must not open the panel.');
+        // Revoke Arcify's grant through its actual settings. The source still has
+        // its prior prepared row, so the fresh receiver-side storage read is tested.
+        await clickUI(arcifyOptions, '#bridgeDisconnect'); await arcifyOptions.waitForSelector('#bridgeStatus[data-state="disabled"]');
+        await clickResult(helper.page, 'Open Arcify sidebar');
+        await helper.page.waitForFunction(() => document.querySelector('.arcify-bridge-status[data-state="error"]')?.textContent.includes('toolbar'), { polling: 50 });
+        const revokedStatus = await helper.page.$eval('.arcify-bridge-status', element => element.textContent);
+        assert.equal(helper.page.isClosed(), false); assert.equal((await nativePanelState()).events.length, eventCount);
+        await screenshot(helper.page, 'sidebar-command-revoked-peer-error-keeps-page');
+        await typeUI(arcifyOptions, '#bridgePeerId', spotlightId); await clickUI(arcifyOptions, '#bridgeSave'); await arcifyOptions.waitForSelector('#bridgeStatus[data-state="connected"]');
+        await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+        return { nonGesture, malformed, revokedStatus, noPanelOpened: true };
+    });
+    await step(stepNames[18], async () => {
+        const typed = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`); await waitSidebarCommand(typed.page);
+        await search(typed.page, 'keep my typed query');
+        const typedBefore = await tabsIn(fixture.windowA);
+        const refused = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: typed.tab.id });
+        assert.equal(refused.ok, true); assert.equal(refused.accepted, false); assert.equal(refused.reason, 'user-interaction');
+        assert.equal(await typed.page.$eval('[data-testid="spotlight-input"]', input => input.value), 'keep my typed query');
+        assert.deepEqual((await tabsIn(fixture.windowA)).map(tab => [tab.id, tab.active]), typedBefore.map(tab => [tab.id, tab.active]));
+        await arcifyOptions.evaluate(id => chrome.tabs.remove(id), typed.tab.id);
+        const chosen = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`); await waitSidebarCommand(chosen.page);
+        const input = await sidebarInput(chosen.page);
+        try { await ui(chosen.page, 'Choose a startup result manually', () => input.asElement().press('ArrowDown')); } finally { await input.dispose(); }
+        const selectedBefore = await chosen.page.$eval('[data-testid="spotlight-result"].selected', row => row.textContent);
+        const refusedSelection = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: chosen.tab.id });
+        assert.equal(refusedSelection.accepted, false); assert.equal(refusedSelection.reason, 'user-interaction');
+        assert.equal(await chosen.page.$eval('[data-testid="spotlight-result"].selected', row => row.textContent), selectedBefore);
+        await screenshot(chosen.page, 'startup-offer-preserves-manual-selection');
+        await arcifyOptions.evaluate(id => chrome.tabs.remove(id), chosen.tab.id);
+        return { typedOffer: refused, manualSelectionOffer: refusedSelection, sourceInputAndSelectionPreserved: true,
+            note: 'Real authenticated offer/UI behavior; once-per-session onStartup controller ordering is separately unit-tested.' };
+    });
+
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');
     assertNoTargetCrashes(report.targetLifecycle);
     report.status = report.checks.some(check => check.status === 'skipped') ? 'passed_with_skips' : 'passed';

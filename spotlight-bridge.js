@@ -2,6 +2,7 @@ import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { ownerOf, tabIds } from './space-store.js';
 import { getSpaceBookmarkById, getSpaceBookmarkTree } from './space-bookmarks.js';
 import { Utils } from './utils.js';
+import { SIDEBAR_COMMAND_TYPE, createSidebarCommandHandler } from './sidebar-command.js';
 import { PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
 const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark'];
@@ -136,7 +137,8 @@ export function createSpotlightBridge(store) {
             throw bridgeError('UNCERTAIN_RESULT', 'The previous action may have completed. Refresh before trying again.');
         }
         const snapshot = await getBridgeSnapshot(store, request.windowId);
-        if (readOnly) return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot });
+        if (readOnly) return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot,
+            ...(commandCapabilities(request, chrome)) });
         const entry = { key, fingerprint: JSON.stringify(request) };
         const next = [...journal.slice(-99), entry];
         await chrome.storage.session.set({ [JOURNAL_KEY]: next });
@@ -163,7 +165,9 @@ export function createSpotlightBridge(store) {
 
 export function registerSpotlightBridge(store) {
     const handle = createSpotlightBridge(store);
+    const handleSidebar = createSidebarCommandHandler();
     chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => {
+        if (request?.type === SIDEBAR_COMMAND_TYPE) return handleSidebar(request, sender, sendResponse);
         handle(request, sender).then(sendResponse);
         return true;
     });
@@ -180,4 +184,8 @@ export function registerSpotlightBridge(store) {
         })().catch(error => sendResponse({ ok: false, error: { code: error.code || 'FAILED', message: error.message } }));
         return true;
     });
+}
+
+function commandCapabilities(request, browser) {
+    return request.command === 'hello' ? { capabilities: typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : [] } : {};
 }

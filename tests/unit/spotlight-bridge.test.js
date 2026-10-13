@@ -241,6 +241,14 @@ test('hello and snapshot return the authoritative model without action journal o
     assert.deepEqual(mutations, []);
 });
 
+test('hello advertises sidebar capability only when its API is available', async () => {
+    const handle = createSpotlightBridge(await makeStore());
+    assert.deepEqual((await handle(request('hello'), SENDER)).capabilities, []);
+    chrome.sidePanel = { open() {} };
+    assert.deepEqual((await handle(request('hello'), SENDER)).capabilities, ['openSidebar']);
+    assert.equal('capabilities' in await handle(request('snapshot'), SENDER), false);
+});
+
 test('activating an empty space changes only the requested window without creating a tab', async () => {
     const store = await makeStore();
     const result = await createSpotlightBridge(store)(request('activateSpace', { spaceId: 'empty' }), SENDER);
@@ -568,6 +576,19 @@ test('registered external listeners retain the response channel and enforce pair
     assert.equal(response.ok, true);
     const blocked = await new Promise(resolve => listener(request('snapshot'), { id: SELF }, resolve));
     assertError(blocked, 'UNAUTHORIZED');
+});
+
+test('dedicated sidebar messages bypass the queued workspace handler', async () => {
+    const store = await makeStore(); registerSpotlightBridge(store);
+    let calls = 0;
+    chrome.sidePanel = { open: options => { calls++; assert.deepEqual(options, { tabId: 1 }); return Promise.resolve(); } };
+    chrome.storage.local.get = (key, callback) => callback({ [PEER_KEY]: PEER });
+    const listener = chrome.runtime.onMessageExternal.listeners[0];
+    const response = await new Promise(resolve => listener({ type: 'arcify-sidebar', version: 1, requestId: 'side-1' },
+        { id: PEER, frameId: 0, url: `chrome-extension://${PEER}/newtab.html`, origin: `chrome-extension://${PEER}`,
+            tab: { id: 1, windowId: 1, active: true, url: 'chrome://newtab/' } }, resolve));
+    assert.equal(response.ok, true); assert.equal(response.type, 'arcify-sidebar'); assert.equal(calls, 1);
+    assert.equal(session[JOURNAL_KEY], undefined); assert.deepEqual(mutations, []);
 });
 
 test('internal launch rejects unknown sender and invalid window before contacting Spotlight', async () => {

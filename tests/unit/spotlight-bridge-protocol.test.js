@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { BRIDGE_TYPE, BRIDGE_VERSION, isExtensionId, isWindowId, isSafeUrl, trustedSender, validateRequest, responseFor, sendBridgeRequest } from '../../spotlight-bridge-protocol.js';
 
 const PEER = 'a'.repeat(32);
-const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'launch'];
+const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'launch', 'startupSuggestion'];
 const request = (command, payload = {}) => ({ type: BRIDGE_TYPE, version: BRIDGE_VERSION, requestId: 'valid-request:1.0', windowId: 1, command, ...payload });
 const success = message => ({ type: BRIDGE_TYPE, version: BRIDGE_VERSION, requestId: message.requestId, role: 'spotlight', ok: true });
 let sent;
@@ -39,7 +39,8 @@ test('all protocol commands accept only their documented payloads', () => {
         request('openTab', { url: 'https://example.test/', spaceId: 'space-a' }),
         request('navigateTab', { tabId: 42, url: 'https://example.test/' }),
         request('openBookmark', { spaceId: 'space-a', bookmarkId: 'bookmark-1' }),
-        request('launch', { mode: 'new-tab' }), request('launch', { mode: 'current-tab' })
+        request('launch', { mode: 'new-tab' }), request('launch', { mode: 'current-tab' }),
+        request('startupSuggestion', { tabId: 42 })
     ];
     for (const example of examples) assert.equal(validateRequest(example, COMMANDS), example);
 });
@@ -63,7 +64,9 @@ test('protocol rejects malformed request IDs, windows, payloads and surplus fiel
         request('navigateTab', { tabId: 1 }), request('navigateTab', { tabId: 1, url: 'data:text/plain,evil' }),
         request('openBookmark', { spaceId: 'a' }), request('openBookmark', { spaceId: 'a', bookmarkId: '' }),
         request('openBookmark', { spaceId: 'a', bookmarkId: 'b', url: 'https://example.test/' }),
-        request('launch'), request('launch', { mode: 'popup' })
+        request('launch'), request('launch', { mode: 'popup' }),
+        request('startupSuggestion'), request('startupSuggestion', { tabId: 0 }),
+        request('startupSuggestion', { tabId: '42' }), request('startupSuggestion', { tabId: 42, mode: 'new-tab' })
     ];
     for (const message of malformed) assert.throws(() => validateRequest(message, COMMANDS), { code: 'INVALID_REQUEST' }, JSON.stringify(message));
 });

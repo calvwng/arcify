@@ -1,4 +1,5 @@
 import { STARTUP_LAUNCHER_PATH, isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
+import { prepareStartupSuggestion, offerStartupSuggestion } from './startup-spotlight.js';
 
 export const STARTUP_LAUNCHER_SETTING = 'startupLauncherEnabled';
 export const STARTUP_LAUNCHER_SESSION = 'arcifyStartupLauncherSession';
@@ -11,7 +12,9 @@ const RETRY_WINDOW_MS = 30000;
 // for a real click in that tab. Session storage survives service-worker suspension.
 export function registerStartupLauncher(browser = globalThis.chrome, {
     setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now,
-    reportError = error => console.warn('Arcify startup launcher:', error)
+    reportError = error => console.warn('Arcify startup launcher:', error),
+    prepareSuggestion = tab => prepareStartupSuggestion(browser, tab),
+    offerSuggestion = context => offerStartupSuggestion(browser, context)
 } = {}) {
     let chain = Promise.resolve();
     let timer;
@@ -71,6 +74,51 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
         return true;
     }
 
+    async function tryStartupSuggestion(state, tab, active) {
+        if (!active || !mayForeground() || state.suggestionAttempted) return false;
+        let context;
+        try { context = await prepareSuggestion(tab); }
+        catch (error) { reportError(error); return false; }
+        if (!context) return false;
+        // Pairing/handshake readiness may finish after the user starts browsing.
+        // Re-read the candidate; never select a different or late Spotlight tab.
+        if (!await isEnabled()) {
+            await writeState({ pending: false }); await clearWake(); return true;
+        }
+        const windows = await normalWindows();
+        const tabs = await browser.tabs.query({ windowId: tab.windowId });
+        const current = tabs.find(candidate => candidate.id === tab.id);
+        if (!mayForeground() || !windows.some(window => window.id === tab.windowId && window.focused)
+            || !current?.active || tabUrl(current) !== startupView?.url) {
+            foregroundSuppressed = true;
+            await reconcile();
+            return true;
+        }
+        // Claim before dispatch. An interrupted worker or an uncertain reply must
+        // not create a second prompt after Spotlight may already have accepted.
+        state.suggestionAttempted = true;
+        await writeState({ pending: false, suggestionAttempted: true });
+        await clearWake();
+        if (!mayForeground()) {
+            await writeState(state);
+            await reconcile();
+            return true;
+        }
+        try {
+            const response = await offerSuggestion(context);
+            if (response?.accepted === false) {
+                if (response.reason !== 'not-ready') return true;
+                // A decline can mean the user typed or selected something in
+                // Spotlight, activity which tabs.onUpdated cannot observe.
+                foregroundSuppressed = true;
+                await writeState(state);
+                await reconcile();
+                return true; // Only an explicit authenticated decline is safe.
+            }
+        } catch (error) { reportError(error); }
+        return true; // Accepted, timeout, malformed or otherwise uncertain.
+    }
+
     async function reconcile() {
         const state = await readState();
         if (!state || (!state.pending && !state.createdTabId)) return;
@@ -104,12 +152,6 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
             return;
         }
 
-        if (launchers.length) {
-            await writeState({ pending: false });
-            await clearWake();
-            return; // Reuse restored tabs without changing selection or focus.
-        }
-
         // Do not create a window. Wait for a normal browsing window with a tab;
         // popups, DevTools and incognito windows are never startup targets.
         const candidates = windows.filter(window => tabs.some(tab => tab.windowId === window.id));
@@ -117,6 +159,10 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
         if (!target) {
             await clearWake();
             return; // onCreated resumes this persisted pending request.
+        }
+        const activeTab = tabs.find(tab => tab.windowId === target.id && tab.active);
+        if (launchers.length && (!activeTab || isStartupLauncherTab(activeTab, browser))) {
+            await writeState({ pending: false }); await clearWake(); return;
         }
         // onStartup is delivered at profile readiness, which can precede the
         // first browser window/focus/tab URL. Give the first ready candidate the
@@ -126,10 +172,15 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
             await schedule(state, Math.max(1, Math.min(SETTLE_MS, foregroundUntil - now() + 1)));
             return;
         }
-        const activeTab = tabs.find(tab => tab.windowId === target.id && tab.active);
         const active = Boolean(startupView && mayForeground() && target.focused
             && target.id === startupView.windowId && activeTab?.id === startupView.tabId
             && tabUrl(activeTab) === startupView.url);
+        if (await tryStartupSuggestion(state, activeTab, active)) return;
+        if (launchers.length) {
+            await writeState({ pending: false });
+            await clearWake();
+            return; // Reuse restored tabs without changing selection or focus.
+        }
         // Claim before creation: neither a second event nor a worker restart can
         // create another tab if Chrome has already accepted the create operation.
         await writeState({ pending: false });

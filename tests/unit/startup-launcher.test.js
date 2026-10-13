@@ -6,6 +6,7 @@ import { isStartupLauncherTab, isStartupLauncherUrl } from '../../startup-launch
 import { Utils } from '../../utils.js';
 
 const launcherUrl = 'chrome-extension://arcify/startup-launcher.html';
+const spotlightUrl = `chrome-extension://${'a'.repeat(32)}/newtab.html`;
 const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); },
     async emit(...args) { await Promise.all(this.listeners.map(fn => fn(...args))); } });
 const area = data => ({
@@ -15,7 +16,7 @@ const area = data => ({
     },
     async set(patch) { Object.assign(data, structuredClone(patch)); }
 });
-function fixture({ enabled, session = {}, windows, tabs } = {}) {
+function fixture({ enabled, session = {}, windows, tabs, controllerOptions = {} } = {}) {
     const sync = { existingPreference: 'unchanged', ...(enabled === undefined ? {} : { startupLauncherEnabled: enabled }) };
     const state = { sync, session, time: 1000, created: [], removed: [], errors: [], alarms: new Map(), timers: new Map(), timerDelays: [],
         windows: windows ?? [{ id: 1, type: 'normal', focused: true }],
@@ -46,9 +47,126 @@ function fixture({ enabled, session = {}, windows, tabs } = {}) {
             state.timers.set(id, () => { state.timers.delete(id); return callback(); });
             return id;
         },
-        clearTimer: id => state.timers.delete(id), reportError: error => state.errors.push(error) });
+        clearTimer: id => state.timers.delete(id), reportError: error => state.errors.push(error), ...controllerOptions });
     return { state, browser, controller: makeController(), makeController };
 }
+
+function pairedFixture({ response = { accepted: true }, prepare, offer } = {}) {
+    const calls = [];
+    const app = fixture({ enabled: true, tabs: [{ id: 10, windowId: 1, url: spotlightUrl, active: true }],
+        controllerOptions: {
+            prepareSuggestion: prepare || (async tab => ({ peerId: 'a'.repeat(32), windowId: tab.windowId, tabId: tab.id })),
+            offerSuggestion: async context => { calls.push(context); return offer ? offer(context) : response; }
+        } });
+    return { ...app, calls };
+}
+
+test('a ready Spotlight startup suggestion consumes the request without creating a competing helper', async () => {
+    const app = pairedFixture(); await app.controller.start(); await app.controller.flush();
+    assert.equal(app.calls.length, 1); assert.deepEqual(app.state.created, []);
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].pending, false);
+    assert.equal(app.state.alarms.size, 0);
+    await app.browser.tabs.onCreated.emit({ id: 20, windowId: 1 });
+    const resumed = app.makeController(); await resumed.ready; await resumed.start(); await resumed.flush();
+    assert.equal(app.calls.length, 1); assert.deepEqual(app.state.created, []);
+});
+
+test('typing or manually selecting in Spotlight consumes startup without a fallback tab', async () => {
+    for (const reason of ['user-interaction', 'not-eligible']) {
+        const app = pairedFixture({ response: { accepted: false, reason } });
+        await app.controller.start(); await app.controller.flush();
+        assert.deepEqual(app.state.created, []); assert.equal(app.calls.length, 1);
+        assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].pending, false);
+    }
+});
+
+test('an explicit not-ready decline creates at most a background fallback, never a second offer', async () => {
+    const app = pairedFixture({ response: { accepted: false, reason: 'not-ready' } });
+    app.state.createError = true;
+    await app.controller.start(); await app.controller.flush();
+    assert.equal(app.state.created[0].active, false);
+    app.state.createError = false;
+    await app.controller.flush();
+    assert.equal(app.state.created.at(-1).active, false);
+    assert.equal(app.calls.length, 1);
+    assert.equal(app.state.tabs.filter(tab => tab.url === launcherUrl).length, 1);
+});
+
+test('timeout or malformed offer outcome consumes startup rather than risking duplicate prompts', async () => {
+    for (const offer of [async () => { throw Error('Timed out'); }, async () => ({}), async () => null,
+        async () => ({ accepted: false }), async () => ({ accepted: false, reason: 'unknown' })]) {
+        const app = pairedFixture({ offer }); await app.controller.start(); await app.controller.flush();
+        assert.deepEqual(app.state.created, []); assert.equal(app.calls.length, 1);
+        const resumed = app.makeController(); await resumed.ready; await resumed.flush();
+        assert.deepEqual(app.state.created, []); assert.equal(app.calls.length, 1);
+    }
+});
+
+test('a worker restart never replays an unresolved startup offer', async () => {
+    let resolve;
+    const app = pairedFixture({ offer: () => new Promise(done => { resolve = done; }) });
+    await app.controller.start(); const original = app.controller.flush();
+    while (!resolve) await new Promise(done => setImmediate(done));
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].pending, false);
+    const resumed = app.makeController(); await resumed.ready; await resumed.flush();
+    assert.equal(app.calls.length, 1); assert.deepEqual(app.state.created, []);
+    resolve({ accepted: true }); await original;
+});
+
+test('startup candidate change or expired readiness skips the offer and keeps fallback quiet', async () => {
+    for (const change of ['late', 'url', 'active', 'focus', 'event']) {
+        let app;
+        app = pairedFixture({ prepare: async tab => {
+            if (change === 'late') app.state.time += 4000;
+            if (change === 'url') app.state.tabs[0].url = 'https://typed.test/';
+            if (change === 'active') app.state.tabs[0].active = false;
+            if (change === 'focus') app.state.windows[0].focused = false;
+            if (change === 'event') await app.browser.tabs.onActivated.emit({ windowId: 1, tabId: 99 });
+            return { peerId: 'a'.repeat(32), windowId: tab.windowId, tabId: tab.id };
+        } });
+        await app.controller.start(); await app.controller.flush();
+        assert.equal(app.calls.length, 0, change);
+        assert.equal(app.state.created[0].active, false, change);
+    }
+});
+
+test('unavailable capability preserves the legacy launcher and disabled startup never prepares Spotlight', async () => {
+    const app = pairedFixture({ prepare: async () => null });
+    await app.controller.start(); await app.controller.flush();
+    assert.equal(app.state.created[0].active, true); assert.equal(app.calls.length, 0);
+    let prepared = false;
+    const disabled = fixture({ controllerOptions: { prepareSuggestion: async () => { prepared = true; } } });
+    await disabled.controller.start(); await disabled.controller.flush(); assert.equal(prepared, false);
+});
+
+test('opting out during capability lookup prevents both prompt and fallback', async () => {
+    let app;
+    app = pairedFixture({ prepare: async tab => {
+        app.state.sync.startupLauncherEnabled = false;
+        return { peerId: 'a'.repeat(32), tabId: tab.id, windowId: tab.windowId };
+    } });
+    await app.controller.start(); await app.controller.flush();
+    assert.deepEqual(app.state.created, []); assert.equal(app.calls.length, 0);
+});
+
+test('an eligible active Spotlight prompt takes precedence over an inactive restored helper without changing tabs', async () => {
+    const app = pairedFixture(); app.state.tabs.push({ id: 55, windowId: 1, url: launcherUrl, active: false });
+    await app.controller.start(); await app.controller.flush();
+    assert.equal(app.calls.length, 1); assert.deepEqual(app.state.created, []); assert.deepEqual(app.state.removed, []);
+    assert.equal(app.state.tabs.find(tab => tab.id === 55).active, false);
+    assert.equal(app.state.tabs.find(tab => tab.id === 10).active, true);
+});
+
+test('unsupported or not-ready Spotlight reuses an inactive restored helper without activation', async () => {
+    for (const prepare of [undefined, async () => null]) {
+        const app = pairedFixture({ prepare, response: { accepted: false, reason: 'not-ready' } });
+        app.state.tabs.push({ id: 55, windowId: 1, url: launcherUrl, active: false });
+        await app.controller.start(); await app.controller.flush();
+        assert.deepEqual(app.state.created, []); assert.deepEqual(app.state.removed, []);
+        assert.equal(app.state.tabs.find(tab => tab.id === 55).active, false);
+        assert.equal(app.state.tabs.find(tab => tab.id === 10).active, true);
+    }
+});
 
 test('launcher is disabled by default and registration/install does not open a tab', async () => {
     const app = fixture();
