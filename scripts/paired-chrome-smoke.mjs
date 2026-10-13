@@ -146,7 +146,7 @@ async function observePage(page) {
     if (!observedPages.has(page)) {
         observedPages.add(page);
         page.setDefaultTimeout(20_000);
-        page.on('pageerror', error => report.diagnostics.push({ type: 'pageerror', url: page.url(), message: error.message }));
+        page.on('pageerror', error => report.diagnostics.push({ type: 'pageerror', url: page.url(), message: error.message, stack: error.stack, observedAt: new Date().toISOString() }));
         page.on('console', message => {
             if (['error', 'warn'].includes(message.type())) report.diagnostics.push({ type: `console-${message.type()}`, url: page.url(), message: message.text().slice(0, 3000) });
         });
@@ -1382,16 +1382,37 @@ try {
         const row = id => `.space[data-space-id="${fixture.spaces.work}"] [data-bookmark-id="${id}"]`;
         const children = id => arcifyOptions.evaluate(async id => (await chrome.bookmarks.getChildren(id)).map(item => item.id),id);
         const observations = [];
+        await page.evaluate(() => {
+            window.__pairedDragEvents = [];
+            for (const type of ['pointerdown','mousedown','dragstart','dragenter','dragover','dragleave','drop','dragend','mouseup']) {
+                document.addEventListener(type,event => {
+                    const item = {type,at:performance.now(),tag:event.target?.tagName,classes:event.target?.className,
+                        id:event.target?.closest?.('[data-bookmark-id]')?.dataset.bookmarkId,x:event.clientX,y:event.clientY,
+                        prevented:event.defaultPrevented,types:[...(event.dataTransfer?.types || [])]};
+                    window.__pairedDragEvents.push(item);
+                    if (window.__pairedDragEvents.length > 150) window.__pairedDragEvents.shift();
+                },{capture:true,passive:true});
+            }
+        });
         const drag = async (sourceSelector,targetSelector,placement,label) => ui(page,label,async () => {
             const source = await page.$(sourceSelector), target = await page.$(targetSelector);
             assert(source && target,'Exact drag source and destination must exist.');
             let mouseDown = false;
+            const diagnostic = {label,sourceSelector,targetSelector,placement};
+            report.dragActions ||= []; report.dragActions.push(diagnostic);
             try {
                 await target.scrollIntoView();
                 const from = await source.boundingBox(),to = await target.boundingBox();
                 assert(from && to && from.height > 0 && to.height > 0);
+                diagnostic.sourceRect = from; diagnostic.targetRect = to;
+                diagnostic.before = await page.evaluate(() => ({events:window.__pairedDragEvents,dragging:document.querySelector('.dragging')?.outerHTML}));
                 const x = Math.min(from.x+40,from.x+from.width/2),y = from.y+from.height/2;
                 const tx = Math.min(to.x+40,to.x+to.width/2),ty = placement === 'inside' ? to.y+to.height/2 : to.y+2;
+                diagnostic.hitPoints = await page.evaluate(({x,y,tx,ty}) => ({
+                    source:document.elementFromPoint(x,y)?.outerHTML,target:document.elementFromPoint(tx,ty)?.outerHTML
+                }),{x,y,tx,ty});
+                diagnostic.sourceConnected = await source.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),sourceSelector);
+                diagnostic.targetConnected = await target.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),targetSelector);
                 await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
                 await page.mouse.move(x+12,y,{steps:5});
                 await page.mouse.move(tx,ty,{steps:20});
@@ -1414,6 +1435,24 @@ try {
                 await page.mouse.up(); mouseDown = false;
                 await page.waitForFunction(() => !document.querySelector('.sidebar-drop-anchor:not([hidden]),.sidebar-drop-inside,.dragging'),{polling:50});
                 observations.push(feedback);
+            } catch (error) {
+                diagnostic.error = error.message;
+                try {
+                    diagnostic.failedState = await page.evaluate(({sourceSelector,targetSelector}) => ({
+                        events:window.__pairedDragEvents,source:document.querySelector(sourceSelector)?.outerHTML,
+                        target:document.querySelector(targetSelector)?.outerHTML,dragging:document.querySelector('.dragging')?.outerHTML,
+                        indicator:document.querySelector('.sidebar-drop-anchor')?.outerHTML,status:document.querySelector('.sidebar-drop-status')?.textContent,
+                        focused:document.hasFocus(),visibility:document.visibilityState,scroll:[...document.querySelectorAll('.space-content')].map(element => ({
+                            active:element.closest('.space')?.classList.contains('active'),rect:element.getBoundingClientRect().toJSON(),
+                            top:element.scrollTop,height:element.scrollHeight,client:element.clientHeight
+                        }))
+                    }),{sourceSelector,targetSelector});
+                    diagnostic.sourceStillConnected = await source.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),sourceSelector);
+                    diagnostic.targetStillConnected = await target.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),targetSelector);
+                    await screenshot(page,`${label}-failure-before-cleanup`,false);
+                } catch (captureError) { diagnostic.captureError = captureError.message; }
+                try { await saveReport(); } catch (saveError) { diagnostic.saveError = saveError.message; }
+                throw error;
             } finally {
                 if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
                 await source.dispose(); await target.dispose();
