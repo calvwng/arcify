@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { BRIDGE_TYPE, BRIDGE_VERSION, isExtensionId, isWindowId, isSafeUrl, trustedSender, validateRequest, responseFor, sendBridgeRequest } from '../../spotlight-bridge-protocol.js';
 
 const PEER = 'a'.repeat(32);
-const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'launch', 'startupSuggestion'];
+const COMMANDS = ['hello', 'snapshot', 'invalidate', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'launch', 'startupSuggestion'];
 const request = (command, payload = {}) => ({ type: BRIDGE_TYPE, version: BRIDGE_VERSION, requestId: 'valid-request:1.0', windowId: 1, command, ...payload });
 const success = message => ({ type: BRIDGE_TYPE, version: BRIDGE_VERSION, requestId: message.requestId, role: 'spotlight', ok: true });
 let sent;
@@ -34,7 +34,7 @@ test('navigation URLs have an explicit scheme allowlist and size bound', () => {
 
 test('all protocol commands accept only their documented payloads', () => {
     const examples = [
-        request('hello'), request('snapshot'), request('activateSpace', { spaceId: 'space-a' }),
+        request('hello'), request('snapshot'), request('invalidate'), request('activateSpace', { spaceId: 'space-a' }),
         request('activateTab', { tabId: 42 }), request('openTab', { url: 'https://example.test/' }),
         request('openTab', { url: 'https://example.test/', spaceId: 'space-a' }),
         request('navigateTab', { tabId: 42, url: 'https://example.test/' }),
@@ -57,6 +57,8 @@ test('protocol rejects malformed request IDs, windows, payloads and surplus fiel
         ...['', 'has space', 'slash/id', 'x'.repeat(81), 123, null].map(requestId => request('snapshot', { requestId })),
         ...[0, -1, 1.2, '1', null].map(windowId => request('snapshot', { windowId })),
         request('snapshot', { url: 'https://example.test/' }), request('hello', { nested: {} }),
+        request('invalidate', { windowId: 0 }), request('invalidate', { snapshot: {} }),
+        request('invalidate', { spaceId: 'space-a' }), request('invalidate', { tabId: 42 }),
         request('activateSpace'), request('activateSpace', { spaceId: '' }), request('activateSpace', { spaceId: 'x'.repeat(201) }),
         request('activateTab', { tabId: '1' }), request('activateTab', { tabId: 0 }),
         request('openTab'), request('openTab', { url: 'https://example.test/', spaceId: null }),

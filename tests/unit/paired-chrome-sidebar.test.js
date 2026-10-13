@@ -129,3 +129,17 @@ test('matched action evidence requires selected action first and retained web se
         assert.throws(() => assertMatchedActionFirst(rows,{ type:'arcify-space',title:'Work',query:'wrok' }));
     }
 });
+
+
+test('actual Spotlight DOM reader captures authoritative workspace chip names for invalidation evidence', async () => {
+    const { readSpotlightRows } = await import('../../scripts/paired-chrome-sidebar.mjs');
+    const { document } = parseHTML('<div data-testid="spotlight-result" data-result-type="open-tab" class="selected"><span class="arcify-spotlight-result-title">Logical Tab One</span><span class="arcify-space-chip" title="Pair Personal">Pair Personal</span></div>');
+    const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    try {
+        Object.defineProperty(globalThis, 'document', { configurable:true, value:document });
+        const [row] = readSpotlightRows();
+        assert.equal(row.title,'Logical Tab One'); assert.equal(row.space,'Pair Personal'); assert.equal(row.selected,true);
+        document.querySelector('.arcify-space-chip').remove();
+        assert.equal(readSpotlightRows()[0].space,null);
+    } finally { if (previous) Object.defineProperty(globalThis,'document',previous); else delete globalThis.document; }
+});

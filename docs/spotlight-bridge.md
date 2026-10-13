@@ -112,6 +112,23 @@ or a promise of recovery. Ordinary temporary tabs retain **× / Close Tab**. Thi
 is the requested control mapping; the existing live/closed gating and handlers
 are unchanged.
 
+## Live logical-state refresh
+
+Arcify sends a small, optional paired invalidation when authoritative membership,
+order, active-space or space metadata changes, including changes with native group
+sync disabled. Relevant Arcify bookmark changes also invalidate saved-pin/space
+metadata. The signal contains only a window ID; Spotlight obtains a fresh snapshot
+through the existing authenticated read path and never copies Arcify's database.
+
+Notifications are coalesced and bounded. The sender checks its current saved peer,
+and Spotlight checks reciprocal identity, strict version/payload and window scope
+before refreshing. Query text and explicit result selection survive refreshes;
+accepted invalidation discards older in-flight results. Hidden pages refresh when
+visible again. Worker startup provides a best-effort refresh signal; no polling or
+persistent notification queue is added. Pair changes, missing peers and timeouts do
+not replay actions. Older v1 Spotlight builds reject this optional command safely
+and still refresh on ordinary queries/focus; update both for live logical changes.
+
 ## Wire contract
 
 Both repositories carry the same small `spotlight-bridge-protocol.js` /
@@ -130,7 +147,8 @@ Every ordinary workspace/launch request has:
   `activateTab {tabId}`, `openTab {url,spaceId?}`,
   `navigateTab {tabId,url}`, and `openBookmark {spaceId,bookmarkId}`.
 - Spotlight accepts `hello`, `launch {mode}` where mode is `current-tab` or `new-tab`,
-  and `startupSuggestion {tabId}` for a single existing new-tab page.
+  `startupSuggestion {tabId}` for a single existing new-tab page, and optional
+  `invalidate` with only the envelope’s `windowId` (no workspace content).
 - Optional `hello.capabilities` advertises `openSidebar` from Arcify and
   `startupSuggestion` from Spotlight. Absent capability means unsupported; older
   v1 companions retain their existing behavior. `startupSuggestion` replies with

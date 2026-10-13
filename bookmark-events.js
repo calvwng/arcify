@@ -1,6 +1,7 @@
 const COALESCE_MS = 100;
 let rootId = null;
 let timer = null;
+let onRelevantChange = () => {};
 
 async function getRootId() {
     if (rootId) {
@@ -31,6 +32,7 @@ async function isRelevant(ids) {
 function notify(reason) {
     clearTimeout(timer);
     timer = setTimeout(() => {
+        onRelevantChange();
         try {
             const sent = chrome.runtime.sendMessage({ action: 'arcifyBookmarksChanged', reason });
             sent?.catch?.(() => {});
@@ -42,7 +44,8 @@ async function handle(ids, reason) {
     if (await isRelevant(ids)) notify(reason);
 }
 
-export function registerBookmarkListeners() {
+export function registerBookmarkListeners(onChange = () => {}) {
+    onRelevantChange = onChange;
     chrome.bookmarks.onCreated.addListener((id, node) => handle([node?.parentId], 'created'));
     chrome.bookmarks.onRemoved.addListener((id, info) => {
         if (String(id) === String(rootId)) {

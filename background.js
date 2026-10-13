@@ -22,11 +22,10 @@ import { isProtectedFavorite } from './favorite-safety.js';
 import { registerBookmarkListeners } from './bookmark-events.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 
-registerBookmarkListeners();
-
 const spaceStore = new SpaceStore();
 spaceStore.install();
-registerSpotlightBridge(spaceStore);
+const spotlightInvalidation = registerSpotlightBridge(spaceStore);
+registerBookmarkListeners(() => spotlightInvalidation.invalidateAll());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'spaceStore') return;
     spaceStore.dispatch(message).then(spaces => sendResponse({ success: true, spaces }), error => sendResponse({ success: false, error: error.message }));

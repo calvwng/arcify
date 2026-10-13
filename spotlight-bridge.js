@@ -3,6 +3,7 @@ import { ownerOf, tabIds } from './space-store.js';
 import { getSpaceBookmarkById, getSpaceBookmarkTree } from './space-bookmarks.js';
 import { Utils } from './utils.js';
 import { SIDEBAR_COMMAND_TYPE, createSidebarCommandHandler } from './sidebar-command.js';
+import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
 import { PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
 const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark'];
@@ -164,6 +165,7 @@ export function createSpotlightBridge(store) {
 }
 
 export function registerSpotlightBridge(store) {
+    const invalidation = registerSpotlightInvalidation(store);
     const handle = createSpotlightBridge(store);
     const handleSidebar = createSidebarCommandHandler();
     chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => {
@@ -184,6 +186,7 @@ export function registerSpotlightBridge(store) {
         })().catch(error => sendResponse({ ok: false, error: { code: error.code || 'FAILED', message: error.message } }));
         return true;
     });
+    return invalidation;
 }
 
 function commandCapabilities(request, browser) {

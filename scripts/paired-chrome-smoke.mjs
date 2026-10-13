@@ -27,7 +27,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '23f741b656efad79a6943b74abd946fbab0d5dec';
+const PINNED_SPOTLIGHT = '62cd3e96a1874d7a48386641c0834f2fcd15b62e';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -50,7 +50,8 @@ const stepNames = [
     'Sidebar command rejects non-gesture, malformed and revoked-peer requests',
     'Startup suggestion preserves typing and manual selection',
     'Fuzzy action ranking retains web search in new-tab and overlay UI',
-    'Live New Tab identities refresh without stale or self-helper suggestions'
+    'Live New Tab identities refresh without stale or self-helper suggestions',
+    'Logical Arcify updates refresh Spotlight without native tab events'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -516,7 +517,7 @@ try {
         return { pairingOrders: ['arcify-first', 'spotlight-first'], unpairedError: unpaired.error.code, arcifyStatus: await arcifyOptions.$eval('#bridgeStatus', node => node.textContent), spotlightStatus: await spotlightOptions.$eval('#connection-status-message', node => node.textContent) };
     });
     await step(stepNames[2], async () => {
-        const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar' };
+        const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two' };
         server = createServer((request, response) => {
             const title = titles[new URL(request.url, 'http://localhost').pathname] || 'Pair Local Fixture';
             response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -1063,6 +1064,109 @@ try {
         await arcifyOptions.evaluate(id => chrome.tabs.remove(id), second.tab.id);
         return { initialLiveTabIds: [first.tab.id,second.tab.id], excludedSourceTabId: helper.tab.id,
             removedTabId: first.tab.id, remainingActivatedTabId: second.tab.id, refreshedWithoutInput: true };
+    });
+
+
+    await step(stepNames[21], async () => {
+        const malformedSignal = await external(arcifyOptions, spotlightId, 'invalidate', { windowId:fixture.windowA, spaces:[] });
+        assert.equal(malformedSignal.ok,false); assert.equal(malformedSignal.error.code,'INVALID_REQUEST');
+        const wrongWindowSignal = await external(arcifyOptions, spotlightId, 'invalidate', { windowId:fixture.windowB });
+        assert.equal(wrongWindowSignal.ok,false); assert.equal(wrongWindowSignal.error.code,'INVALID_WINDOW');
+        assert.equal(await arcifyOptions.evaluate(async () => (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups), false);
+        const created = await arcifyOptions.evaluate(async ({ windowId, base, spaceId }) => {
+            const tabs = [];
+            for (const path of ['/logical-one', '/logical-two']) {
+                const tab = await chrome.tabs.create({ windowId, url: `${base}${path}`, active: false });
+                const result = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+                if (!result.success) throw new Error(result.error);
+                tabs.push(tab.id);
+            }
+            return tabs;
+        }, { windowId: fixture.windowA, base: fixture.base, spaceId: fixture.spaces.work });
+        for (const id of created) await poll(() => tab(id), tab => tab.status === 'complete' && tab.title.startsWith('Logical Tab'), 'settled logical fixture tab');
+        const helper = await newTabPage('chrome://newtab/'); await waitSidebarCommand(helper.page);
+        await poll(() => tab(helper.tab.id), tab => tab.status === 'complete', 'settled logical test helper');
+        await search(helper.page, 'logical tab');
+        const logicalRows = rows => rows.filter(row => row.type === 'open-tab' && row.title.startsWith('Logical Tab'));
+        await poll(() => helper.page.evaluate(readSpotlightRows), rows => logicalRows(rows).length === 2, 'both logical fixture rows');
+        assert.deepEqual(logicalRows(await helper.page.evaluate(readSpotlightRows)).map(row => row.title), ['Logical Tab One', 'Logical Tab Two']);
+        const input = await sidebarInput(helper.page);
+        try {
+            await ui(helper.page, 'Explicitly keep web search selected during logical updates', async () => {
+                await input.asElement().press('ArrowDown'); await input.asElement().press('ArrowUp');
+            });
+            assert.equal((await helper.page.evaluate(readSpotlightRows)).find(row => row.selected)?.type, 'search-query');
+            // Observe the real native event stream; no event is synthesized or suppressed.
+            await arcifyOptions.evaluate(windowId => {
+                globalThis.__logicalTabEvents = [];
+                globalThis.__logicalTabListeners = [];
+                for (const name of ['onCreated','onRemoved','onMoved','onAttached','onDetached','onUpdated','onActivated','onReplaced']) {
+                    const callback = (...args) => {
+                        const observedWindow = name === 'onCreated' ? args[0]?.windowId : name === 'onUpdated' ? args[2]?.windowId
+                            : name === 'onActivated' ? args[0]?.windowId : args[1]?.windowId ?? args[1]?.newWindowId ?? args[1]?.oldWindowId;
+                        if (observedWindow === windowId || name === 'onReplaced') globalThis.__logicalTabEvents.push({ name, args, at: Date.now() });
+                    };
+                    chrome.tabs[name].addListener(callback); globalThis.__logicalTabListeners.push([name,callback]);
+                }
+            }, fixture.windowA);
+            const reordered = await arcifyOptions.evaluate(async ({ ids, spaceId }) => {
+                const current = await chrome.runtime.sendMessage({ type:'spaceStore',action:'get' });
+                if (!current.success) throw new Error(current.error);
+                const after = structuredClone(current.spaces), space = after.find(space => space.id === spaceId);
+                space.temporaryTabs = [...space.temporaryTabs.filter(id => !ids.includes(id)), ...ids.slice().reverse()];
+                return chrome.runtime.sendMessage({ type:'spaceStore',action:'patch',before:current.spaces,after });
+            }, { ids: created, spaceId: fixture.spaces.work });
+            assert.equal(reordered.success, true);
+            await poll(() => helper.page.evaluate(readSpotlightRows), rows => JSON.stringify(logicalRows(rows).map(row => row.title)) === JSON.stringify(['Logical Tab Two','Logical Tab One']), 'logical tab order without input or native events');
+            await screenshot(helper.page, 'logical-tab-order-refreshed-without-native-events');
+
+            const workerUrl = `chrome-extension://${spotlightId}/background.js`;
+            const target = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === workerUrl);
+            const worker = await target.worker(); const session = await browser.target().createCDPSession();
+            const readTargets = async () => (await session.send('Target.getTargets')).targetInfos;
+            report.logicalInvalidationRestart = [];
+            try {
+                const old = await terminateObservedWorker({ worker, url: workerUrl, readTargets,
+                    releaseNetwork: async () => { const network = await networkTargets.get(target); assert(network); const id = network.id(); await network.detach(); networkTargets.delete(target); return id; },
+                    record: async observation => { report.logicalInvalidationRestart.push(observation); await saveReport(); }
+                });
+                const assigned = await internal(arcifyOptions, { type:'spaceStore',action:'assign',tabId:created[0],spaceId:fixture.spaces.personal });
+                assert.equal(assigned.success, true);
+                const rows = await poll(() => helper.page.evaluate(readSpotlightRows), rows => logicalRows(rows).find(row => row.title === 'Logical Tab One')?.space === 'Pair Personal', 'logical membership after Spotlight worker restart');
+                assert.equal(rows.find(row => row.selected)?.type, 'search-query');
+                assert.equal(await input.asElement().evaluate(element => element.value), 'logical tab');
+                const targets = await poll(readTargets, targets => targets.some(item => item.url === workerUrl && item.type === 'service_worker' && item.targetId !== old.targetId), 'distinct Spotlight worker after logical invalidation');
+                const replacement = findExactWorkerTarget(targets,workerUrl); assert.notEqual(replacement.targetId,old.targetId);
+                const replacementTarget = await browser.waitForTarget(item => item !== target && item.type() === 'service_worker' && item.url() === workerUrl);
+                const identity = await waitForExtensionWorkerIdentity(await replacementTarget.worker(),spotlightId);
+                report.logicalInvalidationRestart.push({ phase:'restarted-and-refreshed',replacement,identity,rows });
+                await screenshot(helper.page, 'logical-membership-refresh-preserves-query-and-selection');
+            } finally { await session.detach(); }
+            await search(helper.page, 'pair empty');
+            await poll(() => helper.page.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'arcify-space' && row.title === 'Pair Empty'), 'existing empty workspace command');
+            const emptyFolderId = (await snapshot()).spaces.find(space => space.id === fixture.spaces.empty).bookmarkFolderId;
+            await ui(helper.page, 'Keep web search selected during bookmark-only metadata update', () => input.asElement().press('ArrowDown'));
+            assert.equal((await helper.page.evaluate(readSpotlightRows)).find(row => row.selected)?.type, 'search-query');
+            try {
+                await arcifyOptions.evaluate(id => chrome.bookmarks.update(id, { title:'Pair Empty Updated' }), emptyFolderId);
+                const renamed = await poll(() => helper.page.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'arcify-space' && row.title === 'Pair Empty Updated'), 'bookmark-only workspace rename without typing');
+                assert.equal(renamed.find(row => row.selected)?.type, 'search-query');
+                assert.equal(await input.asElement().evaluate(element => element.value), 'pair empty');
+                await screenshot(helper.page, 'bookmark-only-space-rename-refreshes-visible-command');
+            } finally { await arcifyOptions.evaluate(id => chrome.bookmarks.update(id, { title:'Pair Empty' }), emptyFolderId); }
+            const nativeEvents = await arcifyOptions.evaluate(() => globalThis.__logicalTabEvents);
+            assert.deepEqual(nativeEvents, [], 'Logical reorder, membership and bookmark metadata checks must not be explained by native tab events.');
+            const final = await snapshot();
+            assert.equal(final.tabs.find(tab => tab.id === created[0]).spaceId,fixture.spaces.personal);
+            assert.equal(final.tabs.find(tab => tab.id === created[1]).spaceId,fixture.spaces.work);
+            return { syncTabGroups:false, tabIds:created, sourceHelperId:helper.tab.id, nativeEvents, query:'logical tab', manualWebSearchPreserved:true,
+                reorderedTitles:['Logical Tab Two','Logical Tab One'], movedTabSpace:fixture.spaces.personal, bookmarkOnlyRenameRefreshed:true,
+                rejectedSignals:{ malformed:malformedSignal.error.code,wrongWindow:wrongWindowSignal.error.code } };
+        } finally {
+            await input.dispose();
+            await arcifyOptions.evaluate(() => { for (const [name,callback] of globalThis.__logicalTabListeners || []) chrome.tabs[name].removeListener(callback); });
+            await arcifyOptions.evaluate(ids => chrome.tabs.remove(ids), [...created,helper.tab.id]);
+        }
     });
 
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');

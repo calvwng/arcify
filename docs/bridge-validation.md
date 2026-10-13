@@ -1,22 +1,32 @@
 # Bridge validation record
 
-## Completed native-panel baseline and next search regressions
+## Completed search/freshness baseline and logical-state follow-up
 
-The exact pair Arcify `6081313cd2396698cc2292a6ad908d76a94b85ac` / Spotlight
-`6fae7bbfd083c530b5c3c7198b82300188c9af5a` passed all 19 checks in
-[run 38346668819](https://github.com/calvwng/arcify/actions/runs/38346668819), with
-33 screenshots. Warm Enter, genuinely cold-worker Enter and an overlay click each
-opened an actual native panel with stable 360×869 active-space rendering. Context,
-source-window event, no-normal-tab, hosting and viewport PNG checks corroborate it.
+The exact pair Arcify `3576654c238160e5b41d006d66ca8a456e75502b` / Spotlight
+`23f741b656efad79a6943b74abd946fbab0d5dec` passed all **21 checks** in
+[run 38350796537](https://github.com/calvwng/arcify/actions/runs/38350796537), with
+39 screenshots. Arcify standard CI (389 passes/one baseline skip and 12 browser
+regressions), full E2E (123 tests on each Node 20/22), and Spotlight CI (1,067 tests)
+also passed. Independent source and raw-browser/image review approved this pair.
+
+The new cases verify fuzzy sidebar commands above retained web search on both
+surfaces, fuzzy workspace names on new-tab, real Enter opening the native panel,
+and preserved query/manual selection across live tab removal and a genuine
+Spotlight worker restart. Actual browser assertions also prove distinct New Tab
+IDs, exact source-helper exclusion and removal/selection behavior; those rows are
+below the viewport in images 38–39, so those images are not the identity proof.
+All four native-panel images show stable 360×869 active-space rendering, corroborated
+by context, source-window event, no-normal-tab, hosting and viewport PNG checks.
+
+The subsequent logical-state fixture keeps all 21 checks and adds group-sync-off
+Arcify reorder/membership and bookmark-only workspace metadata updates with zero
+observed native tab events. It requires visible Spotlight refresh without typing,
+manual selection/query preservation and a distinct Spotlight worker after stop.
+This new check requires its own exact-head CI result; do not count the earlier
+21-check run as validation of later product changes. See current paired PR results.
+
 The native proof does not establish full browser startup, initial omnibox focus,
-Helium behavior or OS shortcuts.
-
-The subsequent fixture adds action-ranking and live-tab freshness cases: typo/partial
-sidebar and existing fuzzy workspace matches precede retained web search; a current
-helper is excluded by ID while two legitimate same-title New Tabs remain, a closed
-identity disappears without typing, and the remaining tab still activates. These
-new cases must pass on the updated exact pair; see current PR evidence rather than
-treating the prior 19-check result as coverage of later source changes.
+Helium behavior or OS shortcuts. No physical browser-tab deduplication is included.
 
 ## Unchanged baselines (2026-10-11)
 

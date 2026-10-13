@@ -111,6 +111,7 @@ export function readSpotlightRows() {
         type: row.dataset.resultType,
         title: row.querySelector('.arcify-spotlight-result-title')?.textContent,
         selected: row.classList.contains('selected'),
+        space: row.querySelector('.arcify-space-chip')?.getAttribute('title') || null,
         icon: row.querySelector('.arcify-spotlight-result-favicon')?.getAttribute('src')
     }));
 }
