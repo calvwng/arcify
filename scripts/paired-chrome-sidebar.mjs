@@ -26,3 +26,22 @@ export async function evaluateWithoutGesture(session, expression) {
     assert(!response.result?.subtype || response.result.subtype !== 'error', 'Non-gesture probe returned an exception.');
     return response.result?.value;
 }
+
+// Chrome exposes the override's browser URL and renderer URL differently. Check
+// conservation of each representation rather than equating chrome://newtab with
+// the extension document that actually handled the key.
+export function assertSidebarHelperUnchanged(before, after, { extensionId }) {
+    const documentUrl = `chrome-extension://${extensionId}/newtab.html`;
+    assert.equal(before.pageUrl, documentUrl, 'The command must originate in the exact Spotlight new-tab document.');
+    assert([documentUrl, 'chrome://newtab/'].includes(before.tabUrl), 'The source must be a known new-tab representation.');
+    assert(Number.isSafeInteger(before.tabId) && before.tabId > 0, 'The source tab identity must be valid.');
+    assert(Number.isSafeInteger(before.windowId) && before.windowId > 0, 'The source window identity must be valid.');
+    for (const source of [before, after]) {
+        assert(!source.pendingUrl || [source.tabUrl, documentUrl].includes(source.pendingUrl), 'The source must not have an outbound pending navigation.');
+    }
+    assert.equal(after.windowId, before.windowId, 'Opening the sidebar must preserve the source window.');
+    assert.equal(after.closed, false, 'Opening the sidebar must not close Spotlight.');
+    assert.equal(after.tabId, before.tabId, 'Opening the sidebar must preserve the source tab identity.');
+    assert.equal(after.tabUrl, before.tabUrl, 'Opening the sidebar must preserve the browser-visible source URL.');
+    assert.equal(after.pageUrl, before.pageUrl, 'Opening the sidebar must preserve the rendered source document.');
+}

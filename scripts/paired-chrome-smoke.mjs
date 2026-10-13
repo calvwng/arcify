@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
-import { assertNativeSidebarEvidence, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
+import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
@@ -310,7 +310,10 @@ async function captureNativeSidebar(afterEvent, label) {
         selectedSpaces: [...document.querySelectorAll('#spaceSwitcher > button.active')].map(element => element.dataset.spaceId),
         width: innerWidth, height: innerHeight }));
     await screenshot(page, label);
-    return { context, windowProofSource: 'sidePanel.onOpened', openedEvents: populated.events.slice(afterEvent), targetType: target.type(), hosting, rendered };
+    const evidence = { context, windowProofSource: 'sidePanel.onOpened', openedEvents: populated.events.slice(afterEvent), targetType: target.type(), hosting, rendered };
+    (report.nativePanels ||= []).push({ label, ...evidence });
+    await saveReport();
+    return evidence;
 }
 async function closeNativeSidebar() {
     const before = (await nativePanelState()).events.length;
@@ -836,14 +839,17 @@ try {
         assert.equal(repeated.accepted, false, 'The same page must not accept a second startup preselection.');
         const before = await tabsIn(fixture.windowA);
         const eventCount = (await nativePanelState()).events.length;
+        const sourceTabBefore = before.find(tab => tab.id === helper.tab.id);
+        const sourceBefore = { tabId: sourceTabBefore.id, windowId: sourceTabBefore.windowId, tabUrl: sourceTabBefore.url, pendingUrl: sourceTabBefore.pendingUrl, pageUrl: helper.page.url() };
         await screenshot(helper.page, 'startup-sidebar-command-selected-before-explicit-input-focus');
         await sidebarEnter(helper.page, 'Trusted Enter on startup sidebar suggestion (Spotlight focus explicit)');
         await waitSidebarSuccess(helper.page);
         const native = await captureNativeSidebar(eventCount, 'native-sidebar-opened-from-startup-suggestion');
-        assert.equal(helper.page.isClosed(), false); assert.equal((await tab(helper.tab.id)).url, `chrome-extension://${spotlightId}/newtab.html`);
+        const sourceTabAfter = await tab(helper.tab.id);
+        assertSidebarHelperUnchanged(sourceBefore, { tabId: sourceTabAfter.id, windowId: sourceTabAfter.windowId, tabUrl: sourceTabAfter.url, pendingUrl: sourceTabAfter.pendingUrl, pageUrl: helper.page.url(), closed: helper.page.isClosed() }, { extensionId: spotlightId });
         assert.deepEqual((await tabsIn(fixture.windowA)).map(tab => tab.id), before.map(tab => tab.id), 'Opening a panel must not create or close a tab.');
         await closeNativeSidebar(); await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
-        return { startupOffer: offered, repeatedOffer: repeated, focusBefore, focusExplicitlySetForEnter: true, actualBrowserStartupTested: false, native };
+        return { startupOffer: offered, repeatedOffer: repeated, focusBefore, focusExplicitlySetForEnter: true, actualBrowserStartupTested: false, sourceBefore, native };
     });
     await step(stepNames[15], async () => {
         const helper = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`);

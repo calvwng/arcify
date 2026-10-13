@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertNativeSidebarEvidence, evaluateWithoutGesture } from '../../scripts/paired-chrome-sidebar.mjs';
+import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, evaluateWithoutGesture } from '../../scripts/paired-chrome-sidebar.mjs';
 const id = 'a'.repeat(32);
 const expected = { extensionId: id, windowId: 2, afterEvent: 1 };
 const context = { contextId: 'native', contextType: 'SIDE_PANEL', documentUrl: `chrome-extension://${id}/sidebar.html`, windowId: 2, incognito: false };
@@ -44,5 +44,22 @@ test('native context may report Chromium sentinel window ID only with fresh exac
 test('native panel event path matching rejects broader or malformed normalization', () => {
     for (const path of ['//sidebar.html', 'nested/sidebar.html', 'sidebar.html?x', `chrome-extension://${id}/sidebar.html`, undefined]) {
         assert.throws(() => assertNativeSidebarEvidence([{ ...context, windowId: -1 }], [{}, { ...events[1], path }], expected));
+    }
+});
+
+test('sidebar opening preserves each new-tab URL representation independently', () => {
+    for (const tabUrl of ['chrome://newtab/', `chrome-extension://${id}/newtab.html`]) {
+        const before = { tabId: 9, windowId: 2, tabUrl, pageUrl: `chrome-extension://${id}/newtab.html` };
+        assertSidebarHelperUnchanged(before, { ...before, closed: false }, { extensionId: id });
+        for (const change of [{ closed: true }, { tabId: 10 }, { windowId: 3 }, { pendingUrl: 'https://example.test/' }, { tabUrl: 'https://example.test/' }, { pageUrl: 'https://example.test/' }]) {
+            assert.throws(() => assertSidebarHelperUnchanged(before, { ...before, closed: false, ...change }, { extensionId: id }));
+        }
+    }
+});
+test('helper conservation rejects unknown initial source identity or document', () => {
+    const before = { tabId: 9, windowId: 2, tabUrl: 'chrome://newtab/', pageUrl: `chrome-extension://${id}/newtab.html` };
+    for (const change of [{ tabId: -1 }, { windowId: -1 }, { pendingUrl: 'https://example.test/' }, { tabUrl: 'chrome://settings/' }, { pageUrl: 'chrome://newtab/' }]) {
+        const invalid = { ...before, ...change };
+        assert.throws(() => assertSidebarHelperUnchanged(invalid, { ...invalid, closed: false }, { extensionId: id }));
     }
 });
