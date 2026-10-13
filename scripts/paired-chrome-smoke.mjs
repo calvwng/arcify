@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult } from './paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
@@ -1138,6 +1138,8 @@ try {
             }, { ids: initialIds, spaceId: fixture.spaces.work });
             assert.equal(reordered.success, true);
             await poll(() => helper.page.evaluate(readSpotlightRows), rows => JSON.stringify(logicalRows(rows).map(row => row.title)) === JSON.stringify(reorderedTitles), 'logical tab order without input or native events');
+            report.logicalNativeEventCheckpoints = [{ phase:'reordered', events:await arcifyOptions.evaluate(() => globalThis.__logicalTabEvents) }];
+            assert.deepEqual(report.logicalNativeEventCheckpoints.at(-1).events, []);
             await screenshot(helper.page, 'logical-tab-order-refreshed-without-native-events');
 
             const workerUrl = `chrome-extension://${spotlightId}/background.js`;
@@ -1160,13 +1162,17 @@ try {
                 const replacementTarget = await browser.waitForTarget(item => item !== target && item.type() === 'service_worker' && item.url() === workerUrl);
                 const identity = await waitForExtensionWorkerIdentity(await replacementTarget.worker(),spotlightId);
                 report.logicalInvalidationRestart.push({ phase:'restarted-and-refreshed',replacement,identity,rows });
+                report.logicalNativeEventCheckpoints.push({ phase:'membership-after-restart',events:await arcifyOptions.evaluate(() => globalThis.__logicalTabEvents) });
+                assert.deepEqual(report.logicalNativeEventCheckpoints.at(-1).events, []);
                 await screenshot(helper.page, 'logical-membership-refresh-preserves-query-and-selection');
             } finally { await session.detach(); }
             await search(helper.page, 'pair empty');
             await poll(() => helper.page.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'arcify-space' && row.title === 'Pair Empty'), 'existing empty workspace command');
             const emptyFolderId = (await snapshot()).spaces.find(space => space.id === fixture.spaces.empty).bookmarkFolderId;
-            await ui(helper.page, 'Keep web search selected during bookmark-only metadata update', () => input.asElement().press('ArrowDown'));
+            report.logicalMetadataSelection = await ui(helper.page, 'Keep web search selected during bookmark-only metadata update', () =>
+                selectResultWithKeyboard(input.asElement(), () => helper.page.evaluate(readSpotlightRows), row => row.type === 'search-query' && row.title === 'Search for "pair empty"'));
             assert.equal((await helper.page.evaluate(readSpotlightRows)).find(row => row.selected)?.type, 'search-query');
+            assert.equal(await input.asElement().evaluate(element => element.value), 'pair empty');
             try {
                 await arcifyOptions.evaluate(id => chrome.bookmarks.update(id, { title:'Pair Empty Updated' }), emptyFolderId);
                 const renamed = await poll(() => helper.page.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'arcify-space' && row.title === 'Pair Empty Updated'), 'bookmark-only workspace rename without typing');

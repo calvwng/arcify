@@ -37,6 +37,20 @@ export async function replaceInputText(page, input, text) {
     await input.type(text);
 }
 
+// Choose a unique observed row using real keyboard input, without assuming
+// whether ordinary results or a matching action rank above web search.
+export async function selectResultWithKeyboard(input, readRows, matches) {
+    const before = await readRows();
+    const indices = before.flatMap((row, index) => matches(row) ? [index] : []);
+    if (indices.length !== 1 || before.length > 100) throw new Error('Expected one bounded keyboard selection target.');
+    const keys = ['Home', ...Array(indices[0]).fill('ArrowDown')];
+    for (const key of keys) await input.press(key);
+    const after = await readRows();
+    const selected = after.filter(row => row.selected);
+    if (selected.length !== 1 || !matches(selected[0])) throw new Error('Keyboard selection did not reach the requested result.');
+    return { before, keys, after };
+}
+
 // In locked Puppeteer 25, this exact assertConnectedElement failure occurs in
 // scrollIntoViewIfNeeded, before clickablePoint and mouse.click. Only reacquire
 // for that proven pre-input condition; an uncertain click is never replayed.

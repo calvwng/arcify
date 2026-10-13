@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult } from '../../scripts/paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard } from '../../scripts/paired-chrome-ui.mjs';
 
 function harness() {
     const calls = [], records = [];
@@ -183,4 +183,29 @@ test('post-click evidence failure never repeats a completed click', async () => 
     const h=clickHarness(),error=detachedError();
     await assert.rejects(clickFreshResult(h.locate,async () => {throw error;},h.options),observed => observed === error);
     assert.deepEqual(h.state(),{lookups:1,dispatched:1,disposals:1});
+});
+
+for (const index of [0, 1, 3]) test(`keyboard result selection observes target at row ${index}`, async () => {
+    let selected = 2; const keys = [];
+    const read = async () => Array.from({ length:4 }, (_, i) => ({ type:i === index ? 'search-query' : 'arcify-space',selected:i === selected }));
+    const input = { press:async key => { keys.push(key); selected = key === 'Home' ? 0 : selected + 1; } };
+    const result = await selectResultWithKeyboard(input, read, row => row.type === 'search-query');
+    assert.deepEqual(keys, ['Home', ...Array(index).fill('ArrowDown')]);
+    assert.equal(result.after[index].selected, true);
+});
+for (const count of [0, 2, 101]) test(`keyboard selection rejects absent, duplicate or unbounded target (${count}) before input`, async () => {
+    let presses = 0;
+    await assert.rejects(selectResultWithKeyboard({ press:async () => {presses++;} }, async () => Array.from({length:count}, (_, index) => ({type:count === 101 && index > 0 ? 'other' : 'search-query'})), row => row.type === 'search-query'), /one bounded/);
+    assert.equal(presses, 0);
+});
+test('keyboard selection fails rather than replaying keys if a refresh changes the selected row', async () => {
+    const keys=[]; let reads=0;
+    await assert.rejects(selectResultWithKeyboard({press:async key => keys.push(key)},async () => ++reads === 1
+        ? [{type:'search-query',selected:false}] : [{type:'arcify-space',selected:true}],row => row.type === 'search-query'),/did not reach/);
+    assert.deepEqual(keys,['Home']);
+});
+test('keyboard input errors are not retried', async () => {
+    let presses=0; const error=new Error('input failed');
+    await assert.rejects(selectResultWithKeyboard({press:async () => {presses++;throw error;}},async () => [{type:'search-query'}],row => row.type === 'search-query'),observed => observed === error);
+    assert.equal(presses,1);
 });
