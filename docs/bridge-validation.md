@@ -1,5 +1,23 @@
 # Bridge validation record
 
+## Completed native-panel baseline and next search regressions
+
+The exact pair Arcify `6081313cd2396698cc2292a6ad908d76a94b85ac` / Spotlight
+`6fae7bbfd083c530b5c3c7198b82300188c9af5a` passed all 19 checks in
+[run 38346668819](https://github.com/calvwng/arcify/actions/runs/38346668819), with
+33 screenshots. Warm Enter, genuinely cold-worker Enter and an overlay click each
+opened an actual native panel with stable 360×869 active-space rendering. Context,
+source-window event, no-normal-tab, hosting and viewport PNG checks corroborate it.
+The native proof does not establish full browser startup, initial omnibox focus,
+Helium behavior or OS shortcuts.
+
+The subsequent fixture adds action-ranking and live-tab freshness cases: typo/partial
+sidebar and existing fuzzy workspace matches precede retained web search; a current
+helper is excluded by ID while two legitimate same-title New Tabs remain, a closed
+identity disappears without typing, and the remaining tab still activates. These
+new cases must pass on the updated exact pair; see current PR evidence rather than
+treating the prior 19-check result as coverage of later source changes.
+
 ## Unchanged baselines (2026-10-11)
 
 - Arcify `f714c449e1d88236de9bb45de2259abe5bf5be81`: install/build passed;

@@ -119,3 +119,13 @@ test('actual native DOM reader rejects hidden or offscreen selected chips and sw
         for(const [key,descriptor] of Object.entries(previous)) { if(descriptor) Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key]; }
     }
 });
+
+test('matched action evidence requires selected action first and retained web search', async () => {
+    const { assertMatchedActionFirst } = await import('../../scripts/paired-chrome-sidebar.mjs');
+    const action = { type:'arcify-space',title:'Work',selected:true };
+    const search = { type:'search-query',title:'Search for "wrok"',selected:false };
+    assertMatchedActionFirst([action,search],{ type:'arcify-space',title:'Work',query:'wrok' });
+    for(const rows of [[search,action],[action],[{ ...action,selected:false },search]]) {
+        assert.throws(() => assertMatchedActionFirst(rows,{ type:'arcify-space',title:'Work',query:'wrok' }));
+    }
+});

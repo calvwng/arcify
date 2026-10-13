@@ -104,3 +104,25 @@ export function createNativeSidebarReadiness(extensionId) {
         const stable = previous === current; previous = current; return stable;
     };
 }
+
+export function readSpotlightRows() {
+    const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
+    return [...root.querySelectorAll('[data-testid="spotlight-result"]')].map(row => ({
+        type: row.dataset.resultType,
+        title: row.querySelector('.arcify-spotlight-result-title')?.textContent,
+        selected: row.classList.contains('selected'),
+        icon: row.querySelector('.arcify-spotlight-result-favicon')?.getAttribute('src')
+    }));
+}
+export function assertMatchedActionFirst(rows, { type, title, query }) {
+    assert.equal(rows[0]?.type, type, 'A matched action must precede ordinary web search.');
+    assert.equal(rows[0]?.title, title);
+    assert.equal(rows[0]?.selected, true, 'The best matched action must be primed for a genuine Enter.');
+    const search = rows.findIndex(row => row.type === 'search-query' && row.title.includes(query));
+    assert(search > 0, 'The original web search must remain available below the matched action.');
+    if (type === 'arcify-sidebar-command') {
+        assert(rows[0].icon?.startsWith('data:image/svg+xml,'), 'Sidebar command must have its dedicated SVG icon.');
+        const icon = decodeURIComponent(rows[0].icon.slice('data:image/svg+xml,'.length));
+        assert(icon.includes('<rect') && icon.includes('M9 4v16'), 'Sidebar command must depict a split panel, not a search magnifier.');
+    }
+}

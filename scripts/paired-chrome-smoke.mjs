@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
-import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
+import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
@@ -27,7 +27,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '6fae7bbfd083c530b5c3c7198b82300188c9af5a';
+const PINNED_SPOTLIGHT = '23f741b656efad79a6943b74abd946fbab0d5dec';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -48,7 +48,9 @@ const stepNames = [
     'Trusted Enter opens the sidebar with a genuinely cold Arcify worker',
     'Ordinary overlay sidebar command opens the native panel',
     'Sidebar command rejects non-gesture, malformed and revoked-peer requests',
-    'Startup suggestion preserves typing and manual selection'
+    'Startup suggestion preserves typing and manual selection',
+    'Fuzzy action ranking retains web search in new-tab and overlay UI',
+    'Live New Tab identities refresh without stale or self-helper suggestions'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -514,7 +516,7 @@ try {
         return { pairingOrders: ['arcify-first', 'spotlight-first'], unpairedError: unpaired.error.code, arcifyStatus: await arcifyOptions.$eval('#bridgeStatus', node => node.textContent), spotlightStatus: await spotlightOptions.$eval('#connection-status-message', node => node.textContent) };
     });
     await step(stepNames[2], async () => {
-        const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open' };
+        const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar' };
         server = createServer((request, response) => {
             const title = titles[new URL(request.url, 'http://localhost').pathname] || 'Pair Local Fixture';
             response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
@@ -977,6 +979,90 @@ try {
         await arcifyOptions.evaluate(id => chrome.tabs.remove(id), chosen.tab.id);
         return { typedOffer: refused, manualSelectionOffer: refusedSelection, sourceInputAndSelectionPreserved: true,
             note: 'Real authenticated offer/UI behavior; once-per-session onStartup controller ordering is separately unit-tested.' };
+    });
+
+    await step(stepNames[19], async () => {
+        const helper = await newTabPage('chrome://newtab/'); await waitSidebarCommand(helper.page);
+        await search(helper.page, 'pair wrok');
+        await helper.page.waitForFunction(() => document.querySelector('[data-testid="spotlight-result"].selected')?.dataset.resultType === 'arcify-space', { polling: 50 });
+        const workspaceRows = await helper.page.evaluate(readSpotlightRows);
+        assertMatchedActionFirst(workspaceRows, { type: 'arcify-space', title: 'Pair Work', query: 'pair wrok' });
+        await search(helper.page, 'opn arcfi');
+        await helper.page.waitForSelector(`${sidebarSelector}.selected`);
+        const newtabRows = await helper.page.evaluate(readSpotlightRows);
+        assertMatchedActionFirst(newtabRows, { type: 'arcify-sidebar-command', title: 'Open Arcify sidebar', query: 'opn arcfi' });
+        await screenshot(helper.page, 'fuzzy-sidebar-action-first-newtab');
+        const events = (await nativePanelState()).events.length;
+        await sidebarEnter(helper.page, 'Enter fuzzy-matched sidebar command'); await waitSidebarSuccess(helper.page);
+        const native = await captureNativeSidebar(events, 'native-sidebar-from-fuzzy-newtab-command');
+        await closeNativeSidebar(); await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+        const temporary = await arcifyOptions.evaluate(options => chrome.tabs.create(options), { windowId: fixture.windowA, url: `${fixture.base}/sidebar-match`, active: false });
+        await poll(() => tab(temporary.id), tab => tab.title === 'Open Arcify sidebar', 'temporary matching live tab title');
+        await launchOverlay('current-tab'); await search(sourcePage, 'opn arcfi');
+        await sourcePage.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot.querySelector('[data-result-type="arcify-sidebar-command"].selected'), { polling: 50 });
+        await poll(() => sourcePage.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'open-tab' && row.title === 'Open Arcify sidebar'), 'matching ordinary tab alongside the fuzzy action');
+        const overlayRows = await sourcePage.evaluate(readSpotlightRows);
+        assertMatchedActionFirst(overlayRows, { type: 'arcify-sidebar-command', title: 'Open Arcify sidebar', query: 'opn arcfi' });
+        await screenshot(sourcePage, 'fuzzy-sidebar-action-first-overlay');
+        const input = await sidebarInput(sourcePage);
+        try {
+            await ui(sourcePage, 'Choose retained web search below matched action', () => input.asElement().press('ArrowDown'));
+            assert.equal((await sourcePage.evaluate(readSpotlightRows)).find(row => row.selected)?.type, 'search-query');
+            // Observe the real session registry before stopping its owner. Do not
+            // write tracking state or guess a delay to make restart delivery pass.
+            await poll(() => spotlightOptions.evaluate(() => chrome.storage.session.get('spotlightVisibleOverlayTabIds')),
+                saved => saved.spotlightVisibleOverlayTabIds?.includes(fixture.sourceA), 'durably registered live overlay');
+            const workerUrl = `chrome-extension://${spotlightId}/background.js`;
+            const target = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === workerUrl);
+            const worker = await target.worker();
+            const session = await browser.target().createCDPSession();
+            const readTargets = async () => (await session.send('Target.getTargets')).targetInfos;
+            report.overlayFreshnessRestart = [];
+            try {
+                const old = await terminateObservedWorker({ worker, url: workerUrl, readTargets,
+                    releaseNetwork: async () => { const network = await networkTargets.get(target); assert(network); const id = network.id(); await network.detach(); networkTargets.delete(target); return id; },
+                    record: async observation => { report.overlayFreshnessRestart.push(observation); await saveReport(); }
+                });
+                await arcifyOptions.evaluate(id => chrome.tabs.remove(id), temporary.id);
+                await poll(() => sourcePage.evaluate(readSpotlightRows), rows => !rows.some(row => row.type === 'open-tab' && row.title === 'Open Arcify sidebar'), 'overlay closed-tab invalidation after Spotlight worker restart');
+                const rowsAfterRestart = await sourcePage.evaluate(readSpotlightRows);
+                assert.equal(rowsAfterRestart.find(row => row.selected)?.type, 'search-query', 'A live refresh must preserve manually selected web search.');
+                assert.equal(await input.asElement().evaluate(element => element.value), 'opn arcfi', 'A lifecycle refresh must preserve the typed query.');
+                const targets = await poll(readTargets, targets => targets.some(item => item.url === workerUrl && item.type === 'service_worker' && item.targetId !== old.targetId), 'distinct Spotlight worker after native tab event');
+                const replacement = findExactWorkerTarget(targets, workerUrl); assert.notEqual(replacement.targetId, old.targetId);
+                const replacementTarget = await browser.waitForTarget(item => item !== target && item.type() === 'service_worker' && item.url() === workerUrl);
+                const identity = await waitForExtensionWorkerIdentity(await replacementTarget.worker(), spotlightId);
+                report.overlayFreshnessRestart.push({ phase: 'restarted-and-refreshed', replacement, identity, rowsAfterRestart });
+                await screenshot(sourcePage, 'manual-web-search-survives-live-tab-removal-worker-restart');
+            } finally { await session.detach(); }
+            await ui(sourcePage, 'Dismiss fuzzy action overlay without searching', () => input.asElement().press('Escape'));
+        } finally { await input.dispose(); }
+        return { workspaceRows, newtabRows, overlayRows, native, retainedWebSearchManuallySelectable: true };
+    });
+    await step(stepNames[20], async () => {
+        const first = await newTabPage('chrome://newtab/');
+        const second = await newTabPage('chrome://newtab/');
+        const helper = await newTabPage('chrome://newtab/'); await waitSidebarCommand(helper.page);
+        const rowsNamedNewTab = rows => rows.filter(row => ['open-tab', 'pinned-tab'].includes(row.type) && row.title === 'New Tab');
+        await poll(() => helper.page.evaluate(readSpotlightRows), rows => rowsNamedNewTab(rows).length === 2, 'two legitimate New Tabs with the current helper excluded');
+        const authoritative = await helper.page.evaluate(() => chrome.runtime.sendMessage({ action: 'getSpotlightSuggestions', query: '', mode: 'current-tab' }));
+        assert.equal(authoritative.success, true);
+        const visibleTabIds = authoritative.results.filter(row => ['open-tab','pinned-tab'].includes(row.type)).map(row => row.metadata.tabId);
+        assert(visibleTabIds.includes(first.tab.id) && visibleTabIds.includes(second.tab.id), 'Both distinct same-title tabs must remain discoverable.');
+        assert(!visibleTabIds.includes(helper.tab.id), 'The current helper must not offer switching to itself.');
+        await screenshot(helper.page, 'two-valid-newtab-identities-no-self-helper');
+        await arcifyOptions.evaluate(id => chrome.tabs.remove(id), first.tab.id);
+        await poll(() => helper.page.evaluate(readSpotlightRows), rows => rowsNamedNewTab(rows).length === 1, 'closed-tab removal reflected without another input event');
+        assert.equal(await helper.page.$eval('[data-testid="spotlight-input"]', input => input.value), '');
+        await screenshot(helper.page, 'closed-newtab-removed-without-typing');
+        const before = await tabsIn(fixture.windowA);
+        await clickResult(helper.page, 'New Tab');
+        await poll(() => tab(second.tab.id), tab => tab.active, 'remaining legitimate New Tab activation');
+        await poll(async () => helper.page.isClosed(), closed => closed, 'source helper closes after switching to the other tab');
+        assert.equal((await tabsIn(fixture.windowA)).length, before.length - 1, 'Only the source helper may close during a valid switch.');
+        await arcifyOptions.evaluate(id => chrome.tabs.remove(id), second.tab.id);
+        return { initialLiveTabIds: [first.tab.id,second.tab.id], excludedSourceTabId: helper.tab.id,
+            removedTabId: first.tab.id, remainingActivatedTabId: second.tab.id, refreshedWithoutInput: true };
     });
 
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');

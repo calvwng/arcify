@@ -53,7 +53,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 6fae7bbfd083c530b5c3c7198b82300188c9af5a
+          ref: 23f741b656efad79a6943b74abd946fbab0d5dec
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
