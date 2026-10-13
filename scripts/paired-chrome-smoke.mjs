@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult } from './paired-chrome-ui.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
@@ -235,17 +235,25 @@ async function search(page, query) {
     });
 }
 async function clickResult(page, title) {
-    return ui(page, `Select ${title}`, async () => {
+    return ui(page, `Select ${title}`, () => clickFreshResult(async timeout => {
         await page.waitForFunction(title => {
             const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
             return [...root.querySelectorAll('[data-testid="spotlight-result"]')].some(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
-        }, {}, title);
+        }, { timeout }, title);
         const result = await page.evaluateHandle(title => {
             const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
-            return [...root.querySelectorAll('[data-testid="spotlight-result"]')].find(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
+            const matches = [...root.querySelectorAll('[data-testid="spotlight-result"]')].filter(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
+            if (matches.length !== 1) throw new Error(`Expected one exact result for ${title}, found ${matches.length}.`);
+            return matches[0];
         }, title);
-        const element = result.asElement(); assert(element); await element.click(); await result.dispose();
-    });
+        const element = result.asElement();
+        if (!element) { await result.dispose(); throw new Error('Requested result disappeared before click.'); }
+        return element;
+    }, async observation => {
+        report.resultClicks ||= [];
+        report.resultClicks.push({ title, ...observation, observedAt:new Date().toISOString() });
+        await saveReport();
+    }));
 }
 async function assertSidebarSpace(spaceId) {
     assert(sidebarFixture?.page && !sidebarFixture.page.isClosed(), 'Rendered sidebar fixture must remain open.');

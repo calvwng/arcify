@@ -37,6 +37,39 @@ export async function replaceInputText(page, input, text) {
     await input.type(text);
 }
 
+// In locked Puppeteer 25, this exact assertConnectedElement failure occurs in
+// scrollIntoViewIfNeeded, before clickablePoint and mouse.click. Only reacquire
+// for that proven pre-input condition; an uncertain click is never replayed.
+export async function clickFreshResult(locate, record = async () => {}, {
+    timeoutMs = 20_000, maxAttempts = 3, now = Date.now,
+    pause = ms => new Promise(resolve => setTimeout(resolve, ms))
+} = {}) {
+    const deadline = now() + timeoutMs;
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const remaining = deadline - now();
+        if (remaining <= 0) throw lastError || new Error('Result lookup deadline expired before input.');
+        const element = await locate(remaining);
+        let clicked = false;
+        try {
+            if (now() >= deadline) throw lastError || new Error('Result lookup deadline expired before input.');
+            await element.click();
+            clicked = true;
+        } catch (error) {
+            const preInputDetached = error.message === 'Node is detached from document'
+                && /\bat [^\n]*\.assertConnectedElement\b/.test(error.stack || '')
+                && /\bat [^\n]*\.(?:scrollIntoView|scrollIntoViewIfNeeded|isIntersectingViewport)\b/.test(error.stack || '')
+                && !/Input\.dispatch|Mouse\.click|mouse\.click|CdpMouse/.test(error.stack || '');
+            if (!preInputDetached) throw error;
+            lastError = error;
+            await record({ attempt, status: 'detached-before-input', error: error.message });
+            if (attempt === maxAttempts || now() >= deadline) throw error;
+        } finally { await element.dispose().catch(() => {}); }
+        if (clicked) { await record({ attempt, status: 'clicked' }); return; }
+        await pause(Math.min(50, Math.max(0, deadline - now())));
+    }
+}
+
 // Optional failure evidence must not change the failed UI or mask its error.
 export async function captureVisibleFailurePage(page, label, capture) {
     const observation = { label, url: null, observedAt: new Date().toISOString(), closed: null };

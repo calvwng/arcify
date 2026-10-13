@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from '../../scripts/paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult } from '../../scripts/paired-chrome-ui.mjs';
 
 function harness() {
     const calls = [], records = [];
@@ -124,4 +124,63 @@ test('a stale page metadata probe cannot mask the original fixture failure', asy
     const result = await captureVisibleFailurePage(page, 'failure', async () => { throw new Error('must not capture'); });
     assert.equal(result.status, 'capture_failed'); assert.equal(result.error, 'page unavailable');
     assert.equal(result.url, null);
+});
+
+
+function detachedError(stack = '    at CdpElementHandle.assertConnectedElement (ElementHandle.js:1314:23)\n    at CdpElementHandle.scrollIntoView (ElementHandle.js:106:13)') {
+    const error = new Error('Node is detached from document');
+    error.stack = `${error.message}\n${stack}`.replaceAll('\\n','\n');
+    return error;
+}
+function clickHarness(errors = []) {
+    let time = 0, lookups = 0, dispatched = 0, disposals = 0;
+    const records = [], budgets = [];
+    const locate = async remaining => {
+        budgets.push(remaining); const error = errors[lookups++];
+        return { click:async () => { if (error) throw error; dispatched++; },dispose:async () => { disposals++; } };
+    };
+    return { locate,records,budgets,options:{ now:() => time,pause:async ms => { time += ms; } },
+        state:() => ({lookups,dispatched,disposals}),advance:ms => { time += ms; } };
+}
+test('result click reacquires only proven pre-input detachment and dispatches once', async () => {
+    const h = clickHarness([detachedError()]);
+    await clickFreshResult(h.locate,item => h.records.push(item),h.options);
+    assert.deepEqual(h.state(),{lookups:2,dispatched:1,disposals:2});
+    assert.deepEqual(h.records.map(item => item.status),['detached-before-input','clicked']);
+    assert.deepEqual(h.budgets,[20000,19950]);
+});
+for (const [name,error] of [
+    ['text without assertion stack',new Error('Node is detached from document')],
+    ['assertion without scrolling',detachedError('    at CdpElementHandle.assertConnectedElement (ElementHandle.js:1:1)')],
+    ['input path',detachedError('    at CdpElementHandle.assertConnectedElement (x:1:1)\n    at CdpElementHandle.scrollIntoView (x:2:1)\n    at CdpMouse.click (x:3:1)')],
+    ['protocol timeout',new Error('Input.dispatchMouseEvent timed out')]
+]) test(`result click never retries uncertain ${name}`, async () => {
+    const h=clickHarness([error]);
+    await assert.rejects(clickFreshResult(h.locate,item => h.records.push(item),h.options),observed => observed === error);
+    assert.equal(h.state().lookups,1); assert.equal(h.state().disposals,1); assert.deepEqual(h.records,[]);
+});
+test('repeated pre-input detachment stops at the attempt cap and retains the final error', async () => {
+    const errors=[detachedError(),detachedError(),detachedError()],h=clickHarness(errors);
+    await assert.rejects(clickFreshResult(h.locate,item => h.records.push(item),h.options),error => error === errors[2]);
+    assert.deepEqual(h.state(),{lookups:3,dispatched:0,disposals:3}); assert.equal(h.records.length,3);
+});
+test('shared lookup budget prevents another dispatch after expiration', async () => {
+    const h=clickHarness();
+    await assert.rejects(clickFreshResult(async budget => { const element=await h.locate(budget);h.advance(20001);return element; },undefined,h.options),/deadline expired/);
+    assert.deepEqual(h.state(),{lookups:1,dispatched:0,disposals:1});
+});
+test('cleanup failure after a successful click cannot replay input', async () => {
+    let clicks=0,lookups=0;
+    await clickFreshResult(async () => {lookups++;return {click:async () => {clicks++;},dispose:async () => {throw detachedError();}};});
+    assert.equal(clicks,1);assert.equal(lookups,1);
+});
+test('exact result lookup rejection is fatal before clicking or retrying', async () => {
+    let lookups=0;
+    await assert.rejects(clickFreshResult(async () => {lookups++;throw new Error('Expected one exact result, found 2.');}),/Expected one exact result/);
+    assert.equal(lookups,1);
+});
+test('post-click evidence failure never repeats a completed click', async () => {
+    const h=clickHarness(),error=detachedError();
+    await assert.rejects(clickFreshResult(h.locate,async () => {throw error;},h.options),observed => observed === error);
+    assert.deepEqual(h.state(),{lookups:1,dispatched:1,disposals:1});
 });
