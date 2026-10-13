@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard } from '../../scripts/paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors } from '../../scripts/paired-chrome-ui.mjs';
 
 function harness() {
     const calls = [], records = [];
@@ -208,4 +208,11 @@ test('keyboard input errors are not retried', async () => {
     let presses=0; const error=new Error('input failed');
     await assert.rejects(selectResultWithKeyboard({press:async () => {presses++;throw error;}},async () => [{type:'search-query'}],row => row.type === 'search-query'),observed => observed === error);
     assert.equal(presses,1);
+});
+
+test('uncaught renderer exceptions fail evidence even if UI predicates passed', () => {
+ assert.throws(() => assertNoPageErrors([{type:'pageerror',url:'chrome-extension://fixture/newtab.html',message:'null tabId',stack:'actual stack'}]), /Uncaught renderer exception.*null tabId/);
+});
+test('console and expected observer diagnostics are retained without becoming renderer exceptions', () => {
+ assert.doesNotThrow(() => assertNoPageErrors([{type:'console-error',message:'network unavailable'},{type:'reload-view-detach',message:'closed'}]));
 });

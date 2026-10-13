@@ -14,7 +14,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors } from './paired-chrome-ui.mjs';
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
@@ -29,7 +29,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '91b18839382a6d01f73a823124e764ebb528b163';
+const PINNED_SPOTLIGHT = '0f1ba5eaa50de724cc5ab1e5ef8790e21faeaf08';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -166,6 +166,7 @@ async function step(name, operation) {
             check.windowBUnchanged = true;
         }
         assertNoTargetCrashes(report.targetLifecycle);
+        assertNoPageErrors(report.diagnostics);
         check.status = detail?.skipped ? 'skipped' : 'passed';
         if (detail !== undefined) check.details = detail;
         console.log(`${check.status.toUpperCase()}: ${name}`);
@@ -1511,6 +1512,7 @@ try {
 
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');
     assertNoTargetCrashes(report.targetLifecycle);
+    assertNoPageErrors(report.diagnostics);
     report.status = report.checks.some(check => check.status === 'skipped') ? 'passed_with_skips' : 'passed';
 } catch (error) {
     report.status = 'failed'; report.failure = { message: error.message, stack: error.stack };

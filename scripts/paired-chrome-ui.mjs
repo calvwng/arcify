@@ -1,3 +1,9 @@
+/** Uncaught renderer exceptions cannot be hidden by passing UI assertions. */
+export function assertNoPageErrors(diagnostics) {
+    const errors = diagnostics.filter(item => item.type === 'pageerror');
+    if (errors.length) throw new Error(`Uncaught renderer exception(s): ${JSON.stringify(errors)}`);
+}
+
 /** Real UI actions need a foreground tab, including Puppeteer's viewport observer. */
 export async function performVisibleAction(page, label, action, record = async () => {}) {
     const checkpoint = { label, url: page.url(), phase: 'focus', startedAt: new Date().toISOString() };
