@@ -22,7 +22,11 @@ The subsequent logical-state fixture keeps all 21 checks and adds group-sync-off
 Arcify reorder/membership and bookmark-only workspace metadata updates with zero
 observed native tab events. It requires visible Spotlight refresh without typing,
 manual selection/query preservation and a distinct Spotlight worker after stop.
-This new check requires its own exact-head CI result; do not count the earlier
+The next case also saves an unsupported same-peer extension URL variant as an
+ordinary bookmark, verifies it is absent while the real sidebar command and supported
+bookmark remain, rejects a stale unsupported choice without tab/URL mutation, and
+switches to a legitimate live extension tab by ID. Saved bookmark data remains intact.
+These new checks require their own exact-head CI result; do not count the earlier
 21-check run as validation of later product changes. See current paired PR results.
 
 The native proof does not establish full browser startup, initial omnibox focus,

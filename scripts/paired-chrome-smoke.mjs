@@ -27,7 +27,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '62cd3e96a1874d7a48386641c0834f2fcd15b62e';
+const PINNED_SPOTLIGHT = 'e265e05a1f32ea852c9c17c62c56ba10d0fabdf7';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -51,7 +51,8 @@ const stepNames = [
     'Startup suggestion preserves typing and manual selection',
     'Fuzzy action ranking retains web search in new-tab and overlay UI',
     'Live New Tab identities refresh without stale or self-helper suggestions',
-    'Logical Arcify updates refresh Spotlight without native tab events'
+    'Logical Arcify updates refresh Spotlight without native tab events',
+    'Unsupported generic extension URLs are hidden while live extension tabs still switch'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -1086,10 +1087,21 @@ try {
         for (const id of created) await poll(() => tab(id), tab => tab.status === 'complete' && tab.title.startsWith('Logical Tab'), 'settled logical fixture tab');
         const helper = await newTabPage('chrome://newtab/'); await waitSidebarCommand(helper.page);
         await poll(() => tab(helper.tab.id), tab => tab.status === 'complete', 'settled logical test helper');
-        await search(helper.page, 'logical tab');
+        await search(helper.page, 'logical');
         const logicalRows = rows => rows.filter(row => row.type === 'open-tab' && row.title.startsWith('Logical Tab'));
         await poll(() => helper.page.evaluate(readSpotlightRows), rows => logicalRows(rows).length === 2, 'both logical fixture rows');
-        assert.deepEqual(logicalRows(await helper.page.evaluate(readSpotlightRows)).map(row => row.title), ['Logical Tab One', 'Logical Tab Two']);
+        const initialSnapshot = await snapshot();
+        const initialIds = initialSnapshot.spaces.find(space => space.id === fixture.spaces.work).temporaryTabIds.filter(id => created.includes(id));
+        assert.equal(initialIds.length,2);
+        const titleById = new Map(initialSnapshot.tabs.map(tab => [tab.id,tab.title]));
+        const initialTitles = initialIds.map(id => titleById.get(id));
+        assert.deepEqual(initialTitles.slice().sort(), ['Logical Tab One','Logical Tab Two']);
+        const reorderedTitles = initialTitles.slice().reverse();
+        const scored = await helper.page.evaluate(() => chrome.runtime.sendMessage({ action:'getLocalSuggestions',query:'logical',mode:'new-tab' }));
+        assert.equal(scored.success,true);
+        const scores = scored.results.filter(row => created.includes(row.metadata?.tabId)).map(row => row.score);
+        assert.equal(scores.length,2); assert(scores.every(Number.isFinite)); assert.equal(scores[0],scores[1], 'The order regression requires equal relevance, not overriding search ranking.');
+        assert.deepEqual(logicalRows(await helper.page.evaluate(readSpotlightRows)).map(row => row.title),initialTitles);
         const input = await sidebarInput(helper.page);
         try {
             await ui(helper.page, 'Explicitly keep web search selected during logical updates', async () => {
@@ -1115,9 +1127,9 @@ try {
                 const after = structuredClone(current.spaces), space = after.find(space => space.id === spaceId);
                 space.temporaryTabs = [...space.temporaryTabs.filter(id => !ids.includes(id)), ...ids.slice().reverse()];
                 return chrome.runtime.sendMessage({ type:'spaceStore',action:'patch',before:current.spaces,after });
-            }, { ids: created, spaceId: fixture.spaces.work });
+            }, { ids: initialIds, spaceId: fixture.spaces.work });
             assert.equal(reordered.success, true);
-            await poll(() => helper.page.evaluate(readSpotlightRows), rows => JSON.stringify(logicalRows(rows).map(row => row.title)) === JSON.stringify(['Logical Tab Two','Logical Tab One']), 'logical tab order without input or native events');
+            await poll(() => helper.page.evaluate(readSpotlightRows), rows => JSON.stringify(logicalRows(rows).map(row => row.title)) === JSON.stringify(reorderedTitles), 'logical tab order without input or native events');
             await screenshot(helper.page, 'logical-tab-order-refreshed-without-native-events');
 
             const workerUrl = `chrome-extension://${spotlightId}/background.js`;
@@ -1134,7 +1146,7 @@ try {
                 assert.equal(assigned.success, true);
                 const rows = await poll(() => helper.page.evaluate(readSpotlightRows), rows => logicalRows(rows).find(row => row.title === 'Logical Tab One')?.space === 'Pair Personal', 'logical membership after Spotlight worker restart');
                 assert.equal(rows.find(row => row.selected)?.type, 'search-query');
-                assert.equal(await input.asElement().evaluate(element => element.value), 'logical tab');
+                assert.equal(await input.asElement().evaluate(element => element.value), 'logical');
                 const targets = await poll(readTargets, targets => targets.some(item => item.url === workerUrl && item.type === 'service_worker' && item.targetId !== old.targetId), 'distinct Spotlight worker after logical invalidation');
                 const replacement = findExactWorkerTarget(targets,workerUrl); assert.notEqual(replacement.targetId,old.targetId);
                 const replacementTarget = await browser.waitForTarget(item => item !== target && item.type() === 'service_worker' && item.url() === workerUrl);
@@ -1159,13 +1171,59 @@ try {
             const final = await snapshot();
             assert.equal(final.tabs.find(tab => tab.id === created[0]).spaceId,fixture.spaces.personal);
             assert.equal(final.tabs.find(tab => tab.id === created[1]).spaceId,fixture.spaces.work);
-            return { syncTabGroups:false, tabIds:created, sourceHelperId:helper.tab.id, nativeEvents, query:'logical tab', manualWebSearchPreserved:true,
-                reorderedTitles:['Logical Tab Two','Logical Tab One'], movedTabSpace:fixture.spaces.personal, bookmarkOnlyRenameRefreshed:true,
+            return { syncTabGroups:false, tabIds:created, sourceHelperId:helper.tab.id, nativeEvents, query:'logical', manualWebSearchPreserved:true,
+                initialIds,initialTitles,scores,reorderedTitles, movedTabSpace:fixture.spaces.personal, bookmarkOnlyRenameRefreshed:true,
                 rejectedSignals:{ malformed:malformedSignal.error.code,wrongWindow:wrongWindowSignal.error.code } };
         } finally {
             await input.dispose();
             await arcifyOptions.evaluate(() => { for (const [name,callback] of globalThis.__logicalTabListeners || []) chrome.tabs[name].removeListener(callback); });
             await arcifyOptions.evaluate(ids => chrome.tabs.remove(ids), [...created,helper.tab.id]);
+        }
+    });
+
+
+    await step(stepNames[22], async () => {
+        const unsupportedUrl = `chrome-extension://${arcifyId}/dist/startup-launcher.html`;
+        const saved = await arcifyOptions.evaluate(async ({ unsupportedUrl, base }) => {
+            const unsupported = await chrome.bookmarks.create({ title:'Open Arcify sidebar',url:unsupportedUrl });
+            const supported = await chrome.bookmarks.create({ title:'Open Arcify sidebar reference',url:`${base}/sidebar-reference` });
+            return { unsupported:unsupported.id,supported:supported.id };
+        }, { unsupportedUrl,base:fixture.base });
+        const live = await arcifyOptions.evaluate(options => chrome.tabs.create(options), {
+            windowId:fixture.windowA,url:`chrome-extension://${arcifyId}/options.html?paired-live-tab-identity`,active:false
+        });
+        await poll(() => tab(live.id), tab => tab.title === 'Arcify Settings' && tab.status === 'complete', 'live extension settings tab');
+        const helper = await newTabPage('chrome://newtab/'); await waitSidebarCommand(helper.page);
+        try {
+            await search(helper.page,'open arcify');
+            await poll(() => helper.page.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'bookmark' && row.title === 'Open Arcify sidebar reference'), 'supported ordinary bookmark beside sidebar command');
+            const rows = await helper.page.evaluate(readSpotlightRows);
+            assert(rows.some(row => row.type === 'arcify-sidebar-command' && row.selected));
+            const suggestions = await helper.page.evaluate(() => chrome.runtime.sendMessage({ action:'getSpotlightSuggestions',query:'open arcify',mode:'new-tab' }));
+            assert.equal(suggestions.success,true);
+            assert(!suggestions.results.some(row => row.url === unsupportedUrl));
+            assert.equal((await arcifyOptions.evaluate(id => chrome.bookmarks.get(id), saved.unsupported))[0].url,unsupportedUrl,'Filtering must preserve the saved bookmark.');
+            await screenshot(helper.page,'unsupported-generic-helper-hidden-real-command-retained');
+            const before = await tabsIn(fixture.windowA);
+            const stale = await helper.page.evaluate(url => chrome.runtime.sendMessage({ action:'spotlightHandleResult',mode:'new-tab',result:{ type:'history',title:'Open Arcify sidebar',url } }),unsupportedUrl);
+            assert.equal(stale.success,false); assert.equal(stale.errorCode,'UNSUPPORTED_URL');
+            assert.deepEqual((await tabsIn(fixture.windowA)).map(({id,url}) => ({id,url})),before.map(({id,url}) => ({id,url})), 'Stale unsupported navigation must leave all tabs and URLs intact.');
+            await search(helper.page,'paired-live-tab-identity');
+            await poll(() => helper.page.evaluate(readSpotlightRows), rows => rows.filter(row => row.type === 'open-tab' && row.title === 'Arcify Settings').length === 1, 'unique live extension tab preserved by ID');
+            const matching = await helper.page.evaluate(() => chrome.runtime.sendMessage({ action:'getLocalSuggestions',query:'paired-live-tab-identity',mode:'new-tab' }));
+            assert.equal(matching.success,true);
+            assert.deepEqual(matching.results.filter(row => row.type === 'open-tab' && row.title === 'Arcify Settings').map(row => row.metadata.tabId),[live.id]);
+            await screenshot(helper.page,'legitimate-live-extension-tab-remains-selectable');
+            await clickResult(helper.page,'Arcify Settings');
+            await poll(() => tab(live.id), tab => tab.active, 'ID-based extension tab switch');
+            await poll(async () => helper.page.isClosed(), value => value, 'helper closes only after legitimate tab selection');
+            return { filteredUrl:unsupportedUrl,preservedBookmarkId:saved.unsupported,liveExtensionTabId:live.id,staleActionCode:stale.errorCode };
+        } finally {
+            await arcifyOptions.evaluate(async ({ saved,live,helper }) => {
+                await chrome.bookmarks.remove(saved.unsupported); await chrome.bookmarks.remove(saved.supported);
+                const tabs = await chrome.tabs.query({}); const ids = [live,helper].filter(id => tabs.some(tab => tab.id === id));
+                if (ids.length) await chrome.tabs.remove(ids);
+            }, { saved,live:live.id,helper:helper.tab.id });
         }
     });
 
