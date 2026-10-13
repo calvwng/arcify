@@ -106,7 +106,7 @@ export function createNativeSidebarReadiness(extensionId) {
 }
 
 export function readSpotlightRows() {
-    const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
+    const root = document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument || document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
     return [...root.querySelectorAll('[data-testid="spotlight-result"]')].map(row => ({
         type: row.dataset.resultType,
         title: row.querySelector('.arcify-spotlight-result-title')?.textContent,

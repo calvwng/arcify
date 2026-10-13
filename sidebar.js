@@ -1,3 +1,5 @@
+import { resolveSidebarDrop, insertAtSidebarDrop } from './sidebar-drop-target.js';
+import { createSidebarDropFeedback } from './sidebar-drop-feedback.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { getSpaceBookmarkById, getSpaceBookmarkFolder, getSpaceBookmarkTree, removeSpacePin } from './space-bookmarks.js';
 import { initSidebarTour } from './sidebar-tour.js';
@@ -341,11 +343,19 @@ async function updatePinnedFavicons() {
     if (!pinnedFavicons.dataset.dragListenersBound) {
         pinnedFavicons.dataset.dragListenersBound = 'true';
     pinnedFavicons.addEventListener('dragover', e => {
+        const draggingElement = document.querySelector('.dragging');
+        // Only live tabs can become native Chrome favorites. A folder/closed
+        // bookmark must not advertise a destination that this handler cannot save.
+        if (!draggingElement?.dataset.tabId) {
+            e.currentTarget.classList.remove('drag-over');
+            hideAllDropIndicators();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+            return;
+        }
         e.preventDefault();
         e.currentTarget.classList.add('drag-over');
 
         // Show drop indicator for horizontal favicons
-        const draggingElement = document.querySelector('.dragging');
         if (draggingElement) {
             const afterElement = getDragAfterElementFavicon(pinnedFavicons, e.clientX);
             if (afterElement) {
@@ -549,9 +559,14 @@ async function activatePinnedTabByURL(bookmarkUrl, targetSpaceId, spaceName, boo
 document.addEventListener('DOMContentLoaded', async () => {
     Logger.log('DOM loaded, initializing sidebar...');
     await applyColorOverrides();
+    maxDragFolderDepth = (await chrome.storage.sync.get({ syncTabGroups: false })).syncTabGroups ? 1 : 2;
 
     // Listen for storage changes to re-apply colors when they're updated
     chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName === 'sync' && changes.syncTabGroups) {
+            maxDragFolderDepth = changes.syncTabGroups.newValue ? 1 : 2;
+            sidebarDropFeedback.refresh();
+        }
         if (areaName === 'sync' && changes.colorOverrides) {
             Logger.log('Color overrides changed, re-applying...');
             applyColorOverrides();
@@ -1274,14 +1289,6 @@ function getDragAfterElementSwitcher(container, x) {
     });
 }
 
-function getDragAfterElementTabs(container, y) {
-    return getDragAfterElement(container, y, {
-        axis: 'y',
-        selector: ':scope > .tab:not(.dragging), :scope > .folder:not(.dragging)',
-        placeholderSelector: ':scope > .tab-placeholder'
-    });
-}
-
 function getDragAfterElementFavicon(container, x) {
     return getDragAfterElement(container, x, {
         axis: 'x',
@@ -1312,17 +1319,22 @@ function calculatePinnedTabIndex(afterElement, position, pinnedFavicons) {
 }
 
 // Helper function to set up drag event listeners for tab elements
-function setupTabDragHandlers(tabElement) {
-    tabElement.addEventListener('dragstart', event => {
+function setupTabDragHandlers(tabElement, handle = tabElement) {
+    handle.draggable = true;
+    handle.addEventListener('dragstart', event => {
+        if (event.target.closest('input, button')) { event.preventDefault(); return; }
+        event.stopPropagation();
+        sidebarDropFeedback.clear();
         isDraggingTab = true;
-        event.dataTransfer.setData('text/plain', tabElement.dataset.tabId || tabElement.dataset.url || '');
+        event.dataTransfer.setData('text/plain', tabElement.dataset.bookmarkId || tabElement.dataset.tabId || tabElement.dataset.url || '');
         event.dataTransfer.effectAllowed = 'move';
         tabElement.classList.add('dragging');
         // Track the source folder (if any) so we can resync collapsed-folder projections after drop.
-        dragSourceFolderElement = tabElement.closest('.folder');
+        dragSourceFolderElement = tabElement.parentElement.closest('.folder');
     });
 
-    tabElement.addEventListener('dragend', () => {
+    handle.addEventListener('dragend', () => {
+        sidebarDropFeedback.clear();
         isDraggingTab = false;
         tabElement.classList.remove('dragging');
         dragSourceFolderElement = null;
@@ -1334,6 +1346,35 @@ function setupTabDragHandlers(tabElement) {
 let folderOpenTimer = null;
 let currentHoveredFolder = null;
 let dragSourceFolderElement = null;
+let maxDragFolderDepth = 1;
+const sidebarDropFeedback = createSidebarDropFeedback({
+    document,
+    resolve: point => resolveSidebarDrop({ ...point, dragging: document.querySelector('.dragging'), maxFolderDepth: maxDragFolderDepth }),
+    onTarget: destination => {
+        const folder = destination?.placement === 'inside' ? destination.folder : null;
+        if (folder?.classList.contains('collapsed')) {
+            if (currentHoveredFolder !== folder) startFolderOpenTimer(folder);
+        } else clearFolderOpenTimer();
+    },
+    onClear: clearFolderOpenTimer
+});
+
+document.addEventListener('dragend', () => {
+    isDraggingTab = false;
+    document.querySelectorAll('.dragging').forEach(element => element.classList.remove('dragging'));
+    hideAllDropIndicators();
+    dragSourceFolderElement = null;
+    refreshCoordinator.schedule();
+});
+document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && isDraggingTab) {
+        isDraggingTab = false;
+        document.querySelectorAll('.dragging').forEach(element => element.classList.remove('dragging'));
+        dragSourceFolderElement = null;
+        hideAllDropIndicators();
+        refreshCoordinator.schedule();
+    }
+});
 
 function setFolderCollapsed(folderElement, collapsed, persist = true) {
     folderElement.classList.toggle('collapsed', collapsed);
@@ -1364,7 +1405,8 @@ function startFolderOpenTimer(folderElement) {
         }
         folderOpenTimer = null;
         currentHoveredFolder = null;
-    }, 250); // 750ms delay like macOS Finder
+        sidebarDropFeedback.refresh();
+    }, 250); // Brief hover delay before opening a collapsed folder.
 }
 
 // Helper function to clear the folder auto-open timer
@@ -1717,6 +1759,30 @@ async function handleBookmarkOperations(event, draggingElement, container, targe
         return;
     }
 
+    if (draggingElement.classList.contains('folder')) {
+        if (container.dataset.tabType !== 'pinned' || !draggingElement.dataset.bookmarkId) {
+            throw new Error('Folders can only be moved within Favorites.');
+        }
+        const spaceElement = container.closest('.space');
+        const space = spaces.find(space => space.id === spaceElement.dataset.spaceId);
+        const root = await getSpaceBookmarkFolder(space);
+        const source = dropIntent.bookmarkSourceContent;
+        const target = dropIntent.bookmarkTargetContent;
+        const parentId = bookmarkParentIdForContent(target, root.id);
+        if (source !== target && !await canCreateFolder(root.id, parentId)) {
+            throw new Error('Nested folders require tab group sync to be off and support two folder levels.');
+        }
+        const result = await saveBookmarkOperation(makeBookmarkDropOperation({
+            sourceContent: source, targetContent: target, draggingElement, rootId: root.id, inverted: dropIntent.inverted
+        }));
+        for (const [id, order] of Object.entries(result.orders || {})) bookmarkOrderBaselines.set(String(id), order.map(String));
+        space.spaceBookmarks = mergeVisibleOrder(space.spaceBookmarks ?? [],
+            canonicalOrderFromDisplay(getFlattenedPinnedSectionTabIds(spaceElement), dropIntent.inverted));
+        await persistSpaceTabOrder(space.id);
+        updatePinnedSectionPlaceholders();
+        return { orderHandled: true };
+    }
+
     // Handle tab being moved to pinned section or folder (both open tabs and bookmark-only tabs)
     if (container.dataset.tabType === 'pinned' && (draggingElement.dataset.tabId || draggingElement.dataset.url)) {
         // Handle favorite tab conversion
@@ -2006,85 +2072,28 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
     Logger.log('Setting up drag and drop handlers...');
     [pinnedContainer, tempContainer].forEach(container => {
         container.addEventListener('dragover', e => {
-            e.preventDefault();
-            const draggingElement = document.querySelector('.dragging');
-            if (draggingElement) {
-                const targetFolder = e.target.closest('.folder')?.querySelector(':scope > .folder-content');
-                const targetContainer = targetFolder || container;
-
-                // Check for collapsed folder auto-open functionality
-                const folderElement = e.target.closest('.folder');
-                if (folderElement && folderElement.classList.contains('collapsed')) {
-                    // Start timer to auto-open collapsed folder if hovering over it
-                    if (currentHoveredFolder !== folderElement) {
-                        startFolderOpenTimer(folderElement);
-                    }
-                } else {
-                    // Clear timer if not hovering over a collapsed folder
-                    clearFolderOpenTimer();
-                }
-
-                // Get the element we're dragging over to show drop indicator
-                const afterElement = getDragAfterElementTabs(targetContainer, e.clientY);
-                if (afterElement && targetContainer.contains(afterElement)) {
-                    // Check if this is a placeholder (empty container)
-                    if (afterElement.classList.contains('tab-placeholder')) {
-                        // Show visual feedback on the placeholder itself
-                        afterElement.classList.add('drag-over');
-                        hideAllDropIndicators(); // Don't show traditional indicators for placeholders
-                    } else {
-                        // Show traditional drop indicators for actual tabs/folders
-                        const position = getDropPosition(afterElement, e.clientX, e.clientY, false);
-                        showDropIndicator(afterElement, position, false);
-                        // Remove any placeholder drag-over state in this container
-                        const placeholder = targetContainer.querySelector('.tab-placeholder');
-                        if (placeholder) placeholder.classList.remove('drag-over');
-                    }
-                } else {
-                    // If no specific element, hide indicators
-                    hideAllDropIndicators();
-                    // Remove any placeholder drag-over state in this container
-                    const placeholder = targetContainer.querySelector('.tab-placeholder');
-                    if (placeholder) placeholder.classList.remove('drag-over');
-                }
-
-                // Note: Actual bookmark operations moved to drop event for proper architecture
-            }
+            const destination = sidebarDropFeedback.update(e, container);
+            hideAllDropIndicators();
+            if (destination) e.preventDefault();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = destination ? 'move' : 'none';
         });
-
-        // Add dragleave handler to hide indicators when leaving container
         container.addEventListener('dragleave', e => {
-            // Only hide indicators if we're actually leaving the container (not moving to a child)
-            if (!container.contains(e.relatedTarget)) {
-                hideAllDropIndicators();
-                // Remove any placeholder drag-over state in this container
-                const placeholder = container.querySelector('.tab-placeholder');
-                if (placeholder) placeholder.classList.remove('drag-over');
-                // Clear folder auto-open timer when leaving the container
-                clearFolderOpenTimer();
-            }
+            if (!container.contains(e.relatedTarget)) sidebarDropFeedback.clear();
         });
 
         // Add drop handler to position elements and hide indicators
         container.addEventListener('drop', async e => {
             e.preventDefault();
+            const destination = sidebarDropFeedback.drop(e, container);
             hideAllDropIndicators();
-            // Remove any placeholder drag-over state in this container
-            const placeholder = container.querySelector('.tab-placeholder');
-            if (placeholder) placeholder.classList.remove('drag-over');
-            // Clear folder auto-open timer on drop
-            clearFolderOpenTimer();
-
             const draggingElement = document.querySelector('.dragging');
-            if (draggingElement) {
+            if (draggingElement && destination) {
                 pendingMutationCount++;
                 try {
                 const spaceElement = container.closest('.space');
-                if (container.dataset.tabType === 'pinned' && spaceElement?.dataset.bookmarkTreeUnavailable === 'true') {
-                    throw new Error('Favorites are unavailable until this space bookmark folder is restored.');
-                }
                 const originalContent = draggingElement.parentElement;
-                const sourceContent = dragSourceFolderElement?.querySelector(':scope > .folder-content');
+                const sourceFolderElement = dragSourceFolderElement;
+                const sourceContent = sourceFolderElement?.querySelector(':scope > .folder-content');
                 const anchorKey = draggingElement.dataset.bookmarkId || draggingElement.dataset.tabId;
                 const sourceAnchor = sourceContent && projectedTabAnchors.get(sourceContent)?.get(anchorKey);
                 if (sourceAnchor) {
@@ -2092,41 +2101,11 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
                     projectedTabAnchors.get(sourceContent).delete(anchorKey);
                 }
                 const droppedTabId = draggingElement.dataset.tabId ? parseInt(draggingElement.dataset.tabId) : null;
-                // If dropping on a folder header / collapsed folder area, treat it as dropping into that folder.
-                const targetFolderElement = e.target.closest('.folder');
+                const targetFolderElement = destination.folder;
                 const targetFolder = targetFolderElement?.querySelector(':scope > .folder-content');
                 if (targetFolderElement) openFolder(targetFolderElement);
-
-                const targetContainer = targetFolder || container;
-
-                // Calculate drop position using same logic as indicators
-                const afterElement = getDragAfterElementTabs(targetContainer, e.clientY);
-                if (afterElement && targetContainer.contains(afterElement)) {
-                    // Check if this is a placeholder (empty container)
-                    if (afterElement.classList.contains('tab-placeholder')) {
-                        // Empty container - append directly and hide placeholder
-                        targetContainer.appendChild(draggingElement);
-                        afterElement.classList.add('hidden');
-                    } else {
-                        // Normal positioning logic for actual tabs/folders
-                        const position = getDropPosition(afterElement, e.clientX, e.clientY, false);
-
-                        // Position element based on indicator logic
-                        if (position === 'above') {
-                            targetContainer.insertBefore(draggingElement, afterElement);
-                        } else { // 'below'
-                            const nextSibling = afterElement.nextElementSibling;
-                            if (nextSibling) {
-                                targetContainer.insertBefore(draggingElement, nextSibling);
-                            } else {
-                                targetContainer.appendChild(draggingElement);
-                            }
-                        }
-                    }
-                } else {
-                    // Fallback: append to end if no specific target
-                    targetContainer.appendChild(draggingElement);
-                }
+                const targetContainer = destination.container;
+                insertAtSidebarDrop(destination, draggingElement);
 
                 const dropInverted = await Utils.getInvertTabOrder();
                 const dropIntent = container.dataset.tabType === 'temporary'
@@ -2141,10 +2120,10 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
                 const operationResult = await handleBookmarkOperations(e, draggingElement, container, targetFolder, dropIntent);
 
                 // Resync collapsed-folder projections/icons after move (source + destination)
-                if (dragSourceFolderElement) {
-                    syncCollapsedFolderTabs(dragSourceFolderElement);
+                if (sourceFolderElement) {
+                    syncCollapsedFolderTabs(sourceFolderElement);
                 }
-                if (targetFolderElement && targetFolderElement !== dragSourceFolderElement) {
+                if (targetFolderElement && targetFolderElement !== sourceFolderElement) {
                     syncCollapsedFolderTabs(targetFolderElement);
                 }
 
@@ -2169,68 +2148,23 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
 
 // Function to set up drag and drop for placeholder containers to make entire placeholder area droppable
 function setupPlaceholderDragAndDrop(placeholderContainer, pinnedContainer) {
-    Logger.log('Setting up placeholder drag and drop handlers...');
-
-    placeholderContainer.addEventListener('dragover', e => {
-        e.preventDefault();
-        const draggingElement = document.querySelector('.dragging');
-        if (draggingElement) {
-            // Check if pinned container is empty (no tabs or folders, only placeholder)
-            const hasContent = pinnedContainer.querySelectorAll('.tab:not(.tab-placeholder), .folder').length > 0;
-
-            if (!hasContent) {
-                // Container is empty - show visual feedback on placeholder
-                const placeholder = placeholderContainer.querySelector('.tab-placeholder');
-                if (placeholder) {
-                    placeholder.classList.add('drag-over');
-                }
-                hideAllDropIndicators();
-            }
-        }
+    const isEmpty = () => !pinnedContainer.querySelector('.tab, .folder');
+    placeholderContainer.addEventListener('dragover', event => {
+        if (!isEmpty()) return;
+        const destination = sidebarDropFeedback.update({ target: pinnedContainer, clientX: event.clientX, clientY: event.clientY }, pinnedContainer);
+        if (destination) event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = destination ? 'move' : 'none';
     });
-
-    placeholderContainer.addEventListener('dragleave', e => {
-        // Only hide if leaving the placeholder container entirely
-        if (!placeholderContainer.contains(e.relatedTarget)) {
-            const placeholder = placeholderContainer.querySelector('.tab-placeholder');
-            if (placeholder) {
-                placeholder.classList.remove('drag-over');
-            }
-        }
+    placeholderContainer.addEventListener('dragleave', event => {
+        if (!placeholderContainer.contains(event.relatedTarget)) sidebarDropFeedback.clear();
     });
-
-    placeholderContainer.addEventListener('drop', async e => {
-        e.preventDefault();
-        const placeholder = placeholderContainer.querySelector('.tab-placeholder');
-        if (placeholder) {
-            placeholder.classList.remove('drag-over');
-        }
-        hideAllDropIndicators();
-
-        const draggingElement = document.querySelector('.dragging');
-        if (draggingElement) {
-            // Check if pinned container is empty
-            const hasContent = pinnedContainer.querySelectorAll('.tab:not(.tab-placeholder), .folder').length > 0;
-
-            if (!hasContent) {
-                // Forward the drop to the pinned container by simulating the drop event
-                Logger.log('Forwarding placeholder drop to pinned container');
-
-                // Create a synthetic drop event for the pinned container
-                const syntheticEvent = new DragEvent('drop', {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: e.dataTransfer,
-                    clientX: e.clientX,
-                    clientY: e.clientY,
-                    screenX: e.screenX,
-                    screenY: e.screenY
-                });
-
-                // Dispatch the event on the pinned container
-                pinnedContainer.dispatchEvent(syntheticEvent);
-            }
-        }
+    placeholderContainer.addEventListener('drop', event => {
+        if (!isEmpty()) return;
+        event.preventDefault();
+        pinnedContainer.dispatchEvent(new DragEvent('drop', {
+            bubbles: true, cancelable: true, dataTransfer: event.dataTransfer,
+            clientX: event.clientX, clientY: event.clientY
+        }));
     });
 }
 
@@ -2280,6 +2214,7 @@ async function createNewFolder(spaceElement, parentFolderElement = null) {
     }
     let createdFolderId = createdFolder.id;
     folderElement.dataset.bookmarkId = createdFolderId;
+    setupTabDragHandlers(folderElement, folderHeader);
     await saveFolderCollapsed(createdFolderId, false);
     if (folderEditSession.disposed || activeSpaceId !== space.id || !spaceElement.isConnected) {
         refreshCoordinator.schedule();
@@ -2395,6 +2330,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
                         const folderElement = newFolder.querySelector('.folder');
                         folderElement.dataset.bookmarkId = item.id;
                         const folderHeader = folderElement.querySelector('.folder-header');
+                        setupTabDragHandlers(folderElement, folderHeader);
                         const folderIcon = folderElement.querySelector('.folder-icon');
                         const folderTitle = folderElement.querySelector('.folder-title');
                         const folderNameInput = folderElement.querySelector('.folder-name');

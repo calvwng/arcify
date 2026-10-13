@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
+import { readNewTabReuseState, assertActiveNewTabReused } from './paired-chrome-newtab.mjs';
+import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
@@ -27,7 +29,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = 'e265e05a1f32ea852c9c17c62c56ba10d0fabdf7';
+const PINNED_SPOTLIGHT = '91b18839382a6d01f73a823124e764ebb528b163';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -52,7 +54,10 @@ const stepNames = [
     'Fuzzy action ranking retains web search in new-tab and overlay UI',
     'Live New Tab identities refresh without stale or self-helper suggestions',
     'Logical Arcify updates refresh Spotlight without native tab events',
-    'Unsupported generic extension URLs are hidden while live extension tabs still switch'
+    'Unsupported generic extension URLs are hidden while live extension tabs still switch',
+    'Controlled Spotlight launches reuse the active browser New Tab alias without losing input',
+    'Overlay typing stays isolated from pre-existing host shortcuts under strict CSP',
+    'Sidebar drag anchors match saved tab and folder destinations'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -220,12 +225,12 @@ async function newTabPage(url, windowId = fixture.windowA) {
 }
 async function search(page, query) {
     return ui(page, 'Type Spotlight query', async () => {
-        await page.waitForFunction(() => {
-            const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
-            const input = root.querySelector('[data-testid="spotlight-input"]');
+        const surface = await spotlightSurface(page);
+        await surface.waitForFunction(() => {
+            const input = document.querySelector('[data-testid="spotlight-input"]');
             return input && input.getBoundingClientRect().width > 0;
         });
-        const handle = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
+        const handle = await (await spotlightSurface(page)).evaluateHandle(() => document.querySelector('[data-testid="spotlight-input"]'));
         const input = handle.asElement(); assert(input);
         await replaceInputText(page, input, query);
         assert.equal(page.isClosed(), false, 'Typing a search query must leave its page open.');
@@ -236,12 +241,13 @@ async function search(page, query) {
 }
 async function clickResult(page, title) {
     return ui(page, `Select ${title}`, () => clickFreshResult(async timeout => {
-        await page.waitForFunction(title => {
-            const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
+        const surface = await spotlightSurface(page);
+        await surface.waitForFunction(title => {
+            const root = document;
             return [...root.querySelectorAll('[data-testid="spotlight-result"]')].some(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
         }, { timeout }, title);
-        const result = await page.evaluateHandle(title => {
-            const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
+        const result = await surface.evaluateHandle(title => {
+            const root = document;
             const matches = [...root.querySelectorAll('[data-testid="spotlight-result"]')].filter(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === title);
             if (matches.length !== 1) throw new Error(`Expected one exact result for ${title}, found ${matches.length}.`);
             return matches[0];
@@ -271,10 +277,10 @@ async function assertSidebarSpace(spaceId) {
 async function enterUrl(page, url) {
     await search(page, url);
     await page.waitForFunction(url => {
-        const root = document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
+        const root = document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument || document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
         return root.querySelector('[data-testid="spotlight-result"]')?.textContent.includes(new URL(url).pathname);
     }, {}, url);
-    const input = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
+    const input = await sidebarInput(page);
     await ui(page, 'Open typed URL', () => input.asElement().press('Enter')); await input.dispose();
 }
 async function launchOverlay(mode = 'new-tab') {
@@ -290,15 +296,15 @@ async function launchOverlay(mode = 'new-tab') {
 
 const sidebarSelector = '[data-result-type="arcify-sidebar-command"]';
 async function sidebarInput(page) {
-    const handle = await page.evaluateHandle(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-testid="spotlight-input"]'));
+    const handle = await (await spotlightSurface(page)).evaluateHandle(() => document.querySelector('[data-testid="spotlight-input"]'));
     assert(handle.asElement(), 'Spotlight input must exist.');
     return handle;
 }
 async function waitSidebarCommand(page) {
-    await page.waitForFunction(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-result-type="arcify-sidebar-command"]'), { polling: 50 });
+    await page.waitForFunction(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument || document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-result-type="arcify-sidebar-command"]'), { polling: 50 });
 }
 async function waitSidebarSuccess(page) {
-    await page.waitForFunction(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('.arcify-bridge-status')?.textContent.includes('Arcify sidebar opened.'), { polling: 50 });
+    await page.waitForFunction(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument || document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('.arcify-bridge-status')?.textContent.includes('Arcify sidebar opened.'), { polling: 50 });
 }
 async function nativePanelState() {
     return arcifyOptions.evaluate(async () => ({
@@ -528,7 +534,13 @@ try {
     await step(stepNames[2], async () => {
         const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two' };
         server = createServer((request, response) => {
-            const title = titles[new URL(request.url, 'http://localhost').pathname] || 'Pair Local Fixture';
+            const path = new URL(request.url, 'http://localhost').pathname;
+            if (path === '/keyboard-host' || path === '/keyboard-host.js') {
+                response.writeHead(200, { 'content-type':path.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/html; charset=utf-8', 'content-security-policy':KEYBOARD_CSP, 'cache-control':'no-store' });
+                response.end(path.endsWith('.js') ? KEYBOARD_SCRIPT : KEYBOARD_HTML);
+                return;
+            }
+            const title = titles[path] || 'Pair Local Fixture';
             response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
             response.end(`<!doctype html><html><head><title>${title}</title><link rel="icon" href="data:,"></head><body style="font:24px system-ui;padding:3rem;background:#eef2ff"><h1>${title}</h1><p>Local GitHub Actions test page. No external resources.</p></body></html>`);
         });
@@ -586,7 +598,7 @@ try {
         await assertSidebarSpace(fixture.spaces.work);
         const beforeCount = (await tabsIn(fixture.windowA)).length;
         await launchOverlay(); await search(sourcePage, 'Pair Alpha Target');
-        await sourcePage.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot?.textContent.includes('Pair Alpha Target'));
+        await sourcePage.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument?.body.textContent.includes('Pair Alpha Target'));
         await screenshot(sourcePage, 'overlay-live-tab-search'); await clickResult(sourcePage, 'Pair Alpha Target');
         await poll(() => tab(fixture.alpha), tab => tab.active, 'exact live-tab selection');
         const state = await snapshot(); assert.equal(state.activeSpaceId, fixture.spaces.personal);
@@ -1009,7 +1021,7 @@ try {
         const temporary = await arcifyOptions.evaluate(options => chrome.tabs.create(options), { windowId: fixture.windowA, url: `${fixture.base}/sidebar-match`, active: false });
         await poll(() => tab(temporary.id), tab => tab.title === 'Open Arcify sidebar', 'temporary matching live tab title');
         await launchOverlay('current-tab'); await search(sourcePage, 'opn arcfi');
-        await sourcePage.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot.querySelector('[data-result-type="arcify-sidebar-command"].selected'), { polling: 50 });
+        await sourcePage.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument?.querySelector('[data-result-type="arcify-sidebar-command"].selected'), { polling: 50 });
         await poll(() => sourcePage.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'open-tab' && row.title === 'Open Arcify sidebar'), 'matching ordinary tab alongside the fuzzy action');
         const overlayRows = await sourcePage.evaluate(readSpotlightRows);
         assertMatchedActionFirst(overlayRows, { type: 'arcify-sidebar-command', title: 'Open Arcify sidebar', query: 'opn arcfi' });
@@ -1238,6 +1250,220 @@ try {
                 const tabs = await chrome.tabs.query({}); const ids = [live,helper].filter(id => tabs.some(tab => tab.id === id));
                 if (ids.length) await chrome.tabs.remove(ids);
             }, { saved,live:live.id,helper:helper.tab.id });
+        }
+    });
+
+    await step(stepNames[23], async () => {
+        const priorTargets = new Set(browser.targets());
+        const created = await arcifyOptions.evaluate(() => chrome.windows.create({ url:'chrome://newtab/',type:'normal',focused:true }));
+        assert.equal(created.tabs.length,1);
+        const sourceId = created.tabs[0].id;
+        let helperPage;
+        try {
+            helperPage = await poll(async () => {
+                for (const target of browser.targets()) {
+                    if (priorTargets.has(target) || target.type() !== 'page' || target.url() !== `chrome-extension://${spotlightId}/newtab.html`) continue;
+                    try {
+                        const page = await target.page();
+                        if ((await page.evaluate(() => chrome.tabs.getCurrent())).id === sourceId) return observePage(page);
+                    } catch (error) {
+                        if (!/Execution context was destroyed|Cannot find context with specified id/.test(error.message)) throw error;
+                    }
+                }
+                return null;
+            },Boolean,'exact browser-created alias renderer');
+            await poll(() => tab(sourceId),tab => tab.status === 'complete' && !tab.pendingUrl,'settled browser New Tab alias');
+            await waitSidebarCommand(helperPage);
+            await search(helperPage,'retain alias draft');
+            const input = await sidebarInput(helperPage);
+            try {
+                await ui(helperPage,'Manually keep alias web search selected',() => selectResultWithKeyboard(input.asElement(),() => helperPage.evaluate(readSpotlightRows),row => row.type === 'search-query' && row.title === 'Search for "retain alias draft"'));
+            } finally { await input.dispose(); }
+            const before = await helperPage.evaluate(readNewTabReuseState);
+            const tabsBefore = await tabsIn(created.id);
+            assert.deepEqual(tabsBefore.map(tab => tab.id),[sourceId]);
+            // This is the production command-message entry point, not an OS keypress.
+            // No bringToFront/focus call is permitted between these observations.
+            const replies = await helperPage.evaluate(() => Promise.all(Array.from({length:6},() => chrome.runtime.sendMessage({command:'toggleSpotlightNewTab'}))));
+            assert(replies.every(reply => reply?.success === true),JSON.stringify(replies));
+            const afterCommands = await helperPage.evaluate(readNewTabReuseState);
+            assertActiveNewTabReused(before,afterCommands,tabsBefore.map(tab => tab.id),(await tabsIn(created.id)).map(tab => tab.id),spotlightId);
+            const paired = await external(arcifyOptions,spotlightId,'launch',{windowId:created.id,mode:'new-tab'});
+            assert.equal(paired.ok,true,JSON.stringify(paired));
+            const afterPaired = await helperPage.evaluate(readNewTabReuseState);
+            assertActiveNewTabReused(before,afterPaired,[sourceId],(await tabsIn(created.id)).map(tab => tab.id),spotlightId);
+            await screenshot(helperPage,'active-newtab-alias-reused-with-query-and-selection');
+
+            // A separately created inactive helper is legitimate and must not be
+            // closed or stolen merely to enforce a global singleton count.
+            const inactive = await arcifyOptions.evaluate(options => chrome.tabs.create(options),{windowId:created.id,url:`chrome-extension://${spotlightId}/newtab.html`,active:false});
+            await poll(() => tab(inactive.id),tab => tab.status === 'complete' && !tab.pendingUrl,'separate inactive helper settled');
+            const beforeDuplicate = await helperPage.evaluate(readNewTabReuseState);
+            const repeated = await helperPage.evaluate(() => Promise.all(Array.from({length:3},() => chrome.runtime.sendMessage({command:'toggleSpotlightNewTab'}))));
+            assert(repeated.every(reply => reply?.success === true),JSON.stringify(repeated));
+            const afterDuplicate = await helperPage.evaluate(readNewTabReuseState);
+            assertActiveNewTabReused(beforeDuplicate,afterDuplicate,[sourceId,inactive.id],(await tabsIn(created.id)).map(tab => tab.id),spotlightId);
+            const preserved = await tab(inactive.id);
+            assert.equal(preserved.active,false); assert.equal(preserved.url,`chrome-extension://${spotlightId}/newtab.html`);
+            return { windowId:created.id,sourceId,before,afterCommands,afterPaired,replies,
+                inactiveHelperPreserved:inactive.id,afterDuplicate,commandDispatch:'production runtime command message; physical Ctrl+T and omnibox draft remain manual' };
+        } finally { await arcifyOptions.evaluate(id => chrome.windows.remove(id),created.id); }
+    });
+
+    await step(stepNames[24], async () => {
+        const hostTab = await arcifyOptions.evaluate(options => chrome.tabs.create(options),{ windowId:fixture.windowA,url:`${fixture.base}/keyboard-host`,active:true });
+        const page = await pageForUrl(`${fixture.base}/keyboard-host`);
+        const readHost = () => page.evaluate(() => ({ ready:globalThis.hostReady,keys:globalThis.hostKeys,shortcuts:globalThis.hostShortcuts }));
+        const cycles = [];
+        try {
+            await page.waitForFunction(() => globalThis.hostReady === true);
+            for (let cycle = 0; cycle < 2; cycle++) {
+                await clickUI(page,'#previous');
+                assert.equal(await page.evaluate(() => document.activeElement.id),'previous');
+                const before = await readHost();
+                const opened = await external(arcifyOptions,spotlightId,'launch',{windowId:fixture.windowA,mode:'new-tab'});
+                assert.equal(opened.ok,true,JSON.stringify(opened));
+                await page.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('dialog')?.open);
+                const surface = await spotlightSurface(page);
+                await surface.waitForFunction(() => document.querySelector('[data-testid="spotlight-input"]') === document.activeElement);
+                await page.keyboard.type('window with w');
+                assert.equal(await surface.$eval('[data-testid="spotlight-input"]',input => input.value),'window with w');
+                await page.keyboard.down('Control');
+                try { await page.keyboard.press('KeyA'); } finally { await page.keyboard.up('Control'); }
+                await page.keyboard.press('Backspace');
+                await page.keyboard.type('w window');
+                assert.equal(await surface.$eval('[data-testid="spotlight-input"]',input => input.value),'w window');
+                const typed = await readHost(); assertHostKeyboardIsolated(before,typed);
+                const render = await surface.evaluate(() => {
+                    const input = document.querySelector('[data-testid="spotlight-input"]');
+                    const rect = input.getBoundingClientRect();
+                    return { background:getComputedStyle(document.querySelector('.arcify-spotlight-container')).backgroundColor,
+                        width:innerWidth,height:innerHeight,input:{x:rect.x,y:rect.y,width:rect.width,height:rect.height} };
+                });
+                assert.equal(render.background,'rgb(45, 45, 45)','Host CSP must not strip the isolated Spotlight styling.');
+                assert(render.width > 100 && render.height > 100 && render.input.width > 0 && render.input.height > 0);
+                assert(render.input.x >= 0 && render.input.y >= 0 && render.input.x + render.input.width <= render.width + 1);
+                if (cycle === 0) await screenshot(page,'isolated-overlay-typing-under-strict-host-csp');
+                await page.keyboard.down('Shift');
+                try { await page.keyboard.press('Tab'); } finally { await page.keyboard.up('Shift'); }
+                assert.equal(await surface.evaluate(() => document.activeElement.textContent),'Connection settings');
+                await page.keyboard.press('Tab');
+                assert.equal(await surface.$eval('[data-testid="spotlight-input"]',input => input === document.activeElement),true);
+                await page.keyboard.press('Tab');
+                assert.equal(await surface.evaluate(() => document.activeElement.tagName),'BUTTON');
+                assertHostKeyboardIsolated(before,await readHost());
+                await page.keyboard.press('Escape');
+                await page.waitForFunction(() => !document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('dialog')?.open);
+                assert.equal(await page.evaluate(() => document.activeElement.id),'previous');
+                await page.keyboard.press('KeyW');
+                const afterClose = await readHost(); assert(afterClose.shortcuts > before.shortcuts,'Host keyboard shortcuts must resume after Spotlight closes.');
+                await page.waitForFunction(() => !document.getElementById('arcify-spotlight-host'));
+                cycles.push({before,typed,afterClose,render});
+            }
+            return {hostTabId:hostTab.id,csp:KEYBOARD_CSP,cycles,realKeyboard:true,eventsInjected:false};
+        } finally { await arcifyOptions.evaluate(id => chrome.tabs.remove(id),hostTab.id); }
+    });
+
+    await step(stepNames[25], async () => {
+        await bridge('activateSpace',{spaceId:fixture.spaces.work});
+        const space = (await snapshot()).spaces.find(space => space.id === fixture.spaces.work);
+        const saved = await arcifyOptions.evaluate(async ({rootId,base}) => {
+            const folderA = await chrome.bookmarks.create({parentId:rootId,index:0,title:'Drop Folder A'});
+            const folderB = await chrome.bookmarks.create({parentId:rootId,index:1,title:'Drop Folder B'});
+            const one = await chrome.bookmarks.create({parentId:rootId,index:2,title:'Drop Link One',url:`${base}/drop-one`});
+            const two = await chrome.bookmarks.create({parentId:rootId,index:3,title:'Drop Link Two',url:`${base}/drop-two`});
+            return {folderA:folderA.id,folderB:folderB.id,one:one.id,two:two.id};
+        },{rootId:space.bookmarkFolderId,base:fixture.base});
+        const sidebar = await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`);
+        const page = sidebar.page;
+        const row = id => `.space[data-space-id="${fixture.spaces.work}"] [data-bookmark-id="${id}"]`;
+        const children = id => arcifyOptions.evaluate(async id => (await chrome.bookmarks.getChildren(id)).map(item => item.id),id);
+        const observations = [];
+        const drag = async (sourceSelector,targetSelector,placement,label) => ui(page,label,async () => {
+            const source = await page.$(sourceSelector), target = await page.$(targetSelector);
+            assert(source && target,'Exact drag source and destination must exist.');
+            let mouseDown = false;
+            try {
+                await target.scrollIntoView();
+                const from = await source.boundingBox(),to = await target.boundingBox();
+                assert(from && to && from.height > 0 && to.height > 0);
+                const x = Math.min(from.x+40,from.x+from.width/2),y = from.y+from.height/2;
+                const tx = Math.min(to.x+40,to.x+to.width/2),ty = placement === 'inside' ? to.y+to.height/2 : to.y+2;
+                await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
+                await page.mouse.move(x+12,y,{steps:5});
+                await page.mouse.move(tx,ty,{steps:20});
+                await page.waitForFunction(({placement,targetSelector}) => {
+                    if (placement === 'inside') return document.querySelector(targetSelector)?.classList.contains('sidebar-drop-inside');
+                    const line = document.querySelector('.sidebar-drop-anchor:not([hidden])');
+                    return line?.dataset.placement === placement;
+                },{polling:50},{placement,targetSelector});
+                const feedback = await page.evaluate(({placement,targetSelector}) => {
+                    const element = placement === 'inside' ? document.querySelector(targetSelector) : document.querySelector('.sidebar-drop-anchor:not([hidden])');
+                    const rect = element.getBoundingClientRect();
+                    const target = document.querySelector(targetSelector).getBoundingClientRect();
+                    return {placement,rect:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},target:{y:target.y},
+                        status:document.querySelector('.sidebar-drop-status')?.textContent,
+                        pointerEvents:getComputedStyle(element).pointerEvents};
+                },{placement,targetSelector});
+                assert(feedback.rect.width > 0 && feedback.rect.height > 0);
+                if (placement === 'before') { assert(Math.abs(feedback.rect.y+1-feedback.target.y) <= 1); assert.equal(feedback.pointerEvents,'none'); }
+                await screenshot(page,label);
+                await page.mouse.up(); mouseDown = false;
+                await page.waitForFunction(() => !document.querySelector('.sidebar-drop-anchor:not([hidden]),.sidebar-drop-inside,.dragging'),{polling:50});
+                observations.push(feedback);
+            } finally {
+                if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
+                await source.dispose(); await target.dispose();
+            }
+        });
+        try {
+            await page.waitForFunction(spaceId => document.querySelector(`.space[data-space-id="${spaceId}"]`)?.classList.contains('active'),{polling:50},fixture.spaces.work);
+            for (const id of Object.values(saved)) await page.waitForSelector(row(id));
+            const assertRenderedPlacement = async (sourceId,targetId,placement) => {
+                await page.waitForFunction(({spaceId,sourceId,targetId,placement}) => {
+                    const root = document.querySelector(`.space[data-space-id="${spaceId}"]`);
+                    const source = root?.querySelector(`[data-bookmark-id="${sourceId}"]`);
+                    const target = root?.querySelector(`[data-bookmark-id="${targetId}"]`);
+                    if (!source || !target) return false;
+                    if (placement === 'inside') return source.parentElement?.closest('.folder[data-bookmark-id]') === target;
+                    if (source.parentElement !== target.parentElement || source.parentElement.closest('.folder[data-bookmark-id]')) return false;
+                    const siblings = [...source.parentElement.children].filter(item => item.dataset.bookmarkId);
+                    return siblings.indexOf(source) >= 0 && siblings.indexOf(source)+1 === siblings.indexOf(target);
+                },{polling:50},{spaceId:fixture.spaces.work,sourceId,targetId,placement});
+            };
+            const assertRootParents = async ids => {
+                const items = await arcifyOptions.evaluate(ids => chrome.bookmarks.get(ids),ids);
+                assert.equal(items.length,ids.length);
+                for (const id of ids) assert.equal(items.find(item => item.id === id)?.parentId,space.bookmarkFolderId,'Before-drop rows must retain their root parent.');
+            };
+            await drag(row(saved.two),row(saved.one),'before','sidebar-tab-drop-anchor-before-target');
+            await poll(() => children(space.bookmarkFolderId),ids => ids.indexOf(saved.two) >= 0 && ids.indexOf(saved.one) >= 0 && ids.indexOf(saved.two)+1 === ids.indexOf(saved.one),'saved bookmark tab insertion at anchor');
+            await assertRootParents([saved.two,saved.one]);
+            await assertRenderedPlacement(saved.two,saved.one,'before');
+            await drag(`${row(saved.folderB)} > .folder-header`,`${row(saved.folderA)} > .folder-header`,'before','sidebar-folder-drop-anchor-before-target');
+            await poll(() => children(space.bookmarkFolderId),ids => ids.indexOf(saved.folderB) >= 0 && ids.indexOf(saved.folderA) >= 0 && ids.indexOf(saved.folderB)+1 === ids.indexOf(saved.folderA),'saved whole-folder insertion at anchor');
+            await assertRootParents([saved.folderB,saved.folderA]);
+            await assertRenderedPlacement(saved.folderB,saved.folderA,'before');
+            await drag(row(saved.one),`${row(saved.folderA)} > .folder-header`,'inside','sidebar-tab-drop-inside-folder-highlight');
+            await poll(() => children(saved.folderA),ids => ids.includes(saved.one),'saved tab inside highlighted folder');
+            await assertRenderedPlacement(saved.one,saved.folderA,'inside');
+            await drag(`${row(saved.folderB)} > .folder-header`,`${row(saved.folderA)} > .folder-header`,'inside','sidebar-folder-drop-inside-folder-highlight');
+            await poll(() => children(saved.folderA),ids => ids.includes(saved.folderB),'saved folder inside highlighted parent');
+            await assertRenderedPlacement(saved.folderB,saved.folderA,'inside');
+            const final = await arcifyOptions.evaluate(ids => chrome.bookmarks.get(ids),Object.values(saved));
+            assert.equal(final.length,4,'Every original bookmark identity must remain.');
+            assert.equal(final.find(item => item.id === saved.one).parentId,saved.folderA);
+            assert.equal(final.find(item => item.id === saved.folderB).parentId,saved.folderA);
+            for (const id of [saved.folderA,saved.two]) assert.equal(final.find(item => item.id === id).parentId,space.bookmarkFolderId);
+            return {sidebarTabId:sidebar.tab.id,saved,observations,final,realMouseDrag:true,nativePanel:false};
+        } finally {
+            await arcifyOptions.evaluate(async ({ids,tabId}) => {
+                await chrome.tabs.remove(tabId);
+                for (const id of ids) {
+                    let item; try { [item] = await chrome.bookmarks.get(id); } catch { continue; }
+                    if (item.url) await chrome.bookmarks.remove(id); else await chrome.bookmarks.removeTree(id);
+                }
+            },{ids:Object.values(saved),tabId:sidebar.tab.id});
         }
     });
 

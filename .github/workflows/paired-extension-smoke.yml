@@ -10,12 +10,16 @@ on:
       - 'scripts/paired-chrome-sandbox.mjs'
       - 'scripts/paired-chrome-ui.mjs'
       - 'scripts/paired-chrome-sidebar.mjs'
+      - 'scripts/paired-chrome-newtab.mjs'
+      - 'scripts/paired-chrome-keyboard.mjs'
       - 'scripts/paired-chrome-worker.mjs'
       - 'scripts/paired-chrome-extensions.mjs'
       - 'scripts/paired-chrome-runtime/**'
       - 'tests/unit/paired-chrome-sandbox.test.js'
       - 'tests/unit/paired-chrome-ui.test.js'
       - 'tests/unit/paired-chrome-sidebar.test.js'
+      - 'tests/unit/paired-chrome-newtab.test.js'
+      - 'tests/unit/paired-chrome-keyboard.test.js'
       - 'tests/unit/paired-chrome-worker.test.js'
       - 'tests/unit/paired-chrome-extensions.test.js'
       - 'spotlight-bridge*.js'
@@ -24,12 +28,14 @@ on:
       - 'tests/unit/spotlight-invalidation.test.js'
       - 'tests/unit/spotlight-bridge-protocol.test.js'
       - 'tests/unit/bookmark-events.test.js'
+      - 'tests/unit/sidebar-drop*.test.js'
       - 'sidebar-command.js'
       - 'startup-*.js'
       - 'space-store.js'
       - 'space-bookmarks.js'
       - 'background.js'
       - 'sidebar*'
+      - 'styles.css'
       - 'tab-row-action.js'
       - 'options*'
       - 'manifest.json'
@@ -58,7 +64,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: e265e05a1f32ea852c9c17c62c56ba10d0fabdf7
+          ref: 91b18839382a6d01f73a823124e764ebb528b163
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node

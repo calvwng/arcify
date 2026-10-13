@@ -2039,3 +2039,51 @@ select:focus-visible,
 }
 .tab-group-import p { margin: 0 0 8px; }
 .tab-group-import button { margin-right: 8px; padding: 6px 10px; cursor: pointer; }
+
+/* Arc-like destination feedback. Kept outside folder overflow clipping. */
+.sidebar-drop-anchor {
+    position: fixed;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--sidebar-drop-color, #2563eb);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5);
+    transform: translateY(-1px);
+    z-index: 10000;
+    pointer-events: none;
+}
+.sidebar-drop-anchor::before {
+    content: '';
+    position: absolute;
+    left: -2px;
+    top: -2px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: inherit;
+}
+.sidebar-drop-anchor[hidden] { display: none; }
+.folder-header.sidebar-drop-inside {
+    box-shadow: inset 0 0 0 2px var(--sidebar-drop-color, #2563eb);
+    background: color-mix(in srgb, var(--sidebar-drop-color, #2563eb) 14%, transparent);
+    border-radius: 8px;
+}
+.folder-header[draggable='true'] { cursor: grab; }
+.folder.dragging { opacity: 0.5; }
+.sidebar-drop-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    pointer-events: none;
+}
+@media (prefers-color-scheme: dark) {
+    :root { --sidebar-drop-color: #93c5fd; }
+}
+@media (forced-colors: active) {
+    .sidebar-drop-anchor { background: Highlight; box-shadow: none; forced-color-adjust: none; }
+    .folder-header.sidebar-drop-inside { outline: 2px solid Highlight; outline-offset: -2px; }
+}

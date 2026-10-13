@@ -309,3 +309,20 @@ Repeat relevant cases with Chrome group sync **off** and **on**.
     preserve the original page without navigating it to an intermediate blank URL.
 
 Final automated counts and paired draft PR links are recorded in the PR descriptions.
+
+## Active helper, keyboard isolation, and drop feedback
+
+The paired fixture retains the earlier 23 checks and adds three required cases:
+active browser-alias New Tab reuse through concurrent production commands and a
+paired launch (same document/query/selection/focus/tab IDs), real overlay typing
+on a strict-CSP page with earlier host capture/bubble shortcuts, and real mouse
+drags whose before/inside indicators agree with persisted bookmark identities,
+parents, and order. The sidebar drag fixture opens `sidebar.html` in an ordinary
+tab; it is not native-panel drag evidence. Existing native-panel Enter/click and
+warm/cold-worker assertions remain mandatory after the overlay frame change.
+
+These cases require a successful exact-head CI run before being called verified.
+Physical OS Ctrl+T dispatch, unobservable omnibox drafts, IME/clipboard behavior,
+Helium/native-panel drag geometry, high zoom, long scrolling, and forced-colors
+remain manual checks. Reuse never closes a user tab or searches other workspaces
+for a helper. See [drop-indicator behavior](sidebar-drop-indicators.md).
