@@ -45,3 +45,62 @@ export function assertSidebarHelperUnchanged(before, after, { extensionId }) {
     assert.equal(after.tabUrl, before.tabUrl, 'Opening the sidebar must preserve the browser-visible source URL.');
     assert.equal(after.pageUrl, before.pageUrl, 'Opening the sidebar must preserve the rendered source document.');
 }
+
+// Runs read-only inside the actual native target. Do not focus, resize or create
+// an ordinary sidebar tab to make an unmounted/unfinished panel look ready.
+export function readNativeSidebarRender() {
+    const dimensions = element => {
+        const rect = element?.getBoundingClientRect();
+        return { x: rect?.x || 0, y: rect?.y || 0, width: rect?.width || 0, height: rect?.height || 0 };
+    };
+    const visible = element => {
+        if (!element) return false;
+        const rect = dimensions(element); const style = getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse' &&
+            rect.width > 0 && rect.height > 0 && rect.x < innerWidth && rect.y < innerHeight &&
+            rect.x + rect.width > 0 && rect.y + rect.height > 0;
+    };
+    const switcher = document.querySelector('#spaceSwitcher');
+    const selected = [...document.querySelectorAll('#spaceSwitcher > button.active')];
+    return {
+        url: location.href, visibility: document.visibilityState, width: innerWidth, height: innerHeight, devicePixelRatio,
+        switcher: { ...dimensions(switcher), visible: visible(switcher) },
+        selectedSpaces: selected.map(element => element.dataset.spaceId),
+        selectedVisible: selected.length === 1 && visible(selected[0]),
+        visibleSpaces: [...document.querySelectorAll('#spacesList > .space')].filter(element =>
+            element.classList.contains('active') && visible(element)).map(element => element.dataset.spaceId)
+    };
+}
+export function nativeSidebarRenderReady(rendered, extensionId) {
+    return rendered?.url === `chrome-extension://${extensionId}/sidebar.html` && rendered.visibility === 'visible' &&
+        Number.isFinite(rendered.width) && rendered.width >= 100 && Number.isFinite(rendered.height) && rendered.height >= 100 &&
+        Number.isFinite(rendered.devicePixelRatio) && rendered.devicePixelRatio > 0 &&
+        rendered.switcher?.visible === true && rendered.selectedVisible === true &&
+        rendered.switcher.width > 0 && rendered.switcher.height > 0 &&
+        rendered.switcher.x < rendered.width && rendered.switcher.y < rendered.height &&
+        rendered.switcher.x + rendered.switcher.width > 0 && rendered.switcher.y + rendered.switcher.height > 0 &&
+        rendered.selectedSpaces?.length === 1 && typeof rendered.selectedSpaces[0] === 'string' && rendered.selectedSpaces[0].length > 0 &&
+        rendered.visibleSpaces?.length === 1 && rendered.visibleSpaces[0] === rendered.selectedSpaces[0];
+}
+export function assertNativeSidebarScreenshot(bytes, rendered, extensionId) {
+    assert(nativeSidebarRenderReady(rendered, extensionId), 'Native sidebar must have a visible nontrivial viewport and coherent active-space content.');
+    assert(bytes.length >= 33 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) &&
+        bytes.toString('ascii', 12, 16) === 'IHDR' && bytes.readUInt32BE(8) === 13, 'Native screenshot must contain a valid PNG dimension header.');
+    const dimensions = { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+    assert.equal(dimensions.width, Math.round(rendered.width * rendered.devicePixelRatio), 'Native screenshot width must match the actual host viewport.');
+    assert.equal(dimensions.height, Math.round(rendered.height * rendered.devicePixelRatio), 'Native screenshot height must match the actual host viewport.');
+    return dimensions;
+}
+
+export function nativeSidebarRenderIdentity(rendered) {
+    return { width: rendered.width, height: rendered.height, devicePixelRatio: rendered.devicePixelRatio,
+        selectedSpaces: rendered.selectedSpaces, visibleSpaces: rendered.visibleSpaces };
+}
+export function createNativeSidebarReadiness(extensionId) {
+    let previous = null;
+    return rendered => {
+        if (!nativeSidebarRenderReady(rendered, extensionId)) { previous = null; return false; }
+        const current = JSON.stringify(nativeSidebarRenderIdentity(rendered));
+        const stable = previous === current; previous = current; return stable;
+    };
+}

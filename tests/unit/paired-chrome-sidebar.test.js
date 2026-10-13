@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, evaluateWithoutGesture } from '../../scripts/paired-chrome-sidebar.mjs';
+import { parseHTML } from 'linkedom';
+import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, createNativeSidebarReadiness, assertNativeSidebarScreenshot, evaluateWithoutGesture } from '../../scripts/paired-chrome-sidebar.mjs';
 const id = 'a'.repeat(32);
 const expected = { extensionId: id, windowId: 2, afterEvent: 1 };
 const context = { contextId: 'native', contextType: 'SIDE_PANEL', documentUrl: `chrome-extension://${id}/sidebar.html`, windowId: 2, incognito: false };
@@ -61,5 +62,60 @@ test('helper conservation rejects unknown initial source identity or document', 
     for (const change of [{ tabId: -1 }, { windowId: -1 }, { pendingUrl: 'https://example.test/' }, { tabUrl: 'chrome://settings/' }, { pageUrl: 'chrome://newtab/' }]) {
         const invalid = { ...before, ...change };
         assert.throws(() => assertSidebarHelperUnchanged(invalid, { ...invalid, closed: false }, { extensionId: id }));
+    }
+});
+
+const readyRender = { url: `chrome-extension://${id}/sidebar.html`, visibility: 'visible', width: 360, height: 869, devicePixelRatio: 1,
+    switcher: { x:0, y:800, width: 340, height: 40, visible:true }, selectedVisible:true, selectedSpaces: ['work'], visibleSpaces: ['work'] };
+function pngHeader(width, height) {
+    const bytes = Buffer.alloc(33); Buffer.from([137,80,78,71,13,10,26,10]).copy(bytes);
+    bytes.writeUInt32BE(13,8); bytes.write('IHDR',12); bytes.writeUInt32BE(width,16); bytes.writeUInt32BE(height,20); return bytes;
+}
+test('native render readiness rejects unmounted, tiny, hidden and incomplete content', () => {
+    assert.equal(nativeSidebarRenderReady(readyRender,id),true);
+    for (const change of [{ width:0,height:0 },{ width:16,height:32 },{ width:NaN },{ selectedVisible:false },{ devicePixelRatio:0 },{ visibility:'hidden' },{ switcher:{ x:500,y:0,width:340,height:40 } },
+        { switcher:{ width:0,height:40 } },{ selectedSpaces:[] },{ visibleSpaces:[] },
+        { selectedSpaces:[''] },{ visibleSpaces:['other'] },{ selectedSpaces:['work','other'] },{ url:'https://example.test/' }]) {
+        assert.equal(nativeSidebarRenderReady({ ...readyRender,...change },id),false,JSON.stringify(change));
+    }
+});
+test('native screenshot must cover the real ready viewport and have a PNG header', () => {
+    assert.deepEqual(assertNativeSidebarScreenshot(pngHeader(360,869),readyRender,id),{ width:360,height:869 });
+    for (const bytes of [pngHeader(16,32),pngHeader(360,1),Buffer.alloc(33),Buffer.alloc(8)]) {
+        assert.throws(() => assertNativeSidebarScreenshot(bytes,readyRender,id));
+    }
+    assert.throws(() => assertNativeSidebarScreenshot(pngHeader(360,869),{ ...readyRender,width:0,height:0 },id));
+});
+
+test('native readiness needs two consecutive coherent observations and resets on transient layout', () => {
+    const stable = createNativeSidebarReadiness(id);
+    assert.equal(stable(readyRender),false); assert.equal(stable(readyRender),true);
+    assert.equal(stable({ ...readyRender,width:0 }),false); assert.equal(stable(readyRender),false);
+    assert.equal(stable({ ...readyRender,width:361 }),false); assert.equal(stable({ ...readyRender,width:361 }),true);
+});
+test('native screenshot dimensions honor recorded device scale and reject oversized full-page capture', () => {
+    assert.deepEqual(assertNativeSidebarScreenshot(pngHeader(720,1738),{ ...readyRender,devicePixelRatio:2 },id),{ width:720,height:1738 });
+    assert.throws(() => assertNativeSidebarScreenshot(pngHeader(360,2000),readyRender,id));
+});
+
+test('actual native DOM reader rejects hidden or offscreen selected chips and switcher', () => {
+    const { document } = parseHTML('<div id="spaceSwitcher"><button class="active" data-space-id="work">Work</button></div><div id="spacesList"><div class="space active" data-space-id="work">Work content</div></div>');
+    Object.defineProperty(document,'visibilityState',{ value:'visible' });
+    const elements=[...document.querySelectorAll('*')];
+    for(const element of elements) element.getBoundingClientRect=() => ({ x:0,y:0,width:100,height:40 });
+    const globals={ document,location:{ href:`chrome-extension://${id}/sidebar.html` },innerWidth:360,innerHeight:869,devicePixelRatio:1,
+        getComputedStyle:element => ({ display:element.style.display || 'block',visibility:element.style.visibility || 'visible' }) };
+    const previous=Object.fromEntries(Object.keys(globals).map(key => [key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+    try {
+        for(const [key,value] of Object.entries(globals)) Object.defineProperty(globalThis,key,{ configurable:true,writable:true,value });
+        assert.equal(nativeSidebarRenderReady(readNativeSidebarRender(),id),true);
+        const chip=document.querySelector('button'),switcher=document.querySelector('#spaceSwitcher');
+        chip.style.visibility='hidden';assert.equal(nativeSidebarRenderReady(readNativeSidebarRender(),id),false);chip.style.visibility='visible';
+        chip.getBoundingClientRect=() => ({ x:500,y:0,width:100,height:40 });
+        assert.equal(nativeSidebarRenderReady(readNativeSidebarRender(),id),false);
+        chip.getBoundingClientRect=() => ({ x:0,y:0,width:100,height:40 });
+        switcher.style.visibility='hidden';assert.equal(nativeSidebarRenderReady(readNativeSidebarRender(),id),false);
+    } finally {
+        for(const [key,descriptor] of Object.entries(previous)) { if(descriptor) Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key]; }
     }
 });

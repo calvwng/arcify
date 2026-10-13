@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
-import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
+import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
@@ -96,15 +96,17 @@ async function poll(read, accept, label, timeout = 20_000) {
     }
     throw new Error(`Timed out waiting for ${label}; last observation: ${JSON.stringify(last)}`);
 }
-async function screenshot(page, label, required = true) {
+async function screenshot(page, label, required = true, { fullPage = true } = {}) {
     if (!page || page.isClosed()) {
         if (required) throw new Error(`Required screenshot has no open page: ${label}`);
         return;
     }
     const filename = `${String(report.screenshots.length + 1).padStart(2, '0')}-${slug(label)}.png`;
     try {
-        await page.screenshot({ path: resolve(OUTPUT, filename), fullPage: true });
-        report.screenshots.push({ filename, label, url: page.url(), capturedAt: new Date().toISOString() });
+        await page.screenshot({ path: resolve(OUTPUT, filename), fullPage, ...(fullPage ? {} : { captureBeyondViewport: false }) });
+        const captured = { filename, label, url: page.url(), capturedAt: new Date().toISOString() };
+        report.screenshots.push(captured);
+        return captured;
     } catch (error) {
         report.diagnostics.push({ type: 'screenshot-error', label, message: error.message });
         if (required) throw new Error(`Required screenshot failed (${label}): ${error.message}`);
@@ -303,14 +305,20 @@ async function captureNativeSidebar(afterEvent, label) {
     const hosting = await page.evaluate(async () => ({ tab: await chrome.tabs.getCurrent() || null, windowId: (await chrome.windows.getCurrent()).id }));
     assert.equal(hosting.tab, null, 'The selected rendering target must not be a normal tab.');
     assert.equal(hosting.windowId, fixture.windowA, 'The native rendering target must belong to the source window.');
-    // Do not bring the panel to front: its native host must actually render it.
-    await page.waitForFunction(() => document.visibilityState === 'visible' && document.querySelector('#spacesList > .space') &&
-        document.querySelector('#spaceSwitcher')?.getBoundingClientRect().width > 0, { polling: 50 });
-    const rendered = await page.evaluate(() => ({ url: location.href, visibility: document.visibilityState,
-        selectedSpaces: [...document.querySelectorAll('#spaceSwitcher > button.active')].map(element => element.dataset.spaceId),
-        width: innerWidth, height: innerHeight }));
-    await screenshot(page, label);
-    const evidence = { context, windowProofSource: 'sidePanel.onOpened', openedEvents: populated.events.slice(afterEvent), targetType: target.type(), hosting, rendered };
+    // Native mounting and active-space rendering are asynchronous. Wait only by
+    // observing the actual target; never focus or resize it to manufacture proof.
+    const rendered = await poll(() => page.evaluate(readNativeSidebarRender),
+        createNativeSidebarReadiness(arcifyId), 'stable native sidebar viewport and active-space rendering');
+    const beforeCapture = await page.evaluate(readNativeSidebarRender);
+    assert(nativeSidebarRenderReady(beforeCapture, arcifyId), 'Native panel must be rendered immediately before capture.');
+    assert.deepEqual(nativeSidebarRenderIdentity(beforeCapture), nativeSidebarRenderIdentity(rendered), 'Native content must remain stable before capture.');
+    const captured = await screenshot(page, label, true, { fullPage: false });
+    const screenshotDimensions = assertNativeSidebarScreenshot(await readFile(resolve(OUTPUT, captured.filename)), rendered, arcifyId);
+    const afterCapture = await page.evaluate(readNativeSidebarRender);
+    assert(nativeSidebarRenderReady(afterCapture, arcifyId), 'Native panel must remain rendered after the required capture.');
+    assert.deepEqual(nativeSidebarRenderIdentity(afterCapture), nativeSidebarRenderIdentity(rendered), 'Capture must not change the native viewport or selection.');
+    const evidence = { context, windowProofSource: 'sidePanel.onOpened', openedEvents: populated.events.slice(afterEvent),
+        targetType: target.type(), hosting, rendered, beforeCapture, screenshotDimensions, afterCapture };
     (report.nativePanels ||= []).push({ label, ...evidence });
     await saveReport();
     return evidence;
