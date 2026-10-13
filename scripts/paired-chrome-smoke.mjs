@@ -294,8 +294,8 @@ async function nativePanelState() {
 }
 async function captureNativeSidebar(afterEvent, label) {
     const state = await poll(nativePanelState, state => state.events.slice(afterEvent).some(event => event.type === 'opened' && event.windowId === fixture.windowA), 'a native sidePanel.onOpened event');
-    const populated = await poll(nativePanelState, state => state.contexts.some(context => context.contextType === 'SIDE_PANEL' && context.windowId === fixture.windowA), 'a native SIDE_PANEL context');
-    const context = assertNativeSidebarEvidence(populated.contexts, state.events, { extensionId: arcifyId, windowId: fixture.windowA, afterEvent });
+    const populated = await poll(nativePanelState, state => state.contexts.some(context => context.contextType === 'SIDE_PANEL' && context.documentUrl === `chrome-extension://${arcifyId}/sidebar.html`), 'a native SIDE_PANEL context');
+    const context = assertNativeSidebarEvidence(populated.contexts, populated.events, { extensionId: arcifyId, windowId: fixture.windowA, afterEvent });
     const ordinary = await arcifyOptions.evaluate(() => chrome.tabs.query({}));
     assert(!ordinary.some(tab => tab.url === `chrome-extension://${arcifyId}/sidebar.html`), 'No ordinary sidebar tab may substitute for native rendering evidence.');
     const target = await browser.waitForTarget(target => target.url() === `chrome-extension://${arcifyId}/sidebar.html`);
@@ -310,7 +310,7 @@ async function captureNativeSidebar(afterEvent, label) {
         selectedSpaces: [...document.querySelectorAll('#spaceSwitcher > button.active')].map(element => element.dataset.spaceId),
         width: innerWidth, height: innerHeight }));
     await screenshot(page, label);
-    return { context, openedEvents: state.events.slice(afterEvent), targetType: target.type(), hosting, rendered };
+    return { context, windowProofSource: 'sidePanel.onOpened', openedEvents: populated.events.slice(afterEvent), targetType: target.type(), hosting, rendered };
 }
 async function closeNativeSidebar() {
     const before = (await nativePanelState()).events.length;

@@ -28,3 +28,21 @@ test('non-gesture errors are hard failures, never converted to a rejection resul
     await assert.rejects(evaluateWithoutGesture({ send: async () => { calls++; return { exceptionDetails: { text: 'bad realm' } }; } }, 'probe()'));
     assert.equal(calls, 1);
 });
+
+test('native context may report Chromium sentinel window ID only with fresh exact-window evidence', () => {
+    const native = { ...context, windowId: -1 };
+    for (const path of ['sidebar.html', '/sidebar.html']) {
+        assert.equal(assertNativeSidebarEvidence([native], [{}, { ...events[1], path }], expected), native);
+    }
+    for (const windowId of [undefined, null, -2, 3]) {
+        assert.throws(() => assertNativeSidebarEvidence([{ ...native, windowId }], events, expected));
+    }
+    for (const observed of [[], [events[1]], [{}, { ...events[1], windowId: 3 }], [...events, { ...events[1], windowId: 3 }]]) {
+        assert.throws(() => assertNativeSidebarEvidence([native], observed, expected));
+    }
+});
+test('native panel event path matching rejects broader or malformed normalization', () => {
+    for (const path of ['//sidebar.html', 'nested/sidebar.html', 'sidebar.html?x', `chrome-extension://${id}/sidebar.html`, undefined]) {
+        assert.throws(() => assertNativeSidebarEvidence([{ ...context, windowId: -1 }], [{}, { ...events[1], path }], expected));
+    }
+});
