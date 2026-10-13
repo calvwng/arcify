@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertActiveNewTabReused, readNewTabReuseState } from '../../scripts/paired-chrome-newtab.mjs';
+import { assertActiveNewTabReused, readNewTabReuseState, isSpotlightNewTabTarget } from '../../scripts/paired-chrome-newtab.mjs';
 const id='a'.repeat(32);
 const state=()=>({tab:{id:12,windowId:3,url:'chrome://newtab/',active:true,incognito:false,pinned:false,status:'complete'},url:`chrome-extension://${id}/newtab.html`,timeOrigin:100,visibility:'visible',documentFocused:true,input:{value:'retained draft',start:2,end:5,direction:'forward',focused:true},selected:[{type:'search-query',title:'Search for "retained draft"'}]});
 test('alias reuse evidence preserves document, exact tab IDs and complete input state',()=>{
@@ -33,4 +33,10 @@ test('DOM reader records input and selected identity without focusing or mutatin
   assert.deepEqual(result.input,{value:'draft',start:1,end:3,direction:'backward',focused:true});
   assert.deepEqual(result.selected,[{type:'search-query',title:'Search for "draft"'}]);
  } finally {globalThis.document=old.document;globalThis.chrome=old.chrome;Object.defineProperty(globalThis,'performance',{value:old.performance,configurable:true});}
+});
+
+test('New Tab target discovery accepts CDP alias or exact override but not lookalikes',()=>{
+ for(const url of ['chrome://newtab','chrome://newtab/',`chrome-extension://${id}/newtab.html`]) assert.equal(isSpotlightNewTabTarget(url,id),true);
+ for(const url of ['about:blank','chrome://newtab-footer/',`chrome-extension://${'b'.repeat(32)}/newtab.html`,`chrome-extension://${id}/options.html`,'https://example.test/newtab/']) assert.equal(isSpotlightNewTabTarget(url,id),false);
+ assert.equal(isSpotlightNewTabTarget('chrome://newtab/','invalid'),false);
 });

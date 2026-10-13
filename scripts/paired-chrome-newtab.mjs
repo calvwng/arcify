@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
 
+// CDP may expose Chrome's visible New Tab alias even when document.URL is the
+// extension override. This is only candidate discovery, never identity proof.
+export function isSpotlightNewTabTarget(url, extensionId) {
+    return /^[a-p]{32}$/.test(extensionId) &&
+        ['chrome://newtab', 'chrome://newtab/', `chrome-extension://${extensionId}/newtab.html`].includes(url);
+}
+
 // Read-only renderer evidence. This cannot inspect the browser's omnibox draft.
 export async function readNewTabReuseState() {
     const input = document.querySelector('[data-testid="spotlight-input"]');

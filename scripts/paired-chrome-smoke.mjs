@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
-import { readNewTabReuseState, assertActiveNewTabReused } from './paired-chrome-newtab.mjs';
+import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
@@ -1262,10 +1262,13 @@ try {
         try {
             helperPage = await poll(async () => {
                 for (const target of browser.targets()) {
-                    if (priorTargets.has(target) || target.type() !== 'page' || target.url() !== `chrome-extension://${spotlightId}/newtab.html`) continue;
+                    if (priorTargets.has(target) || target.type() !== 'page' || !isSpotlightNewTabTarget(target.url(),spotlightId)) continue;
                     try {
                         const page = await target.page();
-                        if ((await page.evaluate(() => chrome.tabs.getCurrent())).id === sourceId) return observePage(page);
+                        if ((await page.evaluate(() => chrome.tabs.getCurrent())).id === sourceId) {
+                            report.tabTargets.push({chromeTabId:sourceId,requestedUrl:'chrome://newtab/',observedTargetUrl:target.url()});
+                            return observePage(page);
+                        }
                     } catch (error) {
                         if (!/Execution context was destroyed|Cannot find context with specified id/.test(error.message)) throw error;
                     }
