@@ -1369,6 +1369,9 @@ try {
     });
 
     await step(stepNames[25], async () => {
+        const originalInvert = await arcifyOptions.$eval('#invertTabOrder',element => element.checked);
+        if (originalInvert) await clickUI(arcifyOptions,'label.toggle-label[for="invertTabOrder"]');
+        await poll(() => arcifyOptions.evaluate(() => chrome.storage.sync.get('invertTabOrder')),settings => settings.invertTabOrder === false,'explicit non-inverted drag fixture ordering');
         await bridge('activateSpace',{spaceId:fixture.spaces.work});
         const space = (await snapshot()).spaces.find(space => space.id === fixture.spaces.work);
         const saved = await arcifyOptions.evaluate(async ({rootId,base}) => {
@@ -1405,6 +1408,7 @@ try {
                 await target.scrollIntoView();
                 const from = await source.boundingBox(),to = await target.boundingBox();
                 assert(from && to && from.height > 0 && to.height > 0);
+                if (placement === 'before') assert(from.y > to.y,'The before-drop must move a later visual row, not assert an existing no-op.');
                 diagnostic.sourceRect = from; diagnostic.targetRect = to;
                 diagnostic.before = await page.evaluate(() => ({events:window.__pairedDragEvents,dragging:document.querySelector('.dragging')?.outerHTML}));
                 const x = Math.min(from.x+40,from.x+from.width/2),y = from.y+from.height/2;
@@ -1498,7 +1502,7 @@ try {
             assert.equal(final.find(item => item.id === saved.one).parentId,saved.folderA);
             assert.equal(final.find(item => item.id === saved.folderB).parentId,saved.folderA);
             for (const id of [saved.folderA,saved.two]) assert.equal(final.find(item => item.id === id).parentId,space.bookmarkFolderId);
-            return {sidebarTabId:sidebar.tab.id,saved,observations,final,realMouseDrag:true,nativePanel:false};
+            return {sidebarTabId:sidebar.tab.id,saved,observations,final,invertTabOrder:false,realMouseDrag:true,nativePanel:false};
         } finally {
             await arcifyOptions.evaluate(async ({ids,tabId}) => {
                 await chrome.tabs.remove(tabId);
@@ -1507,6 +1511,10 @@ try {
                     if (item.url) await chrome.bookmarks.remove(id); else await chrome.bookmarks.removeTree(id);
                 }
             },{ids:Object.values(saved),tabId:sidebar.tab.id});
+            if (originalInvert) {
+                await clickUI(arcifyOptions,'label.toggle-label[for="invertTabOrder"]');
+                await poll(() => arcifyOptions.evaluate(() => chrome.storage.sync.get('invertTabOrder')),settings => settings.invertTabOrder === true,'restore original sidebar ordering');
+            }
         }
     });
 
