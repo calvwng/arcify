@@ -1,5 +1,6 @@
 import { Utils } from './utils.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
+import { favoriteIconCacheUrl, isFavoriteIcon } from './favorite-icons.js';
 
 // The background worker is the sole durable Favorites writer. Never send a
 // cached record/URL or whole-array order back from a sidebar.
@@ -148,8 +149,22 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
             node.classList.toggle('active', Boolean(row.tabId && row.tabId === activeTabId));
             node.querySelector('.favorite-state').textContent = row.saved ? (row.tabId ? 'Open' : 'Closed') : 'Pin';
             const img = node.querySelector('img');
-            const icon = Utils.getFaviconUrl(row.url, '96');
-            if (img.getAttribute('src') !== icon) { img.src = icon; img.onerror = () => { img.onerror = null; img.src = 'assets/default_icon.png'; }; }
+            const cached = row.saved && favoriteIconCacheUrl(row.url, api) || Utils.getFaviconUrl(row.url, '96');
+            const icon = row.saved && isFavoriteIcon(row.faviconDataUrl) ? row.faviconDataUrl : cached;
+            // Record the intended source separately from fallback src. Ordinary
+            // refreshes must not repeatedly retry a failed image or revive an old
+            // error handler after a new retained icon arrives.
+            if (img.dataset.favoriteIcon !== icon) {
+                img.dataset.favoriteIcon = icon;
+                let fallback = icon === cached ? 'assets/default_icon.png' : cached;
+                img.onerror = () => {
+                    if (img.dataset.favoriteIcon !== icon) return;
+                    img.src = fallback;
+                    if (fallback === 'assets/default_icon.png') img.onerror = null;
+                    else fallback = 'assets/default_icon.png';
+                };
+                img.src = icon;
+            }
             container.appendChild(node);
         }
         for (const node of existing.values()) node.remove();

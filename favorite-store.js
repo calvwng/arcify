@@ -2,6 +2,7 @@ import { getSpaceBookmarkById } from './space-bookmarks.js';
 import { Utils } from './utils.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { isFavoriteUrl, isWindowId } from './spotlight-bridge-protocol.js';
+import { captureFavoriteIcon, favoriteIconCacheSize, isFavoriteIcon, MAX_FAVORITE_ICON_CACHE, FAVORITE_ICON_CACHE_KEY } from './favorite-icons.js';
 
 export const FAVORITES_KEY = 'persistentFavorites';
 export const FAVORITE_SESSION_KEY = 'favoriteSession';
@@ -32,10 +33,15 @@ export function validateFavoriteRequest(message) {
 // Durable links and browser-session identities are deliberately separate. Clearing
 // storage.session at browser restart never causes URL-based adoption or tab opens.
 export class FavoriteStore {
-    constructor(spaceStore) {
+    constructor(spaceStore, { captureIcon = captureFavoriteIcon, now = Date.now } = {}) {
         this.spaceStore = spaceStore;
         this.initialized = false;
         this.replacements = new Map();
+        this.captureIcon = captureIcon;
+        this.now = now;
+        this.iconJobs = new Map();
+        this.iconAttempts = new Map();
+        this.activeIconJobs = 0;
         spaceStore.favoriteStore = this;
     }
     run(operation) { return this.spaceStore.run(async () => { await this.initialize(); return operation(); }); }
@@ -44,7 +50,7 @@ export class FavoriteStore {
         const local = await chrome.storage.local.get(FAVORITES_KEY);
         const session = await chrome.storage.session.get(FAVORITE_SESSION_KEY);
         const items = local[FAVORITES_KEY] ?? [];
-        if (!Array.isArray(items) || items.some(item => !item || typeof item !== 'object' || Object.keys(item).some(name => !['id', 'title', 'url', 'sourceBookmarkId'].includes(name)) || !id(item.id) || typeof item.title !== 'string' || item.title.length > 4096 || !isFavoriteUrl(item.url)
+        if (!Array.isArray(items) || items.some(item => !item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).some(name => !['id', 'title', 'url', 'sourceBookmarkId'].includes(name)) || !id(item.id) || typeof item.title !== 'string' || item.title.length > 4096 || !isFavoriteUrl(item.url)
             || item.sourceBookmarkId !== null && !id(item.sourceBookmarkId)) || new Set(items.map(item => item.id)).size !== items.length
             || new Set(items.filter(item => item.sourceBookmarkId !== null).map(item => item.sourceBookmarkId)).size !== items.filter(item => item.sourceBookmarkId !== null).length) {
             fail('INVALID_STORAGE', 'The saved Favorites list could not be read. No links were changed.');
@@ -56,8 +62,78 @@ export class FavoriteStore {
             fail('INVALID_STORAGE', 'Favorites session tracking could not be read. No tabs were changed.');
         }
         this.items = copy(items);
+        await this.loadIcons();
         this.state = copy(state);
         this.initialized = true;
+    }
+    async loadIcons() {
+        // This separate auxiliary key never changes the original durable links'
+        // four-key schema, so preceding Arcify readers still work on rollback.
+        let local;
+        try { local = await chrome.storage.local.get(FAVORITE_ICON_CACHE_KEY); }
+        catch { local = {}; }
+        const cache = local?.[FAVORITE_ICON_CACHE_KEY], saved = new Map(this.items.map(item => [item.id, item.url]));
+        this.icons = new Map();
+        if (!cache || cache.version !== 1 || !Array.isArray(cache.entries)
+            || Object.keys(cache).some(name => !['version', 'entries'].includes(name))) return;
+        let size = favoriteIconCacheSize([]);
+        for (const entry of cache.entries) {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+                || Object.keys(entry).some(name => !['favoriteId', 'url', 'faviconDataUrl'].includes(name))
+                || !id(entry.favoriteId) || saved.get(entry.favoriteId) !== entry.url || !isFavoriteUrl(entry.url)
+                || this.icons.has(entry.favoriteId) || !isFavoriteIcon(entry.faviconDataUrl)) continue;
+            const bytes = new TextEncoder().encode(JSON.stringify(entry)).byteLength + (this.icons.size ? 1 : 0);
+            if (size + bytes > MAX_FAVORITE_ICON_CACHE) continue;
+            size += bytes; this.icons.set(entry.favoriteId, copy(entry));
+        }
+    }
+    icon(item) { const cached = this.icons.get(item.id); return cached?.url === item.url ? cached.faviconDataUrl : undefined; }
+    async saveIcons(icons) {
+        const entries = [...icons.values()].filter(entry => this.items.some(item => item.id === entry.favoriteId && item.url === entry.url));
+        if (favoriteIconCacheSize(entries) > MAX_FAVORITE_ICON_CACHE) return false;
+        try { await chrome.storage.local.set({ [FAVORITE_ICON_CACHE_KEY]: { version: 1, entries: copy(entries) } }); }
+        catch { return false; } // Auxiliary quota/failures never invalidate link state.
+        this.icons = new Map(entries.map(entry => [entry.favoriteId, entry]));
+        return true;
+    }
+    scheduleIcon(item, tab, { refresh = false } = {}) {
+        if (!refresh && (this.icon(item) || this.iconJobs.has(item.id)
+            || this.now() - (this.iconAttempts.get(item.id) ?? -Infinity) < 60000)) return;
+        // Tab-supplied bytes belong to the saved page only at its exact URL, never
+        // to a same-host page, pending navigation, unbound twin, or private tab.
+        const samePage = tab && !tab.incognito && tab.pinned && tab.status !== 'loading' && tab.url === item.url
+            && (!tab.pendingUrl || tab.pendingUrl === item.url)
+            && this.state.bindings.some(binding => binding.favoriteId === item.id && binding.tabId === tab.id && binding.windowId === tab.windowId);
+        const job = { id: item.id, url: item.url, previousIcon: this.icon(item),
+            dataUrl: samePage ? tab.favIconUrl : undefined, started: false };
+        this.iconJobs.set(item.id, job);
+        this.iconAttempts.set(item.id, this.now());
+        this.pumpIcons();
+    }
+    pumpIcons() {
+        while (this.activeIconJobs < 4) {
+            const job = [...this.iconJobs.values()].find(job => !job.started);
+            if (!job) return;
+            job.started = true; this.activeIconJobs++;
+            // Do not hold SpaceStore's mutation queue while fetching cache bytes.
+            job.promise = Promise.resolve().then(() => this.captureIcon(job.url, { dataUrl: job.dataUrl }))
+                .then(icon => {
+                    if (!isFavoriteIcon(icon)) return;
+                    return this.run(async () => {
+                        const current = this.items.find(item => item.id === job.id);
+                        if (this.iconJobs.get(job.id) !== job || !current || current.url !== job.url
+                            || this.icon(current) !== job.previousIcon || this.icon(current) === icon) return;
+                        const next = new Map(this.icons);
+                        next.set(current.id, { favoriteId: current.id, url: current.url, faviconDataUrl: icon });
+                        await this.saveIcons(next);
+                    });
+                }).catch(() => { /* Icons are best effort; saved links stay usable. */ })
+                .finally(() => {
+                    this.activeIconJobs--;
+                    if (this.iconJobs.get(job.id) === job) this.iconJobs.delete(job.id);
+                    this.pumpIcons();
+                });
+        }
     }
     async saveItems(items) {
         try { await chrome.storage.local.set({ [FAVORITES_KEY]: copy(items) }); }
@@ -120,8 +196,13 @@ export class FavoriteStore {
         const liveBindings = this.state.bindings.filter(binding => binding.windowId === windowId
             && tabs.get(binding.tabId)?.windowId === windowId && tabs.get(binding.tabId)?.pinned);
         const used = new Set(liveBindings.map(binding => binding.tabId));
+        for (const item of this.items) {
+            const binding = liveBindings.find(binding => binding.favoriteId === item.id);
+            this.scheduleIcon(item, binding && tabs.get(binding.tabId));
+        }
         return {
-            favorites: this.items.map(item => ({ ...copy(item), tabId: liveBindings.find(binding => binding.favoriteId === item.id)?.tabId ?? null })),
+            favorites: this.items.map(item => ({ ...copy(item), ...(this.icon(item) ? { faviconDataUrl: this.icon(item) } : {}),
+                tabId: liveBindings.find(binding => binding.favoriteId === item.id)?.tabId ?? null })),
             nativeTabs: [...tabs.values()].filter(tab => tab.windowId === windowId && tab.pinned && !tab.incognito
                 && !isStartupLauncherTab(tab) && !used.has(tab.id)).map(copy)
         };
@@ -160,6 +241,7 @@ export class FavoriteStore {
         await this.spaceStore.persist();
         const latest = await this.currentTab(confirmed.id, windowId);
         if (!latest.pinned) fail('STALE_TAB', 'This tab was unpinned while saving its Favorite. Its page was kept.');
+        this.scheduleIcon(this.item(favoriteId), latest);
         return latest;
     }
     async open(favoriteId, windowId, { activate = true, tabId, beforeMutation = async () => {} } = {}) {
@@ -324,6 +406,10 @@ export class FavoriteStore {
             this.item(message.favoriteId);
             const bindings = this.state.bindings.filter(binding => binding.favoriteId === message.favoriteId);
             await this.saveItems(this.items.filter(item => item.id !== message.favoriteId));
+            this.iconJobs.delete(message.favoriteId);
+            this.iconAttempts.delete(message.favoriteId);
+            this.icons.delete(message.favoriteId);
+            await this.saveIcons(this.icons); // Orphan cleanup is best effort only.
             this.state.bindings = this.state.bindings.filter(binding => binding.favoriteId !== message.favoriteId);
             this.state.attempts = this.state.attempts.filter(attempt => attempt.favoriteId !== message.favoriteId);
             await this.saveSession();
@@ -354,7 +440,19 @@ export class FavoriteStore {
             this.replacements.set(removed, added);
             handle(() => this.reconcile());
         });
-        chrome.tabs.onUpdated.addListener((tabId, change) => { if (change.pinned !== undefined) handle(() => this.reconcile()); });
+        chrome.tabs.onUpdated.addListener((tabId, change) => {
+            if (change.pinned === undefined && change.favIconUrl === undefined && change.status !== 'complete') return;
+            handle(async () => {
+                const tabs = await this.reconcile();
+                const binding = this.state.bindings.find(binding => binding.tabId === this.exactId(tabId));
+                const item = binding && this.items.find(item => item.id === binding.favoriteId), tab = binding && tabs.get(binding.tabId);
+                // A page finishing without an icon (or explicitly clearing one)
+                // is not evidence that a retained site icon should be replaced.
+                if (item && this.icon(item) && (!tab?.favIconUrl || change.favIconUrl === '')) return;
+                if (item && tab && tab.url === item.url && (!tab.pendingUrl || tab.pendingUrl === item.url)
+                    && (change.favIconUrl !== undefined || change.status === 'complete')) this.scheduleIcon(item, tab, { refresh: true });
+            });
+        });
         chrome.tabs.onAttached?.addListener(() => handle(() => this.reconcile()));
         // No automatic migration, restoration, or tab opening at startup.
     }

@@ -5,6 +5,7 @@ import { parseHTML } from 'linkedom';
 import { enqueueBookmarkOperation } from '../../bookmark-writer.js';
 import { SpaceStore, applySpacePatch, ownerOf } from '../../space-store.js';
 import { FavoriteStore } from '../../favorite-store.js';
+import { pngIcon } from '../fixtures/favorite-icons.js';
 
 // Import and initialize the real sidebar and all its modules against a DOM.
 // Only browser facilities and persisted fixtures are substituted; no source
@@ -36,7 +37,7 @@ const bookmark = (id, tabId = null) => ({ id, title: id, url: tabId ? tabs[tabId
 function resetData() {
     tabs.splice(0, tabs.length, ...[1, 2, 3].map(id => ({ id, windowId: 10, active: id === 2, pinned: false, index: id - 1, title: `Tab ${id}`, url: `https://tab-${id}.test/` })));
     session.activeSpaces = { 10: 'alpha' }; session.favoriteDropAttempts = {}; session.favoriteSession = { version: 1, bindings: [], attempts: [] };
-    local.persistentFavorites = []; if (favoriteStore) favoriteStore.initialized = false;
+    local.persistentFavorites = []; local.favoriteIconCache = { version: 1, entries: [] }; if (favoriteStore) favoriteStore.initialized = false;
     effects = []; hooks = {}; nextId = 100;
     tree = { id: 'root', title: 'Arcify', children: [{ id: 'p', title: 'Alpha', children: [
         bookmark('a', 1), { id: 'f', title: 'Folder', children: [bookmark('b', 2), bookmark('closed')] },
@@ -434,6 +435,20 @@ test('explicit Remove Favorite removes shared record and unpins pages without cl
     assert(!effects.some(([kind]) => kind === 'remove')); assert.deepEqual(tree, original); assert.deepEqual(writes, []);
 });
 
+test('real sidebar navigation handler cannot replace retained saved-page favicon with the live page icon', async () => {
+    await resetFavorites(); await drop(row('closed'), target(), 25);
+    const record = local.persistentFavorites[0], icon = pngIcon();
+    local.favoriteIconCache = { version: 1, entries: [{ favoriteId: record.id, url: record.url, faviconDataUrl: icon }] }; favoriteStore.initialized = false;
+    await onChanged.emit({ favoriteIconCache: { newValue: structuredClone(local.favoriteIconCache) } }, 'local'); await wait(120);
+    assert.equal(savedIcon(record.id).querySelector('img').src, icon);
+    const tab = tabs.find(tab => tab.id === 100); tab.url = 'https://navigated.test/'; tab.favIconUrl = 'https://navigated.test/icon.png';
+    await chrome.tabs.onUpdated.emit(tab.id, { url: tab.url, favIconUrl: tab.favIconUrl }, structuredClone(tab)); await wait(120);
+    assert.equal(savedIcon(record.id).querySelector('img').src, icon);
+    assert.equal(local.persistentFavorites[0].url, record.url);
+    await chrome.tabs.remove(tab.id); await wait(180);
+    assert.equal(savedIcon(record.id).querySelector('img').src, icon);
+});
+
 test('existing browser pins remain native until explicit per-tab adoption and native reorder never rewrites saved order', async () => {
     await resetFavorites(); await drop(row('closed'), target(), 25);
     const savedOrder = structuredClone(local.persistentFavorites);
@@ -446,7 +461,9 @@ test('existing browser pins remain native until explicit per-tab adoption and na
     const first = favorites().querySelector('.native-favorite[data-tab-id="201"]');
     const second = favorites().querySelector('.native-favorite[data-tab-id="202"]');
     first._rect = { left: 0, right: 40, top: 10, bottom: 58, width: 40, height: 48 };
-    await drop(second, first, 25);
+    // Explicitly choose the left half; the right half is its existing slot.
+    drag(second, 'dragstart'); drag(first, 'dragover', 25, { clientX: 10 });
+    drag(first, 'drop', 25, { clientX: 10 }); drag(second, 'dragend'); await wait(180);
     assert(effects.some(([kind]) => kind === 'move')); assert(!effects.some(([kind]) => kind === 'create' || kind === 'update'));
     assert.deepEqual(local.persistentFavorites, savedOrder);
     chooseContext(favorites().querySelector('.native-favorite[data-tab-id="201"]'), 'Keep as saved Favorite'); await wait(220);
@@ -488,4 +505,129 @@ test('legacy uncertain drop from before upgrade is surfaced without a second pag
     assert.match(status(), /before this update could not be verified/);
     assert.deepEqual(effects, []); assert.deepEqual(writes, []); assert.deepEqual(tree, before);
     assert.deepEqual(local.persistentFavorites, []); assert.equal(session.favoriteDropAttempts[receiptKey].tabId, null);
+});
+
+const favoriteMarker = () => document.querySelector('.favorites-drop-anchor');
+const favoriteIds = () => local.persistentFavorites.map(item => item.id);
+async function seedFavoriteGrid({ saved = ['saved-a', 'saved-b', 'saved-c', 'saved-d', 'saved-e'], native = [] } = {}) {
+    await resetFavorites();
+    local.persistentFavorites = saved.map(id => ({ id, title: id, url: 'https://same-url.test/', sourceBookmarkId: null }));
+    favoriteStore.initialized = false;
+    tabs.push(...native.map((id, index) => ({ id, index, windowId: 10, pinned: true, active: false, title: `Native ${id}`, url: 'https://native.test/' })));
+    await onChanged.emit({ persistentFavorites: { newValue: structuredClone(local.persistentFavorites) } }, 'local'); await wait(120);
+    layoutFavoriteGrid(); effects = []; writes = [];
+}
+function layoutFavoriteGrid() {
+    favorites()._rect = { left: 8, right: 288, top: 10, bottom: 240, width: 280, height: 230 };
+    [...favorites().querySelectorAll('.pinned-favicon')].forEach((node, index) => {
+        const left = 8 + index % 3 * 88, top = 10 + Math.floor(index / 3) * 56;
+        node._rect = { left, right: left + 80, top, bottom: top + 48, width: 80, height: 48 };
+    });
+}
+function favoritePoint(node, placement = 'before') {
+    const rect = node.getBoundingClientRect(); return { clientX: placement === 'before' ? rect.left + 8 : rect.right - 8, clientY: rect.top + 20 };
+}
+async function commitFavoriteDrag(source, target, placement, expectedBeforeId) {
+    const point = favoritePoint(target, placement);
+    drag(source, 'dragstart'); drag(target, 'dragover', point.clientY, point);
+    assert.equal(favoriteMarker().hidden, false);
+    assert.equal(favoriteMarker().dataset.beforeId, expectedBeforeId || '');
+    assert.equal(favoriteMarker().dataset.placement, placement);
+    drag(target, 'drop', point.clientY, point);
+    assert.equal(favoriteMarker().hidden, true, 'drop immediately clears its preview');
+    drag(source, 'dragend'); await wait(180); layoutFavoriteGrid();
+}
+
+test('actual Favorites marker commits first, middle, wrapped-row and append slots without losing any saved record', async () => {
+    await seedFavoriteGrid(); const original = structuredClone(local.persistentFavorites), bookmarks = structuredClone(tree);
+    const exact = favoriteIds().sort();
+    await commitFavoriteDrag(savedIcon('saved-e'), savedIcon('saved-a'), 'before', 'saved-a');
+    assert.deepEqual(favoriteIds(), ['saved-e', 'saved-a', 'saved-b', 'saved-c', 'saved-d']);
+    await commitFavoriteDrag(savedIcon('saved-e'), savedIcon('saved-c'), 'after', 'saved-d');
+    assert.deepEqual(favoriteIds(), ['saved-a', 'saved-b', 'saved-c', 'saved-e', 'saved-d']);
+    await commitFavoriteDrag(savedIcon('saved-b'), savedIcon('saved-d'), 'after', null);
+    assert.deepEqual(favoriteIds(), ['saved-a', 'saved-c', 'saved-e', 'saved-d', 'saved-b']);
+    await commitFavoriteDrag(savedIcon('saved-b'), savedIcon('saved-d'), 'before', 'saved-d');
+    assert.deepEqual(favoriteIds(), ['saved-a', 'saved-c', 'saved-e', 'saved-b', 'saved-d']);
+    assert.deepEqual(favoriteIds().sort(), exact);
+    for (const item of local.persistentFavorites) assert.deepEqual(item, original.find(record => record.id === item.id));
+    assert.deepEqual(tree, bookmarks); assert.deepEqual(writes, []); assert.deepEqual(effects, [], 'closed record reorder never opens, closes or moves a tab');
+});
+
+test('actual saved/native boundary previews the saved append slot and keeps unmanaged pins independent', async () => {
+    await seedFavoriteGrid({ saved: ['saved-a', 'saved-b'], native: [201, 202] });
+    const source = savedIcon('saved-a'), native = favorites().querySelector('[data-tab-id="202"]');
+    const point = favoritePoint(native, 'after'), bookmarks = structuredClone(tree);
+    drag(source, 'dragstart'); drag(native, 'dragover', point.clientY, point);
+    assert.equal(favoriteMarker().dataset.list, 'saved'); assert.equal(favoriteMarker().dataset.anchorId, 'saved-b'); assert.equal(favoriteMarker().dataset.beforeId, '');
+    drag(native, 'drop', point.clientY, point); drag(source, 'dragend'); await wait(180); layoutFavoriteGrid();
+    assert.deepEqual(favoriteIds(), ['saved-b', 'saved-a']); assert.deepEqual(effects, []);
+    const records = structuredClone(local.persistentFavorites);
+    const nativeSource = favorites().querySelector('[data-tab-id="202"]'), savedTarget = savedIcon('saved-b');
+    const nativePoint = favoritePoint(savedTarget);
+    drag(nativeSource, 'dragstart'); drag(savedTarget, 'dragover', nativePoint.clientY, nativePoint);
+    assert.equal(favoriteMarker().dataset.list, 'native'); assert.equal(favoriteMarker().dataset.anchorId, '201'); assert.equal(favoriteMarker().dataset.placement, 'before');
+    drag(savedTarget, 'drop', nativePoint.clientY, nativePoint); drag(nativeSource, 'dragend'); await wait(180);
+    assert.deepEqual(effects.filter(([kind]) => kind === 'move').map(([, id, patch]) => [id, patch.index]), [[202, 0], [201, 1]]);
+    assert.deepEqual(local.persistentFavorites, records); assert.deepEqual(tree, bookmarks); assert.deepEqual(writes, []);
+    assert(!effects.some(([kind]) => kind === 'create' || kind === 'remove' || kind === 'update'));
+});
+
+test('actual external bookmark drops use the marker before a saved ID, including empty-saved/native-only boundary', async () => {
+    for (const saved of [['saved-a', 'saved-b'], []]) {
+        await seedFavoriteGrid({ saved, native: [201] });
+        const source = row('closed'), target = saved.length ? savedIcon('saved-b') : favorites().querySelector('[data-tab-id="201"]');
+        const point = favoritePoint(target), bookmarks = structuredClone(tree);
+        drag(source, 'dragstart'); drag(target, 'dragover', point.clientY, point);
+        assert.equal(favoriteMarker().hidden, false); assert.equal(favoriteMarker().dataset.list, 'saved');
+        assert.equal(favoriteMarker().dataset.beforeId, saved.length ? 'saved-b' : '');
+        assert.equal(favoriteMarker().dataset.anchorId, saved.length ? 'saved-b' : '201');
+        drag(target, 'drop', point.clientY, point); drag(source, 'dragend'); await wait(220);
+        const added = local.persistentFavorites.find(item => item.sourceBookmarkId === 'closed'); assert(added);
+        assert.deepEqual(favoriteIds(), saved.length ? ['saved-a', added.id, 'saved-b'] : [added.id]);
+        assert(favorites().querySelector('.native-favorite[data-tab-id="201"]'));
+        assert.deepEqual(tree, bookmarks); assert.deepEqual(writes, []); assert(!effects.some(([kind]) => kind === 'remove' || kind === 'move'));
+    }
+});
+
+test('actual own-slot and adjacent no-op drops do not paint or submit a mutation', async () => {
+    await seedFavoriteGrid({ native: [201, 202] });
+    const records = structuredClone(local.persistentFavorites), operation = favorites().dataset.dropOperation;
+    for (const [source, target, placement] of [
+        [savedIcon('saved-c'), savedIcon('saved-c'), 'after'],
+        [savedIcon('saved-c'), savedIcon('saved-b'), 'after'],
+        [savedIcon('saved-c'), savedIcon('saved-d'), 'before'],
+        [favorites().querySelector('[data-tab-id="202"]'), favorites().querySelector('[data-tab-id="201"]'), 'after']
+    ]) {
+        const point = favoritePoint(target, placement);
+        drag(source, 'dragstart'); const event = drag(target, 'dragover', point.clientY, point);
+        assert.equal(favoriteMarker().hidden, true); assert.equal(event.dataTransfer.dropEffect, 'none');
+        drag(target, 'drop', point.clientY, point); drag(source, 'dragend');
+    }
+    await wait(180); assert.deepEqual(local.persistentFavorites, records); assert.deepEqual(effects, []); assert.deepEqual(writes, []);
+    assert.equal(favorites().dataset.dropOperation, operation);
+});
+
+test('actual Escape, blur, external drop, leave and end clear a visible Favorites preview without mutation', async () => {
+    await seedFavoriteGrid(); const records = structuredClone(local.persistentFavorites);
+    for (const type of ['keydown', 'blur', 'drop', 'dragleave', 'dragend']) {
+        const source = savedIcon('saved-e'), target = savedIcon('saved-a'), point = favoritePoint(target);
+        drag(source, 'dragstart'); drag(target, 'dragover', point.clientY, point); assert.equal(favoriteMarker().hidden, false);
+        const destination = type === 'blur' ? window : type === 'dragleave' ? favorites() : type === 'dragend' ? source : document.body;
+        drag(destination, type, 25, { key: 'Escape', relatedTarget: null });
+        assert.equal(favoriteMarker().hidden, true); assert.equal(favoriteMarker().dataset.beforeId, undefined);
+        if (['keydown', 'blur'].includes(type)) drag(target, 'drop', point.clientY, point);
+        drag(source, 'dragend');
+    }
+    await wait(180); assert.deepEqual(local.persistentFavorites, records); assert.deepEqual(effects, []); assert.deepEqual(writes, []);
+});
+
+test('actual drop recomputes the final pointer destination instead of committing stale hover coordinates', async () => {
+    await seedFavoriteGrid();
+    const source = savedIcon('saved-a'), hovered = savedIcon('saved-c'), target = savedIcon('saved-e');
+    const hoverPoint = favoritePoint(hovered), dropPoint = favoritePoint(target, 'after');
+    drag(source, 'dragstart'); drag(hovered, 'dragover', hoverPoint.clientY, hoverPoint); assert.equal(favoriteMarker().dataset.beforeId, 'saved-c');
+    drag(target, 'drop', dropPoint.clientY, dropPoint); drag(source, 'dragend'); await wait(180);
+    assert.deepEqual(favoriteIds(), ['saved-b', 'saved-c', 'saved-d', 'saved-e', 'saved-a']);
+    assert.deepEqual(effects, []); assert.deepEqual(writes, []);
 });

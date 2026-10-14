@@ -1,6 +1,8 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FavoriteStore, FAVORITES_KEY, FAVORITE_SESSION_KEY, registerFavoriteMessages } from '../../favorite-store.js';
+import { captureFavoriteIcon, favoriteIconCacheSize, MAX_FAVORITE_ICON_CACHE, FAVORITE_ICON_CACHE_KEY } from '../../favorite-icons.js';
+import { pngIcon } from '../fixtures/favorite-icons.js';
 
 // Actual worker module, Chrome API boundary mocks. No browser launched here.
 const SELF = 'b'.repeat(32), URL = 'https://saved.test/';
@@ -9,7 +11,7 @@ const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn);
 let local, session, tabs, windows, nodes, effects, nextId, hooks, spaceStore;
 function storage(data, area) {
     return {
-        async get(keys) { return Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(key => [key, copy(data[key])])); },
+        async get(keys) { await hooks[`${area}BeforeGet`]?.(keys); return Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(key => [key, copy(data[key])])); },
         async set(value) {
             await hooks[`${area}BeforeSet`]?.(value);
             Object.assign(data, copy(value));
@@ -30,8 +32,14 @@ const bookmark = attrs => request('addBookmark', { spaceId: 'space', bookmarkFol
 const get = id => { const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('No tab'); return tab; };
 const creates = () => effects.filter(effect => effect[0] === 'create');
 const updates = () => effects.filter(effect => effect[0] === 'update');
-const newStore = ({ install = true } = {}) => { const store = new FavoriteStore(spaceStore); if (install) store.install(); return store; };
+const storedIcon = (favoriteId = local[FAVORITES_KEY]?.[0]?.id) => local[FAVORITE_ICON_CACHE_KEY]?.entries?.find(entry => entry.favoriteId === favoriteId)?.faviconDataUrl;
+const cacheEntry = (item, faviconDataUrl) => ({ favoriteId: item.id, url: item.url, faviconDataUrl });
+const newStore = ({ install = true, ...options } = {}) => { const store = new FavoriteStore(spaceStore, options); if (install) store.install(); return store; };
 const idle = async () => { for (let i = 0; i < 3; i++) await spaceStore.run(() => {}); };
+const iconIdle = async store => {
+    for (let i = 0; i < 100 && (store.iconJobs.size || store.activeIconJobs); i++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(store.iconJobs.size, 0); assert.equal(store.activeIconJobs, 0); await idle();
+};
 async function added(store, input = bookmark()) { const result = await store.dispatch(input); return { result, favorite: result.favorites[0], tab: result.tab }; }
 beforeEach(() => {
     local = { pinnedTabStatesById: { 2: { bookmarkId: 'bookmark', pinnedUrl: URL } } }; session = {};
@@ -471,4 +479,227 @@ for (const change of ['moved', 'closed', 'unpinned']) test(`verified legacy rece
     };
     await assert.rejects(newStore().dispatch(bookmark()));
     assert.equal(creates().length, 0); assert.equal(local[FAVORITES_KEY], undefined);
+});
+
+test('captured Favorite PNG survives close, worker recreation and fresh browser session without another lookup', async () => {
+    const icon = pngIcon(), calls = [];
+    get(3).favIconUrl = icon;
+    const store = newStore({ captureIcon: async (url, options) => { calls.push({ url, ...options }); return options.dataUrl; } });
+    const { favorite } = await added(store, request('addTab', { tabId: 3 })); await iconIdle(store);
+    assert.deepEqual(calls, [{ url: URL, dataUrl: icon }]); assert.equal(storedIcon(), icon);
+    tabs = tabs.filter(tab => tab.id !== 3); chrome.tabs.onRemoved.emit(3); await idle();
+    assert.equal((await store.dispatch(request('get'))).favorites[0].faviconDataUrl, icon);
+    for (const key of Object.keys(session)) delete session[key];
+    const restarted = newStore({ captureIcon() { throw Error('retained icons need no fetch'); } });
+    const record = (await restarted.dispatch(request('get'))).favorites[0];
+    assert.equal(record.id, favorite.id); assert.equal(record.tabId, null); assert.equal(record.faviconDataUrl, icon);
+    assert.equal(creates().length, 0);
+});
+
+test('navigated saved bookmark cannot donate its current-page icon; capture uses the immutable saved URL', async () => {
+    const icon = pngIcon(), wrong = pngIcon({ red: 200 }), calls = [];
+    get(2).favIconUrl = wrong;
+    const store = newStore({ captureIcon: async (url, options) => { calls.push({ url, ...options }); return icon; } });
+    await added(store, bookmark({ tabId: 2 })); await iconIdle(store);
+    assert.deepEqual(calls, [{ url: URL, dataUrl: undefined }]);
+    assert.equal(storedIcon(), icon); assert.equal(local[FAVORITES_KEY][0].title, 'Saved title');
+    assert.equal(get(2).url, 'https://navigated.test/');
+});
+
+test('bound saved-page icon changes refresh safely; unrelated navigation and pending navigation preserve saved bytes', async () => {
+    const first = pngIcon(), second = pngIcon({ red: 200 }), calls = [];
+    const store = newStore({ captureIcon: async (url, options) => { calls.push({ url, ...options }); return options.dataUrl || first; } });
+    const { tab } = await added(store); await iconIdle(store);
+    for (const patch of [{ url: 'https://elsewhere.test/' }, { url: `${URL}?other=true` }, { url: URL, pendingUrl: 'https://away.test/' }]) {
+        Object.assign(get(tab.id), patch, { favIconUrl: second });
+        chrome.tabs.onUpdated.emit(tab.id, { favIconUrl: second, status: 'complete' }); await idle(); await iconIdle(store);
+        assert.equal(storedIcon(), first);
+    }
+    assert.equal(calls.length, 1);
+    Object.assign(get(tab.id), { url: URL, pendingUrl: undefined, favIconUrl: second });
+    chrome.tabs.onUpdated.emit(tab.id, { favIconUrl: second }); await idle(); await iconIdle(store);
+    assert.equal(storedIcon(), second); assert.equal(calls.length, 2);
+    assert.equal(local[FAVORITES_KEY][0].url, URL); assert.equal(local[FAVORITES_KEY][0].title, 'Saved title');
+});
+
+test('older async icon result cannot overwrite a newer capture even when it finishes last', async () => {
+    const tasks = [], old = pngIcon(), latest = pngIcon({ red: 220 });
+    const store = newStore({ captureIcon: () => new Promise(resolve => tasks.push(resolve)) });
+    const { tab } = await added(store); assert.equal(tasks.length, 1);
+    chrome.tabs.onUpdated.emit(tab.id, { favIconUrl: 'https://saved.test/new.png' }); await idle();
+    assert.equal(tasks.length, 2); tasks[1](latest); await idle();
+    tasks[0](old); await iconIdle(store);
+    assert.equal(storedIcon(), latest);
+});
+
+test('empty favicon signals and unavailable cache preserve a previously retained icon on page completion', async () => {
+    const icon = pngIcon(), generic = pngIcon({ red: 90 }); let captures = 0;
+    const store = newStore({ captureIcon: async () => ++captures === 1 ? icon : generic });
+    const { tab } = await added(store); await iconIdle(store);
+    get(tab.id).favIconUrl = '';
+    chrome.tabs.onUpdated.emit(tab.id, { status: 'complete' }); await idle(); await iconIdle(store);
+    get(tab.id).favIconUrl = 'https://saved.test/icon.png';
+    chrome.tabs.onUpdated.emit(tab.id, { favIconUrl: '' }); await idle(); await iconIdle(store);
+    assert.equal(captures, 1); assert.equal(storedIcon(), icon);
+    store.captureIcon = async () => { captures++; return null; };
+    chrome.tabs.onUpdated.emit(tab.id, { status: 'complete' }); await idle(); await iconIdle(store);
+    assert.equal(captures, 2); assert.equal(storedIcon(), icon);
+});
+
+test('real cache capture rejects Chrome generic PNG even with nonempty live favicon URL, preserving retained bytes', async () => {
+    const icon = pngIcon(), generic = pngIcon({ red: 90 }), urls = [];
+    const store = newStore({ captureIcon: async () => icon });
+    const { tab } = await added(store); await iconIdle(store);
+    store.captureIcon = (url, options) => captureFavoriteIcon(url, { ...options, fetchIcon: async cacheUrl => {
+        urls.push(cacheUrl); return new Response(Buffer.from(generic.split(',')[1], 'base64'), { headers: { 'content-type': 'image/bmp' } });
+    } });
+    get(tab.id).favIconUrl = 'https://saved.test/actual-icon.png';
+    chrome.tabs.onUpdated.emit(tab.id, { status: 'complete' }); await idle(); await iconIdle(store);
+    assert.equal(urls.length, 2); assert(urls.every(url => new globalThis.URL(url).protocol === 'chrome-extension:'));
+    assert.equal(storedIcon(), icon);
+});
+
+test('late icon cannot resurrect a removed Favorite or overwrite the current shared order and additions', async () => {
+    const tasks = [], icon = pngIcon();
+    const store = newStore({ captureIcon: () => new Promise(resolve => tasks.push(resolve)) });
+    const one = await added(store); const two = await store.dispatch(bookmark({ bookmarkId: 'twin' }));
+    await store.dispatch(request('reorder', { favoriteId: two.favorites[1].id, beforeId: one.favorite.id }));
+    tasks[0](icon); await idle();
+    assert.deepEqual(local[FAVORITES_KEY].map(item => item.sourceBookmarkId), ['twin', 'bookmark']);
+    await store.dispatch(request('remove', { favoriteId: two.favorites[1].id }));
+    tasks[1](icon); await iconIdle(store);
+    assert.deepEqual(local[FAVORITES_KEY].map(item => item.id), [one.favorite.id]);
+    assert.equal(storedIcon(), icon);
+});
+
+test('legacy closed Favorites backfill locally without opening tabs, with cooldown on unavailable cache', async () => {
+    local[FAVORITES_KEY] = [{ id: 'old', title: 'Old', url: URL, sourceBookmarkId: null }];
+    let now = 100, calls = 0;
+    const store = newStore({ now: () => now, captureIcon: async () => ++calls === 1 ? null : pngIcon() });
+    assert.equal((await store.dispatch(request('get'))).favorites[0].tabId, null); await iconIdle(store);
+    await store.dispatch(request('get')); await iconIdle(store); assert.equal(calls, 1);
+    now += 60000; await store.dispatch(request('get')); await iconIdle(store);
+    assert.equal(calls, 2); assert.equal(storedIcon(), pngIcon());
+    assert.equal(creates().length, 0); assert.equal(updates().length, 0);
+});
+
+test('bad auxiliary icon metadata is discarded without making a valid Favorite inaccessible or mutating its link', async () => {
+    for (const icon of [null, {}, 42, 'https://tracker.test/favicon', 'data:image/svg+xml,<svg/>', 'data:image/png;base64,garbage', pngIcon({ width: 129 })]) {
+        local[FAVORITES_KEY] = [{ id: 'old', title: 'Old', url: URL, sourceBookmarkId: null }];
+        local[FAVORITE_ICON_CACHE_KEY] = { version: 1, entries: [cacheEntry(local[FAVORITES_KEY][0], icon)] };
+        const before = copy(local[FAVORITES_KEY]), store = newStore({ install: false, captureIcon: async () => null });
+        const response = await store.dispatch(request('get')); await iconIdle(store);
+        assert.equal(response.favorites[0].faviconDataUrl, undefined); assert.equal(response.favorites[0].url, URL);
+        assert.deepEqual(local[FAVORITES_KEY], before, 'read must not eagerly rewrite valid saved links');
+    }
+});
+
+test('cache and icon-write failures never fail a Favorite operation or discard previously retained bytes', async () => {
+    const icon = pngIcon();
+    const store = newStore({ captureIcon: async () => { throw Error('cache denied'); } });
+    const { favorite } = await added(store); await iconIdle(store);
+    assert.equal((await store.dispatch(request('open', { favoriteId: favorite.id }))).tab.id, favorite.tabId);
+    store.captureIcon = async () => icon;
+    hooks.localBeforeSet = value => { if (value[FAVORITE_ICON_CACHE_KEY]) throw Error('quota'); };
+    chrome.tabs.onUpdated.emit(favorite.tabId, { status: 'complete' }); await idle(); await iconIdle(store);
+    assert.equal(local[FAVORITES_KEY][0].id, favorite.id); assert.equal(storedIcon(), undefined); assert.equal(store.initialized, true);
+    hooks.localBeforeSet = null;
+    assert.equal((await store.dispatch(request('open', { favoriteId: favorite.id }))).tab.id, favorite.tabId);
+});
+
+test('four-capture concurrency bound, cache budget and corrupt excess cache never block the saved list', async () => {
+    const icon = pngIcon({ extra: [['tEXt', Buffer.alloc(14000, 65)]] }), count = Math.floor(MAX_FAVORITE_ICON_CACHE / icon.length) + 3;
+    local[FAVORITES_KEY] = Array.from({ length: count }, (_, n) => ({ id: `saved-${n}`, title: 'Saved', url: URL, sourceBookmarkId: null }));
+    local[FAVORITE_ICON_CACHE_KEY] = { version: 1, entries: local[FAVORITES_KEY].map(item => cacheEntry(item, icon)) };
+    const releases = [], store = newStore({ captureIcon: () => new Promise(resolve => releases.push(resolve)) });
+    const result = await store.dispatch(request('get'));
+    assert.equal(result.favorites.length, count);
+    assert(favoriteIconCacheSize([...store.icons.values()]) <= MAX_FAVORITE_ICON_CACHE);
+    assert(releases.length <= 4); releases.splice(0).forEach(resolve => resolve(icon)); await iconIdle(store);
+    assert.equal(store.items.filter(item => !store.icon(item)).length, 3);
+    // A large legacy list must not launch unbounded fetches at once.
+    local[FAVORITES_KEY] = Array.from({ length: 10 }, (_, n) => ({ id: `missing-${n}`, title: 'Saved', url: URL, sourceBookmarkId: null }));
+    const many = newStore({ install: false, captureIcon: () => new Promise(resolve => releases.push(resolve)) });
+    await many.dispatch(request('get')); assert.equal(many.activeIconJobs, 4); assert.equal(releases.length, 4);
+    while (many.iconJobs.size) { releases.splice(0).forEach(resolve => resolve(null)); await new Promise(resolve => setImmediate(resolve)); }
+    await iconIdle(many); assert.equal(creates().length, 0);
+});
+
+test('untrusted Favorite request cannot inject cached icon bytes', async () => {
+    await assert.rejects(newStore().dispatch({ ...request('addTab', { tabId: 3 }), faviconDataUrl: pngIcon() }), { code: 'INVALID_REQUEST' });
+    assert.equal(local[FAVORITES_KEY], undefined); assert.equal(updates().length, 0);
+});
+
+test('icon capture writes only auxiliary cache and keeps exact original four-key durable record schema', async () => {
+    let release;
+    const store = newStore({ captureIcon: () => new Promise(resolve => { release = resolve; }) });
+    const { favorite } = await added(store);
+    const original = copy(local[FAVORITES_KEY]), writes = [];
+    hooks.localBeforeSet = patch => writes.push(copy(patch));
+    release(pngIcon()); await iconIdle(store);
+    assert.deepEqual(local[FAVORITES_KEY], original);
+    assert.deepEqual(Object.keys(original[0]).sort(), ['id', 'sourceBookmarkId', 'title', 'url']);
+    assert.deepEqual(writes.map(patch => Object.keys(patch)), [[FAVORITE_ICON_CACHE_KEY]]);
+    assert.deepEqual(local[FAVORITE_ICON_CACHE_KEY], { version: 1, entries: [{ favoriteId: favorite.id, url: URL, faviconDataUrl: pngIcon() }] });
+    assert.equal((await store.dispatch(request('get'))).favorites[0].faviconDataUrl, pngIcon());
+    await store.dispatch(request('reorder', { favoriteId: favorite.id, beforeId: null }));
+    assert.deepEqual(local[FAVORITES_KEY], original);
+});
+
+test('rollback-style registry reorder retains ID icons while deletion, replacement ID and exact URL changes cannot borrow cache', async () => {
+    const one = { id: 'one', title: 'One', url: URL, sourceBookmarkId: null };
+    const two = { id: 'two', title: 'Two', url: 'https://two.test/', sourceBookmarkId: null };
+    const first = pngIcon(), second = pngIcon({ red: 210 });
+    local[FAVORITE_ICON_CACHE_KEY] = { version: 1, entries: [cacheEntry(one, first), cacheEntry(two, second)] };
+    local[FAVORITES_KEY] = [two, one];
+    const reordered = newStore({ install: false, captureIcon: async () => null });
+    assert.deepEqual((await reordered.dispatch(request('get'))).favorites.map(item => [item.id, item.faviconDataUrl]), [['two', second], ['one', first]]);
+    local[FAVORITES_KEY] = [{ ...one, id: 'replacement' }, { ...two, url: `${two.url}?changed=1` }];
+    const changed = newStore({ install: false, captureIcon: async () => null });
+    assert((await changed.dispatch(request('get'))).favorites.every(item => item.faviconDataUrl === undefined)); await iconIdle(changed);
+    assert.equal(changed.icons.size, 0); assert.equal(local[FAVORITE_ICON_CACHE_KEY].entries.length, 2, 'read only ignores on-disk orphan entries');
+});
+
+test('malformed auxiliary cache envelopes and read failures never block link read or open', async () => {
+    local[FAVORITES_KEY] = [{ id: 'old', title: 'Old', url: URL, sourceBookmarkId: null }];
+    for (const value of [null, [], 'bad', { version: 2, entries: [] }, { version: 1, entries: {} }, { version: 1, entries: [], unexpected: true },
+        { version: 1, entries: [null, 3, [], { favoriteId: 'old', url: URL, faviconDataUrl: pngIcon(), extra: true }] }]) {
+        local[FAVORITE_ICON_CACHE_KEY] = value;
+        const store = newStore({ install: false, captureIcon: async () => null });
+        assert.equal((await store.dispatch(request('get'))).favorites[0].id, 'old'); await iconIdle(store);
+        assert.equal(store.icons.size, 0); assert.equal(store.initialized, true);
+    }
+    hooks.localBeforeGet = keys => { if (keys === FAVORITE_ICON_CACHE_KEY) throw Error('auxiliary cache unavailable'); };
+    const store = newStore({ install: false, captureIcon: async () => null });
+    assert.equal((await store.dispatch(request('open', { favoriteId: 'old' }))).tab.url, URL); await iconIdle(store);
+    assert.equal(store.initialized, true);
+});
+
+test('remove succeeds despite auxiliary cleanup failure and orphan bytes never reappear after restart or late capture', async () => {
+    const icon = pngIcon();
+    const store = newStore({ captureIcon: async () => icon });
+    const { favorite, tab } = await added(store); await iconIdle(store);
+    let release;
+    store.captureIcon = () => new Promise(resolve => { release = resolve; });
+    get(tab.id).favIconUrl = 'https://saved.test/updated.png'; chrome.tabs.onUpdated.emit(tab.id, { favIconUrl: get(tab.id).favIconUrl }); await idle();
+    hooks.localBeforeSet = patch => { if (patch[FAVORITE_ICON_CACHE_KEY]) throw Error('cache cleanup unavailable'); };
+    const removed = await store.dispatch(request('remove', { favoriteId: favorite.id }));
+    assert.deepEqual(removed.favorites, []); assert.deepEqual(local[FAVORITES_KEY], []); assert.equal(get(tab.id).pinned, false);
+    assert.equal(store.icons.size, 0); assert.equal(store.initialized, true); assert.equal(storedIcon(favorite.id), icon);
+    release(pngIcon({ red: 190 })); await iconIdle(store);
+    const restarted = newStore({ install: false, captureIcon: async () => null });
+    assert.deepEqual((await restarted.dispatch(request('get'))).favorites, []); assert.equal(restarted.icons.size, 0);
+    assert.equal(storedIcon(favorite.id), icon, 'failed disk cleanup is ignored, never attached to an absent Favorite');
+});
+
+test('orphan and mismatched cache bytes consume no live cache budget; metadata is included in the storage bound', async () => {
+    const live = { id: 'live', title: 'Live', url: URL, sourceBookmarkId: null }, icon = pngIcon();
+    local[FAVORITES_KEY] = [live];
+    local[FAVORITE_ICON_CACHE_KEY] = { version: 1, entries: [
+        { favoriteId: 'deleted', url: URL, faviconDataUrl: 'x'.repeat(MAX_FAVORITE_ICON_CACHE) },
+        { favoriteId: live.id, url: 'https://other.test/', faviconDataUrl: icon }, cacheEntry(live, icon)] };
+    const store = newStore({ install: false, captureIcon: async () => null });
+    assert.equal((await store.dispatch(request('get'))).favorites[0].faviconDataUrl, icon); assert.equal(store.icons.size, 1);
+    assert(favoriteIconCacheSize([...store.icons.values()]) > icon.length, 'identity, URL and envelope count toward budget');
+    assert.deepEqual(local[FAVORITES_KEY], [live]);
 });

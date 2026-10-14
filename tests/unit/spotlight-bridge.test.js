@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { SpaceStore, ownerOf } from '../../space-store.js';
 import { createSpotlightBridge, getBridgeSnapshot, runBridgeAction, registerSpotlightBridge } from '../../spotlight-bridge.js';
 import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY } from '../../spotlight-bridge-protocol.js';
+import { pngIcon } from '../fixtures/favorite-icons.js';
 
 // These are API-level mocks, not claims of verification in a running browser.
 const PEER = 'a'.repeat(32);
@@ -774,6 +775,18 @@ test('persistent Favorites hello, snapshot and open use the same SpaceStore queu
     assert.equal(response.snapshot.favorites[0].url, DUPLICATE_URL);
     assert.equal(getTab(added.tab.id).url, 'https://navigated-favorite.test/');
     assert.equal(writes('tab.create').length, 1);
+});
+
+test('local retained icon never widens the strict v1 Favorites snapshot consumed by existing Spotlight peers', async () => {
+    const { FavoriteStore } = await import('../../favorite-store.js');
+    const record = { id: 'retained', title: 'Saved', url: DUPLICATE_URL, sourceBookmarkId: null };
+    local.persistentFavorites = [record];
+    local.favoriteIconCache = { version: 1, entries: [{ favoriteId: record.id, url: record.url, faviconDataUrl: pngIcon() }] };
+    const store = await makeStore(); new FavoriteStore(store);
+    const snapshot = await getBridgeSnapshot(store, 1);
+    assert.deepEqual(snapshot.favorites, [{ ...record, tabId: null }]);
+    assert.equal(local.favoriteIconCache.entries[0].faviconDataUrl, pngIcon());
+    assert.deepEqual(local.persistentFavorites, [record]);
 });
 
 test('closed persistent Favorite opens once through paired journal, rejects stale IDs/fields/peer/window, and survives worker recreation', async () => {

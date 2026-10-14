@@ -3,6 +3,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { durableFavoriteRecords, nativePinContents, assertUnchangedExtensionRegistry,
     assertFreshFavoriteRead, assertFavoritesAfterRestart, assertFavoriteReopened, requestScopedFavorite, assertFavoriteRender } from '../../scripts/paired-chrome-favorites-restart.mjs';
+import { FAVORITE_FAVICON_PNG, assertLegacyFavoriteRegistry } from '../../scripts/paired-chrome-favorite-icons.mjs';
+
+const retainedIcon = `data:image/png;base64,${FAVORITE_FAVICON_PNG.toString('base64')}`;
 
 test('scoped Favorite requests validate the real sender window before dispatch', async () => {
     const oldChrome = globalThis.chrome, messages = [];
@@ -25,22 +28,23 @@ const favorites = () => [
     { id: 'saved-first', title: 'First identity', url: 'http://fixture.test/same', sourceBookmarkId: 'bookmark-one' },
     { id: 'older-favorite', title: 'Earlier scenario record', url: 'http://fixture.test/earlier', sourceBookmarkId: null }
 ];
+const iconCache = () => ({ version: 1, entries: [{ favoriteId: 'saved-second', url: 'http://fixture.test/same', faviconDataUrl: retainedIcon }] });
 const tab = (id, windowId = 70, options = {}) => ({ id, windowId, url: 'http://fixture.test/same', pinned: true, incognito: false, active: false, ...options });
 const sources = () => ({ bookmarks: [
     { id: 'bookmark-one', parentId: 'folder', index: 0, title: 'First identity', url: 'http://fixture.test/same' },
     { id: 'bookmark-two', parentId: 'folder', index: 1, title: 'Same URL, second identity', url: 'http://fixture.test/same' }
 ], parents: [{ id: 'folder', parentId: 'root', index: 1, title: 'Space' }] });
 function states(tabs) {
-    return [70, 90].map(windowId => ({ windowId, favorites: favorites().map(item => ({ ...item, tabId: null })),
+    return [70, 90].map(windowId => ({ windowId, favorites: favorites().map(item => ({ ...item, tabId: null, ...(item.id === 'saved-second' ? { faviconDataUrl: retainedIcon } : {}) })),
         nativeTabs: tabs.filter(tab => tab.windowId === windowId && tab.pinned) }));
 }
 function restarted() {
     const tabs = [tab(701), tab(702), tab(900, 90), tab(703, 70, { pinned: false, url: 'chrome-extension://fixture/options.html' })];
-    return { durable: favorites(), sources: sources(), tabs, states: states(tabs), windows: [{ id: 70 }, { id: 90 }],
+    return { durable: favorites(), iconCache: iconCache(), sources: sources(), tabs, states: states(tabs), windows: [{ id: 70 }, { id: 90 }],
         session: null, sessionAfterGet: { version: 1, bindings: [], attempts: [] } };
 }
 function beforeRestart() {
-    return { durable: favorites(), sources: sources(), tabs: [tab(1, 1), tab(2, 1), tab(3, 2)] };
+    return { durable: favorites(), iconCache: iconCache(), sources: sources(), tabs: [tab(1, 1), tab(2, 1), tab(3, 2)] };
 }
 function reopened() {
     const before = restarted(), after = structuredClone(before), created = tab(704, 70, { active: true });
@@ -52,9 +56,22 @@ function reopened() {
 
 test('durable projection retains every identity, metadata field and exact order without session IDs', () => {
     const original = favorites().map((item, index) => ({ ...item, tabId: index + 10 }));
+    original[0].faviconDataUrl = retainedIcon;
     assert.deepEqual(durableFavoriteRecords(original), favorites());
     assert.equal(original[0].tabId, 10);
+    assert.equal(original[0].faviconDataUrl, retainedIcon, 'Projection must not mutate the internal joined UI record.');
+    assert.equal(Object.hasOwn(durableFavoriteRecords(original)[0], 'faviconDataUrl'), false);
+    assert.equal(Object.hasOwn(durableFavoriteRecords(original)[1], 'faviconDataUrl'), false, 'Older records need no optional icon.');
 });
+test('old durable lists remain compatible without inventing retained icons', () => {
+    const old = favorites();
+    assert.deepEqual(durableFavoriteRecords(old), old);
+});
+for (const icon of [null, '', 'https://fixture.test/icon.png', 'data:image/png;base64,AAAA']) {
+    test('any optional icon field in the legacy registry fails raw compatibility evidence', () => {
+        const list = favorites(); list[0].faviconDataUrl = icon; assert.throws(() => assertLegacyFavoriteRegistry(list));
+    });
+}
 for (const mutate of [list => list.push(list[0]), list => { list[0].id = ''; }, list => { delete list[0].sourceBookmarkId; }, list => { list[0].title = null; }]) {
     test('invalid durable records cannot form passing restart evidence', () => {
         const list = favorites(); mutate(list); assert.throws(() => durableFavoriteRecords(list));
@@ -68,6 +85,11 @@ test('native content observations preserve duplicate counts and do not claim sta
 test('durable identities survive while fresh exact IDs identify restored pins separately in every window', () => {
     assert.doesNotThrow(() => assertFavoritesAfterRestart(beforeRestart(), restarted()));
 });
+test('legacy profiles without an auxiliary icon cache still preserve every original restart assertion', () => {
+    const before = beforeRestart(), after = restarted(); before.iconCache = null; after.iconCache = null;
+    for (const state of after.states) for (const favorite of state.favorites) delete favorite.faviconDataUrl;
+    assert.doesNotThrow(() => assertFavoritesAfterRestart(before, after));
+});
 test('Chrome is not required to restore any pins, and no old/new URL-based mapping is invented', () => {
     const after = restarted(); after.tabs = after.tabs.filter(tab => !tab.pinned); after.states = states(after.tabs);
     assert.doesNotThrow(() => assertFavoritesAfterRestart(beforeRestart(), after));
@@ -79,6 +101,12 @@ for (const [name, mutate] of [
     ['changed durable title', after => { after.durable[0].title = 'changed'; }],
     ['changed durable URL', after => { after.durable[0].url = 'http://different.test/'; }],
     ['changed source identity', after => { after.durable[0].sourceBookmarkId = 'different'; }],
+    ['lost retained icon cache', after => { after.iconCache = null; }],
+    ['changed retained icon bytes', after => { after.iconCache.entries[0].faviconDataUrl = 'data:image/png;base64,changed'; }],
+    ['changed cache owner', after => { after.iconCache.entries[0].favoriteId = 'saved-first'; }],
+    ['changed cache saved URL', after => { after.iconCache.entries[0].url = 'http://fixture.test/changed'; }],
+    ['legacy registry icon pollution', after => { after.durable[0].faviconDataUrl = retainedIcon; }],
+    ['window omitted retained icon', after => { delete after.states[0].favorites[0].faviconDataUrl; }],
     ['changed source bookmark', after => { after.sources.bookmarks[0].title = 'changed'; }],
     ['moved source parent', after => { after.sources.parents[0].index++; }],
     ['stale raw binding', after => { after.session = { bindings: [{ favoriteId: 'saved-first', tabId: 1, windowId: 1 }] }; }],
@@ -132,7 +160,10 @@ for (const [name, mutate] of [
     ['extra raw session binding', h => { h.after.sessionAfterGet.bindings.push({ favoriteId: 'saved-second', tabId: 701, windowId: 70 }); }],
     ['pending raw open receipt', h => { h.after.sessionAfterGet.attempts.push({ favoriteId: 'saved-first' }); }],
     ['source bookmark modified', h => { h.after.sources.bookmarks[0].url = 'http://changed.test/'; }],
-    ['durable Favorite removed', h => { h.after.durable.pop(); }]
+    ['durable Favorite removed', h => { h.after.durable.pop(); }],
+    ['retained icon removed', h => { h.after.iconCache.entries = []; }],
+    ['legacy registry icon pollution', h => { h.after.durable[0].faviconDataUrl = retainedIcon; }],
+    ['window changed retained icon', h => { delete h.after.states[0].favorites[0].faviconDataUrl; }]
 ]) {
     test(`explicit reopen rejects ${name}`, () => {
         const h = reopened(); mutate(h); assert.throws(() => assertFavoriteReopened(h.before, h.after, h.expected));

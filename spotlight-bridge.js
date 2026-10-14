@@ -46,7 +46,9 @@ async function readBridgeSnapshot(store, windowId) {
     }
     return { windowId, capturedAt: Date.now(), activeSpaceId: spaces.some(s => s.id === store.active[windowId])
         ? store.active[windowId] : ownerOf(store.spaces, live.find(t => t.active)?.id)?.id || spaces[0]?.id || null,
-    spaces, bookmarks, warnings, ...(store.favoriteStore ? { favorites: (await store.favoriteStore.read(windowId)).favorites } : {}), tabs: live.map(tab => ({ id: tab.id, windowId, title: tab.title || '', url: tab.url || tab.pendingUrl || '',
+    // Keep auxiliary local icon bytes out of v1: older peers reject extra keys.
+    spaces, bookmarks, warnings, ...(store.favoriteStore ? { favorites: (await store.favoriteStore.read(windowId)).favorites
+        .map(({ id, title, url, sourceBookmarkId, tabId }) => ({ id, title, url, sourceBookmarkId, tabId })) } : {}), tabs: live.map(tab => ({ id: tab.id, windowId, title: tab.title || '', url: tab.url || tab.pendingUrl || '',
         active: Boolean(tab.active), pinned: Boolean(tab.pinned), spaceId: ownerOf(store.spaces, tab.id)?.id || null })) };
 }
 

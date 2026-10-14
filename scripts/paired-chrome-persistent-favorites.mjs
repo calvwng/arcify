@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { FAVORITE_FAVICON_PATH, waitForRetainedFavoriteIcon } from './paired-chrome-favorite-icons.mjs';
 
 // Actual Chrome scenario. Seed data uses real APIs; adoption, open and removal
 // use genuine renderer clicks. Native tab closure uses chrome.tabs.remove, not
@@ -41,11 +42,18 @@ export async function exercisePersistentFavorites({ apiPage, newTabPage, ui, scr
             bookmarkId:source.id,parentId:source.parentId});
         const saved = added.favorites.find(item => item.sourceBookmarkId === source.id); assert(saved?.tabId);
         const initial = await liveTab(saved.tabId); assert.equal(initial.pinned,true); assert.equal(initial.active,false);
+        const faviconTab = await poll(() => liveTab(saved.tabId), tab => tab.status === 'complete' && tab.url === source.url
+            && tab.favIconUrl === `${fixture.base}${FAVORITE_FAVICON_PATH}`, 'real localhost Favorite favicon discovery');
+        const retainedIconBefore = await waitForRetainedFavoriteIcon({ apiPage, sidebar: page, favoriteId: saved.id, expectedUrl: source.url, closed: false, poll });
         await clickIcon(page,saved.id);
         await poll(() => liveTab(saved.tabId),tab => tab.active,'exact Favorite activation');
         // This is the same real onRemoved path regardless of close affordance.
         await apiPage.evaluate(id => chrome.tabs.remove(id),saved.tabId);
         const closed = await poll(get,state => state.favorites.find(item => item.id === saved.id)?.tabId === null,'saved identity after real active-tab closure');
+        const retainedIconClosed = await waitForRetainedFavoriteIcon({ apiPage, sidebar: page, favoriteId: saved.id,
+            expectedUrl: source.url, expectedDataUrl: retainedIconBefore.cacheEntry.faviconDataUrl, closed: true, poll });
+        assert.deepEqual(retainedIconClosed.record, retainedIconBefore.record, 'Closing must preserve the four-key legacy Favorite record.');
+        assert.deepEqual(retainedIconClosed.cacheEntry, retainedIconBefore.cacheEntry, 'Closing must preserve exact auxiliary cache ownership and bytes.');
         await ui(page,'Inspect saved Favorite after tab closure',async () => {
             await page.waitForSelector(`${icon(saved.id)}.favorite-closed`);
             await screenshot(page,'saved-favorite-remains-after-native-tab-close');
@@ -107,6 +115,7 @@ export async function exercisePersistentFavorites({ apiPage, newTabPage, ui, scr
         await poll(get,state => state.favorites.find(item => item.id === saved.id)?.tabId === null,'closed saved Favorite prepared for Spotlight search');
         await ui(page,'Capture shared saved Favorite and preserved source',() => screenshot(page,'saved-favorite-explicit-removal-keeps-pages-and-source'));
         return {favoriteId:saved.id,source,initial,closed,reopenedId,reopened:reopenedTab,reused,thirdClosed,thirdOpened,
+            faviconTab,retainedIconBefore,retainedIconClosed,
             adoptedFavorite,beforeAdoption,adopted,beforeRemoval,afterRemoval,sourceAfter:await sourceNow(),
             realMouse:true,closure:'Actual chrome.tabs.remove on active native Favorite; physical Ctrl+W not asserted',nativePanel:false};
     } finally {

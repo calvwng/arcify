@@ -278,6 +278,8 @@ worker-owned saved Favorites store is available. New snapshots include ordered
 current-window exact live binding may be null. These global Favorite bindings
 point only to native-pinned tabs outside Space membership. Saved HTTP(S) URLs and
 titles remain unchanged when the live tab navigates.
+Arcify's optional local `faviconDataUrl` cache is deliberately projected out of
+these snapshots, preserving strict v1 compatibility with existing Spotlight peers.
 
 `openFavorite` accepts only the usual envelope, `windowId`, and `favoriteId`.
 It focuses that Favorite's exact current-window instance or opens its saved URL,

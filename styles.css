@@ -2154,3 +2154,38 @@ select:focus-visible,
 .native-favorites-notice { font-size: 11px; line-height: 1.4; margin: -10px 0 0; opacity: .8; }
 .context-menu button.context-menu-item { display: block; width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .context-menu button.context-menu-item:hover, .context-menu button.context-menu-item:focus-visible { background: #eee; }
+
+/* Saved/native Favorites share the same overlay language as Spaces. This line
+   never participates in flex wrapping or gets clipped by rounded icon tiles. */
+.favorites-drop-anchor {
+    position: fixed;
+    z-index: 10000;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--sidebar-drop-color, #2563eb);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .95);
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+.favorites-drop-anchor::before,
+.favorites-drop-anchor::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: inherit;
+    box-shadow: inherit;
+    transform: translate(-50%, -50%);
+}
+.favorites-drop-anchor::before { top: 0; }
+.favorites-drop-anchor::after { top: 100%; }
+.favorites-drop-anchor[hidden] { display: none; }
+@media (forced-colors: active) {
+    .favorites-drop-anchor {
+        background: Highlight;
+        box-shadow: 0 0 0 1px Canvas;
+        forced-color-adjust: none;
+    }
+}

@@ -5,6 +5,8 @@ import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessR
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
 import { developerModeStateReady, readDeveloperModeDomState, findInstalledExtension } from './paired-chrome-extensions.mjs';
 import { observeTargetDiagnostics, assertNoTargetCrashes, waitForExtensionWorkerIdentity, assertNoWorkerExceptions } from './paired-chrome-worker.mjs';
+import { FAVORITE_FAVICON_PATH, assertLegacyFavoriteRegistry, retainedFavoriteCache,
+    assertFavoriteIconProjection, waitForRetainedFavoriteIcon } from './paired-chrome-favorite-icons.mjs';
 
 const byId = (a, b) => String(a.id).localeCompare(String(b.id));
 const tabIdentity = ({ id, windowId, url, pinned, incognito }) => ({ id, windowId, url, pinned, incognito });
@@ -72,7 +74,10 @@ export function assertFavoriteRender(state, render) {
 }
 
 export function assertFavoritesAfterRestart(before, after) {
-    assert.deepEqual(after.durable, before.durable, 'All saved IDs, order, titles, URLs and source IDs must survive browser restart.');
+    assertLegacyFavoriteRegistry(before.durable); assertLegacyFavoriteRegistry(after.durable);
+    retainedFavoriteCache(before.iconCache, before.durable); retainedFavoriteCache(after.iconCache, after.durable);
+    assert.deepEqual(after.durable, before.durable, 'All saved IDs, order, titles, URLs and source IDs must survive browser restart in the unchanged legacy registry.');
+    assert.deepEqual(after.iconCache, before.iconCache, 'The separate icon cache must retain exact ID-and-saved-URL ownership and bytes across restart.');
     assert.deepEqual(after.sources, before.sources, 'Exact source bookmarks and their parents must survive unchanged.');
     assert.deepEqual(after.session?.bindings ?? [], [], 'Old browser-session Favorite bindings must not survive restart.');
     assert.deepEqual(after.session?.attempts ?? [], [], 'Old browser-session open receipts must not survive restart.');
@@ -82,6 +87,7 @@ export function assertFavoritesAfterRestart(before, after) {
     assert.deepEqual(after.states.map(state => state.windowId).sort(), after.windows.map(window => window.id).sort(), 'Every fresh normal window must be checked.');
     for (const state of after.states) {
         assert.deepEqual(durableFavoriteRecords(state.favorites), before.durable, 'Every fresh window must expose the same ordered durable list.');
+        assertFavoriteIconProjection(state.favorites, after.iconCache, after.durable);
         assert(state.favorites.every(item => item.tabId === null), 'No saved Favorite may silently adopt a restored or equal-URL native pin.');
         const pins = after.tabs.filter(tab => tab.windowId === state.windowId && tab.pinned && !tab.incognito);
         assert.deepEqual(tabsIdentity(state.nativeTabs), tabsIdentity(pins), 'All observed restored pins must remain separate native pins with their own exact new IDs.');
@@ -89,7 +95,10 @@ export function assertFavoritesAfterRestart(before, after) {
 }
 
 export function assertFavoriteReopened(before, after, { favoriteId, windowId }) {
+    assertLegacyFavoriteRegistry(before.durable); assertLegacyFavoriteRegistry(after.durable);
+    retainedFavoriteCache(before.iconCache, before.durable); retainedFavoriteCache(after.iconCache, after.durable);
     assert.deepEqual(after.durable, before.durable, 'Reopening must not change durable Favorite metadata or order.');
+    assert.deepEqual(after.iconCache, before.iconCache, 'Reopening must preserve the separate cache identities, saved URLs and retained bytes.');
     assert.deepEqual(after.sources, before.sources, 'Reopening must not change original source bookmarks or parents.');
     const previous = before.states.find(state => state.windowId === windowId);
     const current = after.states.find(state => state.windowId === windowId);
@@ -112,6 +121,7 @@ export function assertFavoriteReopened(before, after, { favoriteId, windowId }) 
         const state = after.states.find(item => item.windowId === priorState.windowId);
         assert(state, 'All fresh windows must remain present.');
         assert.deepEqual(durableFavoriteRecords(state.favorites), before.durable);
+        assertFavoriteIconProjection(state.favorites, after.iconCache, after.durable);
         assert.deepEqual(tabsIdentity(state.nativeTabs), tabsIdentity(priorState.nativeTabs), 'An explicit reopen must leave every native pin separate and unchanged.');
         for (const favorite of state.favorites) {
             const expectedTabId = state.windowId === windowId && favorite.id === favoriteId ? created.id : null;
@@ -170,7 +180,7 @@ export async function exerciseFavoritesBrowserRestart({ browser, launchOptions, 
         const data = await page.evaluate(async () => {
             const windows = (await chrome.windows.getAll({ windowTypes: ['normal'] })).filter(window => !window.incognito);
             const tabs = await chrome.tabs.query({});
-            const local = await chrome.storage.local.get('persistentFavorites');
+            const local = await chrome.storage.local.get(['persistentFavorites', 'favoriteIconCache']);
             const session = await chrome.storage.session.get('favoriteSession');
             const favorites = local.persistentFavorites;
             const sourceIds = [...new Set((favorites || []).map(item => item.sourceBookmarkId).filter(Boolean))];
@@ -179,10 +189,12 @@ export async function exerciseFavoritesBrowserRestart({ browser, launchOptions, 
                 const [node] = await chrome.bookmarks.get(id); sources.push(node);
                 if (!parents.has(node.parentId)) parents.set(node.parentId, (await chrome.bookmarks.get(node.parentId))[0]);
             }
-            return { windows, tabs, durable: favorites, session: session.favoriteSession ?? null, sources, parents: [...parents.values()] };
+            return { windows, tabs, durable: favorites, iconCache: local.favoriteIconCache ?? null,
+                session: session.favoriteSession ?? null, sources, parents: [...parents.values()] };
         });
         data.sources = { bookmarks: data.sources.map(sourceIdentity).sort(byId), parents: data.parents.map(sourceIdentity).sort(byId) };
         delete data.parents;
+        assertLegacyFavoriteRegistry(data.durable); retainedFavoriteCache(data.iconCache, data.durable);
         data.durable = durableFavoriteRecords(data.durable);
         data.states = [];
         for (const window of data.windows) data.states.push({ windowId: window.id, ...await request(readers.get(window.id), window.id, 'get') });
@@ -231,6 +243,15 @@ export async function exerciseFavoritesBrowserRestart({ browser, launchOptions, 
         });
         await poll(() => apiPage.evaluate(ids => Promise.all(ids.map(id => chrome.tabs.get(id))), [...seeded.map(item => item.tabId), native.id]),
             tabs => tabs.every(tab => tab.status === 'complete' && tab.pinned), 'loaded native restart pin fixtures');
+        evidence.faviconTabsBefore = await poll(() => apiPage.evaluate(ids => Promise.all(ids.map(id => chrome.tabs.get(id))), seeded.map(item => item.tabId)),
+            tabs => tabs.every(tab => tab.favIconUrl === `${fixture.base}${FAVORITE_FAVICON_PATH}`), 'real localhost restart favicon discovery');
+        const beforeSidebar = await pageInWindow(apiPage, fixture.windowA, `chrome-extension://${arcifyId}/sidebar.html`);
+        evidence.retainedIconsBefore = [];
+        for (const favorite of seeded) evidence.retainedIconsBefore.push(await waitForRetainedFavoriteIcon({
+            apiPage, sidebar: beforeSidebar.page, favoriteId: favorite.id, expectedUrl: favorite.url, closed: false, poll }));
+        await ui(beforeSidebar.page, 'Inspect captured Favorite icon bytes before full browser restart',
+            () => screenshot(beforeSidebar.page, 'saved-favorite-retained-icons-before-browser-restart'));
+        await beforeSidebar.page.close();
         evidence.seeded = { favorites: seeded, native, sources: sources.map(sourceIdentity) };
         evidence.before = await read(apiPage);
         const existingIds = new Set(evidence.existingBeforeSeeds.durable.map(item => item.id));
@@ -363,6 +384,10 @@ export async function exerciseFavoritesBrowserRestart({ browser, launchOptions, 
             try { assertFavoriteRender(state, render); return true; } catch { return false; }
         }, 'exact saved Favorite order and separate native pin renderer');
         evidence.renderBefore = await renderedState(currentState);
+        evidence.retainedIconsAfterRestart = [];
+        for (const prior of evidence.retainedIconsBefore) evidence.retainedIconsAfterRestart.push(await waitForRetainedFavoriteIcon({
+            apiPage: arcifyOptions, sidebar, favoriteId: prior.record.id, expectedUrl: prior.record.url,
+            expectedDataUrl: prior.cacheEntry.faviconDataUrl, closed: true, poll }));
         await ui(sidebar, 'Inspect closed saved Favorites beside restored native pins', () => screenshot(sidebar, 'restarted-saved-favorites-closed-native-pins-separate'));
         await ui(sidebar, 'Reopen one exact durable Favorite after browser restart', async () => {
             const handle = await sidebar.evaluateHandle(id => [...document.querySelectorAll('#pinnedFavicons .saved-favorite')]
@@ -376,6 +401,10 @@ export async function exerciseFavoritesBrowserRestart({ browser, launchOptions, 
         evidence.afterClick = await read(arcifyOptions);
         evidence.opened = assertFavoriteReopened(evidence.beforeClick, evidence.afterClick, { favoriteId, windowId: window.windowId });
         evidence.renderAfter = await renderedState(evidence.afterClick.states.find(state => state.windowId === window.windowId));
+        evidence.retainedIconsAfterClick = [];
+        for (const prior of evidence.retainedIconsBefore) evidence.retainedIconsAfterClick.push(await waitForRetainedFavoriteIcon({
+            apiPage: arcifyOptions, sidebar, favoriteId: prior.record.id, expectedUrl: prior.record.url, expectedDataUrl: prior.cacheEntry.faviconDataUrl,
+            closed: prior.record.id !== favoriteId, poll }));
         await ui(sidebar, 'Capture reopened Favorite and untouched restored pins', async () => {
             await sidebar.waitForFunction(({ favoriteId, tabId }) => [...document.querySelectorAll('#pinnedFavicons .saved-favorite')]
                 .some(node => node.dataset.favoriteId === favoriteId && Number(node.dataset.tabId) === tabId && !node.classList.contains('favorite-closed')),

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { createSavedFavoritesUI, favoriteRequest, savedDropBeforeId } from '../../saved-favorites-ui.js';
 import { createFavoritesDragSource, createSavedBookmarkFavoriteDrop } from '../../favorites-drop.js';
+import { pngIcon } from '../fixtures/favorite-icons.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 5));
 function fixture() {
@@ -44,6 +45,32 @@ test('real renderer keeps stable saved IDs, visible closed state and unmanaged n
     assert.match(f.row('two').getAttribute('aria-label'), /Closed.*click to open/);
     assert.match(f.document.getElementById('nativeFavoritesNotice').textContent, /Right-click.*Keep as saved Favorite/);
     assert(f.calls.every(message => message.action === 'get'), 'render must never adopt, pin, open or close tabs');
+});
+
+test('retained Favorite data is preferred and remains identical across close and new renderer', async () => {
+    const f = fixture(), icon = pngIcon(); f.favorites[0].faviconDataUrl = icon;
+    await f.ui.refresh(); const img = f.row('one').querySelector('img'); assert.equal(img.src, icon);
+    f.favorites[0].tabId = null; await f.ui.refresh(); assert.equal(f.row('one').querySelector('img'), img); assert.equal(img.src, icon);
+    f.ui.dispose();
+    const next = createSavedFavoritesUI({ document: f.document, container: f.container, getWindowId: () => 1 });
+    await next.refresh(); assert.equal(f.row('one').querySelector('img').src, icon);
+});
+
+test('invalid icon fields use browser-local fallback, and failed sources do not retry on every refresh', async () => {
+    const f = fixture(); f.favorites[0].faviconDataUrl = 'https://tracker.test/icon.png';
+    await f.ui.refresh(); const img = f.row('one').querySelector('img');
+    assert.match(img.src, /^chrome-extension:/); assert(!img.src.includes('tracker.test'));
+    img.onerror(); assert.equal(img.src, 'assets/default_icon.png'); assert.equal(img.onerror, null);
+    await f.ui.refresh(); assert.equal(img.src, 'assets/default_icon.png');
+});
+
+test('image failure falls back locally; late errors from an older icon cannot replace newer data', async () => {
+    const f = fixture(), first = pngIcon(), second = pngIcon({ red: 200 }); f.favorites[0].faviconDataUrl = first;
+    await f.ui.refresh(); const img = f.row('one').querySelector('img'), oldError = img.onerror;
+    img.onerror(); assert.match(img.src, /^chrome-extension:/);
+    img.onerror(); assert.equal(img.src, 'assets/default_icon.png'); assert.equal(img.onerror, null);
+    f.favorites[0].faviconDataUrl = second; await f.ui.refresh(); assert.equal(img.src, second);
+    oldError(); assert.equal(img.src, second);
 });
 
 test('close changes only live instance; record keeps the same DOM identity and reopens by stable ID', async () => {

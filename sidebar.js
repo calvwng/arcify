@@ -3,7 +3,10 @@ import { createSpaceSwitcher } from './space-switcher.js';
 import { resolveSidebarDrop, insertAtSidebarDrop } from './sidebar-drop-target.js';
 import { createSidebarDropFeedback } from './sidebar-drop-feedback.js';
 import { createFavoritesDragSource, createSavedBookmarkFavoriteDrop, releaseCompletedFavoriteReceipt } from './favorites-drop.js';
-import { createSavedFavoritesUI, savedDropBeforeId } from './saved-favorites-ui.js';
+import { createSavedFavoritesUI } from './saved-favorites-ui.js';
+import { resolveFavoritesDrop } from './favorites-drop-target.js';
+import { createFavoritesDropFeedback } from './favorites-drop-feedback.js';
+import { FAVORITE_ICON_CACHE_KEY } from './favorite-icons.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { getSpaceBookmarkById, getSpaceBookmarkFolder, getSpaceBookmarkTree, removeSpacePin } from './space-bookmarks.js';
 import { initSidebarTour } from './sidebar-tour.js';
@@ -43,7 +46,6 @@ import {
     showTabContextMenu,
     showArchivedTabsPopup,
     setupQuickPinListener,
-    getDragAfterElement,
     getSpaceElement,
     getContainers,
     getTabElement,
@@ -51,8 +53,6 @@ import {
     getTempContainer,
     clearAllActiveStates,
     hideAllDropIndicators,
-    showDropIndicator,
-    getDropPosition,
     handleEmptyContainerDrop
 } from './domManager.js';
 import { BookmarkUtils } from './bookmark-utils.js';
@@ -287,10 +287,28 @@ const savedFavoritesUI = createSavedFavoritesUI({
     onDragEnd: () => { isDraggingTab = false; favoritesDragSource.clear(); refreshCoordinator.schedule(); }
 });
 
+const favoritesDropFeedback = createFavoritesDropFeedback({
+    document, container: document.getElementById('pinnedFavicons'),
+    resolve: point => resolveFavoritesDrop({ ...point, container: document.getElementById('pinnedFavicons'),
+        source: favoritesDragSource.inspect().source, favorites: savedFavoritesUI.getSnapshot().favorites }),
+    isActive: () => Boolean(favoritesDragSource.inspect().source),
+    onClear: () => { if (favoritesPreview) showFavoritesStatus(''); },
+    onCancel: () => {
+        favoritesDragSource.clear();
+        if (!isDraggingTab) return;
+        isDraggingTab = false;
+        document.querySelectorAll('.dragging').forEach(node => node.classList.remove('dragging'));
+        dragSourceFolderElement = null;
+        sidebarDropFeedback.clear();
+        refreshCoordinator.schedule();
+    }
+});
+
 // Function to update pinned favicons
 async function updatePinnedFavicons() {
     const pinnedFavicons = document.getElementById('pinnedFavicons');
     await savedFavoritesUI.refresh();
+    favoritesDropFeedback.refresh();
 
     // Add drag and drop event listeners ONCE. updatePinnedFavicons() is called from many
     // handlers; re-adding these container listeners every call leaked duplicate handlers
@@ -299,66 +317,28 @@ async function updatePinnedFavicons() {
         pinnedFavicons.dataset.dragListenersBound = 'true';
     pinnedFavicons.addEventListener('dragover', e => {
         const { source, hint, error } = favoritesDragSource.inspect();
-        showFavoritesStatus(error || hint, true);
+        hideAllDropIndicators();
+        sidebarDropFeedback.clear();
         if (!source) {
-            e.currentTarget.classList.remove('drag-over');
-            hideAllDropIndicators();
+            favoritesDropFeedback.clear();
+            showFavoritesStatus(error || '', true);
             if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
             return;
         }
-        const draggingElement = source.element;
         e.preventDefault();
-        if (e.dataTransfer) e.dataTransfer.dropEffect = source.kind === 'bookmark' && !source.tabId ? 'copy' : 'move';
-        e.currentTarget.classList.add('drag-over');
-
-        // Show drop indicator for horizontal favicons
-        if (draggingElement) {
-            const afterElement = getDragAfterElementFavicon(pinnedFavicons, e.clientX, source.kind === 'native' ? 'native' : 'saved');
-            if (afterElement) {
-                // Check if this is a placeholder (empty container)
-                if (afterElement.classList.contains('pinned-placeholder-container')) {
-                    // Show visual feedback on the placeholder itself
-                    afterElement.classList.add('drag-over');
-                    hideAllDropIndicators(); // Don't show traditional indicators for placeholders
-                } else {
-                    // Show traditional drop indicators for actual favicons
-                    const position = getDropPosition(afterElement, e.clientX, e.clientY, true);
-                    showDropIndicator(afterElement, position, true);
-                    // Remove any placeholder drag-over state
-                    const placeholder = pinnedFavicons.querySelector('.pinned-placeholder-container');
-                    if (placeholder) placeholder.classList.remove('drag-over');
-                }
-            } else {
-                hideAllDropIndicators();
-                // Remove any placeholder drag-over state
-                const placeholder = pinnedFavicons.querySelector('.pinned-placeholder-container');
-                if (placeholder) placeholder.classList.remove('drag-over');
-            }
-        }
-    });
-
-    pinnedFavicons.addEventListener('dragleave', e => {
-        e.preventDefault();
-        e.currentTarget.classList.remove('drag-over');
-        // Hide indicators when leaving the pinned favicons area
-        if (!pinnedFavicons.contains(e.relatedTarget)) {
-            if (favoritesPreview) showFavoritesStatus('');
-            hideAllDropIndicators();
-            // Remove any placeholder drag-over state
-            const placeholder = pinnedFavicons.querySelector('.pinned-placeholder-container');
-            if (placeholder) placeholder.classList.remove('drag-over');
-        }
+        const destination = favoritesDropFeedback.update(e);
+        showFavoritesStatus(hint || '', true);
+        if (e.dataTransfer) e.dataTransfer.dropEffect = !destination ? 'none'
+            : source.kind === 'bookmark' && !source.tabId ? 'copy' : 'move';
     });
 
     pinnedFavicons.addEventListener('drop', async e => {
         e.preventDefault();
-        e.currentTarget.classList.remove('drag-over');
-        hideAllDropIndicators(); // Clean up indicators on drop
-        // Remove any placeholder drag-over state
-        const placeholder = pinnedFavicons.querySelector('.pinned-placeholder-container');
-        if (placeholder) placeholder.classList.remove('drag-over');
+        hideAllDropIndicators();
+        const destination = favoritesDropFeedback.drop(e);
         const { source, error } = favoritesDragSource.take();
         if (!source) { showFavoritesStatus(error); return; }
+        if (!destination) return;
         const draggingElement = source.element;
         const tabId = source.tabId;
         const operation = String(Number(pinnedFavicons.dataset.dropOperation || 0) + 1);
@@ -374,9 +354,7 @@ async function updatePinnedFavicons() {
         pinnedFavicons.setAttribute('aria-busy', 'true');
         showFavoritesStatus('Adding Favorite…');
         try {
-            const afterElement = getDragAfterElementFavicon(pinnedFavicons, e.clientX, source.kind === 'native' ? 'native' : 'saved');
-            const position = afterElement ? getDropPosition(afterElement, e.clientX, e.clientY, true) : 'right';
-            const beforeId = savedDropBeforeId(pinnedFavicons, afterElement, position, source.favoriteId);
+            const { beforeId } = destination;
             let result;
             if (source.kind === 'bookmark') {
                 result = await addBookmarkFavorite(source, beforeId);
@@ -388,8 +366,9 @@ async function updatePinnedFavicons() {
                 const live = await chrome.tabs.get(tabId);
                 if (live.windowId !== source.windowId || currentWindow?.id !== source.windowId || !live.pinned) throw new Error('This browser pin changed. Drag it again.');
                 const nativeNodes = [...pinnedFavicons.querySelectorAll('.native-favorite')].filter(node => node !== draggingElement);
-                let index = afterElement ? nativeNodes.indexOf(afterElement) + (position === 'right' ? 1 : 0) : nativeNodes.length;
-                if (index < 0) index = nativeNodes.length;
+                const index = destination.beforeTabId === null ? nativeNodes.length
+                    : nativeNodes.findIndex(node => node.dataset.tabId === destination.beforeTabId);
+                if (index < 0 || !pinnedFavicons.contains(draggingElement)) throw new Error('The destination browser pin changed. Drag it again.');
                 nativeNodes.splice(index, 0, draggingElement);
                 const nativeTabs = (await chrome.tabs.query({ pinned: true, windowId: source.windowId })).filter(tab => !isStartupLauncherTab(tab));
                 const unmanagedIds = new Set(nativeNodes.map(node => Number(node.dataset.tabId)));
@@ -497,7 +476,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Listen for storage changes to re-apply colors when they're updated
     chrome.storage.onChanged.addListener((changes, areaName) => {
-        if ((areaName === 'local' && changes.persistentFavorites) || (areaName === 'session' && changes.favoriteSession)) {
+        if ((areaName === 'local' && (changes.persistentFavorites || changes[FAVORITE_ICON_CACHE_KEY])) || (areaName === 'session' && changes.favoriteSession)) {
             if (currentWindow) updatePinnedFavicons();
         }
         if (areaName === 'sync' && changes.syncTabGroups) {
@@ -1066,15 +1045,6 @@ async function reorderSpace(operation) {
         refreshCoordinator.invalidateSpaces();
     }
 }
-
-function getDragAfterElementFavicon(container, x, kind = 'saved') {
-    return getDragAfterElement(container, x, {
-        axis: 'x',
-        selector: kind === 'native' ? '.native-favorite:not(.dragging)' : '.saved-favorite:not(.dragging)',
-        placeholderSelector: '.pinned-placeholder-container'
-    });
-}
-
 
 function setupTabDragHandlers(tabElement, handle = tabElement) {
     handle.draggable = true;
@@ -2976,7 +2946,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
         const tabElement = document.querySelector(`[data-tab-id="${tabId}"]`);
         if (tabElement) {
             // Update Favicon if URL changed
-            if (changeInfo.url || changeInfo.favIconUrl) {
+            if (!tabElement.classList.contains('saved-favorite') && (changeInfo.url || changeInfo.favIconUrl)) {
                 const img = tabElement.querySelector('img');
                 if (img) {
                     img.src = tab.favIconUrl;
@@ -3060,7 +3030,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                 // fallback to img element
                 faviconElement = tabElement.querySelector('img');
             }
-            if (changeInfo.url && faviconElement) {
+            if (changeInfo.url && faviconElement && !tabElement.classList.contains('saved-favorite')) {
                 faviconElement.src = Utils.getFaviconUrl(changeInfo.url);
                 // Do NOT auto-overwrite the pinned bookmark URL on navigation.
                 // Instead, make favicon look actionable and show the Arc-like label only on favicon hover.

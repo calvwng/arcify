@@ -357,3 +357,10 @@ test('shared Favorite records and exact session bindings invalidate every normal
         assert.deepEqual(targets(f), [1, 2]); f.sent.length = 0;
     }
 });
+
+test('auxiliary Favorite icon cache changes stay sidebar-local and do not invalidate Spotlight snapshots', async t => {
+    const f = await fixture(t); await f.settleStartup();
+    await chrome.storage.local.set({ favoriteIconCache: { version: 1, entries: [] } });
+    await f.tick(); await f.tick(); await f.tick();
+    assert.deepEqual(targets(f), []);
+});
