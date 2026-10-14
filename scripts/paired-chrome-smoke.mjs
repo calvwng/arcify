@@ -164,6 +164,8 @@ async function step(name, operation) {
     await saveReport();
     try {
         const detail = await operation();
+        // Preserve completed state evidence even if a later isolation/error gate fails.
+        if (detail !== undefined) check.details = detail;
         if (fixture?.windowBBaseline) {
             assert.deepEqual(await windowBState(), fixture.windowBBaseline, 'An operation in window A changed window B tabs or memberships.');
             check.windowBUnchanged = true;
@@ -171,7 +173,6 @@ async function step(name, operation) {
         assertNoTargetCrashes(report.targetLifecycle);
         assertNoPageErrors(report.diagnostics);
         check.status = detail?.skipped ? 'skipped' : 'passed';
-        if (detail !== undefined) check.details = detail;
         console.log(`${check.status.toUpperCase()}: ${name}`);
     } catch (error) {
         check.status = 'failed'; check.error = { message: error.message, stack: error.stack };

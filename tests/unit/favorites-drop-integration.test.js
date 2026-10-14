@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 import { enqueueBookmarkOperation } from '../../bookmark-writer.js';
-import { applySpacePatch } from '../../space-store.js';
+import { SpaceStore, applySpacePatch, ownerOf } from '../../space-store.js';
 
 // Import and initialize the real sidebar and all its modules against a DOM.
 // Only browser facilities and persisted fixtures are substituted; no source
@@ -79,6 +79,7 @@ globalThis.chrome = {
                 catch (error) { return { success: false, error: error.message, code: error.code }; }
             }
             assert.equal(message.type, 'spaceStore');
+            if (hooks.spaceStore) return { success: true, spaces: await hooks.spaceStore.dispatch(message) };
             if (message.action === 'get') { const result = structuredClone(storedSpaces); return { success: true, spaces: result }; }
             if (message.action === 'patch') storedSpaces = applySpacePatch(storedSpaces, message.before, message.after);
             if (message.action === 'activate') session.activeSpaces[message.windowId] = message.spaceId;
@@ -86,7 +87,7 @@ globalThis.chrome = {
         } },
     storage: { onChanged, local: area(local), sync: area(settings), session: area(session) },
     windows: { async get(id) { if (id !== 10) throw new Error('Window missing'); return { id }; }, getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
-    tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
+    tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved', 'onReplaced'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id) { await hooks.tabGet?.(id); const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Tab closed'); return structuredClone(tab); },
         async create(properties) { effects.push(['create', properties]); await hooks.create?.(); const tab = { id: nextId++, title: 'Created', index: 0, ...properties }; tabs.push(tab); await chrome.tabs.onCreated.emit(structuredClone(tab)); return structuredClone(tab); },
@@ -108,7 +109,7 @@ globalThis.chrome = {
         async create(data) { const node = { ...data, id: `created-${nextId++}` }; getNode(data.parentId).children.splice(data.index, 0, node); writes.push({ kind: 'create', id: node.id }); return structuredClone(node); },
         async remove(id) { const parent = nodes().find(item => item.children?.some(child => child.id === id)); getNode(parent.id).children.splice(getNode(parent.id).children.findIndex(child => child.id === id), 1); writes.push({ kind: 'remove', id }); }
     },
-    tabGroups: { async query() { return []; } }
+    tabGroups: { onRemoved: listeners(), onUpdated: listeners(), async query() { return []; } }
 };
 // Capture the asynchronous DOMContentLoaded callback so initialization failures
 // fail this test instead of being lost in event dispatch.
@@ -282,4 +283,97 @@ test('native Favorite dragged back to a space copies a pin without relocating it
     assert.equal(local.pinnedTabStatesById[2].bookmarkId, copyId);
     assert.equal(tabs.find(tab => tab.id === 2).pinned, false);
     assert.deepEqual(getNode('b'), saved);
+});
+
+function deferred() {
+    let resolve;
+    const promise = new Promise(done => { resolve = done; });
+    return { promise, resolve };
+}
+
+test('native Favorite unpin notification racing closure never resurrects or looks up the closed tab', async () => {
+    await resetFavorites();
+    await drop(row('closed'), target(), 25);
+    const favorite = tabs.find(tab => tab.id === 100);
+    assert(favorites().querySelector('[data-tab-id="100"]'));
+    const before = structuredClone(storedSpaces), bookmarks = structuredClone(tree);
+    const release = deferred();
+    const lookups = [];
+    hooks.tabGet = async id => { lookups.push(id); if (id === favorite.id) await release.promise; };
+    // Chrome detaching a native pin can emit pinned:false before onRemoved.
+    // Keep the real sidebar's tab lookup pending while the tab disappears.
+    await chrome.tabs.onUpdated.emit(favorite.id, { pinned: false }, { ...favorite, pinned: false });
+    tabs.splice(tabs.indexOf(favorite), 1);
+    release.resolve();
+    await chrome.tabs.onRemoved.emit(favorite.id, { windowId: 10, isWindowClosing: false });
+    await wait(220);
+    assert.deepEqual(storedSpaces, before);
+    assert.deepEqual(tree, bookmarks);
+    assert.equal(local.pinnedTabStatesById[favorite.id], undefined);
+    assert(!document.querySelector('[data-tab-id="100"]'));
+    assert.equal(favorites().querySelector('.pinned-placeholder-container').style.display, 'block');
+    assert(row('closed').classList.contains('bookmark-only'));
+    assert.deepEqual(lookups, [], 'A native lifecycle notification must not trigger an optimistic tab move');
+    assert.deepEqual(alerts, []);
+});
+
+for (const destination of ['alpha', 'beta']) test(`native unpin renders the real SpaceStore owner ${destination} without an optimistic reassignment`, async () => {
+    await resetFavorites();
+    await drop(row('closed'), target(), 25);
+    tree.children.push({ id: 'q', title: 'Beta', children: [] });
+    storedSpaces.push({ id: 'beta', name: 'Beta', color: 'red', bookmarkFolderId: 'q', spaceBookmarks: [], temporaryTabs: [] });
+    local.spaces = structuredClone(storedSpaces);
+    local.spaceModelVersion = 2;
+    session.spaceSession = true;
+    const store = new SpaceStore();
+    await store.dispatch({ action: 'get' });
+    // The worker may know a newer selected space before the sidebar receives
+    // that session event. It must remain the only native membership writer.
+    await store.dispatch({ action: 'activate', windowId: 10, spaceId: destination });
+    hooks.spaceStore = store;
+    const events = [onChanged, ...Object.values(chrome.tabs), ...Object.values(chrome.tabGroups)].filter(event => event?.callbacks);
+    const lengths = events.map(event => event.callbacks.length);
+    store.install();
+    try {
+        const favorite = tabs.find(tab => tab.id === 100);
+        const saved = structuredClone(getNode('closed'));
+        favorite.pinned = false;
+        await chrome.tabs.onUpdated.emit(favorite.id, { pinned: false }, structuredClone(favorite));
+        await store.run(() => {});
+        await wait(220);
+        assert.equal(ownerOf(local.spaces, favorite.id)?.id, destination);
+        assert(!favorites().querySelector('[data-tab-id="100"]'));
+        await onChanged.emit({ activeSpaces: { newValue: structuredClone(session.activeSpaces) } }, 'session');
+        await wait(220);
+        const liveRow = document.querySelector(`.space[data-space-id="${destination}"] .tab[data-tab-id="100"]`);
+        assert(liveRow, 'The genuine unpin must render from the worker-owned membership');
+        if (destination === 'alpha') assert.equal(liveRow.dataset.bookmarkId, 'closed', 'Returning to its source space retains the exact saved identity');
+        else assert(liveRow.closest('[data-tab-type="temporary"]'));
+        assert.equal(document.querySelectorAll('#spacesList .tab[data-tab-id="100"]').length, 1);
+        assert.deepEqual(getNode('closed'), saved);
+        assert.equal(local.pinnedTabStatesById[100]?.bookmarkId, 'closed');
+        assert.deepEqual(alerts, []);
+    } finally {
+        await store.run(() => {});
+        events.forEach((event, index) => event.callbacks.splice(lengths[index]));
+        delete hooks.spaceStore;
+    }
+});
+
+for (const state of ['repinned', 'other-window']) test(`delayed native unpin notification respects the current ${state} tab state`, async () => {
+    await resetFavorites();
+    await drop(row('closed'), target(), 25);
+    const favorite = tabs.find(tab => tab.id === 100);
+    const before = structuredClone(storedSpaces), bookmarks = structuredClone(tree), actions = structuredClone(effects);
+    const staleUnpinned = { ...favorite, pinned: false };
+    if (state === 'other-window') favorite.windowId = 99;
+    await chrome.tabs.onUpdated.emit(favorite.id, { pinned: false }, staleUnpinned);
+    await wait(220);
+    assert.deepEqual(storedSpaces, before);
+    assert.deepEqual(tree, bookmarks);
+    assert.deepEqual(effects, actions);
+    assert(!document.querySelector('#spacesList .tab[data-tab-id="100"]'));
+    assert.equal(Boolean(favorites().querySelector('[data-tab-id="100"]')), state === 'repinned');
+    assert.equal(local.pinnedTabStatesById[100]?.bookmarkId, 'closed');
+    assert.deepEqual(alerts, []);
 });

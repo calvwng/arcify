@@ -260,9 +260,12 @@ test('reordering native pinned favicons updates Chrome and survives reload', asy
     const another = await page.evaluate(async url => (await chrome.tabs.create({ url, pinned: true, active: false })).id, url);
     await page.waitForSelector(`#pinnedFavicons [data-tab-id="${another}"]`);
     await page.$eval(`#pinnedFavicons [data-tab-id="${fixture.a}"]`, el => {
-        el.classList.add('dragging');
-        el.parentElement.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: 100000 }));
-        el.classList.remove('dragging');
+        // Exercise the production drag lifecycle: a CSS class alone is not
+        // proof that the item originated from this sidebar.
+        const dataTransfer = new DataTransfer();
+        el.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer }));
+        el.parentElement.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: 100000, dataTransfer }));
+        el.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer }));
     });
     await page.waitForFunction(async id => {
         const tabs = await chrome.tabs.query({ pinned: true, currentWindow: true });

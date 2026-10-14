@@ -3135,7 +3135,10 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                     disposeEditorsInElement(tabElement);
                     tabElement.remove(); // Remove from space
                 } else {
-                    moveTabToSpace(tabId, activeSpaceId, false /* pinned */);
+                    // Native unpin/close membership belongs to SpaceStore. Chrome
+                    // can emit pinned:false while removing a tab, so an optimistic
+                    // move here can resurrect it and look up an already-closed id.
+                    refreshCoordinator.invalidateSpaces();
                 }
                 // Update pinned favicons for both pinning and unpinning
                 updatePinnedFavicons();
