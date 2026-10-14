@@ -13,6 +13,7 @@ A Chrome extension that replicates Arc browser's tab management system, providin
 - Tab grouping functionality
 - Keyboard shortcuts for quick access
 - Bookmark integration
+- [Saved Favorites shared across Spaces and windows](docs/favorites-drop.md)
 - Clean, minimal interface
 - [Optional one-click startup launcher](docs/startup-launcher.md) (off by default)
 
@@ -257,10 +258,14 @@ folders, including folders synced by Chrome, and display their bookmarks as save
 pins. Pinning adds a bookmark; unpinning removes its saved bookmark even if the tab
 has navigated to another URL. Nested bookmark folders remain nested in the space.
 
-Drag a single saved bookmark into the top Favorites strip to open a native pinned
-tab in the current window without switching tabs or moving the saved bookmark.
-Repeated drops reuse an exact known tab identity; folders are not bulk-opened.
-See [Favorites drop behavior and limits](docs/favorites-drop.md).
+The top Favorites strip is a separate profile-local saved list shared across
+Spaces and normal windows. Drag a single bookmark there to save a Favorite and
+open an inactive native pin; the source bookmark stays intact. Closing the live
+tab keeps its icon, clicking reopens it, and **Remove Favorite** is explicit.
+Existing browser pins require explicit adoption. Restarts preserve saved records
+without guessing restored live bindings by URL. Folders are not bulk-opened.
+Paired Spotlight can search closed Favorites. See [saved Favorites behavior and
+limits](docs/favorites-drop.md).
 
 Run `npm run test:unit` for storage, migration, and sync regression tests. Browser
 coverage lives in `tests/e2e/independent-spaces.test.js` alongside the space, tab,

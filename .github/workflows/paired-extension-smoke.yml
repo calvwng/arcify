@@ -35,6 +35,15 @@ on:
       - 'tests/unit/sidebar-drop*.test.js'
       - 'sidebar-command.js'
       - 'favorites-drop.js'
+      - 'favorite-store.js'
+      - 'saved-favorites-ui.js'
+      - 'tests/unit/favorite*.test.js'
+      - 'tests/unit/saved-favorites*.test.js'
+      - 'scripts/paired-chrome-*favorites*.mjs'
+      - 'scripts/paired-chrome-favorite-search.mjs'
+      - 'scripts/paired-chrome-browser-restart.mjs'
+      - 'tests/unit/paired-chrome-browser-restart.test.js'
+      - 'tests/unit/paired-chrome-favorites-restart.test.js'
       - 'utils.js'
       - 'tests/unit/favorites-drop*.test.js'
       - 'startup-*.js'
@@ -75,7 +84,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 0f1ba5eaa50de724cc5ab1e5ef8790e21faeaf08
+          ref: a4e925ccae8ca18410062726cd9a792c35fcf559
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node

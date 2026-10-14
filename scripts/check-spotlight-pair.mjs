@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { SpaceStore, ownerOf } from '../space-store.js';
+import { FavoriteStore } from '../favorite-store.js';
 import { createSpotlightBridge, getBridgeSnapshot } from '../spotlight-bridge.js';
 import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY } from '../spotlight-bridge-protocol.js';
 
@@ -115,6 +116,8 @@ try {
     const hello = await client.request('hello', WINDOW);
     assert.equal(hello.extensionId, ARCIFY);
     assert.equal(hello.role, 'arcify');
+    assert.equal(hello.capabilities?.includes('persistentFavorites'), false, 'The pre-capability peer remains supported.');
+    assert.equal(hello.snapshot.favorites, undefined);
     assert.equal((await client.snapshot(WINDOW)).activeSpaceId, 'work');
     const opened = await client.request('openTab', WINDOW, { spaceId: 'empty', url: 'https://opened.test/' });
     assert.equal(created, 1);
@@ -138,8 +141,63 @@ try {
     await assert.rejects(client.request('hello', WINDOW), { code: 'VERSION_MISMATCH' });
     assert.equal(created, 1, 'Version mismatch must not retry the mutation.');
 
+    // Activate the real optional store only after all original legacy-v1 smoke
+    // assertions, keeping both compatibility paths exercised in the same run.
+    returnWrongVersion = false;
+    const favoriteStore = new FavoriteStore(store);
+    const originalBookmarks = clone(bookmarks);
+    await store.dispatch({ action: 'activate', windowId: WINDOW, spaceId: 'work' });
+    const addFavorite = bookmarkId => favoriteStore.dispatch({ type: 'favoriteStore', action: 'addBookmark',
+        windowId: WINDOW, spaceId: 'work', bookmarkFolderId: 'work-folder', bookmarkId, parentId: 'work-folder' });
+    const firstSaved = await addFavorite('favorite-1');
+    const secondSaved = await addFavorite('favorite-2');
+    const firstId = firstSaved.favorites.find(favorite => favorite.sourceBookmarkId === 'favorite-1').id;
+    const secondId = secondSaved.favorites.find(favorite => favorite.sourceBookmarkId === 'favorite-2').id;
+    assert.notEqual(firstId, secondId, 'Equal source URLs never collapse saved identities.');
+    for (const tabId of [firstSaved.tab.id, secondSaved.tab.id]) tabs.splice(tabs.findIndex(tab => tab.id === tabId), 1);
+    const createsBeforeOpen = created;
+
+    const favoriteHello = await client.request('hello', WINDOW);
+    assert(favoriteHello.capabilities.includes('persistentFavorites'));
+    assert.deepEqual(favoriteHello.snapshot.favorites.map(favorite => [favorite.id, favorite.sourceBookmarkId, favorite.tabId]),
+        [[firstId, 'favorite-1', null], [secondId, 'favorite-2', null]]);
+    const beforeSnapshot = sent.length;
+    const closedFavorites = await client.snapshot(WINDOW);
+    assert.deepEqual(sent.slice(beforeSnapshot).map(message => message.command), ['snapshot', 'hello'],
+        "Optional Favorites data uses Spotlight's authenticated capability check.");
+    assert.deepEqual(closedFavorites.favorites, favoriteHello.snapshot.favorites);
+    assert.equal(created, createsBeforeOpen, 'Reading closed Favorites must never restore tabs.');
+
+    const favoriteOpened = await client.request('openFavorite', WINDOW, { favoriteId: secondId });
+    assert.equal(created, createsBeforeOpen + 1);
+    assert.equal(favoriteOpened.snapshot.favorites.find(favorite => favorite.id === secondId).tabId, favoriteOpened.tabId);
+    assert.equal(favoriteOpened.snapshot.favorites.find(favorite => favorite.id === firstId).tabId, null);
+    assert.equal(ownerOf(store.spaces, favoriteOpened.tabId), undefined, 'Global Favorite stays outside Spaces.');
+    const openedFavoriteTab = favoriteOpened.snapshot.tabs.find(tab => tab.id === favoriteOpened.tabId);
+    assert.equal(openedFavoriteTab.pinned, true); assert.equal(openedFavoriteTab.windowId, WINDOW);
+    assert.equal(openedFavoriteTab.url, 'https://same.test/');
+    const nativeTab = tabs.find(tab => tab.id === favoriteOpened.tabId);
+    nativeTab.url = 'https://navigated-favorite.test/'; nativeTab.title = 'Navigated elsewhere';
+    const reusedFavorite = await client.request('openFavorite', WINDOW, { favoriteId: secondId });
+    assert.equal(reusedFavorite.tabId, favoriteOpened.tabId);
+    assert.equal(created, createsBeforeOpen + 1, 'Repeated opens reuse only the exact current-window instance.');
+    assert.equal(reusedFavorite.snapshot.tabs.find(tab => tab.id === favoriteOpened.tabId).url, nativeTab.url);
+    assert.equal(reusedFavorite.snapshot.favorites.find(favorite => favorite.id === secondId).url, 'https://same.test/',
+        'Live navigation cannot overwrite the saved URL.');
+    const otherWindowFavorites = await client.snapshot(8);
+    assert.deepEqual(otherWindowFavorites.favorites.map(favorite => [favorite.id, favorite.tabId]), [[firstId, null], [secondId, null]]);
+    assert.deepEqual(bookmarks, originalBookmarks, 'Favorite operations never modify original source bookmarks.');
+    assert(sent.slice(beforeSnapshot).filter(message => message.command === 'openFavorite').every(message =>
+        message.favoriteId === secondId && message.windowId === WINDOW && !Object.hasOwn(message, 'url')));
+    const exactOpenRequest = sent.find(message => message.command === 'openFavorite');
+    const replayedFavorite = await handle(clone(exactOpenRequest), sender);
+    assert.equal(replayedFavorite.ok, true);
+    assert.equal(replayedFavorite.tabId, favoriteOpened.tabId);
+    validateSnapshot(replayedFavorite.snapshot, WINDOW);
+    assert.equal(created, createsBeforeOpen + 1, 'Journal replay preserves the exact opened Favorite without creating a duplicate.');
+
     console.log('PASS: mocked Arcify ↔ Spotlight contract smoke test');
-    console.log('Verified byte-identical protocol helpers, real snapshot validation, hello/snapshot/openTab round trips, window isolation, bookmark warnings, and version rejection on both sides.');
+    console.log('Verified byte-identical protocol helpers, real snapshot validation, hello/snapshot/openTab round trips, window isolation, bookmark warnings, version rejection on both sides, and optional saved-Favorite capability/closed snapshots/exact open reuse.');
     console.log('Chrome transport and APIs were mocked; no browser or extension-loading verification was performed.');
 } finally {
     if (previousChrome === undefined) delete globalThis.chrome;

@@ -66,6 +66,7 @@ globalThis.MutationObserver = window.MutationObserver;
 globalThis.chrome = {
     runtime: { onMessage: listeners(), getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: tabs.filter(tab => tab.pinned) };
             if (message.type === 'sidebarTour') return { success: true, state: null };
             if (message.type === 'bookmarkOrder') {
                 try { return { success: true, ...await enqueueBookmarkOperation(message.operation) }; }

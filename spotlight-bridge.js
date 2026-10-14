@@ -6,13 +6,13 @@ import { SIDEBAR_COMMAND_TYPE, createSidebarCommandHandler } from './sidebar-com
 import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
 import { PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
-const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark'];
+const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite'];
 const JOURNAL_KEY = 'spotlightBridgeRequests';
 
 // Only reads Arcify's authoritative model. Group IDs/names never enter the protocol.
 export async function getBridgeSnapshot(store, windowId) {
     const window = await chrome.windows.get(windowId);
-    if (window.type && window.type !== 'normal') throw bridgeError('INVALID_WINDOW', 'Choose a normal browser window.');
+    if (window.incognito || window.type && window.type !== 'normal') throw bridgeError('INVALID_WINDOW', 'Choose a normal browser window.');
     return store.run(() => readBridgeSnapshot(store, windowId));
 }
 
@@ -46,7 +46,7 @@ async function readBridgeSnapshot(store, windowId) {
     }
     return { windowId, capturedAt: Date.now(), activeSpaceId: spaces.some(s => s.id === store.active[windowId])
         ? store.active[windowId] : ownerOf(store.spaces, live.find(t => t.active)?.id)?.id || spaces[0]?.id || null,
-    spaces, bookmarks, warnings, tabs: live.map(tab => ({ id: tab.id, windowId, title: tab.title || '', url: tab.url || tab.pendingUrl || '',
+    spaces, bookmarks, warnings, ...(store.favoriteStore ? { favorites: (await store.favoriteStore.read(windowId)).favorites } : {}), tabs: live.map(tab => ({ id: tab.id, windowId, title: tab.title || '', url: tab.url || tab.pendingUrl || '',
         active: Boolean(tab.active), pinned: Boolean(tab.pinned), spaceId: ownerOf(store.spaces, tab.id)?.id || null })) };
 }
 
@@ -89,6 +89,11 @@ export async function runBridgeAction(store, request, snapshot) {
         const current = await chrome.tabs.get(tab.id);
         if (current.windowId !== windowId) throw bridgeError('STALE_TAB', 'This tab moved to another window.');
         await chrome.tabs.update(tab.id, { url: request.url });
+        return { tabId: tab.id };
+    }
+    if (command === 'openFavorite') {
+        if (!store.favoriteStore) throw bridgeError('UNSUPPORTED_COMMAND', 'This Arcify build does not support saved Favorites.');
+        const tab = await store.favoriteStore.open(request.favoriteId, windowId);
         return { tabId: tab.id };
     }
     const space = findSpace(spaceId);
@@ -139,7 +144,7 @@ export function createSpotlightBridge(store) {
         }
         const snapshot = await getBridgeSnapshot(store, request.windowId);
         if (readOnly) return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot,
-            ...(commandCapabilities(request, chrome)) });
+            ...(commandCapabilities(request, chrome, store)) });
         const entry = { key, fingerprint: JSON.stringify(request) };
         const next = [...journal.slice(-99), entry];
         await chrome.storage.session.set({ [JOURNAL_KEY]: next });
@@ -189,6 +194,9 @@ export function registerSpotlightBridge(store) {
     return invalidation;
 }
 
-function commandCapabilities(request, browser) {
-    return request.command === 'hello' ? { capabilities: typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : [] } : {};
+function commandCapabilities(request, browser, store) {
+    return request.command === 'hello' ? { capabilities: [
+        ...(typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : []),
+        ...(store.favoriteStore ? ['persistentFavorites'] : [])
+    ] } : {};
 }

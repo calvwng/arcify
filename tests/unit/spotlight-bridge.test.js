@@ -754,3 +754,43 @@ test('startup launcher is excluded from bridge tab classification even if native
     assert.equal(snapshot.spaces.some(space => space.tabIds.some(id => [80, 81].includes(id))), false);
     assert.equal(snapshot.tabs.some(tab => tab.id === 5 && tab.pinned), true, 'Regular native pins stay available');
 });
+
+test('persistent Favorites hello, snapshot and open use the same SpaceStore queue and exact source-independent binding', async () => {
+    const { FavoriteStore } = await import('../../favorite-store.js');
+    const store = await makeStore({ install: true });
+    const favorites = new FavoriteStore(store); favorites.install();
+    const added = await favorites.dispatch({ type: 'favoriteStore', action: 'addBookmark', windowId: 1,
+        spaceId: 'a', bookmarkFolderId: 'folder-a', bookmarkId: 'twin-2', parentId: 'nested' });
+    const favoriteId = added.favorites[0].id;
+    const handle = createSpotlightBridge(store);
+    const hello = await handle(request('hello'), SENDER);
+    assert(hello.capabilities.includes('persistentFavorites'));
+    assert.deepEqual(hello.snapshot.favorites, added.favorites);
+    assert.equal(hello.snapshot.tabs.find(tab => tab.id === added.tab.id).spaceId, null);
+    getTab(added.tab.id).url = 'https://navigated-favorite.test/';
+    nodes = nodes.filter(node => node.id !== 'twin-2');
+    const response = await handle(request('openFavorite', { favoriteId }), SENDER);
+    assert.equal(response.ok, true, JSON.stringify(response)); assert.equal(response.tabId, added.tab.id);
+    assert.equal(response.snapshot.favorites[0].url, DUPLICATE_URL);
+    assert.equal(getTab(added.tab.id).url, 'https://navigated-favorite.test/');
+    assert.equal(writes('tab.create').length, 1);
+});
+
+test('closed persistent Favorite opens once through paired journal, rejects stale IDs/fields/peer/window, and survives worker recreation', async () => {
+    const { FavoriteStore } = await import('../../favorite-store.js');
+    const store = await makeStore({ install: true }); const favorites = new FavoriteStore(store); favorites.install();
+    const added = await favorites.dispatch({ type: 'favoriteStore', action: 'addTab', windowId: 1, tabId: 5 });
+    const favoriteId = added.favorites[0].id;
+    tabs = tabs.filter(tab => tab.id !== 5); chrome.tabs.onRemoved.emit(5, { isWindowClosing: false }); await settle(store);
+    const handle = createSpotlightBridge(store);
+    assert.equal((await handle(request('snapshot'), SENDER)).snapshot.favorites[0].tabId, null);
+    const open = request('openFavorite', { favoriteId }, 'open-saved');
+    const first = await handle(open, SENDER), replay = await createSpotlightBridge(store)(open, SENDER);
+    assert.equal(first.ok, true, JSON.stringify(first)); assert.equal(replay.tabId, first.tabId);
+    assert.equal(first.snapshot.favorites[0].tabId, first.tabId); assert.equal(writes('tab.create').length, 1);
+    assertError(await handle(request('openFavorite', { favoriteId: 'removed' }, 'stale-saved'), SENDER), 'STALE_FAVORITE');
+    assertError(await handle(request('openFavorite', { favoriteId, url: 'https://injected.test/' }, 'bad-saved'), SENDER), 'INVALID_REQUEST');
+    assertError(await handle(request('openFavorite', { favoriteId }, 'wrong-peer'), { id: SELF }), 'UNAUTHORIZED');
+    assertError(await handle(request('openFavorite', { favoriteId, windowId: 3 }, 'popup-saved'), SENDER), 'INVALID_WINDOW');
+    assert.equal(writes('tab.create').length, 1);
+});

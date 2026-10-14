@@ -26,6 +26,7 @@ function background(completed = false, onboardingVersion = undefined, version = 
         registerBookmarkListeners() {},
         registerSpotlightBridge() {},
         enqueueBookmarkOrder: async () => [],
+        FavoriteStore: class { install() {} }, registerFavoriteMessages() {},
         SpaceStore: class { install() {} async dispatch() { return [{ id: 'home' }]; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: false }) },
         Logger: { log() {}, error() {} }

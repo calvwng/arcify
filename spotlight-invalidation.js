@@ -82,6 +82,7 @@ export function registerSpotlightInvalidation(store) {
             clear();
             if (isExtensionId(changes[PEER_KEY].newValue)) invalidateAll();
         }
+        if (area === 'local' && changes.persistentFavorites || area === 'session' && changes.favoriteSession) invalidateAll();
         if (area === 'local' && changes.spaces) {
             const before = project(changes.spaces.oldValue), after = project(changes.spaces.newValue);
             if (!same(metadata(before), metadata(after))) pending.all = true;

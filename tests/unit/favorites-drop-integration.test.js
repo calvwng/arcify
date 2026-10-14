@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 import { enqueueBookmarkOperation } from '../../bookmark-writer.js';
 import { SpaceStore, applySpacePatch, ownerOf } from '../../space-store.js';
+import { FavoriteStore } from '../../favorite-store.js';
 
 // Import and initialize the real sidebar and all its modules against a DOM.
 // Only browser facilities and persisted fixtures are substituted; no source
@@ -25,7 +26,7 @@ const listeners = () => {
 };
 const onChanged = listeners();
 const tabs = [1, 2, 3].map(id => ({ id, windowId: 10, active: id === 2, pinned: false, title: `Tab ${id}`, url: `https://tab-${id}.test/` }));
-let storedSpaces;
+let storedSpaces, favoriteStore;
 const local = { tabGroupImportDismissed: true };
 const settings = { invertTabOrder: false, syncTabGroups: false, showAllOpenTabsInCollapsedFolders: true };
 const session = { activeSpaces: { 10: 'alpha' } };
@@ -34,7 +35,8 @@ let startupPinRace = true;
 const bookmark = (id, tabId = null) => ({ id, title: id, url: tabId ? tabs[tabId - 1].url : `https://${id}.test/` });
 function resetData() {
     tabs.splice(0, tabs.length, ...[1, 2, 3].map(id => ({ id, windowId: 10, active: id === 2, pinned: false, index: id - 1, title: `Tab ${id}`, url: `https://tab-${id}.test/` })));
-    session.activeSpaces = { 10: 'alpha' }; session.favoriteDropAttempts = {};
+    session.activeSpaces = { 10: 'alpha' }; session.favoriteDropAttempts = {}; session.favoriteSession = { version: 1, bindings: [], attempts: [] };
+    local.persistentFavorites = []; if (favoriteStore) favoriteStore.initialized = false;
     effects = []; hooks = {}; nextId = 100;
     tree = { id: 'root', title: 'Arcify', children: [{ id: 'p', title: 'Alpha', children: [
         bookmark('a', 1), { id: 'f', title: 'Folder', children: [bookmark('b', 2), bookmark('closed')] },
@@ -53,7 +55,7 @@ const allIds = () => nodes().map(node => node.id).sort();
 const area = state => ({ async get(keys) {
     if (typeof keys === 'string') return { [keys]: structuredClone(state[keys]) };
     return structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
-}, async set(next) { if (state === local && next.pinnedTabStatesById) await hooks.bindingSet?.(); Object.assign(state, structuredClone(next)); }, async remove() {} });
+}, async set(next) { if (state === session) await hooks.sessionSet?.(next); if (state === local && next.pinnedTabStatesById) await hooks.bindingSet?.(); Object.assign(state, structuredClone(next)); }, async remove() {} });
 const onActivated = listeners();
 
 const lockQueues = new Map();
@@ -73,6 +75,7 @@ globalThis.MutationObserver = window.MutationObserver;
 globalThis.chrome = {
     runtime: { onMessage: listeners(), getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'favoriteStore') { try { return { success: true, ...await favoriteStore.dispatch(message) }; } catch (error) { return { success: false, error: error.message, code: error.code }; } }
             if (message.type === 'sidebarTour') return { success: true, state: null };
             if (message.type === 'bookmarkOrder') {
                 try { return { success: true, ...await enqueueBookmarkOperation(message.operation) }; }
@@ -86,14 +89,14 @@ globalThis.chrome = {
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
     storage: { onChanged, local: area(local), sync: area(settings), session: area(session) },
-    windows: { async get(id) { if (id !== 10) throw new Error('Window missing'); return { id }; }, getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
+    windows: { async get(id) { if (![10, 99].includes(id)) throw new Error('Window missing'); return { id, type: 'normal', incognito: false }; }, getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
     tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved', 'onReplaced'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id) { await hooks.tabGet?.(id); const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Tab closed'); return structuredClone(tab); },
         async create(properties) { effects.push(['create', properties]); await hooks.create?.(); const tab = { id: nextId++, title: 'Created', index: 0, ...properties }; tabs.push(tab); await chrome.tabs.onCreated.emit(structuredClone(tab)); return structuredClone(tab); },
         async update(id, properties) { const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Tab closed'); Object.assign(tab, properties); effects.push(['update', id, properties]); await chrome.tabs.onUpdated.emit(id, properties, structuredClone(tab)); return structuredClone(tab); },
         async move(id, properties) { await hooks.move?.(); const tab = tabs.find(tab => tab.id === id); Object.assign(tab, properties); effects.push(['move', id, properties]); return structuredClone(tab); },
-        async remove() { assert.fail('Favorites never closes a user tab'); } },
+        async remove(id) { effects.push(['remove', id]); const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); await chrome.tabs.onRemoved.emit(id, { windowId: 10, isWindowClosing: false }); } },
     bookmarks: { async get(id) { return structuredClone(nodes().filter(node => node.id === id)); },
         async search({ title }) { return structuredClone(nodes().filter(node => node.title === title)); },
         async getChildren(id) { if (startupPinRace && id === 'p') { startupPinRace = false; tabs[0].pinned = true; } return structuredClone((getNode(id)?.children || []).map(node => ({ ...node, parentId: id }))); },
@@ -111,6 +114,22 @@ globalThis.chrome = {
     },
     tabGroups: { onRemoved: listeners(), onUpdated: listeners(), async query() { return []; } }
 };
+// Use the actual authoritative FavoriteStore with the same serialization and
+// membership boundary as the worker; all browser APIs and storage are fixtures.
+let favoriteQueue = Promise.resolve();
+const favoriteSpaces = {
+    run(operation) { const next = favoriteQueue.then(operation); favoriteQueue = next.catch(() => {}); return next; },
+    get spaces() { return storedSpaces; }, get active() { return session.activeSpaces; },
+    track(tab) {
+        if (tab.pinned) for (const space of storedSpaces) {
+            space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== tab.id);
+            space.temporaryTabs = space.temporaryTabs.filter(id => id !== tab.id);
+        }
+    },
+    async persist() { local.spaces = structuredClone(storedSpaces); }
+};
+favoriteStore = new FavoriteStore(favoriteSpaces);
+favoriteStore.install();
 // Capture the asynchronous DOMContentLoaded callback so initialization failures
 // fail this test instead of being lost in event dispatch.
 const domReady = [];
@@ -173,8 +192,8 @@ for (const id of ['c', 'closed']) test(`actual sidebar opens closed ${id} as one
     assert.equal(favorites().getAttribute('aria-busy'), 'true'); assert.equal(favorites().dataset.dropState, 'pending');
     drag(source, 'dragend'); await wait(220);
     assert.deepEqual(tree, before); assert.deepEqual(writes, []); assert.deepEqual(storedSpaces, membership);
-    assert.deepEqual(effects, [['create', { pinned: true, active: false, windowId: 10, url: getNode(id).url }], ['move', 100, { index: 0 }]]);
-    assert.equal(local.pinnedTabStatesById[100].bookmarkId, id);
+    assert.deepEqual(effects, [['create', { pinned: true, active: false, windowId: 10, url: getNode(id).url }]]);
+    assert.equal(local.persistentFavorites.find(item => item.sourceBookmarkId === id)?.url, getNode(id).url);
     assert(favorites().querySelector('[data-tab-id="100"]')); assert(row(id).classList.contains('bookmark-only'));
     assert.equal(tabs.find(tab => tab.active).id, 2); assert.equal(session.activeSpaces[10], 'alpha');
     assert.equal(favorites().getAttribute('aria-busy'), 'false'); assert.equal(favorites().dataset.dropState, 'success');
@@ -193,7 +212,7 @@ test('actual sidebar repeats and concurrent drops reuse one exact pin; same-URL 
     assert.equal(effects.filter(([kind]) => kind === 'create').length, 1);
     await drop(row('c'), favorites(), 25);
     assert.equal(effects.filter(([kind]) => kind === 'create').length, 2);
-    assert.equal(local.pinnedTabStatesById[100].bookmarkId, 'closed'); assert.equal(local.pinnedTabStatesById[101].bookmarkId, 'c');
+    assert.deepEqual(local.persistentFavorites.map(item => item.sourceBookmarkId).sort(), ['c', 'closed']);
     assert.deepEqual(writes, []);
 });
 
@@ -245,23 +264,24 @@ test('actual stale moved/deleted bookmarks and moved live tabs fail without chan
 
 test('actual binding failure shows partial error, keeps new tab, and retries without duplication', async () => {
     await resetFavorites(); const before = structuredClone(tree);
-    hooks.bindingSet = () => { throw new Error('Binding store failed'); };
+    hooks.sessionSet = next => { if (next.favoriteSession?.bindings.length) throw new Error('Binding store failed'); };
     await drop(row('closed'), target(), 25);
-    assert.match(status(), /pinned tab was opened.*Binding store failed/); assert.equal(favorites().dataset.dropState, 'error');
+    assert.match(status(), /Binding store failed/); assert.equal(favorites().dataset.dropState, 'error');
     assert.equal(tabs.filter(tab => tab.pinned).length, 1); assert.deepEqual(tree, before); assert.deepEqual(writes, []);
-    delete hooks.bindingSet;
+    delete hooks.sessionSet;
     await drop(row('closed'), favorites(), 25);
     assert.equal(effects.filter(([kind]) => kind === 'create').length, 1); assert.equal(favorites().dataset.dropState, 'success');
 });
 
-test('actual native live reorder remains functional without activating or opening a tab', async () => {
+test('actual saved Favorites reorder remains functional without activating, opening or moving native tabs', async () => {
     await resetFavorites();
     await drop(row('b'), target(), 25);
     await drop(temporary().querySelector('[data-tab-id="3"]'), favorites(), 25);
     const source = favorites().querySelector('[data-tab-id="3"]');
     await drop(source, favorites().querySelector('[data-tab-id="2"]'), 25);
     assert.equal(effects.filter(([kind]) => kind === 'create').length, 0);
-    assert(effects.filter(([kind]) => kind === 'move').length >= 3);
+    assert.equal(effects.filter(([kind]) => kind === 'move').length, 0, 'Saved order never reorders native tabs');
+    assert.deepEqual([...favorites().querySelectorAll('.saved-favorite')].map(node => node.dataset.tabId), ['3', '2']);
     assert.equal(tabs.find(tab => tab.active).id, 2); assert.deepEqual(writes, []);
 });
 
@@ -278,7 +298,8 @@ test('native Favorite dragged back to a space copies a pin without relocating it
     const copyId = local.pinnedTabStatesById[2].bookmarkId;
     await drop(row('b'), favorites(), 25);
     assert.equal(favorites().dataset.dropState, 'success');
-    const newFavorite = tabs.find(tab => tab.pinned && local.pinnedTabStatesById[tab.id]?.bookmarkId === 'b');
+    const savedFavorite = local.persistentFavorites.find(item => item.sourceBookmarkId === 'b');
+    const newFavorite = tabs.find(tab => tab.pinned && session.favoriteSession.bindings.some(binding => binding.favoriteId === savedFavorite.id && binding.tabId === tab.id));
     assert(newFavorite); assert.notEqual(newFavorite.id, 2);
     assert.equal(local.pinnedTabStatesById[2].bookmarkId, copyId);
     assert.equal(tabs.find(tab => tab.id === 2).pinned, false);
@@ -311,9 +332,10 @@ test('native Favorite unpin notification racing closure never resurrects or look
     assert.deepEqual(tree, bookmarks);
     assert.equal(local.pinnedTabStatesById[favorite.id], undefined);
     assert(!document.querySelector('[data-tab-id="100"]'));
-    assert.equal(favorites().querySelector('.pinned-placeholder-container').style.display, 'block');
+    assert.equal(favorites().querySelector('.pinned-placeholder-container').style.display, 'none');
+    assert.equal(favorites().querySelector('.saved-favorite .favorite-state').textContent, 'Closed');
     assert(row('closed').classList.contains('bookmark-only'));
-    assert.deepEqual(lookups, [], 'A native lifecycle notification must not trigger an optimistic tab move');
+    assert(!effects.some(([kind, , update]) => kind === 'update' && update.pinned === false), 'A native lifecycle notification must not trigger an optimistic tab move');
     assert.deepEqual(alerts, []);
 });
 
@@ -347,11 +369,10 @@ for (const destination of ['alpha', 'beta']) test(`native unpin renders the real
         await wait(220);
         const liveRow = document.querySelector(`.space[data-space-id="${destination}"] .tab[data-tab-id="100"]`);
         assert(liveRow, 'The genuine unpin must render from the worker-owned membership');
-        if (destination === 'alpha') assert.equal(liveRow.dataset.bookmarkId, 'closed', 'Returning to its source space retains the exact saved identity');
-        else assert(liveRow.closest('[data-tab-type="temporary"]'));
+        assert(liveRow.closest('[data-tab-type="temporary"]'), 'A saved Favorite instance is independent from its source bookmark');
         assert.equal(document.querySelectorAll('#spacesList .tab[data-tab-id="100"]').length, 1);
         assert.deepEqual(getNode('closed'), saved);
-        assert.equal(local.pinnedTabStatesById[100]?.bookmarkId, 'closed');
+        assert.equal(local.pinnedTabStatesById[100], undefined);
         assert.deepEqual(alerts, []);
     } finally {
         await store.run(() => {});
@@ -374,6 +395,97 @@ for (const state of ['repinned', 'other-window']) test(`delayed native unpin not
     assert.deepEqual(effects, actions);
     assert(!document.querySelector('#spacesList .tab[data-tab-id="100"]'));
     assert.equal(Boolean(favorites().querySelector('[data-tab-id="100"]')), state === 'repinned');
-    assert.equal(local.pinnedTabStatesById[100]?.bookmarkId, 'closed');
+    assert.equal(local.pinnedTabStatesById[100], undefined);
     assert.deepEqual(alerts, []);
+});
+
+const savedIcon = id => [...favorites().querySelectorAll('.saved-favorite')].find(node => node.dataset.favoriteId === id);
+function click(element, type = 'click') { const event = new window.Event(type, { bubbles: true, cancelable: true }); Object.assign(event, { clientX: 20, clientY: 20 }); element.dispatchEvent(event); }
+function chooseContext(element, text) {
+    click(element, 'contextmenu');
+    const option = [...document.querySelectorAll('#tab-context-menu button')].find(node => node.textContent === text);
+    assert(option, `Missing context action: ${text}`); click(option);
+}
+
+test('Ctrl+W-equivalent close preserves saved icon; clicking reopens its saved URL and later activation preserves navigation', async () => {
+    await resetFavorites(); await drop(row('closed'), target(), 25);
+    const favoriteId = local.persistentFavorites[0].id;
+    const source = structuredClone(tree);
+    await chrome.tabs.remove(100); await wait(180);
+    assert(savedIcon(favoriteId)); assert.equal(savedIcon(favoriteId).dataset.tabId, undefined);
+    assert.equal(savedIcon(favoriteId).querySelector('.favorite-state').textContent, 'Closed');
+    assert.equal(local.persistentFavorites.length, 1); assert.deepEqual(tree, source);
+    click(savedIcon(favoriteId)); await wait(180);
+    const reopenedId = Number(savedIcon(favoriteId).dataset.tabId), reopened = tabs.find(tab => tab.id === reopenedId);
+    assert.notEqual(reopenedId, 100); assert.equal(reopened.url, getNode('closed').url); assert.equal(reopened.pinned, true); assert.equal(reopened.active, true);
+    reopened.url = 'https://navigated.test/deep'; reopened.active = false;
+    effects = []; click(savedIcon(favoriteId)); await wait(180);
+    assert.equal(reopened.url, 'https://navigated.test/deep');
+    assert.deepEqual(effects, [['update', reopenedId, { active: true }]]);
+    assert.deepEqual(tree, source);
+});
+
+test('explicit Remove Favorite removes shared record and unpins pages without closing or deleting source bookmark', async () => {
+    await resetFavorites(); await drop(row('closed'), target(), 25);
+    const id = local.persistentFavorites[0].id, original = structuredClone(tree);
+    effects = []; chooseContext(savedIcon(id), 'Remove Favorite'); await wait(220);
+    assert.equal(local.persistentFavorites.length, 0); assert(!savedIcon(id));
+    assert(tabs.some(tab => tab.id === 100)); assert.equal(tabs.find(tab => tab.id === 100).pinned, false);
+    assert(!effects.some(([kind]) => kind === 'remove')); assert.deepEqual(tree, original); assert.deepEqual(writes, []);
+});
+
+test('existing browser pins remain native until explicit per-tab adoption and native reorder never rewrites saved order', async () => {
+    await resetFavorites(); await drop(row('closed'), target(), 25);
+    const savedOrder = structuredClone(local.persistentFavorites);
+    tabs.push({ id: 201, windowId: 10, pinned: true, active: false, index: 1, title: 'Existing A', url: 'https://legacy.test/a' },
+        { id: 202, windowId: 10, pinned: true, active: false, index: 2, title: 'Existing B', url: 'https://legacy.test/b' });
+    await chrome.tabs.onMoved.emit(201, { windowId: 10 }); await wait(80);
+    assert.equal(favorites().querySelectorAll('.native-favorite').length, 2); assert.deepEqual(local.persistentFavorites, savedOrder);
+    assert.equal(document.getElementById('nativeFavoritesNotice').hidden, false);
+    effects = [];
+    const first = favorites().querySelector('.native-favorite[data-tab-id="201"]');
+    const second = favorites().querySelector('.native-favorite[data-tab-id="202"]');
+    first._rect = { left: 0, right: 40, top: 10, bottom: 58, width: 40, height: 48 };
+    await drop(second, first, 25);
+    assert(effects.some(([kind]) => kind === 'move')); assert(!effects.some(([kind]) => kind === 'create' || kind === 'update'));
+    assert.deepEqual(local.persistentFavorites, savedOrder);
+    chooseContext(favorites().querySelector('.native-favorite[data-tab-id="201"]'), 'Keep as saved Favorite'); await wait(220);
+    assert.equal(local.persistentFavorites.length, 2); assert.equal(local.persistentFavorites[1].sourceBookmarkId, null);
+    assert(favorites().querySelector('.saved-favorite[data-tab-id="201"]')); assert(favorites().querySelector('.native-favorite[data-tab-id="202"]'));
+    assert(!effects.some(([kind]) => kind === 'create' || kind === 'remove'));
+});
+
+test('shared saved storage refresh renders closed records and keeps exact distinct identities with equal URLs', async () => {
+    await resetFavorites();
+    local.persistentFavorites = [{ id: 'other-window-a', title: 'One', url: 'https://shared.test/', sourceBookmarkId: null },
+        { id: 'other-window-b', title: 'Two', url: 'https://shared.test/', sourceBookmarkId: null }];
+    favoriteStore.initialized = false;
+    await onChanged.emit({ persistentFavorites: { newValue: structuredClone(local.persistentFavorites) } }, 'local'); await wait(120);
+    assert.equal(favorites().querySelectorAll('.saved-favorite.favorite-closed').length, 2);
+    assert(savedIcon('other-window-a')); assert(savedIcon('other-window-b'));
+    assert.deepEqual(effects, []); assert.deepEqual(writes, []);
+});
+
+
+test('unmanaged native pin reverse drag retains legacy copy behavior without implicit saved adoption', async () => {
+    await resetFavorites(); const original = structuredClone(getNode('b'));
+    await chrome.tabs.update(2, { pinned: true }); await wait(120);
+    const native = favorites().querySelector('.native-favorite[data-tab-id="2"]'); assert(native);
+    await drop(native, root(), 700);
+    assert.deepEqual(getNode('b'), original); assert(ids('f').includes('b'));
+    assert.equal(local.persistentFavorites.length, 0); assert.equal(tabs.find(tab => tab.id === 2).pinned, false);
+    assert.equal(writes.filter(write => write.kind === 'create').length, 1); assert(!writes.some(write => write.id === 'b'));
+    assert.notEqual(local.pinnedTabStatesById[2]?.bookmarkId, 'b'); assert.deepEqual(alerts, []);
+});
+
+test('legacy uncertain drop from before upgrade is surfaced without a second page or saved-record write', async () => {
+    await resetFavorites();
+    const receiptKey = JSON.stringify([10, 'closed']);
+    session.favoriteDropAttempts[receiptKey] = { tabId: null, url: getNode('closed').url };
+    const before = structuredClone(tree);
+    await drop(row('closed'), target(), 25);
+    assert.equal(favorites().dataset.dropState, 'error'); assert.equal(favorites().getAttribute('aria-busy'), 'false');
+    assert.match(status(), /before this update could not be verified/);
+    assert.deepEqual(effects, []); assert.deepEqual(writes, []); assert.deepEqual(tree, before);
+    assert.deepEqual(local.persistentFavorites, []); assert.equal(session.favoriteDropAttempts[receiptKey].tabId, null);
 });

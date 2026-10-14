@@ -143,3 +143,15 @@ test('actual Spotlight DOM reader captures authoritative workspace chip names fo
         assert.equal(readSpotlightRows()[0].space,null);
     } finally { if (previous) Object.defineProperty(globalThis,'document',previous); else delete globalThis.document; }
 });
+
+test('Spotlight DOM evidence distinguishes a saved Favorite from an equal-title source bookmark', async () => {
+    const { readSpotlightRows } = await import('../../scripts/paired-chrome-sidebar.mjs');
+    const { document } = parseHTML('<div data-testid="spotlight-result" data-result-type="arcify-favorite" data-favorite-id="saved-exact" class="selected"><span class="arcify-spotlight-result-title">Same</span></div><div data-testid="spotlight-result" data-result-type="bookmark"><span class="arcify-spotlight-result-title">Same</span></div>');
+    const previous = Object.getOwnPropertyDescriptor(globalThis,'document');
+    try {
+        Object.defineProperty(globalThis,'document',{configurable:true,value:document});
+        assert.deepEqual(readSpotlightRows().map(row=>[row.type,row.favoriteId,row.title,row.selected]),[
+            ['arcify-favorite','saved-exact','Same',true],['bookmark',null,'Same',false]
+        ]);
+    } finally { if(previous) Object.defineProperty(globalThis,'document',previous); else delete globalThis.document; }
+});

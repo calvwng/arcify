@@ -358,3 +358,37 @@ chip order. This is pending exact-head CI together with the Favorites case, for
 Imported folder order seeds a clean store, while established Space order is
 retained and newly discovered folders append. The reorder action does not move
 bookmark folders or automatically change an existing user's order.
+
+## Persistent Favorites follow-up
+
+The saved Favorites model adds a shared profile-local list with exact per-window
+live bindings. Unit/API/DOM tests cover closure, reopen, native unpin, replacement,
+window moves and conflicts, worker restart, uncertain writes, concurrent requests,
+legacy upgrade receipts, source preservation, explicit removal, and safe sender/
+URL validation. The retired native-only writer's 27 safety cases are mapped in
+[favorites-drop.md](favorites-drop.md). No user bookmark import or bulk adoption
+is performed.
+
+The dedicated real-Chrome fixture retains all original 28 checks and adds:
+
+1. Close an active Favorite through Chrome's native tab API, keep its saved icon,
+   reopen by real click, preserve a navigated live instance, open a separate
+   instance in another window, explicitly adopt an existing native pin, and remove
+   the saved Favorite while keeping known pages and source bookmarks intact.
+2. Search and select a closed Favorite with genuine keyboard input while its
+   same-title source bookmark remains independent. Native closure then preserves
+   the query, manually selected saved identity, and closed result.
+3. Gracefully stop the complete Chrome process and launch once with the same
+   disposable profile and unchanged security options. Recheck installed runtime,
+   actual namespace sandbox, enabled extension identities and normal Developer
+   mode. Require the saved list/order/source bookmarks to survive without URL-based
+   rebinding, and reopen only through an explicit real click. Observed restored
+   native pins remain separate and unchanged.
+
+These new behaviors require a successful exact-head paired run before being called
+browser-verified. `chrome.tabs.remove` exercises real native closure and onRemoved;
+it does not claim physical Ctrl+W dispatch. Sidebar gestures use an ordinary
+sidebar tab, so native-panel drag geometry, Helium behavior, physical shortcuts,
+startup omnibox focus, and arbitrary crash/session-restore policies remain manual.
+The full-process restart is distinct from the earlier worker-stop and extension-
+reload cases. No sandbox, browser policy, or filesystem permissions are weakened.

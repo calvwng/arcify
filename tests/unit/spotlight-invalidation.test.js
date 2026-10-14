@@ -346,3 +346,14 @@ test('existing relevant bookmark listener signals saved pin/title/order changes 
         assert.deepEqual(targets(f), [1, 2]); f.sent.length = 0;
     }
 });
+
+test('shared Favorite records and exact session bindings invalidate every normal window', async t => {
+    const f = await fixture(t); await f.settleStartup();
+    for (const [area, values] of [
+        ['local', { persistentFavorites: [{ id: 'saved', title: 'Saved', url: 'https://saved.test/', sourceBookmarkId: null }] }],
+        ['session', { favoriteSession: { version: 1, bindings: [{ favoriteId: 'saved', windowId: 1, tabId: 1 }], attempts: [] } }]
+    ]) {
+        await chrome.storage[area].set(values); await f.tick(); await f.tick(); await f.tick();
+        assert.deepEqual(targets(f), [1, 2]); f.sent.length = 0;
+    }
+});

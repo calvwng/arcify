@@ -109,6 +109,7 @@ export function readSpotlightRows() {
     const root = document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument || document.getElementById('arcify-spotlight-host')?.shadowRoot || document;
     return [...root.querySelectorAll('[data-testid="spotlight-result"]')].map(row => ({
         type: row.dataset.resultType,
+        favoriteId: row.dataset.favoriteId || null,
         title: row.querySelector('.arcify-spotlight-result-title')?.textContent,
         selected: row.classList.contains('selected'),
         space: row.querySelector('.arcify-space-chip')?.getAttribute('title') || null,

@@ -17,6 +17,7 @@ registerStartupLauncher();
  */
 
 import { SpaceStore, ownerOf } from './space-store.js';
+import { FavoriteStore, registerFavoriteMessages } from './favorite-store.js';
 import { registerSpotlightBridge } from './spotlight-bridge.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { registerBookmarkListeners } from './bookmark-events.js';
@@ -24,6 +25,9 @@ import { enqueueBookmarkOperation } from './bookmark-writer.js';
 
 const spaceStore = new SpaceStore();
 spaceStore.install();
+const favoriteStore = new FavoriteStore(spaceStore);
+favoriteStore.install();
+registerFavoriteMessages(favoriteStore);
 const spotlightInvalidation = registerSpotlightBridge(spaceStore);
 registerBookmarkListeners(() => spotlightInvalidation.invalidateAll());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

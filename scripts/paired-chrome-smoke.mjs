@@ -17,6 +17,9 @@ import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSi
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors } from './paired-chrome-ui.mjs';
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
+import { exercisePersistentFavorites } from './paired-chrome-persistent-favorites.mjs';
+import { exerciseFavoritesBrowserRestart } from './paired-chrome-favorites-restart.mjs';
+import { exerciseFavoriteSearch } from './paired-chrome-favorite-search.mjs';
 import { assertSavedBookmarkFavorite } from './paired-chrome-favorites.mjs';
 import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels } from './paired-chrome-space-marker.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
@@ -31,7 +34,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '0f1ba5eaa50de724cc5ab1e5ef8790e21faeaf08';
+const PINNED_SPOTLIGHT = 'a4e925ccae8ca18410062726cd9a792c35fcf559';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -61,7 +64,10 @@ const stepNames = [
     'Overlay typing stays isolated from pre-existing host shortcuts under strict CSP',
     'Sidebar drag anchors match saved tab and folder destinations',
     'Saved bookmark drops create and reuse native Favorites without changing the source',
-    'Space drag and keyboard reordering persist without switching workspaces'
+    'Space drag and keyboard reordering persist without switching workspaces',
+    'Persistent Favorites close, reopen, share and explicitly remove without losing source bookmarks',
+    'Spotlight finds closed Favorites and preserves saved identity through live closure',
+    'Full same-profile browser restart preserves saved Favorites without guessing restored bindings'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -77,11 +83,12 @@ const report = {
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
         'Independent overlay cases wait for the previous close animation to remove its host. Rapid close/reopen stress is not exercised.',
         'The runner uses its installed stable Chrome and existing AppArmor policy, with actual Namespace/PID/network/seccomp sandbox evidence required. No privileged helper is selected, installed or modified. The runner image supplies the browser version; package/runtime evidence is recorded for each run.',
-        'A disposable CI profile is used. No installed Chrome Web Store builds, existing user profiles, full browser-session restart, or manual extension-install UI are exercised.',
+        'A disposable CI profile is used. The final Favorites case performs one graceful full-process restart with the same profile; arbitrary crash/session restoration, store-installed builds, existing user profiles and manual extension-install UI remain untested.',
         'Optional external HTTPS autocomplete is blocked with DevTools Network request blocking; no fake suggestion responses are supplied.',
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
+let launchOptions, persistentFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
 const networkTargets = new WeakMap();
@@ -158,7 +165,7 @@ async function observePage(page) {
     await blockExternalHttps(page.target());
     return page;
 }
-async function step(name, operation) {
+async function step(name, operation, { windowIsolation = true } = {}) {
     const check = report.checks.find(item => item.name === name);
     assert(check, `Unknown check: ${name}`);
     check.status = 'running'; check.startedAt = new Date().toISOString();
@@ -167,10 +174,11 @@ async function step(name, operation) {
         const detail = await operation();
         // Preserve completed state evidence even if a later isolation/error gate fails.
         if (detail !== undefined) check.details = detail;
-        if (fixture?.windowBBaseline) {
+        if (windowIsolation && fixture?.windowBBaseline) {
             assert.deepEqual(await windowBState(), fixture.windowBBaseline, 'An operation in window A changed window B tabs or memberships.');
             check.windowBUnchanged = true;
         }
+        if (!windowIsolation) check.windowIsolationLimit = 'Final full-process restart deliberately invalidates prior browser-session window/tab IDs; preservation is checked against fresh postrestart identities.';
         assertNoTargetCrashes(report.targetLifecycle);
         assertNoPageErrors(report.diagnostics);
         check.status = detail?.skipped ? 'skipped' : 'passed';
@@ -300,6 +308,35 @@ async function launchOverlay(mode = 'new-tab') {
     return sourcePage;
 }
 
+async function restartFavoriteWorker(favoriteId, tabId) {
+    const beforeSnapshot = await snapshot();
+    const url = `chrome-extension://${arcifyId}/background.js`;
+    const oldTarget = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === url);
+    const worker = await oldTarget.worker();
+    const cdp = await browser.target().createCDPSession();
+    const readTargets = async () => (await cdp.send('Target.getTargets')).targetInfos;
+    const observations = [];
+    report.favoriteWorkerRestart = observations;
+    try {
+        const old = await terminateObservedWorker({worker,url,readTargets,
+            releaseNetwork: async () => {
+                const network = await networkTargets.get(oldTarget); assert(network);
+                const id = network.id(); await network.detach(); networkTargets.delete(oldTarget); return id;
+            },record:async observation => { observations.push(observation); await saveReport(); }});
+        const afterSnapshot = await snapshot();
+        assert.deepEqual(afterSnapshot.favorites,beforeSnapshot.favorites,'Worker restart must preserve every saved record and exact binding.');
+        assert.equal(afterSnapshot.favorites.find(item => item.id === favoriteId)?.tabId,tabId);
+        assert.deepEqual(afterSnapshot.tabs.map(item=>item.id).sort((a,b)=>a-b),beforeSnapshot.tabs.map(item=>item.id).sort((a,b)=>a-b),'Read-only worker wake cannot duplicate a Favorite.');
+        const raw = await poll(readTargets,targets => targets.some(target => target.type === 'service_worker' && target.url === url && target.targetId !== old.targetId),'distinct Favorite worker replacement');
+        const replacement = findExactWorkerTarget(raw,url);
+        const target = await browser.waitForTarget(target => target !== oldTarget && target.type() === 'service_worker' && target.url() === url);
+        await blockExternalHttps(target);
+        const identity = await waitForExtensionWorkerIdentity(await target.worker(),arcifyId);
+        observations.push({phase:'restarted',target:replacement,identity});
+        return {oldTargetId:old.targetId,restartedTargetId:replacement.targetId,identity,beforeSnapshot,afterSnapshot};
+    } finally { await cdp.detach(); }
+}
+
 const sidebarSelector = '[data-result-type="arcify-sidebar-command"]';
 async function sidebarInput(page) {
     const handle = await (await spotlightSurface(page)).evaluateHandle(() => document.querySelector('[data-testid="spotlight-input"]'));
@@ -383,7 +420,7 @@ try {
         // Require its namespace sandbox; do not select/repair a setuid helper or
         // change permission, AppArmor, sysctl or other policy settings.
         // No sandbox-disabling or web-security-disabling fallback flags.
-        const launch = { channel: 'chrome', headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, protocolTimeout: 30_000, defaultViewport: { width: 1280, height: 900 } };
+        const launch = launchOptions = { channel: 'chrome', headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, protocolTimeout: 30_000, defaultViewport: { width: 1280, height: 900 } };
         report.environment.requestedLaunch = { ...launch, userDataDir: '<fresh disposable runner profile>' };
         validateChromeLaunchArguments(await puppeteer.defaultArgs(launch));
         browser = await puppeteer.launch(launch);
@@ -1543,7 +1580,7 @@ try {
                 bookmarks:(await chrome.bookmarks.get(ids)).map(({id,parentId,index,title,url}) => ({id,parentId,index,title,url})),
                 bindings:(await chrome.storage.local.get('pinnedTabStatesById')).pinnedTabStatesById || {}
             }),{windowId:fixture.windowA,ids:Object.values(saved)});
-            return {...data,windowId:fixture.windowA,activeSpaceId:state.activeSpaceId,
+            return {...data,favorites:state.favorites,windowId:fixture.windowA,activeSpaceId:state.activeSpaceId,
                 spaces:state.spaces.map(({id,tabIds,pinnedTabIds,temporaryTabIds}) => ({id,tabIds,pinnedTabIds,temporaryTabIds}))};
         };
         const createdIds = [];
@@ -1594,7 +1631,7 @@ try {
             const before = await read();
             assert.equal(before.tabs.find(tab => tab.active)?.id,sidebar.tab.id);
             await dragToFavorites(row(saved.one),'closed-bookmark-drop-empty-native-favorites',true);
-            await poll(read,state => state.tabs.some(tab => tab.pinned && state.bindings[tab.id]?.bookmarkId === saved.one && tab.status === 'complete'),'first exact saved bookmark becomes a native pinned tab');
+            await poll(read,state => state.favorites.some(favorite => favorite.sourceBookmarkId === saved.one && state.tabs.some(tab => tab.id === favorite.tabId && tab.pinned && tab.status === 'complete')),'first exact saved bookmark becomes a native pinned tab');
             const first = await read();
             const favorite = assertSavedBookmarkFavorite(before,first,{bookmarkId:saved.one,newTab:true}); createdIds.push(favorite.id);
             await page.waitForSelector(`#pinnedFavicons [data-tab-id="${favorite.id}"]`);
@@ -1603,7 +1640,7 @@ try {
             const repeated = await read();
             assertSavedBookmarkFavorite(first,repeated,{bookmarkId:saved.one,newTab:false,expectedTabId:favorite.id});
             await dragToFavorites(row(saved.two),'equal-url-bookmark-drop-keeps-distinct-native-identity',true);
-            await poll(read,state => state.tabs.some(tab => tab.pinned && state.bindings[tab.id]?.bookmarkId === saved.two && tab.status === 'complete'),'equal-URL saved identity receives its own native pin');
+            await poll(read,state => state.favorites.some(favorite => favorite.sourceBookmarkId === saved.two && state.tabs.some(tab => tab.id === favorite.tabId && tab.pinned && tab.status === 'complete')),'equal-URL saved identity receives its own native pin');
             const second = await read();
             const other = assertSavedBookmarkFavorite(repeated,second,{bookmarkId:saved.two,newTab:true}); createdIds.push(other.id);
             assert.notEqual(other.id,favorite.id);
@@ -1614,6 +1651,14 @@ try {
             return {sidebarTabId:sidebar.tab.id,saved,observations,before,first,repeated,second,rejected,
                 nativePinnedTabIds:createdIds,syncTabGroups:await arcifyOptions.evaluate(async () => (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups),realMouseDrag:true,nativePanel:false,sourceBookmarksPreserved:true};
         } finally {
+            await page.evaluate(async ({ids,windowId}) => {
+                const state = await chrome.runtime.sendMessage({type:'favoriteStore',action:'get',windowId});
+                if (!state.success) throw new Error(state.error?.message || state.error);
+                for (const favorite of state.favorites.filter(item => ids.includes(item.sourceBookmarkId))) {
+                    const removed = await chrome.runtime.sendMessage({type:'favoriteStore',action:'remove',windowId,favoriteId:favorite.id});
+                    if (!removed.success) throw new Error(removed.error?.message || removed.error);
+                }
+            },{ids:Object.values(saved),windowId:fixture.windowA});
             await arcifyOptions.evaluate(async ({ids,tabIds,sidebarId}) => {
                 const live = await chrome.tabs.query({});
                 for (const id of [...tabIds,sidebarId]) if (live.some(tab => tab.id === id)) await chrome.tabs.remove(id);
@@ -1730,6 +1775,25 @@ try {
                 originalBookmarkFolders,finalBookmarkFolders:await readBookmarkFolders(),realMouseDrag:true,realKeyboard:true,bookmarkFoldersMoved:false,nativePanel:false};
         } finally { await arcifyOptions.evaluate(id => chrome.tabs.remove(id),sidebar.tab.id); }
     });
+
+    await step(stepNames[28], async () => {
+        persistentFixture = await exercisePersistentFavorites({apiPage:arcifyOptions,newTabPage,ui,screenshot,snapshot,poll,fixture,arcifyId});
+        return persistentFixture;
+    });
+    await step(stepNames[29], () => exerciseFavoriteSearch({apiPage:arcifyOptions,newTabPage,ui,screenshot,snapshot,poll,fixture,spotlightId,persistentFixture,search,sidebarInput,restartWorker:restartFavoriteWorker}));
+
+    await step(stepNames[30], async () => {
+        const restarted = await exerciseFavoritesBrowserRestart({browser,launchOptions,
+            launch:async options => { browser = await puppeteer.launch(options); return browser; },
+            apiPage:arcifyOptions,fixture,arcifyId,spotlightId,
+            expectedExtensions:['arcify','spotlight'].map(name => ({...report.extensions[name],path:resolve(name === 'arcify' ? ROOT : COMPANION,'dist')})),
+            snapshot,observePage,blockExternalHttps,ui,screenshot,poll,
+            record:async evidence => { report.favoritesBrowserRestart = evidence; await saveReport(); },
+            recordTarget:event => report.targetLifecycle.push(event),
+            recordDiagnostic:event => report.diagnostics.push(event)});
+        browser = restarted.browser; arcifyOptions = restarted.arcifyOptions; spotlightOptions = restarted.spotlightOptions;
+        return restarted.evidence;
+    },{windowIsolation:false});
 
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');
     assertNoTargetCrashes(report.targetLifecycle);

@@ -25,6 +25,7 @@ function fixture() {
     const context = { chrome, console, registerTourMessages() {}, registerBookmarkListeners() {}, registerSpotlightBridge() {},
         registerStartupLauncher() { launcherRegistered++; },
         isStartupLauncherTab: tab => isStartupLauncherTab(tab, chrome), ownerOf, isProtectedFavorite: () => false,
+        FavoriteStore: class { install() {} }, registerFavoriteMessages() {},
         SpaceStore: class { install() {} async dispatch() { return [{ id: 'home', spaceBookmarks: [], temporaryTabs: [1, 2] }]; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: true, autoArchiveIdleMinutes: 10 }),
             getPinnedTabStates: async () => ({}), addArchivedTab: async tab => archives.push(tab) },

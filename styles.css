@@ -2144,3 +2144,13 @@ select:focus-visible,
         forced-color-adjust: none;
     }
 }
+
+/* Saved Favorite state belongs to the record; Chrome pins may come and go. */
+.pinned-favicon { position: relative; flex-direction: column; gap: 3px; }
+.favorite-state { font-size: 9px; line-height: 11px; opacity: .75; }
+.favorite-closed { background-color: rgba(255, 255, 255, .1); border: 1px dashed rgba(80, 80, 80, .45); box-sizing: border-box; }
+.native-favorite { border: 1px dotted rgba(80, 80, 80, .35); box-sizing: border-box; }
+.pinned-favicon:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.native-favorites-notice { font-size: 11px; line-height: 1.4; margin: -10px 0 0; opacity: .8; }
+.context-menu button.context-menu-item { display: block; width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.context-menu button.context-menu-item:hover, .context-menu button.context-menu-item:focus-visible { background: #eee; }

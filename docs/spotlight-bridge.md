@@ -269,3 +269,24 @@ an installation policy. The paired PRs link the exact run and its result.
 
 See [bridge-validation.md](bridge-validation.md) for the interactive cloud-browser
 policy restriction, CI coverage boundaries, and remaining manual checks.
+
+## Optional persistent Favorites (protocol v1)
+
+Arcify advertises `persistentFavorites` in `hello.capabilities` when its
+worker-owned saved Favorites store is available. New snapshots include ordered
+`favorites: [{ id, title, url, sourceBookmarkId, tabId }]`; provenance and the
+current-window exact live binding may be null. These global Favorite bindings
+point only to native-pinned tabs outside Space membership. Saved HTTP(S) URLs and
+titles remain unchanged when the live tab navigates.
+
+`openFavorite` accepts only the usual envelope, `windowId`, and `favoriteId`.
+It focuses that Favorite's exact current-window instance or opens its saved URL,
+then returns the usual `tabId` plus fresh snapshot. It uses the same pairing,
+strict payload validation, normal-window checks, request journal and SpaceStore
+queue as other actions. It never accepts a caller-supplied replacement URL.
+
+Favorite list and session-binding changes invalidate current normal windows.
+The notification remains optional and best effort. Older v1 peers that do not
+advertise this capability keep their existing space/bookmark/tab behavior.
+See [favorites-drop.md](favorites-drop.md) for close/removal, restart, native-pin
+adoption and profile-local durability limits.

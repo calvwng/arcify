@@ -2,9 +2,25 @@ import assert from 'node:assert/strict';
 
 // Browser evidence only: callers obtain these records from real Chrome APIs.
 export function assertSavedBookmarkFavorite(before, after, { bookmarkId, newTab, expectedTabId }) {
-    const bindingIds = Object.entries(after.bindings).filter(([, state]) =>
-        String(state.bookmarkId) === String(bookmarkId)).map(([id]) => Number(id));
-    const candidates = after.tabs.filter(tab => bindingIds.includes(tab.id));
+    assert(Array.isArray(before.favorites) && Array.isArray(after.favorites), 'Persistent Favorite snapshots are required.');
+    const records = after.favorites.filter(record => record.sourceBookmarkId === bookmarkId);
+    assert.equal(records.length, 1, 'The exact source bookmark must map to one saved Favorite identity.');
+    const record = records[0];
+    assert(typeof record.id === 'string' && record.id.length > 0);
+    const prior = before.favorites.find(item => item.sourceBookmarkId === bookmarkId);
+    if (prior) assert.equal(record.id, prior.id, 'Repeated drops must preserve the stable saved Favorite ID.');
+    else {
+        const source = before.bookmarks.find(bookmark => bookmark.id === bookmarkId);
+        assert.equal(record.url, source?.url); assert.equal(record.title, source?.title);
+    }
+    assert.equal(after.favorites.length, before.favorites.length + (prior ? 0 : 1));
+    for (const existing of before.favorites) {
+        const current = after.favorites.find(item => item.id === existing.id);
+        assert(current, 'Existing saved Favorites cannot be removed by a drop.');
+        for (const key of ['id', 'title', 'url', 'sourceBookmarkId']) assert.equal(current[key], existing[key]);
+        if (existing.id !== prior?.id) assert.equal(current.tabId, existing.tabId);
+    }
+    const candidates = after.tabs.filter(tab => tab.id === record.tabId);
     assert.equal(candidates.length, 1, 'The exact saved identity must have one current-window live instance.');
     const favorite = candidates[0];
     assert.equal(favorite.pinned, true, 'The destination must be a real native pinned tab.');
