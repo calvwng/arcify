@@ -1780,7 +1780,8 @@ try {
         persistentFixture = await exercisePersistentFavorites({apiPage:arcifyOptions,newTabPage,ui,screenshot,snapshot,poll,fixture,arcifyId});
         return persistentFixture;
     });
-    await step(stepNames[29], () => exerciseFavoriteSearch({apiPage:arcifyOptions,newTabPage,ui,screenshot,snapshot,poll,fixture,spotlightId,persistentFixture,search,sidebarInput,restartWorker:restartFavoriteWorker}));
+    await step(stepNames[29], () => exerciseFavoriteSearch({apiPage:arcifyOptions,newTabPage,ui,screenshot,snapshot,poll,fixture,spotlightId,persistentFixture,search,sidebarInput,restartWorker:restartFavoriteWorker,
+        record:async observation => { report.favoriteSearchObservations ||= []; report.favoriteSearchObservations.push(observation); await saveReport(); }}));
 
     await step(stepNames[30], async () => {
         const restarted = await exerciseFavoritesBrowserRestart({browser,launchOptions,

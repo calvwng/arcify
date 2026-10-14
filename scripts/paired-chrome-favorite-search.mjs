@@ -2,10 +2,19 @@ import assert from 'node:assert/strict';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
 import { selectResultWithKeyboard } from './paired-chrome-ui.mjs';
 
+// URL preview is intentional keyboard-selection behavior. Preserve both it and
+// the logical query represented by the retained web-search choice.
+export function closedFavoriteSelectionReady({selector,query,preview}) {
+    const row = document.querySelector(selector);
+    return Boolean(row?.classList.contains('selected') && row.textContent.includes('Open Favorite') &&
+        document.querySelector('[data-testid="spotlight-input"]')?.value === preview &&
+        [...document.querySelectorAll('[data-result-type="search-query"]')].some(item => item.querySelector('.arcify-spotlight-result-title')?.textContent === `Search for "${query}"`));
+}
+
 // Real focused keyboard input selects the saved identity, even when the source
 // bookmark has the same title/URL. Never dispatch a synthetic KeyboardEvent.
 export async function exerciseFavoriteSearch({ apiPage, newTabPage, ui, screenshot, snapshot, poll,
-    fixture, spotlightId, persistentFixture, search, sidebarInput, restartWorker }) {
+    fixture, spotlightId, persistentFixture, search, sidebarInput, restartWorker, record = async () => {} }) {
     const {favoriteId,source} = persistentFixture;
     const selector = `[data-result-type="arcify-favorite"][data-favorite-id="${favoriteId}"]`;
     const matching = row => row.type === 'arcify-favorite' && row.favoriteId === favoriteId;
@@ -47,13 +56,12 @@ export async function exerciseFavoriteSearch({ apiPage, newTabPage, ui, screensh
         const workerRestart = await restartWorker(favoriteId,tabId);
         second = await openHelper();
         const selectedOpen = await select(second);
+        const preview = await second.page.$eval('[data-testid="spotlight-input"]',input => input.value);
+        assert.equal(preview,source.url,'Keyboard selection must show the selected Favorite URL preview.');
+        await record({phase:'selected-before-close',favoriteId,query:source.title,preview,rows:selectedOpen.after});
         await apiPage.evaluate(id => chrome.tabs.remove(id),tabId);
         await poll(() => snapshot(),state => state.favorites.find(item => item.id === favoriteId)?.tabId === null,'closed Favorite snapshot');
-        await second.page.waitForFunction(({selector,query}) => {
-            const row = document.querySelector(selector);
-            return row?.classList.contains('selected') && row.textContent.includes('Open Favorite') &&
-                document.querySelector('[data-testid="spotlight-input"]')?.value === query;
-        },{polling:50},{selector,query:source.title});
+        await second.page.waitForFunction(closedFavoriteSelectionReady,{polling:50},{selector,query:source.title,preview});
         const afterClose = await second.page.evaluate(readSpotlightRows);
         assert.equal(afterClose.filter(matching).length,1);
         assert.equal(afterClose.filter(row => row.selected).length,1);
@@ -61,7 +69,19 @@ export async function exerciseFavoriteSearch({ apiPage, newTabPage, ui, screensh
         assert(afterClose.some(row => row.type === 'bookmark' && row.title === source.title));
         await ui(second.page,'Capture stable Favorite selection after live instance closes',() => screenshot(second.page,'spotlight-favorite-keeps-query-and-selection-after-close'));
         assert.deepEqual(await sourceNow(),source);
-        return {favoriteId,source,rows,selection,openedTabId:tabId,beforeTabIds:before.map(tab=>tab.id),afterTabIds:after.map(tab=>tab.id),selectedOpen,afterClose,sourceAfter:await sourceNow(),workerRestart,realKeyboard:true};
+        return {favoriteId,source,rows,selection,openedTabId:tabId,beforeTabIds:before.map(tab=>tab.id),afterTabIds:after.map(tab=>tab.id),selectedOpen,preview,afterClose,sourceAfter:await sourceNow(),workerRestart,realKeyboard:true};
+    } catch (error) {
+        const observation = {phase:'failure-before-cleanup',error:{message:error.message,stack:error.stack}};
+        try {
+            if (second && !second.page.isClosed()) {
+                observation.rows = await second.page.evaluate(readSpotlightRows);
+                observation.input = await second.page.$eval('[data-testid="spotlight-input"]',input=>({value:input.value,focused:document.activeElement===input}));
+                observation.visibility = await second.page.evaluate(()=>document.visibilityState);
+                if (observation.visibility === 'visible') await screenshot(second.page,'favorite-search-failure-before-cleanup');
+            }
+        } catch (captureError) { observation.captureError = captureError.message; }
+        await record(observation).catch(()=>{});
+        throw error;
     } finally {
         for (const item of [helper,second].filter(Boolean)) {
             await apiPage.evaluate(async id => { if ((await chrome.tabs.query({})).some(tab=>tab.id===id)) await chrome.tabs.remove(id); },item.tab.id);

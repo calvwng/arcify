@@ -44,6 +44,7 @@ on:
       - 'scripts/paired-chrome-browser-restart.mjs'
       - 'tests/unit/paired-chrome-browser-restart.test.js'
       - 'tests/unit/paired-chrome-favorites-restart.test.js'
+      - 'tests/unit/paired-chrome-favorite-search.test.js'
       - 'utils.js'
       - 'tests/unit/favorites-drop*.test.js'
       - 'startup-*.js'
