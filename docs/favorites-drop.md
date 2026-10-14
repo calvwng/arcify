@@ -31,6 +31,10 @@ record. Whether the native toast applies to a particular Helium installation
 depends on its browser version; browser shortcut dispatch is separate from the
 extension's close API tests.
 
+Opening saved Favorites as ordinary unpinned tabs is
+[deferred in the backlog](BACKLOG.md#ordinary-unpinned-live-tabs-for-saved-favorites).
+Native-pinned behavior remains unchanged.
+
 ## Retained favicons
 
 Favorites retain a small PNG copy of their saved page's favicon in this profile's
