@@ -1,27 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 import { createSpaceSwitcher } from '../../space-switcher.js';
 import { moveSpace, projectSpaceOrder } from '../../space-order.js';
 
 function setup() {
-    const { window, document } = parseHTML('<div id="switcher"></div><button id="outside"></button>');
+    const { window, document } = parseHTML('<html><body><div id="switcher"></div><button id="outside"></button></body></html>');
+    window.innerWidth = 400; window.innerHeight = 800;
     const container = document.getElementById('switcher');
+    container.scrollLeft = 0; container.scrollWidth = 400; container.clientWidth = 400;
+    const frames = new Map(); let nextFrame = 0;
+    window.requestAnimationFrame = callback => { frames.set(++nextFrame, callback); return nextFrame; };
+    window.cancelAnimationFrame = id => frames.delete(id);
     let spaces = ['Personal', 'GenAI', 'Finance'].map(id => ({ id, name: id }));
     const moves = [], activations = [], states = [], reports = [];
     const control = createSpaceSwitcher({ container, getSpaces: () => spaces, getActiveSpaceId: () => 'GenAI',
         activate: id => activations.push(id), onDragState: value => states.push(value), report: text => reports.push(text),
         move: async operation => { moves.push(operation); spaces = moveSpace(spaces, operation); control.render(); } });
     control.render();
-    container.getBoundingClientRect = () => ({ left: 0, right: 400 });
+    container.getBoundingClientRect = () => ({ left: 0, right: container.clientWidth, width: container.clientWidth, top: 492, bottom: 536, height: 44 });
     function buttons() { return [...container.querySelectorAll('button')]; }
     function event(target, type, extra = {}) {
-        buttons().forEach((button, index) => { button.getBoundingClientRect = () => ({ left: index * 100, width: 80 }); });
+        buttons().forEach((button, index) => { button.getBoundingClientRect = () => ({ left: 8 + index * 100 - container.scrollLeft, right: 88 + index * 100 - container.scrollLeft, width: 80, top: 500, bottom: 532, height: 32 }); });
         const e = new window.Event(type, { bubbles: true, cancelable: true });
-        Object.assign(e, { clientX: 50, dataTransfer: { data: {}, setData(type, value) { this.data[type] = value; } }, ...extra });
+        Object.assign(e, { clientX: 50, clientY: 516, dataTransfer: { data: {}, setData(type, value) { this.data[type] = value; } }, ...extra });
         target.dispatchEvent(e); return e;
     }
-    return { document, container, control, event, buttons, moves, activations, states, reports,
+    return { window, document, container, control, event, buttons, moves, activations, states, reports, frames,
+        line: document.querySelector('.space-drop-anchor'),
+        tick(time) { const [id, callback] = frames.entries().next().value; frames.delete(id); callback(time); },
         ids: () => buttons().map(button => button.dataset.spaceId), setSpaces: next => { spaces = next; } };
 }
 const settle = async () => { await Promise.resolve(); await Promise.resolve(); };
@@ -35,12 +43,22 @@ test('real switcher controller renders stable IDs and saves exactly one move aft
     assert.equal(source.classList.contains('dragging-switcher'), true);
     const over = f.event(target, 'dragover', { clientX: 1 });
     assert(over.defaultPrevented); assert(target.classList.contains('space-drop-before'));
+    assert.equal(f.line.hidden, false);
+    assert.equal(f.line.dataset.sourceSpaceId, 'Finance');
+    assert.equal(f.line.dataset.anchorSpaceId, 'Personal');
+    assert.equal(f.line.dataset.placement, 'before');
+    assert.equal(f.line.style.left, '4px');
+    assert.equal(f.line.style.top, '498px');
+    assert.equal(f.line.style.height, '36px');
     f.event(target, 'drop', { clientX: 1 }); f.event(source, 'dragend'); await settle();
     assert.deepEqual(f.ids(), ['Finance', 'Personal', 'GenAI']);
     assert.deepEqual(f.moves, [{ spaceId: 'Finance', anchorSpaceId: 'Personal', position: 'before' }]);
     assert.deepEqual(f.states, [true, false]);
     assert.equal(f.container.querySelector('.active').dataset.spaceId, 'GenAI');
     assert.equal(f.container.querySelector('.space-drop-before'), null);
+    assert.equal(f.line.hidden, true);
+    assert.equal(f.line.dataset.placement, undefined);
+    assert.equal(f.frames.size, 0);
     assert.deepEqual(f.reports, ['Space order saved.']);
 });
 
@@ -49,6 +67,9 @@ test('preview and gap/end drops use the same placement and self-drop does not mo
     const source = f.buttons()[0];
     f.event(source, 'dragstart'); f.event(f.container, 'dragover', { clientX: 395 });
     assert(f.buttons()[2].classList.contains('space-drop-after'));
+    assert.equal(f.line.hidden, false);
+    assert.equal(f.line.dataset.placement, 'after');
+    assert.equal(f.line.style.left, '292px');
     f.event(f.container, 'drop', { clientX: 395 }); await settle();
     assert.deepEqual(f.ids(), ['GenAI', 'Finance', 'Personal']);
     const middle = f.buttons()[1];
@@ -68,14 +89,16 @@ test('external drags are ignored and Escape or an outside dragend clears drag st
     assert.deepEqual(f.states, [true, false, true, false]); assert.deepEqual(f.moves, []);
 });
 
-test('refresh during drag defers replacing its source and stale moves do not resurrect deleted spaces', async () => {
+test('refresh during drag defers replacing its source and rejects known-deleted sources without a marker or save', async () => {
     const f = setup(), source = f.buttons()[2];
     f.event(source, 'dragstart');
     f.setSpaces([{ id: 'Personal', name: 'Renamed' }, { id: 'GenAI', name: 'GenAI' }, { id: 'New', name: 'New' }]);
     f.control.render(); assert(source.isConnected);
     f.event(f.buttons()[0], 'drop', { clientX: 0 }); await settle();
     assert.deepEqual(f.ids(), ['Personal', 'GenAI', 'New']);
-    assert.match(f.reports[0], /Could not reorder spaces.*deleted/);
+    assert.equal(f.line.hidden, true);
+    assert.deepEqual(f.moves, []);
+    assert.deepEqual(f.reports, []);
 });
 
 test('keyboard reorders one neighbor without changing selection or wrapping and exposes a shortcut', async () => {
@@ -100,7 +123,7 @@ test('projected authoritative order retains current objects and local-only slots
 });
 
 test('render restores chip focus only while the chip still owns focus', async () => {
-    const { window, document } = parseHTML('<div id="switcher"></div><button id="outside"></button>');
+    const { window, document } = parseHTML('<html><body><div id="switcher"></div><button id="outside"></button></body></html>');
     let active = null;
     Object.defineProperty(document, 'activeElement', { get: () => active });
     window.HTMLElement.prototype.focus = function () { active = this; };
@@ -127,4 +150,141 @@ test('immediate repeated keyboard moves use acknowledged order before an externa
     f.event(f.buttons()[1], 'keydown', { key: 'ArrowRight', altKey: true, shiftKey: true }); await settle();
     assert.deepEqual(f.ids(), ['GenAI', 'Finance', 'Personal']);
     assert.deepEqual(f.moves.map(move => move.anchorSpaceId), ['GenAI', 'Finance']);
+});
+
+test('one non-interactive overlay survives repeated renders without changing chip geometry or order', () => {
+    const f = setup();
+    const source = f.buttons()[2], target = f.buttons()[0];
+    f.event(source, 'dragstart');
+    const before = f.buttons().map(button => button.getBoundingClientRect());
+    f.event(target, 'dragover', { clientX: 10 });
+    for (let i = 0; i < 5; i++) f.control.render();
+    assert.equal(f.document.querySelectorAll('.space-drop-anchor').length, 1);
+    assert.equal(f.line.parentElement, f.document.body);
+    assert.equal(f.line.getAttribute('aria-hidden'), 'true');
+    assert.equal(f.line.hasAttribute('tabindex'), false);
+    assert.equal(f.container.contains(f.line), false);
+    assert.equal(f.line.hidden, false);
+    assert.deepEqual(f.buttons().map(button => button.getBoundingClientRect()), before);
+    assert.deepEqual(f.ids(), ['Personal', 'GenAI', 'Finance']);
+    f.event(source, 'dragend');
+    assert.equal(f.line.hidden, true);
+});
+
+test('both source halves, adjacent no-op slots and one remaining Space never advertise or save a move', async () => {
+    for (const [sourceIndex, targetIndex, clientX] of [[1, 1, 110], [1, 1, 185], [0, 1, 110], [1, 2, 210], [2, null, 395]]) {
+        const f = setup(), source = f.buttons()[sourceIndex], target = f.buttons()[targetIndex] || f.container;
+        f.event(source, 'dragstart');
+        const over = f.event(target, 'dragover', { clientX });
+        assert.equal(f.line.hidden, true);
+        assert.equal(over.dataTransfer.dropEffect, 'none');
+        f.event(target, 'drop', { clientX }); await settle();
+        assert.deepEqual(f.moves, []);
+        assert.deepEqual(f.ids(), ['Personal', 'GenAI', 'Finance']);
+    }
+    const f = setup(); f.setSpaces([{ id: 'Personal', name: 'Personal' }]); f.control.render();
+    f.event(f.buttons()[0], 'dragstart'); f.event(f.container, 'dragover', { clientX: 395 });
+    assert.equal(f.line.hidden, true);
+    f.event(f.container, 'drop', { clientX: 395 }); await settle();
+    assert.deepEqual(f.moves, []);
+});
+
+test('invalid, removed and external sources or anchors clear the marker without a write', async () => {
+    const f = setup();
+    const source = f.buttons()[2], target = f.buttons()[0];
+    f.event(source, 'dragstart'); f.event(target, 'dragover', { clientX: 10 });
+    assert.equal(f.line.hidden, false);
+    f.event(target, 'dragover', { clientX: NaN });
+    assert.equal(f.line.hidden, true);
+    f.event(target, 'dragover', { clientX: 10 });
+    f.setSpaces([{ id: 'GenAI', name: 'GenAI' }, { id: 'Finance', name: 'Finance' }]); f.control.render();
+    assert.equal(f.line.hidden, true, 'A known-deleted anchor is no longer a target');
+    f.event(target, 'drop', { clientX: 10 }); await settle();
+    assert.deepEqual(f.moves, []);
+    const external = f.event(f.container, 'dragover', { dataTransfer: { types: ['application/x-arcify-space'], dropEffect: 'none' } });
+    assert.equal(external.defaultPrevented, false);
+    assert.equal(f.line.hidden, true);
+    const invalidStart = f.event(f.container, 'dragstart');
+    assert.equal(invalidStart.defaultPrevented, true);
+    assert.deepEqual(f.states, [true, false]);
+});
+
+test('scroll and resize re-resolve the exact visible boundary beneath a stationary pointer', async () => {
+    const f = setup(), source = f.buttons()[2], first = f.buttons()[0];
+    f.event(source, 'dragstart'); f.event(first, 'dragover', { clientX: 10 });
+    assert.equal(f.line.style.left, '4px');
+    f.document.elementFromPoint = () => f.container;
+    f.container.scrollLeft = 50;
+    f.event(f.container, 'scroll');
+    assert.equal(f.line.hidden, false);
+    assert.equal(f.line.dataset.anchorSpaceId, 'GenAI');
+    assert.equal(f.line.style.left, '54px');
+    const expected = { spaceId: f.line.dataset.sourceSpaceId, anchorSpaceId: f.line.dataset.anchorSpaceId, position: f.line.dataset.placement };
+    f.event(f.container, 'drop', { clientX: 10 }); await settle();
+    assert.deepEqual(f.moves, [expected]);
+
+    const g = setup();
+    g.event(g.buttons()[0], 'dragstart'); g.event(g.container, 'dragover', { clientX: 395 });
+    assert.equal(g.line.hidden, false);
+    g.container.clientWidth = 280; g.event(g.window, 'resize');
+    assert.equal(g.line.hidden, true, 'Offscreen boundaries must not clamp to a misleading visible slot');
+    g.container.clientWidth = 400; g.event(g.window, 'resize');
+    assert.equal(g.line.hidden, false);
+    g.event(g.document, 'keydown', { key: 'Escape' });
+});
+
+test('edge autoscroll refreshes operation-aligned geometry and cancels every scheduled frame on leave', () => {
+    const f = setup(); f.container.clientWidth = 180; f.container.scrollWidth = 400;
+    f.event(f.buttons()[0], 'dragstart'); f.event(f.container, 'dragover', { clientX: 170 });
+    f.document.elementFromPoint = () => f.container;
+    assert.equal(f.line.hidden, true, 'The next insertion boundary starts outside the viewport');
+    for (let i = 1; i <= 6; i++) f.tick(i * 16);
+    assert(f.container.scrollLeft > 0);
+    assert.equal(f.line.hidden, false);
+    const anchor = f.buttons().find(button => button.dataset.spaceId === f.line.dataset.anchorSpaceId).getBoundingClientRect();
+    assert.equal(Number.parseFloat(f.line.style.left), f.line.dataset.placement === 'before' ? anchor.left - 4 : anchor.right + 4);
+    f.event(f.container, 'dragleave', { relatedTarget: f.document.getElementById('outside') });
+    assert.equal(f.line.hidden, true);
+    assert.equal(f.frames.size, 0);
+    assert.deepEqual(f.moves, []);
+    f.event(f.document, 'dragend');
+});
+
+for (const type of ['dragend', 'drop', 'keydown', 'blur']) test(`${type} clears the marker, metadata and scroll frames, including repeated cleanup`, () => {
+    const f = setup(); f.event(f.buttons()[2], 'dragstart'); f.event(f.buttons()[0], 'dragover', { clientX: 10 });
+    assert.equal(f.line.hidden, false);
+    const target = type === 'blur' ? f.window : type === 'drop' ? f.document.getElementById('outside') : f.document;
+    f.event(target, type, type === 'keydown' ? { key: 'Escape' } : {});
+    f.event(f.document, 'dragend');
+    assert.equal(f.line.hidden, true);
+    assert.equal(f.line.dataset.anchorSpaceId, undefined);
+    assert.equal(f.frames.size, 0);
+    assert.equal(f.container.querySelector('.space-drop-before, .space-drop-after, .dragging-switcher'), null);
+    assert.deepEqual(f.states, [true, false]);
+    assert.deepEqual(f.moves, []);
+});
+
+test('internal dragleave keeps feedback, while a document exit clears it until re-entry', () => {
+    const f = setup(), source = f.buttons()[2], target = f.buttons()[0];
+    f.event(source, 'dragstart'); f.event(target, 'dragover', { clientX: 10 });
+    f.event(target, 'dragleave', { relatedTarget: f.buttons()[1] });
+    assert.equal(f.line.hidden, false);
+    f.event(f.document, 'dragleave', { relatedTarget: null });
+    assert.equal(f.line.hidden, true); assert.equal(f.frames.size, 0);
+    f.event(target, 'dragover', { clientX: 10 });
+    assert.equal(f.line.hidden, false);
+    f.event(source, 'dragend');
+});
+
+test('line styles keep a visible independent paint surface with dark/forced-color support and no motion', async () => {
+    const css = await readFile(new URL('../../styles.css', import.meta.url), 'utf8');
+    const style = css.match(/\.space-drop-anchor \{([^}]+)\}/)[1];
+    assert.match(style, /position: fixed/);
+    assert.match(style, /pointer-events: none/);
+    assert.match(style, /width: 3px/);
+    assert.match(style, /background: var\(--sidebar-drop-color, #2563eb\)/);
+    assert.doesNotMatch(style, /transition|animation/);
+    assert.match(css, /\.space-drop-anchor\[hidden\] \{ display: none; \}/);
+    assert.match(css, /prefers-color-scheme: dark[^]*--sidebar-drop-color: #93c5fd/);
+    assert.match(css, /\.space-drop-anchor \{\s*background: Highlight;[^}]*forced-color-adjust: none/);
 });

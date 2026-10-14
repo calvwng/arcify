@@ -3,6 +3,9 @@
 Drag a Space chip in the bottom switcher to the left or right of another chip.
 The insertion line shows the saved destination. Dropping onto the source chip,
 pressing Escape, or ending the drag outside the switcher leaves the order alone.
+The blue line sits between chips, outside their rounded backgrounds, and stays
+aligned while the strip scrolls. Hold the drag near either edge to scroll across
+more Spaces. Existing-order gaps, deleted targets and external drags show no line.
 For keyboard access, focus a chip and press **Alt+Shift+Left** or
 **Alt+Shift+Right** to move it one neighbor. Moving a Space does not select it.
 
@@ -39,6 +42,14 @@ saving. A completed move projects the acknowledged order onto current panel
 objects without resetting pending metadata edits; normal refresh reconciles the
 remaining authoritative state. Focus stays on its chip unless the user moved it
 elsewhere while the request was pending.
+
+Drag feedback is a single non-interactive body-level `.space-drop-anchor`
+overlay, so the horizontal strip's fade mask and chip overflow cannot obscure
+it. It never participates in chip layout or focus order. Its source, anchor and
+placement come from the same resolver used at drop; scroll and resize recompute
+both the target and its visible boundary. Boundaries outside the viewport remain
+hidden rather than implying a different drop slot. Drop, Escape, drag end,
+leaving the strip and window blur clear the line and stop edge scrolling.
 
 ## Regression coverage
 

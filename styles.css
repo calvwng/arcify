@@ -2095,9 +2095,33 @@ select:focus-visible,
     .folder-header.sidebar-drop-inside { outline: 2px solid Highlight; outline-offset: -2px; }
 }
 
-/* Stable insertion markers: no margins that shift the target during a drag. */
-#spaceSwitcher button.space-drop-before { box-shadow: inset 3px 0 0 currentColor; }
-#spaceSwitcher button.space-drop-after { box-shadow: inset -3px 0 0 currentColor; }
+/* Body-level insertion line: not clipped by chip corners or the switcher mask,
+   never a flex item, and never intercepts the drop it previews. */
+.space-drop-anchor {
+    position: fixed;
+    z-index: 10000;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--sidebar-drop-color, #2563eb);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.95);
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+.space-drop-anchor::before,
+.space-drop-anchor::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: inherit;
+    box-shadow: inherit;
+    transform: translate(-50%, -50%);
+}
+.space-drop-anchor::before { top: 0; }
+.space-drop-anchor::after { top: 100%; }
+.space-drop-anchor[hidden] { display: none; }
 #spaceSwitcher button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
 .space-order-status:not(:empty) {
@@ -2114,16 +2138,9 @@ select:focus-visible,
 }
 
 @media (forced-colors: active) {
-    #spaceSwitcher button.space-drop-before,
-    #spaceSwitcher button.space-drop-after { position: relative; }
-    #spaceSwitcher button.space-drop-before::after,
-    #spaceSwitcher button.space-drop-after::after {
-        content: '';
-        position: absolute;
-        top: 5px;
-        bottom: 5px;
-        border-left: 3px solid Highlight;
+    .space-drop-anchor {
+        background: Highlight;
+        box-shadow: 0 0 0 1px Canvas;
+        forced-color-adjust: none;
     }
-    #spaceSwitcher button.space-drop-before::after { left: 2px; }
-    #spaceSwitcher button.space-drop-after::after { right: 2px; }
 }

@@ -18,6 +18,7 @@ import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clic
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { assertSavedBookmarkFavorite } from './paired-chrome-favorites.mjs';
+import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels } from './paired-chrome-space-marker.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
@@ -1653,27 +1654,42 @@ try {
         };
         try {
             await page.waitForSelector(chip(movedId)); await page.waitForSelector(chip(anchorId));
-            let hover;
-            await ui(page,'Drag final Space before first Space',async () => {
-                const source = await page.$(chip(movedId)),target = await page.$(chip(anchorId));
+            const markerEvidence = [];
+            const dragSpace = async (sourceId,targetId,placement,label) => ui(page,label,async () => {
+                const source = await page.$(chip(sourceId)),target = await page.$(chip(targetId));
                 let mouseDown = false;
                 try {
                     await source.scrollIntoView();
                     const from = await source.boundingBox(),to = await target.boundingBox();
                     assert(from && to && from.width > 0 && to.width > 0);
-                    const x = from.x+from.width/2,y = from.y+from.height/2,tx = to.x+2,ty = to.y+to.height/2;
+                    const x = from.x+from.width/2,y = from.y+from.height/2;
+                    const tx = placement === 'before' ? to.x+2 : to.x+to.width-2,ty = to.y+to.height/2;
                     await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
                     await page.mouse.move(x,y-12,{steps:5}); await page.mouse.move(tx,ty,{steps:20});
-                    await page.waitForFunction(id => document.querySelector(`#spaceSwitcher button[data-space-id="${id}"]`)?.classList.contains('space-drop-before'),{polling:50},anchorId);
-                    hover = await page.evaluate(() => ({status:document.getElementById('spaceOrderStatus')?.textContent,
-                        chips:[...document.querySelectorAll('#spaceSwitcher button[data-space-id]')].map(button => ({id:button.dataset.spaceId,classes:button.className}))}));
-                    await screenshot(page,'space-reorder-before-drop-feedback');
+                    await page.waitForFunction(({targetId,placement}) => {
+                        const marker = document.querySelector('.space-drop-anchor');
+                        return marker && !marker.hidden && marker.dataset.anchorSpaceId === targetId && marker.dataset.placement === placement;
+                    },{polling:50},{targetId,placement});
+                    const marker = assertSpaceDropMarker(await page.evaluate(readSpaceDropMarker),
+                        {sourceSpaceId:sourceId,anchorSpaceId:targetId,placement});
+                    const captured = await screenshot(page,label,true,{fullPage:false});
+                    const pixels = await page.evaluate(readMarkerScreenshotPixels,
+                        {base64:(await readFile(resolve(OUTPUT,captured.filename))).toString('base64'),marker});
+                    const paint = assertMarkerScreenshotPixels(pixels,marker);
+                    const afterCapture = assertSpaceDropMarker(await page.evaluate(readSpaceDropMarker),
+                        {sourceSpaceId:sourceId,anchorSpaceId:targetId,placement});
+                    assert.deepEqual(afterCapture.rect,marker.rect,'Capture must not shift the drop destination.');
+                    const hover = {marker,paint,screenshot:captured.filename,afterCapture};
+                    markerEvidence.push(hover);
                     await page.mouse.up(); mouseDown = false;
+                    await page.waitForFunction(() => document.querySelector('.space-drop-anchor')?.hidden === true,{polling:50});
+                    return hover;
                 } finally {
                     if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
                     await source.dispose(); await target.dispose();
                 }
             });
+            const hover = await dragSpace(movedId,anchorId,'before','space-reorder-before-drop-feedback');
             await poll(() => snapshot(),state => JSON.stringify(state.spaces.map(space => space.id)) === JSON.stringify(expected),'persisted ID-relative Space drag');
             const reordered = await assertState(expected);
             await page.reload({waitUntil:'domcontentloaded'});
@@ -1692,7 +1708,25 @@ try {
                 await assertState(next);
             }
             const restored = await assertState(originalOrder);
+            const afterMovedId = originalOrder[0],afterAnchorId = originalOrder.at(-1);
+            const afterOrder = [...originalOrder.slice(1),afterMovedId];
+            const afterHover = await dragSpace(afterMovedId,afterAnchorId,'after','space-reorder-after-drop-feedback');
+            await poll(() => snapshot(),state => JSON.stringify(state.spaces.map(space => space.id)) === JSON.stringify(afterOrder),'persisted after-boundary Space drag');
+            const afterReordered = await assertState(afterOrder);
+            for (let i = originalOrder.length-1; i > 0; i--) {
+                const next = [...originalOrder.slice(1,i),afterMovedId,...originalOrder.slice(i)];
+                await ui(page,'Restore focused Space left with Alt+Shift+ArrowLeft',async () => {
+                    const element = await page.$(chip(afterMovedId)); assert(element); await element.focus(); await element.dispose();
+                    await page.keyboard.down('Alt'); await page.keyboard.down('Shift');
+                    try { await page.keyboard.press('ArrowLeft'); }
+                    finally { await page.keyboard.up('Shift'); await page.keyboard.up('Alt'); }
+                });
+                await poll(() => snapshot(),state => JSON.stringify(state.spaces.map(space => space.id)) === JSON.stringify(next),'one-neighbor left keyboard Space move');
+                await assertState(next);
+            }
+            await assertState(originalOrder);
             return {sidebarTabId:sidebar.tab.id,originalOrder,reorderedOrder:expected,hover,reordered,reloaded,restored,
+                markerEvidence,afterHover,afterReordered,
                 originalBookmarkFolders,finalBookmarkFolders:await readBookmarkFolders(),realMouseDrag:true,realKeyboard:true,bookmarkFoldersMoved:false,nativePanel:false};
         } finally { await arcifyOptions.evaluate(id => chrome.tabs.remove(id),sidebar.tab.id); }
     });
