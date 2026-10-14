@@ -170,16 +170,23 @@ const Utils = {
     // dropping favorites' tab<->bookmark links (B10). Chaining makes each op atomic.
     _pinnedStateChain: Promise.resolve(),
     _serializePinnedStateOp: function (op) {
-        const run = this._pinnedStateChain.then(op, op);
+        // Also serialize across sidebar documents; local Promise chains alone
+        // can overwrite another window's newly saved bookmark binding.
+        const locked = () => globalThis.navigator?.locks?.request
+            ? globalThis.navigator.locks.request('arcify-pinned-tab-state', op) : op();
+        const run = this._pinnedStateChain.then(locked, locked);
         // Keep the chain alive even if an op rejects, so one failure can't wedge the queue.
         this._pinnedStateChain = run.then(() => { }, () => { });
         return run;
     },
 
-    setPinnedTabState: async function (tabId, state) {
+    setPinnedTabState: async function (tabId, state, { onlyIfUnboundOrMatching = false } = {}) {
         if (!tabId || !state) return;
         return this._serializePinnedStateOp(async () => {
             const states = await this.getPinnedTabStates();
+            if (onlyIfUnboundOrMatching && states[tabId]?.bookmarkId && String(states[tabId].bookmarkId) !== String(state.bookmarkId)) {
+                throw new Error('The tab is now linked to a different bookmark. Refresh and try again.');
+            }
             states[tabId] = {
                 pinnedUrl: state.pinnedUrl || null,
                 bookmarkId: state.bookmarkId || null
@@ -188,9 +195,13 @@ const Utils = {
         });
     },
 
-    removePinnedTabState: async function (tabId) {
+    removePinnedTabState: async function (tabId, { preserveNativePinned = false } = {}) {
         if (!tabId) return;
         return this._serializePinnedStateOp(async () => {
+            if (preserveNativePinned) {
+                try { if ((await chrome.tabs.get(tabId))?.pinned) return; }
+                catch { /* A closed tab's stale binding can be removed. */ }
+            }
             const states = await this.getPinnedTabStates();
             if (states[tabId]) {
                 delete states[tabId];

@@ -1,3 +1,4 @@
+import { moveSpace } from './space-order.js';
 import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
 import { isPracticeUrl } from './tour-practice.js';
 import { syncSpaceGroups } from './tab-group-sync.js';
@@ -38,12 +39,8 @@ export function applySpacePatch(current, before, after) {
             target[key] = [...newIds.filter(id => existing.includes(id) || added.includes(id)), ...existing.filter(id => !newIds.includes(id))];
         }
     }
-    if (JSON.stringify(before.map(s => s.id)) !== JSON.stringify(after.map(s => s.id))) {
-        result.sort((a, b) => {
-            const rank = s => { const i = after.findIndex(n => n.id === s.id); return i < 0 ? after.length : i; };
-            return rank(a) - rank(b);
-        });
-    }
+    // A generic metadata/membership patch never reorders surviving spaces.
+    // Only the explicit ID-relative reorder action can change their order.
     return result;
 }
 
@@ -266,6 +263,9 @@ export class SpaceStore {
                 }
                 this.spaces = applySpacePatch(this.spaces, message.before, message.after);
                 if (!this.spaces.length) this.spaces.push(await this.makeSpace(this.defaultSpaceName));
+                break;
+            case 'reorder':
+                this.spaces = moveSpace(this.spaces, message);
                 break;
             case 'activate': this.active[message.windowId] = message.spaceId; break;
             case 'assign': {

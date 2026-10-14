@@ -17,6 +17,7 @@ import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSi
 import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors } from './paired-chrome-ui.mjs';
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
+import { assertSavedBookmarkFavorite } from './paired-chrome-favorites.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
@@ -57,7 +58,9 @@ const stepNames = [
     'Unsupported generic extension URLs are hidden while live extension tabs still switch',
     'Controlled Spotlight launches reuse the active browser New Tab alias without losing input',
     'Overlay typing stays isolated from pre-existing host shortcuts under strict CSP',
-    'Sidebar drag anchors match saved tab and folder destinations'
+    'Sidebar drag anchors match saved tab and folder destinations',
+    'Saved bookmark drops create and reuse native Favorites without changing the source',
+    'Space drag and keyboard reordering persist without switching workspaces'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -1516,6 +1519,181 @@ try {
                 await poll(() => arcifyOptions.evaluate(() => chrome.storage.sync.get('invertTabOrder')),settings => settings.invertTabOrder === true,'restore original sidebar ordering');
             }
         }
+    });
+
+    await step(stepNames[26], async () => {
+        await bridge('activateSpace',{spaceId:fixture.spaces.work});
+        const space = (await snapshot()).spaces.find(space => space.id === fixture.spaces.work);
+        assert.equal((await tabsIn(fixture.windowA)).filter(tab => tab.pinned).length,0,'This fixture must exercise the empty Favorites destination first.');
+        const saved = await arcifyOptions.evaluate(async ({rootId,base}) => {
+            const one = await chrome.bookmarks.create({parentId:rootId,index:0,title:'Favorite Drop One',url:`${base}/native-favorite`});
+            const two = await chrome.bookmarks.create({parentId:rootId,index:1,title:'Favorite Drop Equal URL',url:`${base}/native-favorite`});
+            const folder = await chrome.bookmarks.create({parentId:rootId,index:2,title:'Favorites remain an ordinary folder'});
+            return {one:one.id,two:two.id,folder:folder.id};
+        },{rootId:space.bookmarkFolderId,base:fixture.base});
+        const sidebar = await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`);
+        const page = sidebar.page;
+        const row = id => `.space[data-space-id="${fixture.spaces.work}"] [data-bookmark-id="${id}"]`;
+        const read = async () => {
+            const state = await snapshot();
+            const data = await arcifyOptions.evaluate(async ({windowId,ids}) => ({
+                tabs:await chrome.tabs.query({windowId}),
+                bookmarks:(await chrome.bookmarks.get(ids)).map(({id,parentId,index,title,url}) => ({id,parentId,index,title,url})),
+                bindings:(await chrome.storage.local.get('pinnedTabStatesById')).pinnedTabStatesById || {}
+            }),{windowId:fixture.windowA,ids:Object.values(saved)});
+            return {...data,windowId:fixture.windowA,activeSpaceId:state.activeSpaceId,
+                spaces:state.spaces.map(({id,tabIds,pinnedTabIds,temporaryTabIds}) => ({id,tabIds,pinnedTabIds,temporaryTabIds}))};
+        };
+        const createdIds = [];
+        const observations = [];
+        const dragToFavorites = async (sourceSelector,label,allowed) => ui(page,label,async () => {
+            await page.waitForSelector(sourceSelector);
+            const source = await page.$(sourceSelector),target = await page.$('#pinnedFavicons');
+            assert(source && target);
+            let mouseDown = false;
+            const operationBefore = await page.$eval('#pinnedFavicons',element => Number(element.dataset.dropOperation || 0));
+            try {
+                await source.scrollIntoView();
+                const from = await source.boundingBox(),to = await target.boundingBox();
+                assert(from && to && from.width > 0 && from.height > 0 && to.width > 0 && to.height > 0);
+                const x = from.x+Math.min(40,from.width/2),y = from.y+from.height/2;
+                const tx = to.x+Math.min(35,to.width/2),ty = to.y+to.height/2;
+                await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
+                await page.mouse.move(x+12,y,{steps:5}); await page.mouse.move(tx,ty,{steps:20});
+                await page.waitForFunction(({allowed}) => {
+                    const status = document.getElementById('favoritesDropStatus');
+                    const text = status?.textContent || '';
+                    return allowed ? /pinned tab|already.*favorite|reorder|favorite/i.test(text) && document.getElementById('pinnedFavicons').classList.contains('drag-over')
+                        : /folder|individual|one bookmark/i.test(text) && !document.getElementById('pinnedFavicons').classList.contains('drag-over');
+                },{polling:50},{allowed});
+                const hover = await page.evaluate(() => ({status:document.getElementById('favoritesDropStatus')?.textContent,
+                    highlighted:document.getElementById('pinnedFavicons').classList.contains('drag-over'),
+                    source:document.querySelector('.dragging')?.dataset.bookmarkId}));
+                assert.equal(hover.highlighted,allowed);
+                await screenshot(page,label);
+                await page.mouse.up(); mouseDown = false;
+                await page.waitForFunction(() => !document.querySelector('.dragging'),{polling:50});
+                if (allowed) await page.waitForFunction(previous => {
+                    const strip = document.getElementById('pinnedFavicons');
+                    return Number(strip.dataset.dropOperation) === previous+1 && strip.dataset.dropState === 'success' && strip.getAttribute('aria-busy') === 'false';
+                },{polling:50},operationBefore);
+                else assert.equal(await page.$eval('#pinnedFavicons',element => Number(element.dataset.dropOperation || 0)),operationBefore);
+                const completed = await page.evaluate(() => ({status:document.getElementById('favoritesDropStatus')?.textContent,
+                    operation:document.getElementById('pinnedFavicons').dataset.dropOperation,state:document.getElementById('pinnedFavicons').dataset.dropState}));
+                observations.push({label,hover,completed,sourceRect:from,targetRect:to});
+            } finally {
+                if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
+                await source.dispose(); await target.dispose();
+            }
+        });
+        try {
+            await page.waitForFunction(spaceId => document.querySelector(`.space[data-space-id="${spaceId}"]`)?.classList.contains('active'),{polling:50},fixture.spaces.work);
+            for (const id of Object.values(saved)) await page.waitForSelector(row(id));
+            const before = await read();
+            assert.equal(before.tabs.find(tab => tab.active)?.id,sidebar.tab.id);
+            await dragToFavorites(row(saved.one),'closed-bookmark-drop-empty-native-favorites',true);
+            await poll(read,state => state.tabs.some(tab => tab.pinned && state.bindings[tab.id]?.bookmarkId === saved.one && tab.status === 'complete'),'first exact saved bookmark becomes a native pinned tab');
+            const first = await read();
+            const favorite = assertSavedBookmarkFavorite(before,first,{bookmarkId:saved.one,newTab:true}); createdIds.push(favorite.id);
+            await page.waitForSelector(`#pinnedFavicons [data-tab-id="${favorite.id}"]`);
+            await page.waitForSelector(`${row(saved.one)}.bookmark-only`);
+            await dragToFavorites(row(saved.one),'repeat-bookmark-drop-reuses-exact-native-favorite',true);
+            const repeated = await read();
+            assertSavedBookmarkFavorite(first,repeated,{bookmarkId:saved.one,newTab:false,expectedTabId:favorite.id});
+            await dragToFavorites(row(saved.two),'equal-url-bookmark-drop-keeps-distinct-native-identity',true);
+            await poll(read,state => state.tabs.some(tab => tab.pinned && state.bindings[tab.id]?.bookmarkId === saved.two && tab.status === 'complete'),'equal-URL saved identity receives its own native pin');
+            const second = await read();
+            const other = assertSavedBookmarkFavorite(repeated,second,{bookmarkId:saved.two,newTab:true}); createdIds.push(other.id);
+            assert.notEqual(other.id,favorite.id);
+            await page.waitForSelector(`#pinnedFavicons [data-tab-id="${other.id}"]`);
+            await dragToFavorites(`${row(saved.folder)} > .folder-header`,'favorites-folder-drop-rejected-with-explanation',false);
+            const rejected = await read(); assert.deepEqual(rejected,second,'A folder drag must not expand, open, move, or remove anything.');
+            await screenshot(page,'native-favorites-and-preserved-saved-bookmarks');
+            return {sidebarTabId:sidebar.tab.id,saved,observations,before,first,repeated,second,rejected,
+                nativePinnedTabIds:createdIds,syncTabGroups:await arcifyOptions.evaluate(async () => (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups),realMouseDrag:true,nativePanel:false,sourceBookmarksPreserved:true};
+        } finally {
+            await arcifyOptions.evaluate(async ({ids,tabIds,sidebarId}) => {
+                const live = await chrome.tabs.query({});
+                for (const id of [...tabIds,sidebarId]) if (live.some(tab => tab.id === id)) await chrome.tabs.remove(id);
+                for (const id of ids) {
+                    const [node] = await chrome.bookmarks.get(id);
+                    if (node.url) await chrome.bookmarks.remove(id); else await chrome.bookmarks.removeTree(id);
+                }
+            },{ids:Object.values(saved),tabIds:createdIds,sidebarId:sidebar.tab.id});
+        }
+    });
+
+    await step(stepNames[27], async () => {
+        const beforeA = await snapshot(),beforeB = await snapshot(fixture.windowB);
+        const originalOrder = beforeA.spaces.map(space => space.id);
+        const readBookmarkFolders = () => arcifyOptions.evaluate(async folderId => {
+            const [folder] = await chrome.bookmarks.get(folderId);
+            return (await chrome.bookmarks.getChildren(folder.parentId)).filter(node => !node.url)
+                .map(({id,parentId,index}) => ({id,parentId,index}));
+        },beforeA.spaces[0].bookmarkFolderId);
+        const originalBookmarkFolders = await readBookmarkFolders();
+        assert(originalOrder.length >= 3,'Space-order fixture needs at least three stable identities.');
+        const movedId = originalOrder.at(-1),anchorId = originalOrder[0];
+        const expected = [movedId,...originalOrder.slice(0,-1)];
+        const sidebar = await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`);
+        const page = sidebar.page;
+        const chip = id => `#spaceSwitcher button[data-space-id="${id}"]`;
+        const renderedOrder = () => page.$$eval('#spaceSwitcher button[data-space-id]',buttons => buttons.map(button => button.dataset.spaceId));
+        const membership = state => state.spaces.map(({id,tabIds,pinnedTabIds,temporaryTabIds}) => ({id,tabIds,pinnedTabIds,temporaryTabIds})).sort((a,b) => a.id.localeCompare(b.id));
+        const assertState = async order => {
+            const a = await snapshot(),b = await snapshot(fixture.windowB);
+            assert.deepEqual(a.spaces.map(space => space.id),order);
+            assert.deepEqual(b.spaces.map(space => space.id),order,'Space ordering is globally shared, not per-window copied state.');
+            assert.equal(a.activeSpaceId,beforeA.activeSpaceId); assert.equal(b.activeSpaceId,beforeB.activeSpaceId);
+            assert.deepEqual(membership(a),membership(beforeA)); assert.deepEqual(membership(b),membership(beforeB));
+            assert.deepEqual(await readBookmarkFolders(),originalBookmarkFolders,'Space UI ordering must not move the imported bookmark folders.');
+            await poll(renderedOrder,ids => JSON.stringify(ids) === JSON.stringify(order),'matching rendered Space chips');
+            return {a,b};
+        };
+        try {
+            await page.waitForSelector(chip(movedId)); await page.waitForSelector(chip(anchorId));
+            let hover;
+            await ui(page,'Drag final Space before first Space',async () => {
+                const source = await page.$(chip(movedId)),target = await page.$(chip(anchorId));
+                let mouseDown = false;
+                try {
+                    await source.scrollIntoView();
+                    const from = await source.boundingBox(),to = await target.boundingBox();
+                    assert(from && to && from.width > 0 && to.width > 0);
+                    const x = from.x+from.width/2,y = from.y+from.height/2,tx = to.x+2,ty = to.y+to.height/2;
+                    await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
+                    await page.mouse.move(x,y-12,{steps:5}); await page.mouse.move(tx,ty,{steps:20});
+                    await page.waitForFunction(id => document.querySelector(`#spaceSwitcher button[data-space-id="${id}"]`)?.classList.contains('space-drop-before'),{polling:50},anchorId);
+                    hover = await page.evaluate(() => ({status:document.getElementById('spaceOrderStatus')?.textContent,
+                        chips:[...document.querySelectorAll('#spaceSwitcher button[data-space-id]')].map(button => ({id:button.dataset.spaceId,classes:button.className}))}));
+                    await screenshot(page,'space-reorder-before-drop-feedback');
+                    await page.mouse.up(); mouseDown = false;
+                } finally {
+                    if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
+                    await source.dispose(); await target.dispose();
+                }
+            });
+            await poll(() => snapshot(),state => JSON.stringify(state.spaces.map(space => space.id)) === JSON.stringify(expected),'persisted ID-relative Space drag');
+            const reordered = await assertState(expected);
+            await page.reload({waitUntil:'domcontentloaded'});
+            await page.waitForSelector(chip(movedId));
+            const reloaded = await assertState(expected);
+            await screenshot(page,'space-order-persists-after-sidebar-reload');
+            for (let i = 1; i < originalOrder.length; i++) {
+                const next = [...originalOrder.slice(0,i),movedId,...originalOrder.slice(i,-1)];
+                await ui(page,'Move focused Space right with Alt+Shift+ArrowRight',async () => {
+                    const element = await page.$(chip(movedId)); assert(element); await element.focus(); await element.dispose();
+                    await page.keyboard.down('Alt'); await page.keyboard.down('Shift');
+                    try { await page.keyboard.press('ArrowRight'); }
+                    finally { await page.keyboard.up('Shift'); await page.keyboard.up('Alt'); }
+                });
+                await poll(() => snapshot(),state => JSON.stringify(state.spaces.map(space => space.id)) === JSON.stringify(next),'one-neighbor keyboard Space move');
+                await assertState(next);
+            }
+            const restored = await assertState(originalOrder);
+            return {sidebarTabId:sidebar.tab.id,originalOrder,reorderedOrder:expected,hover,reordered,reloaded,restored,
+                originalBookmarkFolders,finalBookmarkFolders:await readBookmarkFolders(),realMouseDrag:true,realKeyboard:true,bookmarkFoldersMoved:false,nativePanel:false};
+        } finally { await arcifyOptions.evaluate(id => chrome.tabs.remove(id),sidebar.tab.id); }
     });
 
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');

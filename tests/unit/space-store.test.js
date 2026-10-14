@@ -408,3 +408,85 @@ test('native-group imports, explicit assignment and stale patches cannot persist
     assert.equal(local.spaceTabSnapshot.some(tab => tab.tabId === 1), false);
     assert.equal(JSON.stringify(local.spaceWindowSnapshot).includes('startup-launcher.html'), false);
 });
+
+const order = list => list.map(space => space.id);
+test('first imported folder discovery preserves Chrome order and existing order is never silently reseeded', async () => {
+    let folders = ['Personal', 'GenAI', 'Finance'].map(title => ({ id: title, title }));
+    chrome.bookmarks.getChildren = async id => id === 'root' ? structuredClone(folders) : [];
+    local.spaces = []; tabs = [];
+    const seeded = await new SpaceStore().dispatch({ action: 'get' });
+    assert.deepEqual(seeded.map(space => space.name), ['Personal', 'GenAI', 'Finance']);
+    const byName = new Map(seeded.map(space => [space.name, space]));
+    local.spaces = ['GenAI', 'Finance'].map(name => byName.get(name));
+    const discovered = await new SpaceStore().dispatch({ action: 'get' });
+    assert.deepEqual(discovered.map(space => space.name), ['GenAI', 'Finance', 'Personal']);
+    assert.equal(discovered[2].id, byName.get('Personal').id);
+});
+
+test('explicit ID-relative reorder persists across worker and browser reload, folder sync and renames', async () => {
+    let folders = [{ id: 'a', title: 'Personal' }, { id: 'b', title: 'GenAI' }, { id: 'c', title: 'Finance' }];
+    chrome.bookmarks.getChildren = async id => id === 'root' ? structuredClone(folders) : [];
+    local.spaces.push(space('c'));
+    session.activeSpaces = { 1: 'a', 2: 'b' };
+    const store = new SpaceStore();
+    const original = await store.dispatch({ action: 'get' });
+    await store.dispatch({ action: 'reorder', spaceId: 'c', anchorSpaceId: 'a', position: 'before' });
+    assert.deepEqual(order(local.spaces), ['c', 'a', 'b']);
+    assert.deepEqual(session.activeSpaces, { 1: 'a', 2: 'b' });
+    for (const saved of local.spaces) assert.deepEqual(saved, original.find(space => space.id === saved.id));
+    assert.deepEqual(order(await new SpaceStore().dispatch({ action: 'get' })), ['c', 'a', 'b']);
+    // Changed bookmark order/rename is not a second ordering database.
+    folders.reverse(); folders.find(folder => folder.id === 'a').title = 'Renamed';
+    folders.unshift({ id: 'new', title: 'New' });
+    const synced = await store.dispatch({ action: 'get' });
+    assert.deepEqual(order(synced).slice(0, 3), ['c', 'a', 'b']);
+    assert.equal(synced.at(-1).bookmarkFolderId, 'new');
+    assert.equal(synced.find(space => space.id === 'a').name, 'Renamed');
+    const expected = order(synced);
+    session = {}; chrome.storage.session = area(session);
+    assert.deepEqual(order(await new SpaceStore().dispatch({ action: 'get' })), expected);
+    assert.deepEqual(mutations, []);
+});
+
+test('multiwindow relative moves apply to latest order and retain concurrent membership and new spaces', async () => {
+    local.spaces.push(space('c'));
+    const store = new SpaceStore(); const before = await store.dispatch({ action: 'get' });
+    await store.dispatch({ action: 'reorder', spaceId: 'c', anchorSpaceId: 'a', position: 'before' });
+    const added = structuredClone(before); added.push(space('d')); added[0].temporaryTabs.push(3);
+    tabs.push({ id: 3, windowId: 2, url: 'https://three.test/' });
+    await store.dispatch({ action: 'patch', before, after: added });
+    assert.deepEqual(order(local.spaces), ['c', 'a', 'b', 'd']);
+    await store.dispatch({ action: 'reorder', spaceId: 'a', anchorSpaceId: 'b', position: 'after' });
+    assert.deepEqual(order(local.spaces), ['c', 'b', 'a', 'd']);
+    assert.deepEqual(local.spaces.find(space => space.id === 'a').temporaryTabs, [1, 3]);
+    const removed = before.filter(space => space.id !== 'b');
+    await store.dispatch({ action: 'patch', before, after: removed });
+    assert.deepEqual(order(local.spaces), ['c', 'a', 'd']);
+});
+
+test('stale unrelated edits and deletion cannot restore a previous space order or resurrect deleted spaces', () => {
+    const before = ['a', 'b', 'c'].map(id => space(id));
+    const current = [before[2], before[0], before[1], space('new')];
+    const renamed = structuredClone(before); renamed[0].name = 'Rename';
+    assert.deepEqual(order(applySpacePatch(current, before, renamed)), ['c', 'a', 'b', 'new']);
+    assert.deepEqual(order(applySpacePatch(current, before, renamed.filter(space => space.id !== 'b'))), ['c', 'a', 'new']);
+    const newAfter = [...before, space('added')];
+    assert.deepEqual(order(applySpacePatch(current.filter(space => space.id !== 'b'), before, newAfter)), ['c', 'a', 'new', 'added']);
+    // Generic full-array patches cannot undo order either; only reorder owns it.
+    assert.deepEqual(order(applySpacePatch([before[0], space('new'), before[1], before[2]], before, [before[2], before[0], before[1]])), ['a', 'new', 'b', 'c']);
+});
+
+test('invalid or stale relative moves reject without writes; source self-drop leaves state intact', async () => {
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    const baseline = structuredClone(local);
+    for (const payload of [
+        { spaceId: 'a', anchorSpaceId: 'missing', position: 'before' },
+        { spaceId: 'missing', anchorSpaceId: 'a', position: 'after' },
+        { spaceId: 'a', anchorSpaceId: 'b', position: 'invalid' }
+    ]) {
+        await assert.rejects(store.dispatch({ action: 'reorder', ...payload }));
+        assert.deepEqual(local, baseline);
+    }
+    await store.dispatch({ action: 'reorder', spaceId: 'a', anchorSpaceId: 'a', position: 'before' });
+    assert.deepEqual(local.spaces, baseline.spaces);
+});

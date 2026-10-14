@@ -326,3 +326,35 @@ Physical OS Ctrl+T dispatch, unobservable omnibox drafts, IME/clipboard behavior
 Helium/native-panel drag geometry, high zoom, long scrolling, and forced-colors
 remain manual checks. Reuse never closes a user tab or searches other workspaces
 for a helper. See [drop-indicator behavior](sidebar-drop-indicators.md).
+
+## Saved bookmarks into native Favorites
+
+The new required paired case keeps all prior 26 checks. It uses real mouse drags
+in an ordinary `sidebar.html` tab, first targeting the empty Favorites strip,
+then repeating the same exact saved bookmark and adding a distinct bookmark with
+the same URL. Chrome's actual tab API and stored identity must show native pinned,
+inactive tabs in the source window, exact-instance reuse, unchanged saved nodes,
+unchanged active tab/space and unchanged logical memberships. A folder drag must
+show an explanatory rejection without opening or moving anything. Window B remains
+protected by the existing whole-step invariant. Required screenshots record hover
+feedback and the populated strip beside the retained bookmark rows.
+
+This is native pinned-tab API evidence, not native-side-panel drag geometry.
+The new case is pending a successful exact-head CI run; earlier green results do
+not validate this repair. No user profile, imported bookmark collection, or bulk
+Favorites/Today migration is part of the fixture. `Today Tabs` remains an ordinary
+saved folder until the user separately chooses which links to open as temporary
+browser tabs; the repair does not infer semantics from imported folder names.
+
+## Explicit Space ordering
+
+A further required paired case drags the last Space chip before the first, checks
+the same authoritative ID order in both windows without changing either active
+Space or membership, reloads the sidebar document to verify persistence, and
+restores the original order through genuine Alt+Shift+ArrowRight keyboard input.
+Its ordinary-sidebar-tab screenshots document reorder feedback and the persisted
+chip order. This is pending exact-head CI together with the Favorites case, for
+28 required checks total; no earlier result is credited to either new case.
+Imported folder order seeds a clean store, while established Space order is
+retained and newly discovered folders append. The reorder action does not move
+bookmark folders or automatically change an existing user's order.

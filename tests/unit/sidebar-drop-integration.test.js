@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 import { enqueueBookmarkOperation } from '../../bookmark-writer.js';
 import { applySpacePatch } from '../../space-store.js';
+import { moveSpace } from '../../space-order.js';
 
 // Import and initialize the real sidebar and all its modules against a DOM.
 // Only browser facilities and persisted fixtures are substituted; no source
@@ -73,6 +74,7 @@ globalThis.chrome = {
             assert.equal(message.type, 'spaceStore');
             if (message.action === 'get') { const result = structuredClone(storedSpaces); return { success: true, spaces: result }; }
             if (message.action === 'patch') storedSpaces = applySpacePatch(storedSpaces, message.before, message.after);
+            if (message.action === 'reorder') storedSpaces = moveSpace(storedSpaces, message);
             if (message.action === 'activate') session.activeSpaces[message.windowId] = message.spaceId;
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
@@ -283,4 +285,73 @@ test('a folder cannot advertise the native Chrome favorites strip as a drop dest
     assert.equal(document.querySelector('.drop-indicator-vertical'), null);
     drag(source.firstElementChild, 'dragend');
     assert.deepEqual(writes, []);
+});
+
+
+async function resetSpaces() {
+    await reset();
+    for (const id of ['beta', 'gamma']) {
+        storedSpaces.push({ id, name: id, color: 'blue', bookmarkFolderId: id, spaceBookmarks: [], temporaryTabs: [] });
+        tree.children.push({ id, title: id, children: [] });
+    }
+    await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local');
+    await wait(180);
+}
+const spaceChips = () => [...document.querySelectorAll('#spaceSwitcher button[data-space-id]')];
+const chipIds = () => spaceChips().map(button => button.dataset.spaceId);
+function spaceRects() {
+    spaceChips().forEach((button, index) => { button._rect = { left: index * 90, width: 80, right: index * 90 + 80, top: 720, bottom: 752, height: 32 }; });
+}
+
+test('actual sidebar Space drag saves relative order, preserves membership/selection and does not touch bookmarks', async () => {
+    await resetSpaces(); spaceRects();
+    const baseline = structuredClone(storedSpaces), active = structuredClone(session.activeSpaces);
+    const source = spaceChips()[2], target = spaceChips()[0];
+    drag(source, 'dragstart', 730); drag(target, 'dragover', 730, { clientX: 1 });
+    assert(target.classList.contains('space-drop-before'));
+    drag(target, 'drop', 730, { clientX: 1 });
+    drag(source, 'click', 730, { detail: 1 }); drag(source, 'dragend', 730);
+    await wait(180);
+    assert.deepEqual(chipIds(), ['gamma', 'alpha', 'beta']);
+    assert.deepEqual(storedSpaces.map(space => space.id), chipIds());
+    assert.deepEqual(session.activeSpaces, active);
+    for (const space of storedSpaces) assert.deepEqual(space, baseline.find(old => old.id === space.id));
+    assert.deepEqual(writes, []); assert.deepEqual(alerts, []);
+});
+
+test('actual sidebar defers bookmark/storage refresh during Space drag and cancels cleanly', async () => {
+    await resetSpaces(); spaceRects();
+    const source = spaceChips()[2]; drag(source, 'dragstart', 730);
+    storedSpaces[0].name = 'Renamed Alpha'; tree.children[0].title = 'Renamed Alpha';
+    await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local');
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
+    await wait(180); assert(source.isConnected); assert.equal(spaceChips()[0].textContent, 'Alpha');
+    drag(document, 'keydown', 730, { key: 'Escape' }); await wait(180);
+    assert.deepEqual(chipIds(), ['alpha', 'beta', 'gamma']);
+    assert.equal(spaceChips()[0].textContent, 'Renamed Alpha');
+    assert.equal(document.querySelector('.dragging-switcher'), null); assert.deepEqual(writes, []);
+});
+
+test('actual sidebar keyboard ordering persists and repeated renders install one handler', async () => {
+    await resetSpaces();
+    for (let i = 0; i < 3; i++) {
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(150);
+    }
+    drag(spaceChips()[2], 'keydown', 730, { key: 'ArrowLeft', altKey: true, shiftKey: true });
+    await wait(180); assert.deepEqual(chipIds(), ['alpha', 'gamma', 'beta']);
+    drag(spaceChips()[1], 'keydown', 730, { key: 'ArrowLeft', altKey: true, shiftKey: true });
+    await wait(180); assert.deepEqual(chipIds(), ['gamma', 'alpha', 'beta']);
+    assert.deepEqual(storedSpaces.map(space => space.id), chipIds());
+    assert.deepEqual(writes, []); assert.equal(session.activeSpaces[10], 'alpha');
+});
+
+
+test('actual sidebar rapid keyboard moves use the acknowledged order before scheduled refresh', async () => {
+    await resetSpaces();
+    drag(spaceChips()[0], 'keydown', 730, { key: 'ArrowRight', altKey: true, shiftKey: true });
+    await wait(10); assert.deepEqual(chipIds(), ['beta', 'alpha', 'gamma']);
+    drag(spaceChips()[1], 'keydown', 730, { key: 'ArrowRight', altKey: true, shiftKey: true });
+    await wait(10); assert.deepEqual(chipIds(), ['beta', 'gamma', 'alpha']);
+    assert.deepEqual(storedSpaces.map(space => space.id), chipIds());
+    await wait(180); assert.deepEqual(chipIds(), ['beta', 'gamma', 'alpha']);
 });

@@ -1732,6 +1732,13 @@ h3 {
     border-color: #eee;
 }
 
+.favorites-drop-status:not(:empty) {
+    margin: 0 12px 8px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+}
+
 .pinned-placeholder-container {
     padding: 8px 16px;
     text-align: center;
@@ -2086,4 +2093,37 @@ select:focus-visible,
 @media (forced-colors: active) {
     .sidebar-drop-anchor { background: Highlight; box-shadow: none; forced-color-adjust: none; }
     .folder-header.sidebar-drop-inside { outline: 2px solid Highlight; outline-offset: -2px; }
+}
+
+/* Stable insertion markers: no margins that shift the target during a drag. */
+#spaceSwitcher button.space-drop-before { box-shadow: inset 3px 0 0 currentColor; }
+#spaceSwitcher button.space-drop-after { box-shadow: inset -3px 0 0 currentColor; }
+#spaceSwitcher button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+.space-order-status:not(:empty) {
+    position: absolute;
+    bottom: 44px;
+    left: 8px;
+    right: 8px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    background: var(--space-bg-color, #f0f0f0);
+    color: inherit;
+    font-size: 12px;
+    pointer-events: none;
+}
+
+@media (forced-colors: active) {
+    #spaceSwitcher button.space-drop-before,
+    #spaceSwitcher button.space-drop-after { position: relative; }
+    #spaceSwitcher button.space-drop-before::after,
+    #spaceSwitcher button.space-drop-after::after {
+        content: '';
+        position: absolute;
+        top: 5px;
+        bottom: 5px;
+        border-left: 3px solid Highlight;
+    }
+    #spaceSwitcher button.space-drop-before::after { left: 2px; }
+    #spaceSwitcher button.space-drop-after::after { right: 2px; }
 }

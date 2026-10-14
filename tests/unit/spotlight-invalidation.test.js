@@ -149,12 +149,17 @@ test('empty-space metadata, creation, deletion and logical space ordering affect
         after => { after[2].color = 'red'; },
         after => { after[2].bookmarkFolderId = 'changed-folder'; },
         after => { after.push(space('added')); },
-        after => { after.reverse(); },
         after => { after.splice(after.findIndex(s => s.id === 'added'), 1); }
     ]) {
         await f.patch(change); await f.tick(); await f.tick();
         assert.deepEqual(targets(f), [1, 2]); f.sent.length = 0;
     }
+    // A generic stale panel patch cannot reorder the authoritative array.
+    await f.patch(after => { after.reverse(); });
+    await f.tick(); await f.tick(); assert.deepEqual(targets(f), []);
+    const ids = f.store.spaces.map(space => space.id);
+    await f.store.dispatch({ action: 'reorder', spaceId: ids.at(-1), anchorSpaceId: ids[0], position: 'before' });
+    await f.tick(); await f.tick(); assert.deepEqual(targets(f), [1, 2]);
     assert.deepEqual(f.mutations, []);
 });
 
