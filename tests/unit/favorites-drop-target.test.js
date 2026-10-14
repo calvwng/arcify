@@ -102,3 +102,20 @@ test('unsupported, detached, foreign, stale and malformed source/destination inp
     assert.equal(f.resolve({ ...f.source('a'), favoriteId: 'missing' }, point), null);
     f.nodes.get('a').remove(); assert.equal(f.resolve(f.source('a'), point), null);
 });
+
+test('native synthetic append uses the last target’s real right half and row center, not an offscreen X-only sentinel', () => {
+    for (const columns of [1, 2, 4]) {
+        const f = fixture({ saved: ['a', 'b'], native: ['11', '12', '13'], columns });
+        const source = f.source('11', 'native'), target = f.nodes.get('13');
+        assert.equal(f.resolve(source, { target: f.container, clientX: 100000, clientY: 0 }), null,
+            'the legacy sentinel is above the grid and resolves to the first native pin’s existing slot');
+        const rect = target.getBoundingClientRect();
+        const destination = f.resolve(source, { target,
+            clientX: rect.right - Math.min(4, rect.width / 4), clientY: rect.top + rect.height / 2 });
+        assert.equal(destination.list, 'native'); assert.equal(destination.reference, target);
+        assert.equal(destination.placement, 'after'); assert.equal(destination.anchorId, '13');
+        assert.equal(destination.beforeTabId, null); assert.equal(destination.index, 2);
+        const reordered = ['12', '13']; reordered.splice(destination.index, 0, '11');
+        assert.deepEqual(reordered, ['12', '13', '11']);
+    }
+});

@@ -44,3 +44,19 @@ check both the screenshot and saved bookmark parent/index after each drop:
    anchor remains visible and never changes the element receiving pointer events.
 
 Native Arc/Helium panel docking and OS drag cancellation remain manual checks.
+
+
+### Saved Favorites cancellation evidence
+
+The paired Chrome Favorites scenario starts a genuine mouse drag, then uses
+Chrome's documented [`Input.cancelDragging`](https://chromedevtools.github.io/devtools-protocol/tot/Input/#method-cancelDragging) on the same CDP session that owns
+Puppeteer's mouse. It passively observes trusted `dragstart` and `dragend`, requires
+`dropEffect: none` and no `drop`, and checks cleared source/marker plus unchanged
+registry, icon cache, bookmarks, windows and tabs before and after mouse release.
+Progress and failure observations are persisted before cleanup.
+
+This proves browser-native drag cancellation, not physical Escape-key dispatch.
+The production DOM Escape listener has separate unit/integration coverage.
+Physical Escape during native dragging, OS input routing and native panel layout
+remain manual checks. Puppeteer's ordinary CDP `keyboard.press('Escape')` alone
+does not establish that a native drag or its DOM listener received cancellation.

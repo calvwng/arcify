@@ -1,7 +1,7 @@
 // Evidence validation only. These tests never start Chrome or a profile.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertFavoritesDropMarker, assertFavoritesMarkerHidden, assertSavedFavoriteReorder } from '../../scripts/paired-chrome-favorites-marker.mjs';
+import { assertFavoritesDropMarker, assertFavoritesMarkerHidden, assertSavedFavoriteReorder, assertFavoriteDragCancelled, favoriteDragInputClient } from '../../scripts/paired-chrome-favorites-marker.mjs';
 import { assertMarkerScreenshotPixels } from '../../scripts/paired-chrome-space-marker.mjs';
 import { FAVORITE_FAVICON_PNG } from '../../scripts/paired-chrome-favorite-icons.mjs';
 
@@ -106,4 +106,35 @@ for (const [name, mutate] of Object.entries({
     guessedURLBinding: h => { h.after.states[0].favorites[1].tabId = 101; }
 })) test(`saved reorder evidence rejects ${name}`, () => {
     const h = reordered(); mutate(h); assert.throws(() => assertSavedFavoriteReorder(h.before, h.after, h.order));
+});
+
+
+test('native cancellation uses the same locked primary CDP client as real mouse input', () => {
+    const client = { send: async () => {} };
+    assert.equal(favoriteDragInputClient({ _client: () => client, target: () => assert.fail('Must not create another session') }), client);
+    for (const page of [{}, { _client: 'invalid' }, { _client: () => null }, { _client: () => ({}) }]) {
+        assert.throws(() => favoriteDragInputClient(page));
+    }
+});
+const cancelled = () => ({ method: 'Input.cancelDragging', acknowledged: true, mouseReleased: false,
+    operation: 7, writes: [], marker: { ...hidden(), draggingCount: 0 }, events: [
+        { type: 'dragstart', isTrusted: true, favoriteId: 'saved-c', dropEffect: 'move' },
+        { type: 'dragend', isTrusted: true, favoriteId: 'saved-c', dropEffect: 'none' }
+    ] });
+const cancelledExpected = { sourceId: 'saved-c', operation: 7 };
+test('native cancellation proof requires genuine trusted dragend before release without a drop or mutation', () => {
+    assertFavoriteDragCancelled(cancelled(), cancelledExpected);
+});
+for (const [name, mutate] of Object.entries({
+    keyboardDispatchOnly: e => { e.method = 'Input.dispatchKeyEvent'; }, noAcknowledgment: e => { e.acknowledged = false; },
+    observedAfterRelease: e => { e.mouseReleased = true; }, missingStart: e => { e.events.shift(); },
+    missingEnd: e => { e.events.pop(); }, duplicateEnd: e => { e.events.push(e.events[1]); },
+    wrongSequence: e => { e.events.reverse(); }, syntheticStart: e => { e.events[0].isTrusted = false; },
+    syntheticEnd: e => { e.events[1].isTrusted = false; }, wrongSource: e => { e.events[1].favoriteId = 'saved-other'; },
+    successfulDropEffect: e => { e.events[1].dropEffect = 'move'; }, deliveredDrop: e => { e.events.splice(1, 0, { type: 'drop', isTrusted: true }); },
+    staleMarker: e => { e.marker.hidden = false; }, staleSource: e => { e.marker.sourceId = 'saved-c'; },
+    draggingRemains: e => { e.marker.draggingCount = 1; }, dispatchedMutation: e => { e.operation++; },
+    durableWrite: e => { e.writes.push({ newValue: [] }); }
+})) test(`native cancellation rejects ${name}`, () => {
+    const evidence = cancelled(); mutate(evidence); assert.throws(() => assertFavoriteDragCancelled(evidence, cancelledExpected));
 });

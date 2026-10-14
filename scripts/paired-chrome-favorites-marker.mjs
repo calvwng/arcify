@@ -61,6 +61,52 @@ export function assertFavoritesMarkerHidden(state) {
     for (const field of ['list', 'placement', 'beforeId', 'anchorId']) assert.equal(state[field], undefined, `Cleanup must discard stale ${field}.`);
 }
 
+// Passive DOM observers only. Never synthesize, intercept or cancel an event.
+export function installFavoriteDragTrace() {
+    globalThis.__favoriteVisualDragEvents = [];
+    if (globalThis.__favoriteVisualDragTraceInstalled) return;
+    globalThis.__favoriteVisualDragTraceInstalled = true;
+    for (const type of ['dragstart', 'dragend', 'drop', 'keydown', 'keyup']) {
+        document.addEventListener(type, event => {
+            globalThis.__favoriteVisualDragEvents.push({ type: event.type, isTrusted: event.isTrusted,
+                favoriteId: event.target.closest?.('.saved-favorite')?.dataset.favoriteId ?? null,
+                key: event.key ?? null, dropEffect: event.dataTransfer?.dropEffect ?? null });
+        }, { capture: true, passive: true });
+    }
+}
+
+export function favoriteDragInputClient(page) {
+    // The runner separately requires Puppeteer 25.12.0. In that locked CDP
+    // implementation page.mouse and page._client() share #primaryTargetClient.
+    // Chrome's drag controller belongs to that session; a new CDPSession can
+    // acknowledge cancelDragging without owning (or cancelling) this drag.
+    assert.equal(typeof page._client, 'function', 'The verified primary input client is required; do not substitute another session.');
+    const client = page._client();
+    assert(client && typeof client.send === 'function', 'The real mouse input CDP client must be available.');
+    return client;
+}
+
+export function assertFavoriteDragCancelled(evidence, { sourceId, operation }) {
+    assert.equal(evidence.method, 'Input.cancelDragging'); assert.equal(evidence.acknowledged, true);
+    assert.equal(evidence.mouseReleased, false, 'Observe native cancellation before releasing the held mouse button.');
+    assert(Array.isArray(evidence.events));
+    const starts = evidence.events.filter(event => event.type === 'dragstart');
+    const ends = evidence.events.filter(event => event.type === 'dragend');
+    assert.equal(starts.length, 1, 'One genuine drag must have started.');
+    assert.equal(ends.length, 1, 'Chrome must deliver one actual dragend for cancellation.');
+    for (const event of [starts[0], ends[0]]) {
+        assert.equal(event.isTrusted, true); assert.equal(event.favoriteId, sourceId);
+    }
+    assert(evidence.events.indexOf(starts[0]) < evidence.events.indexOf(ends[0]));
+    assert.equal(ends[0].dropEffect, 'none', 'Cancelled native dragging must finish without a drop operation.');
+    assert(!evidence.events.some(event => event.type === 'drop'), 'A cancelled drag must never deliver drop.');
+    assertFavoritesMarkerHidden(evidence.marker);
+    assert.equal(evidence.marker.draggingCount, 0); assert.equal(evidence.marker.sourceId, undefined);
+    assert.equal(evidence.operation, operation, 'Cancelling must not dispatch a Favorite mutation.');
+    assert.deepEqual(evidence.writes, [], 'Cancelling must not write the durable registry.');
+    return evidence;
+}
+
 export function assertSavedFavoriteReorder(before, after, order) {
     assertLegacyFavoriteRegistry(before.durable); assertLegacyFavoriteRegistry(after.durable);
     retainedFavoriteCache(before.iconCache, before.durable); retainedFavoriteCache(after.iconCache, after.durable);
@@ -80,7 +126,7 @@ export function assertSavedFavoriteReorder(before, after, order) {
     }
 }
 
-export async function exerciseSavedFavoriteMarker({ apiPage, newTabPage, ui, screenshot, screenshotBytes, snapshot, poll, fixture, arcifyId }) {
+export async function exerciseSavedFavoriteMarker({ apiPage, newTabPage, ui, screenshot, screenshotBytes, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
     const initial = await snapshot();
     const space = initial.spaces.find(item => item.id === initial.activeSpaceId);
     assert(space?.bookmarkFolderId);
@@ -134,9 +180,17 @@ export async function exerciseSavedFavoriteMarker({ apiPage, newTabPage, ui, scr
     const drag = async ({ source, target, side = 'before', expected, label, cancel = false, leave = false, invalid = false }) => ui(page, label, async () => {
         await page.waitForSelector(source); await page.waitForSelector(target);
         const sourceNode = await page.$(source), targetNode = await page.$(target);
-        let down = false;
+        let down = false, cancellation;
+        const client = favoriteDragInputClient(page);
+        const beforeDrag = cancel || leave ? await read() : null;
         const operation = await page.$eval('#pinnedFavicons', node => Number(node.dataset.dropOperation || 0));
         await page.evaluate(() => { globalThis.__favoriteVisualStorageEvents = []; });
+        await page.evaluate(installFavoriteDragTrace);
+        const inspect = async () => ({ marker: await page.evaluate(readFavoritesDropMarker),
+            ...await page.evaluate(() => ({ events: globalThis.__favoriteVisualDragEvents,
+                operation: Number(document.getElementById('pinnedFavicons').dataset.dropOperation || 0),
+                writes: globalThis.__favoriteVisualStorageEvents })) });
+        const checkpoint = async (phase, extra = {}) => record({ phase, label, ...await inspect(), ...extra });
         try {
             await sourceNode.scrollIntoView();
             const from = await sourceNode.boundingBox(), to = await targetNode.boundingBox();
@@ -148,12 +202,28 @@ export async function exerciseSavedFavoriteMarker({ apiPage, newTabPage, ui, scr
             await page.waitForFunction(() => document.querySelectorAll('.dragging').length === 1, { polling: 50 });
             if (invalid) await page.waitForFunction(() => /folder|one bookmark/i.test(document.getElementById('favoritesDropStatus')?.textContent || ''), { polling: 50 });
             const hover = expected ? await capture(expected, label) : await hidden();
+            await checkpoint('hover-before-release', { hover });
             if (leave) {
                 const outside = await page.$eval('#pinnedFavicons', node => ({ x: 1, y: node.getBoundingClientRect().bottom + 40 }));
                 await page.mouse.move(outside.x, outside.y, { steps: 12 });
                 await hidden();
             }
-            if (cancel || leave) await page.keyboard.press('Escape');
+            if (cancel || leave) {
+                // Puppeteer's CDP keyboard Escape is not native drag cancellation.
+                // Use Chrome's documented cancellation command and prove its real
+                // DOM result before releasing the mouse. Physical Escape is manual.
+                await checkpoint('before-native-cancel', { before: beforeDrag });
+                await client.send('Input.cancelDragging');
+                await poll(() => page.evaluate(() => globalThis.__favoriteVisualDragEvents),
+                    events => events.some(event => event.type === 'dragend'), 'trusted browser-native cancellation dragend');
+                await page.waitForFunction(() => !document.querySelector('.dragging'), { polling: 50 });
+                cancellation = { method: 'Input.cancelDragging', acknowledged: true, mouseReleased: false, ...await inspect() };
+                await record({ phase: 'native-cancel-before-release', label, cancellation });
+                assertFavoriteDragCancelled(cancellation, { sourceId: expected.sourceId, operation });
+                const cancelledState = await read();
+                assertSavedFavoriteReorder(beforeDrag, cancelledState, beforeDrag.durable.map(item => item.id));
+                await record({ phase: 'cancelled-state-before-release', label, state: cancelledState });
+            }
             await page.mouse.up(); down = false;
             await page.waitForFunction(() => !document.querySelector('.dragging'), { polling: 50 });
             if (expected && !cancel && !leave) await page.waitForFunction(previous => {
@@ -167,10 +237,27 @@ export async function exerciseSavedFavoriteMarker({ apiPage, newTabPage, ui, scr
                 : await page.evaluate(() => globalThis.__favoriteVisualStorageEvents);
             if (!expected || cancel || leave) assert.deepEqual(writes, [], 'A no-op, invalid or cancelled drag must not write the durable Favorites store.');
             else assert.equal(writes.length, 1, 'One real reorder must result in exactly one durable write.');
-            const observation = { label, sourceRect: from, targetRect: to, hover, cleanup, writes, cancelled: cancel, leftStrip: leave };
-            observations.push(observation); return observation;
+            const events = await page.evaluate(() => globalThis.__favoriteVisualDragEvents);
+            if (cancel || leave) {
+                assert(!events.some(event => event.type === 'drop'), 'Releasing the mouse after cancellation must not deliver a late drop.');
+                assertSavedFavoriteReorder(beforeDrag, await read(), beforeDrag.durable.map(item => item.id));
+            }
+            const observation = { label, sourceRect: from, targetRect: to, hover, cleanup, writes, events, cancellation,
+                cancelled: cancel, leftStrip: leave, physicalEscapeAsserted: false };
+            observations.push(observation); await record({ phase: 'completed-drag', ...observation }); return observation;
+        } catch (error) {
+            // Persist the original state/events before cleanup can erase the cause.
+            const failure = { phase: 'failed-before-cleanup', label, error: error.message, cancellation };
+            try { Object.assign(failure, await inspect()); } catch (diagnosticError) { failure.observationError = diagnosticError.message; }
+            try { failure.state = await read(); } catch (diagnosticError) { failure.stateError = diagnosticError.message; }
+            try { await record(failure); } catch (diagnosticError) { error.favoriteMarkerDiagnosticError = diagnosticError.message; }
+            throw error;
         } finally {
-            if (down) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
+            if (down) {
+                await client.send('Input.cancelDragging').catch(() => {});
+                const ended = await page.evaluate(() => !document.querySelector('.dragging')).catch(() => false);
+                if (ended) await page.mouse.up().catch(() => {});
+            }
             await sourceNode.dispose(); await targetNode.dispose();
         }
     });
@@ -197,11 +284,13 @@ export async function exerciseSavedFavoriteMarker({ apiPage, newTabPage, ui, scr
         });
         await ui(page, 'Observe original saved Favorites before real dragging', async () => {});
         const before = await read(), original = before.durable.map(item => item.id);
+        await record({ phase: 'initial-state', before });
         const [a, b, c] = saved.map(item => item.id), prefix = original.slice(0, -3);
         assert.deepEqual(original.slice(-3), [a, b, c]);
         const assertOrder = async order => {
             await poll(renderedOrder, actual => JSON.stringify(actual) === JSON.stringify(order), 'exact rendered saved Favorite order');
-            const after = await read(); assertSavedFavoriteReorder(before, after, order); return after;
+            const after = await read(); assertSavedFavoriteReorder(before, after, order);
+            await record({ phase: 'verified-order', order, after }); return after;
         };
         await drag({ source: icon(c), target: icon(a), expected: { sourceId: c, anchorId: a, beforeId: a, placement: 'before' }, label: 'saved-favorites-before-slot-real-mouse-pixels' });
         const reordered = await assertOrder([...prefix, c, a, b]);
@@ -216,7 +305,7 @@ export async function exerciseSavedFavoriteMarker({ apiPage, newTabPage, ui, scr
         await drag({ source: icon(c), target: icon(c), label: 'saved-favorites-self-drop-has-no-marker' }); await assertOrder(original);
         await drag({ source: icon(c), target: icon(b), side: 'after', label: 'saved-favorites-adjacent-noop-has-no-marker' }); await assertOrder(original);
         await drag({ source: `.space[data-space-id="${space.id}"] .folder[data-bookmark-id="${seeds.folder.id}"] > .folder-header`, target: icon(a), invalid: true, label: 'saved-favorites-invalid-folder-has-no-marker' }); await assertOrder(original);
-        await drag({ source: icon(c), target: icon(a), expected: { sourceId: c, anchorId: a, beforeId: a, placement: 'before' }, cancel: true, label: 'saved-favorites-escape-clears-destination' }); await assertOrder(original);
+        await drag({ source: icon(c), target: icon(a), expected: { sourceId: c, anchorId: a, beforeId: a, placement: 'before' }, cancel: true, label: 'saved-favorites-browser-native-cancellation-clears-destination' }); await assertOrder(original);
         await drag({ source: icon(c), target: icon(a), expected: { sourceId: c, anchorId: a, beforeId: a, placement: 'before' }, leave: true, label: 'saved-favorites-leaving-strip-clears-destination' }); await assertOrder(original);
         await drag({ source: icon(b), target: `#pinnedFavicons .native-favorite[data-tab-id="${native.id}"]`, expected: { sourceId: b, anchorId: c, beforeId: null, placement: 'after' }, label: 'saved-favorites-native-boundary-uses-last-saved-anchor' });
         const boundary = await assertOrder([...prefix, a, c, b]);

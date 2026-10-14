@@ -88,7 +88,7 @@ const report = {
         'Independent overlay cases wait for the previous close animation to remove its host. Rapid close/reopen stress is not exercised.',
         'The runner uses its installed stable Chrome and existing AppArmor policy, with actual Namespace/PID/network/seccomp sandbox evidence required. No privileged helper is selected, installed or modified. The runner image supplies the browser version; package/runtime evidence is recorded for each run.',
         'A disposable CI profile is used. The final Favorites case performs one graceful full-process restart with the same profile; arbitrary crash/session restoration, store-installed builds, existing user profiles and manual extension-install UI remain untested.',
-        'Favorites rendering uses a regular sidebar.html tab with real mouse input, marker screenshot pixels and decoded retained favicon pixels. Native panel layout and physical close shortcuts remain manual. Favicon pages and their PNG response are served by the real localhost fixture; Chrome may resize or re-encode the local cache.',
+        'Favorites rendering uses a regular sidebar.html tab with real mouse input, marker screenshot pixels and decoded retained favicon pixels. Native panel layout, physical close shortcuts and physical Escape during native dragging remain manual. Favorites cancellation uses documented Input.cancelDragging with trusted dragend/no-drop evidence; DOM Escape handling is covered separately by unit tests. Favicon pages and their PNG response are served by the real localhost fixture; Chrome may resize or re-encode the local cache.',
         'Optional external HTTPS autocomplete is blocked with DevTools Network request blocking; no fake suggestion responses are supplied.',
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
@@ -1790,7 +1790,8 @@ try {
         record:async observation => { report.favoriteSearchObservations ||= []; report.favoriteSearchObservations.push(observation); await saveReport(); }}));
 
     await step(stepNames[30], () => exerciseSavedFavoriteMarker({apiPage:arcifyOptions,newTabPage,ui,screenshot,
-        screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId}));
+        screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
+        record:async observation => { report.favoriteMarkerObservations ||= []; report.favoriteMarkerObservations.push(observation); await saveReport(); }}));
 
     await step(stepNames[31], async () => {
         const restarted = await exerciseFavoritesBrowserRestart({browser,launchOptions,

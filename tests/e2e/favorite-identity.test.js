@@ -256,24 +256,41 @@ test('service-worker ordering matches real Chrome move semantics and rejects par
     expect(ordered.partial.success).toBe(false);
 });
 
-test('reordering native pinned favicons updates Chrome and survives reload', async () => {
+test('reordering native pinned favicons updates Chrome and survives reload (synthetic drag lifecycle)', async () => {
     const another = await page.evaluate(async url => (await chrome.tabs.create({ url, pinned: true, active: false })).id, url);
-    await page.waitForSelector(`#pinnedFavicons [data-tab-id="${another}"]`);
-    await page.$eval(`#pinnedFavicons [data-tab-id="${fixture.a}"]`, el => {
-        // Exercise the production drag lifecycle: a CSS class alone is not
-        // proof that the item originated from this sidebar.
+    await page.waitForSelector(`#pinnedFavicons .native-favorite[data-tab-id="${another}"]`);
+    const original = await page.evaluate(async () => (await chrome.tabs.query({ pinned: true, currentWindow: true }))
+        .sort((a, b) => a.index - b.index).map(tab => tab.id));
+    const expected = [...original.filter(id => id !== fixture.a), fixture.a];
+    const preview = await page.$eval(`#pinnedFavicons .native-favorite[data-tab-id="${fixture.a}"]`, (el, targetId) => {
+        // Synthetic lifecycle coverage, not native mouse/drag evidence. Use the
+        // target's real right half and row center: the old X=100000/Y=0 sentinel
+        // lies above a wrapping grid and therefore means its start, not append.
+        const target = el.parentElement.querySelector(`.native-favorite[data-tab-id="${targetId}"]`);
+        target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        const rect = target.getBoundingClientRect();
+        if (!(rect.width > 0 && rect.height > 0)) throw new Error('Native reorder target has no layout.');
         const dataTransfer = new DataTransfer();
+        const endpoint = { bubbles: true, cancelable: true, dataTransfer,
+            clientX: rect.right - Math.min(4, rect.width / 4), clientY: rect.top + rect.height / 2 };
         el.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer }));
-        el.parentElement.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: 100000, dataTransfer }));
+        target.dispatchEvent(new DragEvent('dragover', endpoint));
+        const marker = document.querySelector('.favorites-drop-anchor');
+        const preview = { hidden: marker.hidden, list: marker.dataset.list,
+            placement: marker.dataset.placement, anchorId: marker.dataset.anchorId };
+        target.dispatchEvent(new DragEvent('drop', endpoint));
         el.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer }));
-    });
-    await page.waitForFunction(async id => {
-        const tabs = await chrome.tabs.query({ pinned: true, currentWindow: true });
-        return tabs.sort((a, b) => a.index - b.index).at(-1)?.id === id;
-    }, { polling: 100 }, fixture.a);
+        return preview;
+    }, another);
+    expect(preview).toEqual({ hidden: false, list: 'native', placement: 'after', anchorId: String(another) });
+    await page.waitForFunction(async expected => {
+        const actual = (await chrome.tabs.query({ pinned: true, currentWindow: true }))
+            .sort((a, b) => a.index - b.index).map(tab => tab.id);
+        return actual.length === expected.length && actual.every((id, index) => id === expected[index]);
+    }, { polling: 100 }, expected);
     await page.reload();
-    await page.waitForSelector(`#pinnedFavicons [data-tab-id="${another}"]`);
-    expect(await page.$$eval('#pinnedFavicons .pinned-favicon', els => Number(els.at(-1).dataset.tabId))).toBe(fixture.a);
+    await page.waitForSelector(`#pinnedFavicons .native-favorite[data-tab-id="${another}"]`);
+    expect(await page.$$eval('#pinnedFavicons .native-favorite', els => els.map(el => Number(el.dataset.tabId)))).toEqual(expected);
 });
 
 test('new folders have a bookmark identity before naming and remain usable after Escape', async () => {
