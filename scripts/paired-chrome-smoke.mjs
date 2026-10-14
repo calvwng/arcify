@@ -18,6 +18,7 @@ import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clic
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { exercisePersistentFavorites } from './paired-chrome-persistent-favorites.mjs';
+import { snapshotChromeLaunchOptions } from './paired-chrome-browser-restart.mjs';
 import { exerciseFavoritesBrowserRestart } from './paired-chrome-favorites-restart.mjs';
 import { exerciseFavoriteSearch } from './paired-chrome-favorite-search.mjs';
 import { assertSavedBookmarkFavorite } from './paired-chrome-favorites.mjs';
@@ -420,10 +421,10 @@ try {
         // Require its namespace sandbox; do not select/repair a setuid helper or
         // change permission, AppArmor, sysctl or other policy settings.
         // No sandbox-disabling or web-security-disabling fallback flags.
-        const launch = launchOptions = { channel: 'chrome', headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, protocolTimeout: 30_000, defaultViewport: { width: 1280, height: 900 } };
+        const launch = launchOptions = snapshotChromeLaunchOptions({ channel: 'chrome', headless: false, pipe: true, enableExtensions: true, dumpio: true, userDataDir: profile, timeout: 60_000, protocolTimeout: 30_000, defaultViewport: { width: 1280, height: 900 } });
         report.environment.requestedLaunch = { ...launch, userDataDir: '<fresh disposable runner profile>' };
-        validateChromeLaunchArguments(await puppeteer.defaultArgs(launch));
-        browser = await puppeteer.launch(launch);
+        validateChromeLaunchArguments(await puppeteer.defaultArgs(structuredClone(launch)));
+        browser = await puppeteer.launch(structuredClone(launch));
         report.environment.chromeExecutable = browser.process().spawnfile;
         report.environment.chromeArguments = browser.process().spawnargs.map(arg => arg.startsWith('--user-data-dir=') ? '--user-data-dir=<disposable-profile>' : arg);
         assert.equal(report.environment.chromeExecutable, CHROME_EXECUTABLE, 'Unexpected actual spawned Chrome executable.');
@@ -1785,7 +1786,7 @@ try {
 
     await step(stepNames[30], async () => {
         const restarted = await exerciseFavoritesBrowserRestart({browser,launchOptions,
-            launch:async options => { browser = await puppeteer.launch(options); return browser; },
+            launch:async options => { browser = await puppeteer.launch(structuredClone(options)); return browser; },
             apiPage:arcifyOptions,fixture,arcifyId,spotlightId,
             expectedExtensions:['arcify','spotlight'].map(name => ({...report.extensions[name],path:resolve(name === 'arcify' ? ROOT : COMPANION,'dist')})),
             snapshot,observePage,blockExternalHttps,ui,screenshot,poll,

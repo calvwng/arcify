@@ -16,6 +16,14 @@ function freeze(value) {
     }
     return value;
 }
+
+/** Capture before any driver call. Puppeteer may add a non-cloneable logger or
+ * consume args; pass a fresh structuredClone(snapshot) at each driver boundary.
+ * Never sanitize an already contaminated configuration by dropping fields. */
+export function snapshotChromeLaunchOptions(options) {
+    assert(options && typeof options === 'object' && !Array.isArray(options), 'Original launch options are required.');
+    return freeze(structuredClone(options));
+}
 function liveProcess(browser, isProcessAlive) {
     const child = browser.process();
     assert(child && Number.isSafeInteger(child.pid) && child.pid > 0, 'A real browser child process PID is required.');
@@ -74,6 +82,8 @@ async function closeAndObserveExit(browser, child, isProcessAlive, timeout, obse
  * and the same enabled extension registry, then return all three flags as true.
  * Retain the newly launched browser in the caller too, for ordinary final cleanup
  * if revalidation fails. Errors retain the original cause and restart evidence.
+ * The launch callback receives an immutable baseline; it must give Puppeteer a
+ * fresh structuredClone of that baseline so driver mutations stay disposable.
  * The timeout bounds close/exit only; the original launch timeout is unchanged.
  */
 export async function restartObservedBrowser({ browser, launchOptions, launch, revalidate, record }, {
@@ -92,8 +102,7 @@ export async function restartObservedBrowser({ browser, launchOptions, launch, r
             assert.equal(typeof callback, 'function', `${name} callback is required for browser restart.`);
         }
         assert(Number.isFinite(timeout) && timeout > 0, 'Browser close timeout must be positive.');
-        assert(launchOptions && typeof launchOptions === 'object', 'Original launch options are required.');
-        const options = freeze(structuredClone(launchOptions));
+        const options = snapshotChromeLaunchOptions(launchOptions);
         assert.equal(options.channel, 'chrome', 'Restart must retain the installed stable Chrome channel.');
         assert.equal(options.headless, false, 'Restart must retain headed Chrome.');
         assert.equal(options.pipe, true, 'Restart must retain the original pipe transport.');

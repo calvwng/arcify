@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { restartObservedBrowser } from '../../scripts/paired-chrome-browser-restart.mjs';
+import { restartObservedBrowser, snapshotChromeLaunchOptions } from '../../scripts/paired-chrome-browser-restart.mjs';
 import { CHROME_EXECUTABLE } from '../../scripts/paired-chrome-sandbox.mjs';
 
 function harness() {
@@ -199,6 +199,73 @@ test('launch receives a recursively frozen copy with the original options and ca
     };
     await execute(h); assert.deepEqual(h.args.launchOptions, baseline);
 });
+
+test('a pristine launch snapshot is detached, recursively immutable and still cloneable', () => {
+    const h = harness(); h.args.launchOptions.args = ['--enable-features=PdfOopif'];
+    const baseline = structuredClone(h.args.launchOptions), snapshot = snapshotChromeLaunchOptions(h.args.launchOptions);
+    assert.deepEqual(snapshot, baseline); assert.notEqual(snapshot, h.args.launchOptions);
+    assert(Object.isFrozen(snapshot)); assert(Object.isFrozen(snapshot.defaultViewport)); assert(Object.isFrozen(snapshot.args));
+    h.args.launchOptions.defaultViewport.width = 1; h.args.launchOptions.args.push('--changed-caller-option');
+    assert.deepEqual(structuredClone(snapshot), baseline);
+});
+
+test('initial and restart driver logger mutations affect only separate mutable boundary copies', async () => {
+    const h = harness(), baseline = structuredClone(h.args.launchOptions);
+    h.args.launchOptions = snapshotChromeLaunchOptions(h.args.launchOptions);
+    const driverCopies = [];
+    const fakeDriver = async (options, browser) => {
+        assert.equal(Object.isFrozen(options), false); assert.equal(Object.isFrozen(options.defaultViewport), false);
+        assert.deepEqual(options, baseline);
+        // Matches the pinned driver's options.logger ??= debug write. This is a
+        // fake driver only: no Puppeteer launch entry point or process is invoked.
+        options.logger ??= () => {};
+        options.defaultViewport.width = 42;
+        driverCopies.push(options); return browser;
+    };
+    assert.equal(await fakeDriver(structuredClone(h.args.launchOptions), h.args.browser), h.args.browser);
+    assert.throws(() => structuredClone(driverCopies[0]), { name: 'DataCloneError' });
+    h.args.launch = options => {
+        assert(Object.isFrozen(options)); assert.deepEqual(structuredClone(options), baseline);
+        return fakeDriver(structuredClone(options), h.restarted);
+    };
+    const originalRevalidation = h.args.revalidate;
+    h.args.revalidate = (browser, context) => {
+        assert(Object.isFrozen(context.launchOptions)); assert.deepEqual(structuredClone(context.launchOptions), baseline);
+        return originalRevalidation(browser, context);
+    };
+    await execute(h);
+    assert.equal(driverCopies.length, 2); assert.notEqual(driverCopies[0], driverCopies[1]);
+    assert.notEqual(driverCopies[0].defaultViewport, driverCopies[1].defaultViewport);
+    assert.deepEqual(structuredClone(h.args.launchOptions), baseline);
+});
+
+for (const location of ['logger', 'unknownCallback', 'nestedCallback']) {
+    test(`non-cloneable ${location} is rejected before close rather than silently stripped`, async () => {
+        const h = harness();
+        if (location === 'nestedCallback') h.args.launchOptions.defaultViewport.callback = () => {};
+        else h.args.launchOptions[location] = () => {};
+        assert.throws(() => snapshotChromeLaunchOptions(h.args.launchOptions), { name: 'DataCloneError' });
+        await assert.rejects(execute(h), error => {
+            assert.equal(error.name, 'DataCloneError'); assert.equal(error.browserRestartEvidence.observations.at(-1).failedPhase, 'preflight');
+            return true;
+        });
+        assert.deepEqual(h.calls, []); unlaunched(h);
+    });
+}
+
+for (const argument of ['--no-sandbox', '--changed-driver-option']) {
+    test(`mutable driver copies cannot conceal changed actual launch argument ${argument}`, async () => {
+        const h = harness(), baseline = structuredClone(h.args.launchOptions);
+        h.args.launchOptions = snapshotChromeLaunchOptions(h.args.launchOptions);
+        h.args.launch = async frozen => {
+            const options = structuredClone(frozen); options.logger = () => {}; options.args = [argument];
+            h.next.spawnargs.push(argument); return h.restarted;
+        };
+        await assert.rejects(execute(h), argument === '--no-sandbox' ? /Security-disabling/ : /Actual Chrome launch arguments must remain unchanged/);
+        assert.equal(h.calls.includes('revalidate'), false);
+        assert.deepEqual(structuredClone(h.args.launchOptions), baseline);
+    });
+}
 
 test('diagnostic recording failure cannot replace the original startup error', async () => {
     const h = harness(), denied = new Error('Chrome startup denied');
