@@ -1,7 +1,7 @@
 // Evidence-validator tests only; importing these modules never launches Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 const selection = () => ({ ids: ['a','b','d'], count: 3, text: '3 bookmarks selected', rows: ['a','b','d'].map(id => ({ id, ariaSelected: 'true', visible: true })) });
 test('selection requires exact visible order, announced count and accessible state', () => {
     assertBookmarkSelection(selection(), ['a','b','d']);
@@ -49,4 +49,40 @@ for (const [name, acknowledged, ended] of [['cancel failed',false,false],['ack w
 test('held drag cleanup never releases when observation fails', async () => {
     let released=false; const page={_client:()=>({send:async()=>{}}),evaluate:async()=>{throw Error('closed renderer');},mouse:{up:async()=>{released=true;}}};
     await cancelHeldBookmarkDrag(page);assert.equal(released,false);
+});
+
+
+test('fixture cleanup preserves the primary failure and still restores independent state', async () => {
+    const primary = Error('original selection failure'), calls = [], evidence = [];
+    await finishBookmarkFixture([async () => { calls.push('records'); throw Error('cleanup denied'); }, async () => calls.push('restore')], primary, async item => evidence.push(item));
+    assert.deepEqual(calls, ['records', 'restore']); assert.equal(primary.message, 'original selection failure');
+    assert.deepEqual(primary.cleanupErrors, ['cleanup denied']); assert.equal(evidence[0].phase, 'cleanup-failed');
+});
+test('cleanup failure remains hard failure when behavioral assertions succeeded', async () => {
+    await assert.rejects(() => finishBookmarkFixture([async () => { throw Error('cleanup failed'); }], null), /cleanup failed/);
+});
+test('cleanup diagnostic failure cannot erase the original failure', async () => {
+    const primary = Error('input failed');
+    await finishBookmarkFixture([async () => { throw Error('cleanup failed'); }], primary, async () => { throw Error('record failed'); });
+    assert.equal(primary.message, 'input failed'); assert.deepEqual(primary.cleanupErrors, ['cleanup failed', 'Evidence: record failed']);
+});
+test('Favorite cleanup uses the actual source-window renderer and exact owned bookmark identities', async () => {
+    const calls = []; globalThis.chrome = { tabs: { getCurrent: async () => ({ windowId: 10 }) }, runtime: { sendMessage: async message => {
+        calls.push(message); return message.action === 'get' ? { success: true, favorites: [
+            { id: 'owned', sourceBookmarkId: 'a', tabId: 42 }, { id: 'unrelated', sourceBookmarkId: 'b', tabId: 43 }
+        ] } : { success: true };
+    } } };
+    try { assert.deepEqual(await cleanupBookmarkFavoritesInSourceWindow({ windowId: 10, ids: ['a'] }), [42]);
+        assert.deepEqual(calls, [{ type: 'favoriteStore', action: 'get', windowId: 10 }, { type: 'favoriteStore', action: 'remove', windowId: 10, favoriteId: 'owned' }]);
+    } finally { delete globalThis.chrome; }
+});
+test('Favorite cleanup rejects a different renderer window before sending any mutation', async () => {
+    let sent = false; globalThis.chrome = { tabs: { getCurrent: async () => ({ windowId: 20 }) }, runtime: { sendMessage: async () => { sent = true; } } };
+    try { await assert.rejects(() => cleanupBookmarkFavoritesInSourceWindow({ windowId: 10, ids: ['a'] }), /exact source window/); assert.equal(sent, false); }
+    finally { delete globalThis.chrome; }
+});
+test('Favorite cleanup stops on an explicit rejection and does not replay', async () => {
+    let calls = 0; globalThis.chrome = { tabs: { getCurrent: async () => ({ windowId: 10 }) }, runtime: { sendMessage: async () => { calls++; return { success: false, error: 'denied' }; } } };
+    try { await assert.rejects(() => cleanupBookmarkFavoritesInSourceWindow({ windowId: 10, ids: ['a'] }), /denied/); assert.equal(calls, 1); }
+    finally { delete globalThis.chrome; }
 });

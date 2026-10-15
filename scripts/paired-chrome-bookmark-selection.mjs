@@ -17,6 +17,34 @@ export async function cancelHeldBookmarkDrag(page) {
     if (ended) await page.mouse.up().catch(() => {});
 }
 
+// Cleanup failures remain hard failures, but cannot erase the original input or
+// assertion failure. Run independent cleanup operations even if one fails.
+export async function finishBookmarkFixture(cleanups, primaryError, record = async () => {}) {
+    const errors = [];
+    for (const cleanup of cleanups) {
+        try { await cleanup(); } catch (error) { errors.push(error); }
+    }
+    if (!errors.length) return;
+    const messages = errors.map(error => error.message);
+    try { await record({ phase: 'cleanup-failed', errors: messages }); } catch (error) { messages.push(`Evidence: ${error.message}`); }
+    if (primaryError) primaryError.cleanupErrors = messages;
+    else throw new AggregateError(errors, `Bookmark fixture cleanup failed: ${messages.join('; ')}`);
+}
+
+export async function cleanupBookmarkFavoritesInSourceWindow({ windowId, ids }) {
+    const current = await chrome.tabs.getCurrent();
+    if (current?.windowId !== windowId) throw new Error('Bookmark cleanup requires its exact source window.');
+    const state = await chrome.runtime.sendMessage({ type: 'favoriteStore', action: 'get', windowId });
+    if (!state.success) throw new Error(state.error || 'Fixture cleanup could not read Favorites.');
+    const targets = state.favorites.filter(item => ids.includes(item.sourceBookmarkId));
+    const tabIds = targets.map(item => item.tabId).filter(Number.isInteger);
+    for (const item of targets) {
+        const result = await chrome.runtime.sendMessage({ type: 'favoriteStore', action: 'remove', windowId, favoriteId: item.id });
+        if (!result.success) throw new Error(result.error);
+    }
+    return tabIds;
+}
+
 export function readBookmarkSelection() {
     const selected = [...document.querySelectorAll('.space.active .tab.bookmark-selected')];
     const status = document.getElementById('bookmarkSelectionStatus');
@@ -136,7 +164,8 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         await page.waitForFunction(({ selector, expanded }) => document.querySelector(selector)?.classList.contains('collapsed') === !expanded, { polling: 50 }, { selector: folder(id), expanded });
     };
     const observations = [];
-    let ordinaryTabId = null;
+    let ordinaryTabId = null, primaryError = null;
+    const originalInvert = await apiPage.$eval('#invertTabOrder', element => element.checked);
     const drag = async ({ sourceId, beforeId, expectedIds, label, afterStart }) => ui(page, label, async () => {
         const targetSelector = `#pinnedFavicons .saved-favorite[data-favorite-id="${beforeId}"]`;
         await page.waitForSelector(targetSelector);
@@ -191,10 +220,19 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         }
     });
     try {
+        // Previous cases restore the user's default (inverted) order. This
+        // scenario deliberately asserts A→B→D, so select that display mode via
+        // the actual options UI rather than silently sorting observed rows.
+        if (originalInvert) await ui(apiPage, 'Use normal visible order for bookmark selection fixture', () => apiPage.click('label.toggle-label[for="invertTabOrder"]'));
+        await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), settings => settings.invertTabOrder === false, 'explicit non-inverted bookmark selection ordering');
         await page.waitForSelector(`.space.active[data-space-id="${space.id}"]`);
         await setExpanded(seed.root.id, true); await setExpanded(seed.open.id, true); await setExpanded(seed.closed.id, false);
         for (const id of [seed.a.id, seed.b.id, seed.d.id, seed.e.id]) await page.waitForSelector(row(id), { visible: true });
         assert.equal(await page.$eval(row(seed.hidden.id), node => node.getClientRects().length), 0);
+        const visibleOrder = [seed.a.id, seed.b.id, seed.d.id, seed.e.id, seed.control.id];
+        await poll(() => page.evaluate(ids => [...document.querySelectorAll('.space.active .tab[data-bookmark-id]')]
+            .filter(node => ids.includes(node.dataset.bookmarkId) && node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden')
+            .map(node => node.dataset.bookmarkId), visibleOrder), ids => JSON.stringify(ids) === JSON.stringify(visibleOrder), 'rendered normal bookmark order before any selection');
         const beforeOrdinary = await read();
         await click(row(seed.d.id));
         const opened = await poll(() => apiPage.evaluate(async ({ windowId, old }) => (await chrome.tabs.query({ windowId })).filter(tab => !old.includes(tab.id)), { windowId: fixture.windowA, old: beforeOrdinary.tabs.map(tab => tab.id) }),
@@ -287,17 +325,30 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         return { source: seed, chosen, firstProof, repeatProof, observations, modifierInput: 'real Control/Shift on Linux',
             realMouseDrag: true, nativePinnedTabsVerified: true, sourcePreserved: true,
             limits: ['Cmd modifier covered by DOM tests, not Linux physical input.', 'Native side-panel layout and OS drag-image appearance remain manual.', 'Partial API-failure injection is unit coverage; real browser case covers deletion during a frozen drag.'] };
+    } catch (error) {
+        primaryError = error;
+        const failure = { phase: 'failed-before-cleanup', error: error.message };
+        try { failure.selection = await page.evaluate(readBookmarkSelection); } catch (observation) { failure.observationError = observation.message; }
+        try { await record(failure); } catch (observation) { error.diagnosticError = observation.message; }
+        throw error;
     } finally {
         // Only fixture-owned Favorite records/tabs and the fixture folder are removed.
-        await apiPage.evaluate(async ({ ids, rootId, sidebarId, ordinaryTabId, windowId }) => {
-            const state = await chrome.runtime.sendMessage({ type: 'favoriteStore', action: 'get', windowId });
-            if (!state.success) throw new Error(state.error || 'Fixture cleanup could not read Favorites.');
-            const targets = state.favorites.filter(item => ids.includes(item.sourceBookmarkId));
-            const tabIds = targets.map(item => item.tabId).filter(Number.isInteger);
-            for (const item of targets) { const r = await chrome.runtime.sendMessage({ type: 'favoriteStore', action: 'remove', windowId, favoriteId: item.id }); if (!r.success) throw new Error(r.error); }
-            const live = new Set((await chrome.tabs.query({})).map(tab => tab.id));
-            for (const id of [...tabIds, sidebarId, ordinaryTabId]) if (live.has(id)) await chrome.tabs.remove(id);
-            await chrome.bookmarks.removeTree(rootId);
-        }, { ids: leafIds, rootId: seed.root.id, sidebarId: sidebar.tab.id, ordinaryTabId, windowId: fixture.windowA });
+        await finishBookmarkFixture([
+            async () => {
+                // The control options tab is in a different window. Use the
+                // fixture's own source renderer; production sender checks stay strict.
+                const tabIds = await page.evaluate(cleanupBookmarkFavoritesInSourceWindow, { ids: leafIds, windowId: fixture.windowA });
+                await apiPage.evaluate(async ({ tabIds, rootId, sidebarId, ordinaryTabId }) => {
+                    const live = new Set((await chrome.tabs.query({})).map(tab => tab.id));
+                    for (const id of [...tabIds, sidebarId, ordinaryTabId]) if (live.has(id)) await chrome.tabs.remove(id);
+                    await chrome.bookmarks.removeTree(rootId);
+                }, { tabIds, rootId: seed.root.id, sidebarId: sidebar.tab.id, ordinaryTabId });
+            },
+            async () => {
+                if (originalInvert !== await apiPage.$eval('#invertTabOrder', element => element.checked))
+                    await ui(apiPage, 'Restore original bookmark display ordering', () => apiPage.click('label.toggle-label[for="invertTabOrder"]'));
+                await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), settings => settings.invertTabOrder === originalInvert, 'restored bookmark display ordering');
+            }
+        ], primaryError, record);
     }
 }
