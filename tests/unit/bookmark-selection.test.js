@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 import { createBookmarkSelection } from '../../bookmark-selection.js';
 import { createFavoritesDragSource, createSavedBookmarkFavoriteDrop, describeBookmarkBatchOutcome } from '../../favorites-drop.js';
@@ -10,7 +11,7 @@ function fixture(extra = '') {
     const { document, window } = parseHTML(`<html><body><div id="pinnedFavicons"></div><div id="spacesList"><div class="space active" data-space-id="s"><div class="pinned-tabs" data-tab-type="pinned">
         ${htmlRow('a')}<div class="folder" data-bookmark-id="folder"><div class="folder-header">Folder</div><div class="folder-content">${htmlRow('b', 'data-tab-id="7"')}${htmlRow('c')}</div><div class="folder-collapsed-tabs"></div></div>
         <div class="folder collapsed" data-bookmark-id="hidden-folder"><div class="folder-content collapsed">${htmlRow('hidden')}</div><div class="folder-collapsed-tabs">${htmlRow('projected', 'data-tab-id="8"')}</div></div>
-        ${htmlRow('d')}${htmlRow('e')}${extra}</div><div data-tab-type="temporary">${htmlRow('temporary')}</div></div><div class="space" data-space-id="other"><div data-tab-type="pinned">${htmlRow('other')}</div></div></div></body></html>`);
+        ${htmlRow('d')}${htmlRow('e')}${extra}</div><div data-tab-type="temporary">${htmlRow('temporary')}</div></div><div class="space" data-space-id="other"><div data-tab-type="pinned">${htmlRow('other')}</div></div></div><div class="new-tab-btn-container"></div></body></html>`);
     const context = { windowId: 10, activeSpaceId: 's', spaces: [{ id: 's', bookmarkFolderId: 'root' }, { id: 'other', bookmarkFolderId: 'other-root' }] };
     const selection = createBookmarkSelection({ document, getContext: () => context });
     for (const row of document.querySelectorAll('.tab')) selection.register(row);
@@ -22,6 +23,22 @@ function fixture(extra = '') {
     const start = id => { row(id).classList.add('dragging'); return drag.start(row(id)); };
     return { document, window, context, selection, row, event, click, ids, drag, start };
 }
+
+test('singleton drag count is an out-of-flow, pointer-transparent badge outside the Space list', async () => {
+    const f = fixture(), source = f.row('a'), status = f.document.getElementById('bookmarkSelectionStatus');
+    assert.equal(status.parentElement, f.document.querySelector('.new-tab-btn-container'));
+    assert.equal(f.document.getElementById('spacesList').contains(status), false);
+    assert.equal(status.hidden, true);
+    const started = f.start('a');
+    assert.equal(status.hidden, false); assert.equal(status.dataset.count, '1');
+    assert.equal(f.row('a'), source); assert.equal(f.selection.validate(started.source.selectionSnapshot), true);
+    // LinkeDOM has no layout engine. Enforce the CSS contract here; real native
+    // source geometry/drag continuation is checked by the paired Chrome case.
+    const css = await readFile(new URL('../../styles.css', import.meta.url), 'utf8');
+    const rule = css.match(/\.bookmark-selection-status\s*\{([^}]+)\}/)?.[1];
+    assert.match(rule, /position:\s*absolute\s*;/); assert.match(rule, /pointer-events:\s*none\s*;/);
+    assert.match(rule, /bottom:\s*calc\(100% \+ 8px\)\s*;/);
+});
 
 test('Ctrl/Cmd toggles exact bookmark IDs without activating rows or conflating equal URLs', () => {
     const f = fixture(); let activations = 0;

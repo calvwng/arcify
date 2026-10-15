@@ -809,7 +809,17 @@ h3 {
 .tab.bookmark-selected .tab-title-display { font-weight: 600; }
 .tab[role="treeitem"]:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 .bookmark-selection-status {
-    margin: 4px 12px;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 8px;
+    right: 8px;
+    z-index: 1000;
+    pointer-events: none;
+    padding: 6px 10px;
+    border: 1px solid currentColor;
+    border-radius: 8px;
+    color: CanvasText;
+    background: Canvas;
     font-size: 12px;
     line-height: 1.4;
 }

@@ -1470,6 +1470,14 @@ try {
                 diagnostic.targetConnected = await target.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),targetSelector);
                 await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
                 await page.mouse.move(x+12,y,{steps:5});
+                diagnostic.afterDragStart = await source.evaluate(element => {
+                    const badge = document.getElementById('bookmarkSelectionStatus');
+                    return {connected:element.isConnected,rect:element.getBoundingClientRect().toJSON(),
+                        badge:{visible:!badge.hidden,position:getComputedStyle(badge).position,pointerEvents:getComputedStyle(badge).pointerEvents}};
+                });
+                assert(diagnostic.afterDragStart.connected,'Native dragstart must retain the source row.');
+                assert(Math.abs(diagnostic.afterDragStart.rect.y-from.y) < 1,'Selection feedback must not move the native drag source.');
+                assert(Math.abs(diagnostic.afterDragStart.rect.height-from.height) < 1,'Selection feedback must not resize the native drag source.');
                 await page.mouse.move(tx,ty,{steps:20});
                 await page.waitForFunction(({placement,targetSelector}) => {
                     if (placement === 'inside') return document.querySelector(targetSelector)?.classList.contains('sidebar-drop-inside');

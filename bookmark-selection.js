@@ -16,7 +16,9 @@ export function createBookmarkSelection({ document, getContext }) {
     status.id = 'bookmarkSelectionStatus'; status.className = 'bookmark-selection-status';
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.setAttribute('aria-atomic', 'true');
     status.hidden = true; status.dataset.count = '0';
-    document.getElementById('spacesList').before(status);
+    // Showing a singleton count during dragstart must not move the source while
+    // Chrome captures its native drag image. Keep this badge outside list flow.
+    document.querySelector('.new-tab-btn-container').append(status);
 
     function context() {
         const value = getContext(), space = value.spaces.find(item => item.id === value.activeSpaceId);

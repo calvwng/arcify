@@ -669,6 +669,21 @@ test('actual ordinary closed-bookmark activation/re-render/blur preserves only i
     drag(document.body, 'keydown', 0, { key: 'Escape' });
 });
 
+test('ordinary singleton drag retains row identity while selection count appears and a refresh waits', async () => {
+    await resetFavorites();
+    const source = row('c'), destination = row('a'), status = document.getElementById('bookmarkSelectionStatus');
+    assert.equal(status.hidden, true);
+    drag(source, 'dragstart');
+    assert.equal(status.hidden, false); assert.equal(status.dataset.count, '1');
+    assert.equal(status.parentElement, document.querySelector('.new-tab-btn-container'));
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
+    await wait(180);
+    assert.equal(row('c'), source); assert.equal(row('a'), destination);
+    assert(source.classList.contains('dragging'));
+    assert.deepEqual(effects, []); assert.deepEqual(writes, []);
+    drag(source, 'dragend'); await wait(180);
+});
+
 test('actual batch drag shows count and marker, preserves source bookmarks, and reuses exact repeated instances', async () => {
     await resetFavorites(); const original = structuredClone(tree), originalActive = tabs.filter(tab => tab.active).map(tab => tab.id);
     selectBookmark('a'); selectBookmark('c', { shiftKey: true });
