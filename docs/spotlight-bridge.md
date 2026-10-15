@@ -276,7 +276,9 @@ Arcify advertises `persistentFavorites` in `hello.capabilities` when its
 worker-owned saved Favorites store is available. New snapshots include ordered
 `favorites: [{ id, title, url, sourceBookmarkId, tabId }]`; provenance and the
 current-window exact live binding may be null. These global Favorite bindings
-point only to native-pinned tabs outside Space membership. Saved HTTP(S) URLs and
+point to native-pinned tabs outside Space membership by default. The optional
+`globalFavoritesV1` capability and explicit request marker also permit ordinary
+globally owned tabs, while preserving the real native `pinned` value. Saved HTTP(S) URLs and
 titles remain unchanged when the live tab navigates.
 Arcify's optional local `faviconDataUrl` cache is deliberately projected out of
 these snapshots, preserving strict v1 compatibility with existing Spotlight peers.
@@ -292,3 +294,8 @@ The notification remains optional and best effort. Older v1 peers that do not
 advertise this capability keep their existing space/bookmark/tab behavior.
 See [favorites-drop.md](favorites-drop.md) for close/removal, restart, native-pin
 adoption and profile-local durability limits.
+
+
+See [favorite-continuity.md](favorite-continuity.md) for ordinary-Favorite feature
+negotiation, authenticated Spotlight session witnessing, two-phase recovery,
+revocation guarantees, and explicit reload/restart/downgrade limits.

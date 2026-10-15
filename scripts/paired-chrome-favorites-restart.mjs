@@ -94,6 +94,29 @@ export function assertFavoritesAfterRestart(before, after) {
     }
 }
 
+export function assertOrdinaryFavoriteRestartBoundary(before, after, expected) {
+    assert(expected && typeof expected.favoriteId === 'string' && Number.isSafeInteger(expected.tabId), 'An exact ordinary Favorite handoff is required.');
+    const item = before.durable.find(item => item.id === expected.favoriteId);
+    const binding = before.sessionAfterGet?.bindings.find(binding => binding.favoriteId === expected.favoriteId && binding.tabId === expected.tabId);
+    const live = before.tabs.find(tab => tab.id === expected.tabId);
+    assert(item && binding?.mode === 'ordinary', 'The ordinary Favorite must have a real old-session association before restart.');
+    assert(live && !live.pinned && !live.incognito && live.windowId === binding.windowId, 'The old exact ordinary tab must still be open and unpinned.');
+    const cache = retainedFavoriteCache(before.iconCache, before.durable);
+    const ordinaryIcon = cache?.entries.filter(entry => entry.favoriteId === item.id && entry.url === item.url) || [];
+    assert.equal(ordinaryIcon.length, 1, 'The exact ordinary Favorite must have its own valid retained icon before restart.');
+    assert.deepEqual(after.durable.find(candidate => candidate.id === item.id), item, 'The saved ordinary Favorite survives unchanged.');
+    assert.deepEqual(after.iconCache, before.iconCache, 'The ordinary Favorite shares the same durable icon-preservation guarantee.');
+    assert.deepEqual(after.iconCache.entries.filter(entry => entry.favoriteId === item.id), ordinaryIcon);
+    for (const state of after.states) assert.equal(state.favorites.find(candidate => candidate.id === item.id)?.tabId, null, 'A fresh browser session cannot guess the old ordinary association.');
+    for (const state of [after.session, after.sessionAfterGet]) {
+        assert(!(state?.bindings || []).some(candidate => candidate.favoriteId === item.id));
+        assert(!(state?.attempts || []).some(candidate => candidate.favoriteId === item.id));
+    }
+    return { favoriteId:item.id, oldTabId:live.id, oldWindowId:live.windowId,
+        savedRecordRetained:true, associationRecovered:false,
+        restoredOrdinaryTabsAreNotRequired:true, urlBasedIdentityMatching:false };
+}
+
 export function assertFavoriteReopened(before, after, { favoriteId, windowId }) {
     assertLegacyFavoriteRegistry(before.durable); assertLegacyFavoriteRegistry(after.durable);
     retainedFavoriteCache(before.iconCache, before.durable); retainedFavoriteCache(after.iconCache, after.durable);
@@ -139,7 +162,7 @@ export function assertFavoriteReopened(before, after, { favoriteId, windowId }) 
  */
 export async function exerciseFavoritesBrowserRestart({ browser, launchOptions, launch, apiPage, fixture,
     arcifyId, spotlightId, expectedExtensions, snapshot, observePage, blockExternalHttps,
-    ui, screenshot, poll, record, recordTarget = () => {}, recordDiagnostic = () => {} }) {
+    ui, screenshot, poll, record, ordinaryFixture = null, recordTarget = () => {}, recordDiagnostic = () => {} }) {
     const evidence = { phase: 'preparing', restartObservations: [], targetLifecycle: [], diagnostics: [], workerObservations: [], workerExceptions: [], readerTabs: [],
         limits: ['Native tab IDs are not treated as stable across restart. Pre/post native pin content is recorded as duplicate-preserving multisets; Chrome is not required to restore every pin. Subsequent preservation uses each newly observed exact tab ID.',
             'This exercises one graceful close/relaunch of the same disposable CI profile with unchanged security defaults. It does not assert physical Ctrl+W, native sidebar docking, or restoration of every unpinned browser-session tab.'] };
@@ -362,6 +385,7 @@ export async function exerciseFavoritesBrowserRestart({ browser, launchOptions, 
         evidence.nativePinsAfterRestart = nativePinContents(evidence.afterRestart.tabs);
         await checkpoint('fresh-session-observed');
         assertFavoritesAfterRestart(evidence.before, evidence.afterRestart);
+        if (ordinaryFixture) evidence.ordinaryBoundary = assertOrdinaryFavoriteRestartBoundary(evidence.before, evidence.afterRestart, ordinaryFixture);
         const window = [...evidence.afterRestart.states].sort((a, b) => b.nativeTabs.length - a.nativeTabs.length)[0];
         const favoriteId = seeded[0].id;
         // An explicit NEW collision fixture makes no-adoption meaningful even if

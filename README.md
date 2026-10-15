@@ -14,6 +14,8 @@ A Chrome extension that replicates Arc browser's tab management system, providin
 - Keyboard shortcuts for quick access
 - Bookmark integration
 - [Saved Favorites shared across Spaces and windows](docs/favorites-drop.md)
+- [Optional ordinary Favorite tabs and reload continuity](docs/ordinary-favorites.md)
+- [Select Today tabs and save a named pinned folder](docs/today-tab-selection.md)
 - [Adjustable Favorites and Space header sizing](docs/sidebar-appearance.md)
 - [Sidebar management scroll and focus](docs/sidebar-management-scroll.md)
 - Clean, minimal interface

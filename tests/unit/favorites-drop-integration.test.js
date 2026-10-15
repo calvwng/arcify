@@ -216,7 +216,7 @@ test('actual canceled hover restores an undismissed result instead of silently e
     await resetFavorites();await drop(row('closed'),target(),25);
     const message=status(), before=structuredClone({tabs,tree,local,session,effects});
     const source=row('c');drag(source,'dragstart');drag(favorites().querySelector('.saved-favorite'),'dragover',25);
-    assert.equal(dismissStatus().hidden,true);assert.match(status(),/Opens a pinned tab/);
+    assert.equal(dismissStatus().hidden,true);assert.match(status(),/Opens a Favorite tab/);
     drag(source,'dragend');await wait(60);
     assert.equal(status(),message);assert.equal(dismissStatus().hidden,false);
     assert.deepEqual({tabs,tree,local,session,effects},before);
@@ -251,7 +251,7 @@ for (const id of ['c', 'closed']) test(`actual sidebar opens closed ${id} as one
     drag(source, 'dragstart');
     const over = drag(target(), 'dragover', 25);
     assert.equal(over.defaultPrevented, true); assert.equal(over.dataTransfer.dropEffect, 'copy');
-    assert.match(status(), /Opens a pinned tab.*bookmark stays/);
+    assert.match(status(), /Opens a Favorite tab.*bookmark stays/);
     drag(target(), 'drop', 25);
     assert.equal(favorites().getAttribute('aria-busy'), 'true'); assert.equal(favorites().dataset.dropState, 'pending');
     drag(source, 'dragend'); await wait(220);

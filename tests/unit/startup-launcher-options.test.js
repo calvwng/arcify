@@ -6,11 +6,11 @@ import { runInNewContext } from 'node:vm';
 const source = readFileSync(new URL('../../options.js', import.meta.url), 'utf8').replace(/^import .*;\s*$/gm, '');
 test('startup setting restores and autosaves without replacing other sync data', async () => {
     const values = { startupLauncherEnabled: true, defaultSpaceName: 'Work', autoArchiveEnabled: true,
-        autoArchiveIdleMinutes: 90, syncTabGroups: true, invertTabOrder: false,
+        autoArchiveIdleMinutes: 90, ordinaryFavoriteTabs: false, syncTabGroups: true, invertTabOrder: false,
         showAllOpenTabsInCollapsedFolders: true, debugLoggingEnabled: true,
         colorOverrides: null, unrelatedSavedSetting: 'keep me' };
     const listeners = {};
-    const elements = Object.fromEntries(['startupLauncherEnabled', 'autoArchiveEnabled', 'syncTabGroups', 'invertTabOrder',
+    const elements = Object.fromEntries(['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'autoArchiveEnabled', 'syncTabGroups', 'invertTabOrder',
         'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'].map(id => [id, { checked: false, addEventListener(type, fn) { listeners[id] = fn; } }]));
     elements.defaultSpaceName = { value: '', innerHTML: '', appendChild() {}, addEventListener() {} };
     elements.autoArchiveIdleMinutes = { value: '', disabled: false, reportValidity: () => true, addEventListener() {} };
@@ -29,7 +29,7 @@ test('startup setting restores and autosaves without replacing other sync data',
     elements.startupLauncherEnabled.checked = false;
     await listeners.startupLauncherEnabled();
     assert.deepEqual(values, { startupLauncherEnabled: false, defaultSpaceName: 'Work', autoArchiveEnabled: true,
-        autoArchiveIdleMinutes: 90, syncTabGroups: true, invertTabOrder: false,
+        autoArchiveIdleMinutes: 90, ordinaryFavoriteTabs: false, syncTabGroups: true, invertTabOrder: false,
         showAllOpenTabsInCollapsedFolders: true, debugLoggingEnabled: true,
         colorOverrides: null, unrelatedSavedSetting: 'keep me' });
 });

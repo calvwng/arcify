@@ -39,6 +39,8 @@ const area = state => ({ async get(keys) {
 }, async set(next) { Object.assign(state, structuredClone(next)); }, async remove() {} });
 const onActivated = listeners();
 let beforeRead;
+let beforeWindow;
+let currentWindowId = 10;
 let beforeTree;
 const folders = [{ id: 'root', title: 'Arcify' }, ...storedSpaces.map(space => ({ id: space.bookmarkFolderId, parentId: 'root', title: space.name }))];
 globalThis.window = window;
@@ -61,7 +63,7 @@ globalThis.chrome = {
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
     storage: { onChanged, local: area(local), sync: area({}), session: area(session) },
-    windows: { getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
+    windows: { getCurrent(_options, callback) { if (callback) { if (beforeWindow) beforeWindow(callback); else callback({ id: currentWindowId }); } return Promise.resolve({ id: currentWindowId }); } },
     tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id) { return structuredClone(tabs.find(tab => tab.id === id)); } },
@@ -355,4 +357,78 @@ test('real sidebar excludes startup launcher from native pinned favicons', async
     assert.equal(document.querySelector('#pinnedFavicons [data-tab-id="800"]'), null);
     assert.equal(document.querySelector('#spacesList [data-tab-id="800"]'), null);
     tabs.splice(tabs.indexOf(launcher), 1);
+});
+
+
+async function resetActivationOwners() {
+    beforeWindow = null; beforeRead = null; currentWindowId = 10;
+    for (const space of storedSpaces) {
+        space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== 1);
+        space.temporaryTabs = space.temporaryTabs.filter(id => id !== 1);
+    }
+    storedSpaces.find(space => space.id === 'alpha').temporaryTabs.push(1);
+    await publishSpaces(); await selectSession('alpha'); await selectTab(1); await settled('alpha'); await wait(180);
+}
+
+test('an older activation cannot switch Space or highlight after a newer authoritative read completes', async () => {
+    await resetActivationOwners();
+    const started = deferred(), release = deferred();
+    beforeRead = async () => { beforeRead = null; started.resolve(); await release.promise; };
+    await selectTab(1); await started.promise;
+    await selectTab(2); await settled('beta');
+    const latest = document.querySelector('.space[data-space-id="beta"] .tab[data-tab-id="2"]');
+    assert(latest.classList.contains('active'));
+    release.resolve(); await wait(240);
+    assert.deepEqual(visible(), ['beta']); assert.deepEqual(selected(), ['beta']);
+    assert(latest.classList.contains('active'), 'the older read must not replace the latest highlight');
+    await selectSession('alpha'); await selectTab(1); await settled('alpha');
+});
+
+test('an older window callback cannot reset the latest activation before its authoritative read', async () => {
+    await resetActivationOwners();
+    let oldCallback;
+    beforeWindow = callback => { beforeWindow = null; oldCallback = callback; };
+    await selectTab(1); assert.equal(typeof oldCallback, 'function');
+    await selectTab(2); await settled('beta');
+    await oldCallback({ id: 10 }); await wait(240);
+    assert.deepEqual(visible(), ['beta']);
+    assert(document.querySelector('.space[data-space-id="beta"] .tab[data-tab-id="2"]').classList.contains('active'));
+    await selectSession('alpha'); await selectTab(1); await settled('alpha');
+});
+
+test('another window activation does not discard a still-current local authoritative read', async () => {
+    await resetActivationOwners();
+    const started = deferred(), release = deferred();
+    beforeRead = async () => { beforeRead = null; started.resolve(); await release.promise; };
+    await selectTab(2); await started.promise;
+    await onActivated.emit({ windowId: 99, tabId: 999 });
+    release.resolve(); await settled('beta');
+    assert(document.querySelector('.space[data-space-id="beta"] .tab[data-tab-id="2"]').classList.contains('active'));
+    await selectSession('alpha'); await selectTab(1); await settled('alpha');
+});
+
+test('a panel window change during the authoritative read prevents stale activation side effects', async () => {
+    await resetActivationOwners();
+    const started = deferred(), release = deferred();
+    beforeRead = async () => { beforeRead = null; started.resolve(); await release.promise; };
+    await selectTab(2); await started.promise; currentWindowId = 99;
+    release.resolve(); await wait(240);
+    assert.deepEqual(visible(), ['alpha']); assert.deepEqual(selected(), ['alpha']);
+    currentWindowId = 10; await selectTab(1); await settled('alpha');
+});
+
+test('a delayed callback from a previous panel window cannot cancel a newer local activation', async () => {
+    await resetActivationOwners();
+    let previousWindowCallback;
+    currentWindowId = 99;
+    beforeWindow = callback => { beforeWindow = null; previousWindowCallback = callback; };
+    await onActivated.emit({ windowId: 99, tabId: 999 });
+    assert.equal(typeof previousWindowCallback, 'function');
+    currentWindowId = 10;
+    const started = deferred(), release = deferred();
+    beforeRead = async () => { beforeRead = null; started.resolve(); await release.promise; };
+    await selectTab(2); await started.promise;
+    await previousWindowCallback({ id: 99 });
+    release.resolve(); await settled('beta');
+    assert(document.querySelector('.space[data-space-id="beta"] .tab[data-tab-id="2"]').classList.contains('active'));
 });

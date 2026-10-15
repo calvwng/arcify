@@ -83,6 +83,16 @@
             </div>
             <div class="options-setting-item options-setting-toggle">
                 <div class="options-setting-copy">
+                    <label for="ordinaryFavoriteTabs" class="options-label">Open Favorites as ordinary tabs</label>
+                    <p id="ordinaryFavoriteTabsDescription" class="options-description">Newly opened or explicitly adopted Favorites stay global across Spaces without a browser pin, so one Ctrl+W closes the page and keeps its saved link. Existing open Favorites keep their current mode. Reload continuity requires the paired Spotlight session to survive. After a full browser restart, saved Favorites appear closed and restored pages are ordinary Space tabs; reopening can create a second page. Close ordinary Favorites before downgrading Arcify.</p>
+                </div>
+                <div class="toggle-switch-container">
+                    <input type="checkbox" id="ordinaryFavoriteTabs" class="ios-toggle" role="switch" aria-describedby="ordinaryFavoriteTabsDescription">
+                    <label for="ordinaryFavoriteTabs" class="toggle-label" aria-hidden="true"></label>
+                </div>
+            </div>
+            <div class="options-setting-item options-setting-toggle">
+                <div class="options-setting-copy">
                     <label for="syncTabGroups" class="options-label">Sync spaces to Chrome tab groups</label>
                     <p id="syncTabGroupsDescription" class="options-description">Mirror space membership, names, colors, and tab order to Chrome groups. Spaces stay saved independently. Turning this off leaves existing groups unchanged.</p>
                 </div>

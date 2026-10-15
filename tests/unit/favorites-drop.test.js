@@ -27,7 +27,7 @@ test('provenance accepts one unchanged own-sidebar row, never transfer payload o
     const drag = createFavoritesDragSource({ document, getContext: () => context });
     assert.match(drag.inspect().error, /from this sidebar/);
     const row = document.querySelector('.tab'); drag.start(row);
-    assert.equal(drag.inspect().source.bookmarkId, 'saved'); assert.match(drag.inspect().hint, /Opens a pinned tab/);
+    assert.equal(drag.inspect().source.bookmarkId, 'saved'); assert.match(drag.inspect().hint, /Opens a Favorite tab/);
     row.dataset.bookmarkId = 'forged'; assert.match(drag.inspect().error, /changed/);
     row.dataset.bookmarkId = 'saved'; row.remove(); assert.match(drag.take().error, /changed/);
     assert.match(drag.inspect().error, /from this sidebar/);

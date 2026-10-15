@@ -802,11 +802,11 @@ h3 {
 
 /* Selection and active-page state are independent. An inset outline remains
    visible on both active and inactive rows, without changing their layout. */
-.tab.bookmark-selected {
+.tab.bookmark-selected, .tab.today-selected {
     background: color-mix(in srgb, var(--space-bg-color, #6c8cff) 35%, transparent);
     box-shadow: inset 0 0 0 2px currentColor;
 }
-.tab.bookmark-selected .tab-title-display { font-weight: 600; }
+.tab.bookmark-selected .tab-title-display, .tab.today-selected .tab-title-display { font-weight: 600; }
 .tab[role="treeitem"]:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 .bookmark-selection-status {
     position: absolute;
@@ -824,6 +824,30 @@ h3 {
     line-height: 1.4;
 }
 .bookmark-selection-status[hidden] { display: none; }
+.today-folder-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: grid;
+    align-items: start;
+    padding: 60px 12px 12px;
+    background: rgb(0 0 0 / 35%);
+}
+.today-folder-dialog form {
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid currentColor;
+    border-radius: 12px;
+    color: CanvasText;
+    background: Canvas;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+}
+.today-folder-dialog h2 { margin: 0 0 12px; font-size: 18px; }
+.today-folder-dialog p { margin: 0 0 16px; line-height: 1.4; }
+.today-folder-dialog label { display: block; margin-bottom: 6px; }
+.today-folder-dialog input { width: 100%; box-sizing: border-box; padding: 8px; }
+.today-folder-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.today-folder-buttons button { padding: 6px 10px; }
 .bookmark-drag-preview {
     position: fixed;
     left: 0;

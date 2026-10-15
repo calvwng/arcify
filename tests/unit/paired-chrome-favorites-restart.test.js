@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { durableFavoriteRecords, nativePinContents, assertUnchangedExtensionRegistry,
-    assertFreshFavoriteRead, assertFavoritesAfterRestart, assertFavoriteReopened, requestScopedFavorite, assertFavoriteRender } from '../../scripts/paired-chrome-favorites-restart.mjs';
+    assertFreshFavoriteRead, assertFavoritesAfterRestart, assertFavoriteReopened, requestScopedFavorite, assertFavoriteRender, assertOrdinaryFavoriteRestartBoundary } from '../../scripts/paired-chrome-favorites-restart.mjs';
 import { FAVORITE_FAVICON_PNG, assertLegacyFavoriteRegistry } from '../../scripts/paired-chrome-favorite-icons.mjs';
 
 const retainedIcon = `data:image/png;base64,${FAVORITE_FAVICON_PNG.toString('base64')}`;
@@ -53,6 +53,37 @@ function reopened() {
     after.sessionAfterGet.bindings = [{ favoriteId: 'saved-first', windowId: 70, tabId: created.id }];
     return { before, after, created, expected: { favoriteId: 'saved-first', windowId: 70 } };
 }
+
+function ordinaryRestart() {
+    const before=beforeRestart(), after=restarted(), expected={favoriteId:'saved-first',tabId:2};
+    const ownIcon={favoriteId:'saved-first',url:'http://fixture.test/same',faviconDataUrl:retainedIcon};
+    before.iconCache.entries.push(ownIcon); after.iconCache.entries.push(structuredClone(ownIcon));
+    before.tabs.find(tab=>tab.id===2).pinned=false;
+    before.sessionAfterGet={version:1,bindings:[{favoriteId:expected.favoriteId,tabId:2,windowId:1,mode:'ordinary'}],attempts:[]};
+    return {before,after,expected};
+}
+test('ordinary Favorite full restart retains its saved record without inventing an exact restored association',()=>{
+    const {before,after,expected}=ordinaryRestart();
+    assert.equal(assertOrdinaryFavoriteRestartBoundary(before,after,expected).associationRecovered,false);
+    after.tabs=[]; // Chrome is not required to restore ordinary pages.
+    assert.doesNotThrow(()=>assertOrdinaryFavoriteRestartBoundary(before,after,expected));
+});
+for(const [name,mutate] of [
+    ['missing pre-restart association',value=>{value.before.sessionAfterGet.bindings=[];}],
+    ['legacy pinned mode',value=>{delete value.before.sessionAfterGet.bindings[0].mode;}],
+    ['wrong live identity',value=>{value.expected.tabId=1000;}],
+    ['native pin instead of ordinary tab',value=>{value.before.tabs.find(tab=>tab.id===2).pinned=true;}],
+    ['wrong window',value=>{value.before.tabs.find(tab=>tab.id===2).windowId=3;}],
+    ['private source',value=>{value.before.tabs.find(tab=>tab.id===2).incognito=true;}],
+    ['missing saved record',value=>{value.after.durable=value.after.durable.filter(item=>item.id!=='saved-first');}],
+    ['changed icon cache',value=>{value.after.iconCache=null;}],
+    ['no exact ordinary icon',value=>{value.before.iconCache.entries.pop();value.after.iconCache.entries.pop();}],
+    ['wrong ordinary icon ownership',value=>{value.before.iconCache.entries[1].url='http://wrong.test/';value.after.iconCache=structuredClone(value.before.iconCache);}],
+    ['invalid ordinary icon bytes',value=>{value.before.iconCache.entries[1].faviconDataUrl='https://remote.test/icon.png';value.after.iconCache=structuredClone(value.before.iconCache);}],
+    ['silently associated render',value=>{value.after.states[0].favorites.find(item=>item.id==='saved-first').tabId=702;}],
+    ['silently associated session',value=>{value.after.sessionAfterGet.bindings=[{favoriteId:'saved-first',tabId:702,windowId:70,mode:'ordinary'}];}],
+    ['silently pending reopen',value=>{value.after.sessionAfterGet.attempts=[{favoriteId:'saved-first',tabId:null,windowId:70}];}]
+]) test(`ordinary restart evidence rejects ${name}`,()=>{const value=ordinaryRestart();mutate(value);assert.throws(()=>assertOrdinaryFavoriteRestartBoundary(value.before,value.after,value.expected));});
 
 test('durable projection retains every identity, metadata field and exact order without session IDs', () => {
     const original = favorites().map((item, index) => ({ ...item, tabId: index + 10 }));

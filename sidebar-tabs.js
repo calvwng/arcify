@@ -1,7 +1,7 @@
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 
-export function selectWindowSpaceTabs(space, tabs, windowId) {
-    const byId = new Map(tabs.filter(t => t.windowId === windowId && !t.pinned && !isStartupLauncherTab(t)).map(t => [t.id, t]));
+export function selectWindowSpaceTabs(space, tabs, windowId, globalTabIds = new Set()) {
+    const byId = new Map(tabs.filter(t => t.windowId === windowId && !t.pinned && !globalTabIds.has(t.id) && !isStartupLauncherTab(t)).map(t => [t.id, t]));
     return [...(space?.spaceBookmarks || []), ...(space?.temporaryTabs || [])]
         .map(id => byId.get(id)).filter(Boolean);
 }

@@ -125,7 +125,7 @@ try {
     assert.equal(opened.snapshot.activeSpaceId, 'empty');
     assert.equal(opened.snapshot.tabs.find(tab => tab.id === opened.tabId).windowId, WINDOW);
     assert.equal(session.activeSpaces[8], 'work');
-    assert.deepEqual(sent.map(message => message.command), ['hello', 'snapshot', 'openTab']);
+    assert.deepEqual(sent.map(message => message.command), ['hello', 'hello', 'hello', 'openTab']);
     assert(sent.every(message => message.type === BRIDGE_TYPE && message.version === BRIDGE_VERSION));
 
     // An inaccessible folder must not break the consumer's live-tab snapshot.
@@ -163,7 +163,7 @@ try {
         [[firstId, 'favorite-1', null], [secondId, 'favorite-2', null]]);
     const beforeSnapshot = sent.length;
     const closedFavorites = await client.snapshot(WINDOW);
-    assert.deepEqual(sent.slice(beforeSnapshot).map(message => message.command), ['snapshot', 'hello'],
+    assert.deepEqual(sent.slice(beforeSnapshot).map(message => message.command), ['hello'],
         "Optional Favorites data uses Spotlight's authenticated capability check.");
     assert.deepEqual(closedFavorites.favorites, favoriteHello.snapshot.favorites);
     assert.equal(created, createsBeforeOpen, 'Reading closed Favorites must never restore tabs.');

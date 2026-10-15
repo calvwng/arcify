@@ -63,9 +63,9 @@ export function createFavoritesDragSource({ document, getContext, selection = nu
         if (source.kind === 'folder') return { error: 'Favorites does not accept folders. Open the folder and select its bookmarks.' };
         if (source.kind === 'live' && !Number.isInteger(source.tabId)) return { error: 'This item cannot be added to Favorites.' };
         return { source, hint: source.kind === 'bookmarks'
-            ? `Add supported bookmarks from ${source.bookmarks.length} selected to Favorites in visible order. Other URL types are skipped. Opens or reuses pinned tabs; source bookmarks stay in their folders.`
+            ? `Add supported bookmarks from ${source.bookmarks.length} selected to Favorites in visible order. Other URL types are skipped. Opens or reuses Favorite tabs using your current setting; source bookmarks stay in their folders.`
             : source.kind === 'bookmark' && !source.tabId
-            ? 'Opens a pinned tab in this window and saves a Favorite. Your saved bookmark stays in its folder.'
+            ? 'Opens a Favorite tab in this window using your current setting. Your saved bookmark stays in its folder.'
             : source.kind === 'saved' ? 'Reorder your saved Favorites across Spaces and windows.'
             : source.kind === 'native' ? 'Reorder browser pins. Right-click to keep one as a saved Favorite.' : 'Save this tab as a Favorite.' };
     }

@@ -12,6 +12,8 @@ on:
       - 'scripts/paired-chrome-sidebar.mjs'
       - 'scripts/paired-chrome-sidebar-appearance.mjs'
       - 'scripts/paired-chrome-management-scroll.mjs'
+      - 'scripts/paired-chrome-today-selection.mjs'
+      - 'scripts/paired-chrome-native-close.*'
       - 'scripts/paired-chrome-newtab.mjs'
       - 'scripts/paired-chrome-favorites.mjs'
       - 'scripts/paired-chrome-space-marker.mjs'
@@ -24,6 +26,10 @@ on:
       - 'tests/unit/paired-chrome-sidebar.test.js'
       - 'tests/unit/paired-chrome-sidebar-appearance.test.js'
       - 'tests/unit/paired-chrome-management-scroll.test.js'
+      - 'tests/unit/paired-chrome-today-selection.test.js'
+      - 'tests/unit/paired-chrome-native-close.test.js'
+      - 'tests/unit/paired_chrome_native_close_test.py'
+      - 'tests/unit/paired-chrome-ordinary-favorites.test.js'
       - 'tests/unit/paired-chrome-newtab.test.js'
       - 'tests/unit/paired-chrome-favorites.test.js'
       - 'tests/unit/paired-chrome-space-marker.test.js'
@@ -49,6 +55,11 @@ on:
       - 'favorites-drop-target.js'
       - 'favorite-icons.js'
       - 'favorite-store.js'
+      - 'favorite-continuity.js'
+      - 'favorite-witness-protocol.js'
+      - 'today-*.js'
+      - 'tests/unit/today-*.test.js'
+      - 'tests/unit/ordinary-favorites.test.js'
       - 'saved-favorites-ui.js'
       - 'tests/unit/favorite*.test.js'
       - 'tests/unit/saved-favorites*.test.js'
@@ -105,7 +116,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: a4e925ccae8ca18410062726cd9a792c35fcf559
+          ref: 019b52718c84c84f785081537534b8902e47946a
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node

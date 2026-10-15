@@ -87,11 +87,8 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
         };
         item(favoriteId && !tabId ? 'Open Favorite' : 'Go to Tab', () => activate(node));
         if (favoriteId && tabId) item('Close Tab (Keep Favorite)', () => run(`close:${favoriteId}`, async () => {
-            const latest = await request('get');
-            if (getWindowId() !== windowId || !latest.favorites.some(record => record.id === favoriteId && record.tabId === tabId)) throw new Error('This Favorite’s open tab changed. Refresh and try again.');
-            const tab = await api.tabs.get(tabId);
-            if (tab.windowId !== windowId || !tab.pinned) throw new Error('This Favorite’s open tab changed. Refresh and try again.');
-            await api.tabs.remove(tabId);
+            if (getWindowId() !== windowId) throw new Error('This Favorite’s window changed. Refresh and try again.');
+            await request('closeTab', { favoriteId, tabId });
         }, 'Tab closed. Your Favorite is saved.'));
         if (favoriteId) item('Remove Favorite', () => run(`remove:${favoriteId}`, () => request('remove', { favoriteId }), 'Favorite removed. Open pages and source bookmarks were kept.'));
         else item('Keep as saved Favorite', () => run(`adopt:${tabId}`, () => request('addTab', { tabId }), 'Favorite saved across Spaces and windows.'));

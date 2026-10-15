@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
+import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
+import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture } from './paired-chrome-ordinary-favorites.mjs';
+import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
 import { exerciseSidebarAppearance } from './paired-chrome-sidebar-appearance.mjs';
 import { exerciseBookmarkMultiSelection, assertNativeDragSourceStable } from './paired-chrome-bookmark-selection.mjs';
 /**
@@ -40,7 +43,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = 'a4e925ccae8ca18410062726cd9a792c35fcf559';
+const PINNED_SPOTLIGHT = '019b52718c84c84f785081537534b8902e47946a';
 const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -77,7 +80,9 @@ const stepNames = [
     'Visible bookmark multi-selection batches exact Favorites without altering source bookmarks',
     'Full same-profile browser restart preserves saved Favorites without guessing restored bindings',
     'Sidebar appearance persists compact fixed Favorites and usable Space headers through real options input',
-    'Native sidebar management preserves offscreen-active scroll and focus while deliberate activation still reveals'
+    'Native sidebar management preserves offscreen-active scroll and focus while deliberate activation still reveals',
+    'Today multi-selection saves an explicitly named folder without closing tabs and refreshes paired search',
+    'Ordinary Favorites close with one native Ctrl+W, remain global and retain witnessed reload identity'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -91,6 +96,7 @@ const report = {
         'Workspace rendering regressions use sidebar.html in a regular tab. Dedicated command checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking/focus and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
+        'The ordinary-Favorite close case separately sends one native XTEST Ctrl+W to the verified Chrome window under CI Xvfb and requires exact tab/target destruction. It does not claim physical keyboard hardware or Helium shortcut acceptance.',
         'Independent overlay cases wait for the previous close animation to remove its host. Rapid close/reopen stress is not exercised.',
         'The runner uses its installed stable Chrome and existing AppArmor policy, with actual Namespace/PID/network/seccomp sandbox evidence required. No privileged helper is selected, installed or modified. The runner image supplies the browser version; package/runtime evidence is recorded for each run.',
         'A disposable CI profile is used. The final Favorites case performs one graceful full-process restart with the same profile; arbitrary crash/session restoration, store-installed builds, existing user profiles and manual extension-install UI remain untested.',
@@ -99,7 +105,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-let launchOptions, persistentFixture;
+let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
 const networkTargets = new WeakMap();
@@ -208,7 +214,7 @@ async function external(page, peerId, command, payload, requestId = `ci-${crypto
     });
 }
 async function bridge(command, payload = {}, requestId) {
-    const response = await external(spotlightOptions, arcifyId, command, { windowId: fixture.windowA, ...payload }, requestId);
+    const response = await external(spotlightOptions, arcifyId, command, { windowId: fixture.windowA, supportedFeatures:[GLOBAL_FAVORITES_FEATURE], ...payload }, requestId);
     assert.equal(response?.ok, true, JSON.stringify(response));
     assert.equal(response.type, 'arcify-bridge'); assert.equal(response.version, 1); assert.equal(response.role, 'arcify');
     return response;
@@ -406,6 +412,89 @@ async function sidebarEnter(page, label) {
     finally { await input.dispose(); }
 }
 
+// Retain the same raw-target, original-view, registry and fresh-identity proof
+// for every real reload, including Favorite continuity acceptance.
+async function reloadPairedExtension(name) {
+    assert(['arcify', 'spotlight'].includes(name));
+    const id = name === 'arcify' ? arcifyId : spotlightId;
+    const page = name === 'arcify' ? arcifyOptions : spotlightOptions;
+    const url = `chrome-extension://${id}/background.js`;
+    const workerTarget = browser.targets().find(target => target.type() === 'service_worker' && target.url() === url);
+    assert(workerTarget);
+    const worker = await workerTarget.worker();
+    const targetsCdp = await browser.target().createCDPSession();
+    const viewCdp = await page.target().createCDPSession();
+    const defaultContexts = new Set();
+    let collectingInitialContexts = true;
+    const view = { url: page.url(), contexts: [], invalidations: [] };
+    viewCdp.on('Runtime.executionContextCreated', ({ context }) => {
+        view.contexts.push(context);
+        if (collectingInitialContexts && context.auxData?.isDefault) defaultContexts.add(context.id);
+    });
+    viewCdp.on('Runtime.executionContextDestroyed', event => {
+        if (defaultContexts.has(event.executionContextId)) view.invalidations.push(event);
+    });
+    viewCdp.on('Runtime.executionContextsCleared', () => view.invalidations.push({ allContextsCleared: true }));
+    report.extensionReloads ||= [];
+    const evidence = { name, view, observations: [], registry: [] };
+    const expected = { ...report.extensions[name], path: resolve(name === 'arcify' ? ROOT : COMPANION, 'dist') };
+    const readRegistry = async () => (await targetsCdp.send('Extensions.getExtensions')).extensions;
+    const recordRegistry = async (phase, extensions) => { evidence.registry.push({ phase, extensions, observedAt: new Date().toISOString() }); await saveReport(); };
+    report.extensionReloads.push(evidence);
+    try {
+        const installedBefore = await readRegistry();
+        await recordRegistry('before-reload', installedBefore);
+        assert.equal(findInstalledExtension(installedBefore, expected).enabled, true);
+        await viewCdp.send('Runtime.enable');
+        collectingInitialContexts = false;
+        assert(defaultContexts.size > 0, 'The original extension options realm must be observed before reload.');
+        const readTargets = async () => (await targetsCdp.send('Target.getTargets')).targetInfos;
+        const original = await reloadObservedExtension({ url, readTargets,
+            releaseObservers: async () => {
+                const network = await networkTargets.get(workerTarget);
+                assert(network, 'The fixture-owned worker network session must be tracked.');
+                evidence.detachedNetworkSessionId = network.id();
+                await network.detach();
+                networkTargets.delete(workerTarget);
+                evidence.detachedWorkerSessionId = worker.client.id();
+                await worker.client.detach();
+            },
+            reload: () => ui(page, `Reload ${name} extension`, () => page.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 50); })),
+            viewInvalidated: async () => { view.closed = page.isClosed(); return view.closed || view.invalidations.length > 0; },
+            record: async observation => { evidence.observations.push({ ...observation, observedAt: new Date().toISOString() }); await saveReport(); }
+        });
+        await waitForEnabledExtension(readRegistry, expected, extensions => recordRegistry('after-unload', extensions));
+        // A reloaded MV3 worker need not stay running without an event.
+        // Reconnect through the same fresh settings/peer check a user uses.
+        const reopened = await observePage(await browser.newPage());
+        await reopened.goto(`chrome-extension://${id}/options.html`);
+        if (name === 'arcify') arcifyOptions = reopened; else spotlightOptions = reopened;
+        if (!page.isClosed()) await page.close();
+        if (name === 'arcify') {
+            await spotlightOptions.waitForSelector('#refresh-connection:not([disabled])');
+            await clickUI(spotlightOptions, '#refresh-connection');
+            await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
+        } else {
+            await arcifyOptions.waitForSelector('#bridgeCheck:not([disabled])');
+            await clickUI(arcifyOptions, '#bridgeCheck');
+            await arcifyOptions.waitForSelector('#bridgeStatus[data-state="connected"]');
+        }
+        const after = await poll(readTargets, targets => targets.some(target => target.type === 'service_worker' && target.url === url && target.targetId !== original.targetId), 'the reloaded extension worker');
+        evidence.replacement = findExactWorkerTarget(after, url);
+        assert.notEqual(evidence.replacement.targetId, original.targetId);
+        const replacement = await browser.waitForTarget(target => target !== workerTarget && target.type() === 'service_worker' && target.url() === url);
+        await blockExternalHttps(replacement);
+        evidence.identity = await waitForExtensionWorkerIdentity(await replacement.worker(), id);
+    } finally {
+        try { await recordRegistry('final', await readRegistry()); }
+        catch (error) { report.diagnostics.push({ type: 'reload-registry-read', message: error.message }); }
+        await viewCdp.detach().catch(error => report.diagnostics.push({ type: 'reload-view-detach', message: error.message }));
+        await targetsCdp.detach();
+        await saveReport();
+    }
+    return { evidence, arcifyOptions, spotlightOptions };
+}
+
 await mkdir(OUTPUT, { recursive: true });
 try {
     report.environment.arcifyHead = head(ROOT);
@@ -586,8 +675,9 @@ try {
         return { pairingOrders: ['arcify-first', 'spotlight-first'], unpairedError: unpaired.error.code, arcifyStatus: await arcifyOptions.$eval('#bridgeStatus', node => node.textContent), spotlightStatus: await spotlightOptions.$eval('#connection-status-message', node => node.textContent) };
     });
     await step(stepNames[2], async () => {
-        const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two' };
+        const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two', '/today-selection-one': 'Today Selection One', '/today-selection-two': 'Today Selection Two', '/today-selection-four': 'Today Selection Four', '/today-selection-five': 'Today Selection Five', '/today-selection-six': 'Today Selection Six' };
         server = createServer((request, response) => {
+            if (serveOrdinaryFavoriteFixture(request, response)) return;
             if (serveFavoriteIconFixture(request, response)) return;
             const path = new URL(request.url, 'http://localhost').pathname;
             if (path === '/keyboard-host' || path === '/keyboard-host.js') {
@@ -812,84 +902,7 @@ try {
     });
     await step(stepNames[12], async () => {
         const before = await snapshot();
-        for (const name of ['arcify', 'spotlight']) {
-            const id = name === 'arcify' ? arcifyId : spotlightId;
-            const page = name === 'arcify' ? arcifyOptions : spotlightOptions;
-            const url = `chrome-extension://${id}/background.js`;
-            const workerTarget = browser.targets().find(target => target.type() === 'service_worker' && target.url() === url);
-            assert(workerTarget);
-            const worker = await workerTarget.worker();
-            const targetsCdp = await browser.target().createCDPSession();
-            const viewCdp = await page.target().createCDPSession();
-            const defaultContexts = new Set();
-            let collectingInitialContexts = true;
-            const view = { url: page.url(), contexts: [], invalidations: [] };
-            viewCdp.on('Runtime.executionContextCreated', ({ context }) => {
-                view.contexts.push(context);
-                if (collectingInitialContexts && context.auxData?.isDefault) defaultContexts.add(context.id);
-            });
-            viewCdp.on('Runtime.executionContextDestroyed', event => {
-                if (defaultContexts.has(event.executionContextId)) view.invalidations.push(event);
-            });
-            viewCdp.on('Runtime.executionContextsCleared', () => view.invalidations.push({ allContextsCleared: true }));
-            report.extensionReloads ||= [];
-            const evidence = { name, view, observations: [], registry: [] };
-            const expected = { ...report.extensions[name], path: resolve(name === 'arcify' ? ROOT : COMPANION, 'dist') };
-            const readRegistry = async () => (await targetsCdp.send('Extensions.getExtensions')).extensions;
-            const recordRegistry = async (phase, extensions) => { evidence.registry.push({ phase, extensions, observedAt: new Date().toISOString() }); await saveReport(); };
-            report.extensionReloads.push(evidence);
-            try {
-                const installedBefore = await readRegistry();
-                await recordRegistry('before-reload', installedBefore);
-                assert.equal(findInstalledExtension(installedBefore, expected).enabled, true);
-                await viewCdp.send('Runtime.enable');
-                collectingInitialContexts = false;
-                assert(defaultContexts.size > 0, 'The original extension options realm must be observed before reload.');
-                const readTargets = async () => (await targetsCdp.send('Target.getTargets')).targetInfos;
-                const original = await reloadObservedExtension({ url, readTargets,
-                    releaseObservers: async () => {
-                        const network = await networkTargets.get(workerTarget);
-                        assert(network, 'The fixture-owned worker network session must be tracked.');
-                        evidence.detachedNetworkSessionId = network.id();
-                        await network.detach();
-                        networkTargets.delete(workerTarget);
-                        evidence.detachedWorkerSessionId = worker.client.id();
-                        await worker.client.detach();
-                    },
-                    reload: () => ui(page, `Reload ${name} extension`, () => page.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 50); })),
-                    viewInvalidated: async () => { view.closed = page.isClosed(); return view.closed || view.invalidations.length > 0; },
-                    record: async observation => { evidence.observations.push({ ...observation, observedAt: new Date().toISOString() }); await saveReport(); }
-                });
-                await waitForEnabledExtension(readRegistry, expected, extensions => recordRegistry('after-unload', extensions));
-                // A reloaded MV3 worker need not stay running without an event.
-                // Reconnect through the same fresh settings/peer check a user uses.
-                const reopened = await observePage(await browser.newPage());
-                await reopened.goto(`chrome-extension://${id}/options.html`);
-                if (name === 'arcify') arcifyOptions = reopened; else spotlightOptions = reopened;
-                if (!page.isClosed()) await page.close();
-                if (name === 'arcify') {
-                    await spotlightOptions.waitForSelector('#refresh-connection:not([disabled])');
-                    await clickUI(spotlightOptions, '#refresh-connection');
-                    await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
-                } else {
-                    await arcifyOptions.waitForSelector('#bridgeCheck:not([disabled])');
-                    await clickUI(arcifyOptions, '#bridgeCheck');
-                    await arcifyOptions.waitForSelector('#bridgeStatus[data-state="connected"]');
-                }
-                const after = await poll(readTargets, targets => targets.some(target => target.type === 'service_worker' && target.url === url && target.targetId !== original.targetId), 'the reloaded extension worker');
-                evidence.replacement = findExactWorkerTarget(after, url);
-                assert.notEqual(evidence.replacement.targetId, original.targetId);
-                const replacement = await browser.waitForTarget(target => target !== workerTarget && target.type() === 'service_worker' && target.url() === url);
-                await blockExternalHttps(replacement);
-                evidence.identity = await waitForExtensionWorkerIdentity(await replacement.worker(), id);
-            } finally {
-                try { await recordRegistry('final', await readRegistry()); }
-                catch (error) { report.diagnostics.push({ type: 'reload-registry-read', message: error.message }); }
-                await viewCdp.detach().catch(error => report.diagnostics.push({ type: 'reload-view-detach', message: error.message }));
-                await targetsCdp.detach();
-                await saveReport();
-            }
-        }
+        for (const name of ['arcify', 'spotlight']) await reloadPairedExtension(name);
         await spotlightOptions.waitForSelector('#refresh-connection:not([disabled])');
         await clickUI(spotlightOptions, '#refresh-connection'); await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
         const after = await snapshot();
@@ -1853,12 +1866,24 @@ try {
             }
         } }));
 
+    await step(stepNames[35], () => exerciseTodaySelection({ apiPage:arcifyOptions,newTabPage,ui,screenshot,
+        snapshot,poll,fixture,arcifyId,spotlightId,search,
+        record:async observation => { report.todaySelection ||= []; report.todaySelection.push(observation); await saveReport(); } }));
+
+    await step(stepNames[36], async () => {
+        ordinaryFixture = await exerciseOrdinaryFavorites({ browser,apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,
+            newTabPage,pageForUrl,ui,screenshot,snapshot,poll,fixture,arcifyId,spotlightId,search,
+            reloadArcify:()=>reloadPairedExtension('arcify'),reloadSpotlight:()=>reloadPairedExtension('spotlight'),
+            record:async evidence => { report.ordinaryFavorites = evidence; await saveReport(); } });
+        return ordinaryFixture;
+    });
+
     await step(stepNames[32], async () => {
         const restarted = await exerciseFavoritesBrowserRestart({browser,launchOptions,
             launch:async options => { browser = await puppeteer.launch(structuredClone(options)); return browser; },
             apiPage:arcifyOptions,fixture,arcifyId,spotlightId,
             expectedExtensions:['arcify','spotlight'].map(name => ({...report.extensions[name],path:resolve(name === 'arcify' ? ROOT : COMPANION,'dist')})),
-            snapshot,observePage,blockExternalHttps,ui,screenshot,poll,
+            snapshot,observePage,blockExternalHttps,ui,screenshot,poll,ordinaryFixture:ordinaryFixture.restartFixture,
             record:async evidence => { report.favoritesBrowserRestart = evidence; await saveReport(); },
             recordTarget:event => report.targetLifecycle.push(event),
             recordDiagnostic:event => report.diagnostics.push(event)});

@@ -1,3 +1,4 @@
+import { configureFavoriteContinuityPeer } from './favorite-continuity.js';
 import { PEER_KEY, isExtensionId, sendBridgeRequest } from './spotlight-bridge-protocol.js';
 
 // Saving an ID and the companion approving it are separate steps. Neither a
@@ -75,12 +76,12 @@ export function initializeSpotlightBridgeOptions({
             show('error', 'Enter the other extension’s 32-letter ID (a–p).');
             return;
         }
-        await api.storage.local.set({ [PEER_KEY]: peerId });
+        await configureFavoriteContinuityPeer(api, peerId);
         input.value = peerId;
         await checkSaved();
     });
     const disconnect = () => withBusy(async () => {
-        await api.storage.local.remove(PEER_KEY);
+        await configureFavoriteContinuityPeer(api, '');
         input.value = '';
         showSavedId(null);
         show('disabled', 'Disconnected. Incoming companion requests are rejected.');

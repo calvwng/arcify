@@ -2,7 +2,7 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { SpaceStore, ownerOf } from '../../space-store.js';
 import { createSpotlightBridge, getBridgeSnapshot, runBridgeAction, registerSpotlightBridge } from '../../spotlight-bridge.js';
-import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY } from '../../spotlight-bridge-protocol.js';
+import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY, PAIRING_GENERATION_KEY } from '../../spotlight-bridge-protocol.js';
 import { pngIcon } from '../fixtures/favorite-icons.js';
 
 // These are API-level mocks, not claims of verification in a running browser.
@@ -806,4 +806,29 @@ test('closed persistent Favorite opens once through paired journal, rejects stal
     assertError(await handle(request('openFavorite', { favoriteId }, 'wrong-peer'), { id: SELF }), 'UNAUTHORIZED');
     assertError(await handle(request('openFavorite', { favoriteId, windowId: 3 }, 'popup-saved'), SENDER), 'INVALID_WINDOW');
     assert.equal(writes('tab.create').length, 1);
+});
+
+
+test('existing bookmark activation honors the late guard before Space activation or tab focus', async () => {
+    const store = await makeStore(); store.active[1] = 'b';
+    const snapshot = await getBridgeSnapshot(store, 1); mutations.length = 0;
+    let checks = 0;
+    await assert.rejects(runBridgeAction(store, request('openBookmark', { spaceId: 'a', bookmarkId: 'twin-1' }), snapshot,
+        { beforeMutation: async () => { checks++; throw Object.assign(new Error('Pairing changed'), { code: 'UNAUTHORIZED' }); } }), { code: 'UNAUTHORIZED' });
+    assert.equal(checks, 1); assert.equal(store.active[1], 'b'); assert.deepEqual(mutations, []);
+});
+
+test('pairing revocation during tab activation suppresses the later window focus', async () => {
+    const store = await makeStore();
+    local[PAIRING_GENERATION_KEY] = crypto.randomUUID();
+    const update = chrome.tabs.update;
+    chrome.tabs.update = async (id, changes) => {
+        const tab = await update(id, changes);
+        // A disconnect/reconnect can retain the same peer ID but revokes the request.
+        if (changes.active) local[PAIRING_GENERATION_KEY] = crypto.randomUUID();
+        return tab;
+    };
+    assertError(await createSpotlightBridge(store)(request('activateTab', { tabId: 5 }), SENDER), 'UNAUTHORIZED');
+    assert.deepEqual(writes('tab.update'), [['tab.update', 5, { active: true }]]);
+    assert.deepEqual(writes('window.update'), []);
 });

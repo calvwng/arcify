@@ -4,6 +4,10 @@ Arcify can select visible bookmark rows in the current Space and add them to the
 shared saved Favorites list with one drag. Your original bookmark records stay in
 their folders. This does not import folder contents or move bookmarks.
 
+For live Today tabs, see [Select Today tabs and save a named folder](today-tab-selection.md).
+Pinned and Today selections have a section boundary: selecting in one clears the
+other, and Shift ranges never combine their different identities.
+
 ## Selection
 
 - **Ctrl-click** on Windows/Linux or **Cmd-click** on macOS toggles a bookmark.

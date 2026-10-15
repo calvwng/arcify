@@ -1,6 +1,17 @@
 // Optional, one-way projection. This is the only module allowed to mutate groups.
 // Space identity and ordering never depend on the projection succeeding.
-export async function syncSpaceGroups(spaces, activeSpaces = {}) {
+export async function detachGlobalTabs(tabIds) {
+    if (!tabIds.length) return;
+    const requested = new Set(tabIds);
+    const grouped = (await chrome.tabs.query({})).filter(tab => requested.has(tab.id) && Number.isInteger(tab.groupId) && tab.groupId >= 0);
+    if (grouped.length) await chrome.tabs.ungroup(grouped.map(tab => tab.id));
+}
+
+export async function syncSpaceGroups(spaces, activeSpaces = {}, globalTabIds = []) {
+    // Ownership promotion must eject only the exact Favorite, even when group
+    // projection is disabled; otherwise a prior collapsed group hides it.
+    await detachGlobalTabs(globalTabIds);
+    const globalIds = new Set(globalTabIds);
     const { syncTabGroups = false } = await chrome.storage.sync.get('syncTabGroups');
     if (!syncTabGroups) return;
     const { spaceGroupProjection = {} } = await chrome.storage.session.get('spaceGroupProjection');
@@ -10,7 +21,7 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}) {
     const next = {};
     const windowGroups = new Map();
     for (const space of spaces) {
-        const members = [...space.spaceBookmarks, ...space.temporaryTabs].map(id => byId.get(id)).filter(t => t && !t.pinned);
+        const members = [...space.spaceBookmarks, ...space.temporaryTabs].map(id => byId.get(id)).filter(t => t && !t.pinned && !globalIds.has(t.id));
         const windows = [...new Set(members.map(t => t.windowId))];
         for (const windowId of windows) {
             // Recheck between spaces so disabling the setting stops a long projection.

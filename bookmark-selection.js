@@ -9,7 +9,7 @@ const sameContext = (a, b) => a && b && ['windowId', 'spaceId', 'bookmarkFolderI
 
 // Selection is local UI state. Only registered bookmark rows in the active
 // Space participate; neither CSS classes nor transfer text create authority.
-export function createBookmarkSelection({ document, getContext }) {
+export function createBookmarkSelection({ document, getContext, onGesture = () => {} }) {
     const registered = new WeakMap();
     let selected = new Map(), anchor = null, scope = null, view = [], revision = 0, interaction = 0, image = null;
     const status = document.createElement('div');
@@ -98,6 +98,7 @@ export function createBookmarkSelection({ document, getContext }) {
     function select(element, event) {
         const entries = reconcile(), index = entries.findIndex(entry => entry.element === element);
         if (index < 0) return false;
+        onGesture();
         const entry = entries[index], additive = event.ctrlKey || event.metaKey;
         if (event.shiftKey) {
             const start = entries.findIndex(item => item.bookmarkId === anchor?.bookmarkId);
@@ -123,6 +124,7 @@ export function createBookmarkSelection({ document, getContext }) {
                 // Even an unavailable/hidden row must not activate on a modifier.
                 event.preventDefault(); event.stopImmediatePropagation(); select(element, event);
             } else {
+                onGesture();
                 const entry = reconcile().find(item => item.element === element);
                 clear();
                 // Ordinary activation clears the batch but establishes the
@@ -143,6 +145,7 @@ export function createBookmarkSelection({ document, getContext }) {
         interaction++;
         const entries = reconcile(), entry = entries.find(item => item.element === element);
         if (!entry) { clear(); return null; }
+        onGesture();
         if (!selected.has(entry.bookmarkId)) { selected = new Map([[entry.bookmarkId, entry]]); anchor = entry; revision++; paint(); }
         if (selected.size > MAX_BOOKMARK_SELECTION) return { error: `Select at most ${MAX_BOOKMARK_SELECTION} bookmarks for one Favorites drop. Nothing was added.` };
         const visibleEntries = Object.freeze(entries.map(item => Object.freeze({ ...item })));

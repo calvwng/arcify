@@ -210,7 +210,15 @@ test('activation before the new row exists still reveals after membership adopti
     assert.equal(live(5), null);
     storedSpaces[0].temporaryTabs.push(5);
     await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local');
-    await wait(240);
+    // Membership repaint and its queued reveal are separate tasks. Wait for
+    // the actual invariant rather than racing a fixed sleep under full-suite
+    // CPU load; a missing reveal still fails at the same assertions below.
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+        const row = live(5), rect = row?.getBoundingClientRect();
+        if (rect && rect.top >= 0 && rect.bottom <= content().clientHeight && content().scrollTop > 700) break;
+        await wait(10);
+    }
     const rect = live(5).getBoundingClientRect();
     assert(rect.top >= 0 && rect.bottom <= content().clientHeight);
     assert(content().scrollTop > 700);

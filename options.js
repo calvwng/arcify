@@ -102,6 +102,7 @@ async function saveOptions() {
     startupLauncherEnabled: getCheckboxValue(document.getElementById('startupLauncherEnabled'), false),
     autoArchiveEnabled: getCheckboxValue(document.getElementById('autoArchiveEnabled'), false),
     autoArchiveIdleMinutes: parseInt(autoArchiveIdleMinutesInput?.value, 10) || 360,
+    ordinaryFavoriteTabs: getCheckboxValue(document.getElementById('ordinaryFavoriteTabs'), false),
     syncTabGroups: getCheckboxValue(document.getElementById('syncTabGroups'), false),
     invertTabOrder: getCheckboxValue(document.getElementById('invertTabOrder'), true),
     showAllOpenTabsInCollapsedFolders: getCheckboxValue(document.getElementById('showAllOpenTabsInCollapsedFolders'), false),
@@ -147,6 +148,7 @@ async function restoreOptions() {
   // Restore checkbox values
   setCheckboxValue(document.getElementById('startupLauncherEnabled'), settings.startupLauncherEnabled, false);
   setCheckboxValue(document.getElementById('autoArchiveEnabled'), settings.autoArchiveEnabled, false);
+  setCheckboxValue(document.getElementById('ordinaryFavoriteTabs'), settings.ordinaryFavoriteTabs, false);
   setCheckboxValue(document.getElementById('syncTabGroups'), settings.syncTabGroups, false);
   setCheckboxValue(document.getElementById('invertTabOrder'), settings.invertTabOrder, true);
   setCheckboxValue(document.getElementById('showAllOpenTabsInCollapsedFolders'), settings.showAllOpenTabsInCollapsedFolders, false);
@@ -251,7 +253,7 @@ function setupAutoSave() {
   addListenerIfExists('defaultSpaceName', 'change', saveOptions);
 
   // Auto-save for checkboxes (most just save immediately)
-  const checkboxIds = ['startupLauncherEnabled', 'syncTabGroups', 'invertTabOrder', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
+  const checkboxIds = ['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'syncTabGroups', 'invertTabOrder', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
   checkboxIds.forEach(id => addListenerIfExists(id, 'change', saveOptions));
 
   // Auto-archive checkbox needs special handling to update visibility

@@ -97,6 +97,7 @@ const Utils = {
             autoArchiveEnabled: false, // Default: disabled
             autoArchiveIdleMinutes: 360, // Default: 6 hours
             syncTabGroups: false,
+            ordinaryFavoriteTabs: false, // Prospective; existing Favorite tabs keep their mode
             invertTabOrder: true, // Default: enabled (New tabs/High index on top)
             colorOverrides: null, // Default: no color overrides
             debugLoggingEnabled: false, // Default: disabled (controls debug logging)

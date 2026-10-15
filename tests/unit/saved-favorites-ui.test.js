@@ -19,6 +19,12 @@ function fixture() {
         runtime: { getURL: path => `chrome-extension://fixture/${path}`, async sendMessage(message) {
             calls.push(structuredClone(message));
             if (message.action === 'get') { const result = structuredClone({ success: true, favorites, nativeTabs }); await beforeGet?.(); return result; }
+            if (message.action === 'closeTab') {
+                const favorite = favorites.find(item => item.id === message.favoriteId && item.tabId === message.tabId);
+                const tab = tabs.find(tab => tab.id === message.tabId);
+                if (!favorite || !tab || tab.windowId !== message.windowId) return { success: false, code: 'STALE_TAB', error: 'This Favorite’s open tab changed.' };
+                await api.tabs.remove(message.tabId);
+            }
             return { success: true, favorites, nativeTabs };
         } },
         tabs: { async query() { return tabs.filter(tab => tab.windowId === windowId && tab.active); },

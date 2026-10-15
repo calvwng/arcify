@@ -77,7 +77,7 @@ async function reorderParent(parentId, desired, initial, observedOrders) {
     return live;
 }
 
-async function applyOperation(request = {}) {
+async function applyOperation(request = {}, { beforeWrite, onCreated } = {}) {
     const parents = (request.parents || []).map(parent => ({
         parentId: String(parent.parentId),
         expected: normalizeList(parent.expectedCanonicalIds, 'expectedCanonicalIds'),
@@ -160,10 +160,14 @@ async function applyOperation(request = {}) {
                 throw new BookmarkOrderError('New bookmark position is invalid.', { code: 'invalid_request', observedOrders: fresh });
             }
             const index = target.desired.indexOf('$new');
+            // Trusted background callers can revalidate live sources after this
+            // operation waited in the writer queue. Never accepted from a message.
+            await beforeWrite?.();
             const created = await chrome.bookmarks.create({
                 parentId: target.parentId, index, title: relocation.title, url: relocation.url
             });
             createdId = String(created.id);
+            onCreated?.(createdId);
             predictedAfterRelocation = predictRelocationOrders(parents, relocation, createdId);
             for (const parent of parents) parent.desired = parent.desired.map(id => id === '$new' ? createdId : id);
         } else if (relocation.kind === 'move') {
@@ -201,8 +205,14 @@ async function applyOperation(request = {}) {
     return { orders: observedOrders, createdId };
 }
 
-export function enqueueBookmarkOperation(request) {
-    const run = chain.then(() => applyOperation(request));
+export function enqueueBookmarkOperation(request, { beforeWrite } = {}) {
+    let createdId = null;
+    const run = chain.then(() => applyOperation(request, { beforeWrite, onCreated: id => { createdId = id; } })).catch(error => {
+        // A caller must be able to report an already-created record even when
+        // post-write verification fails. Never delete it or retry silently.
+        if (createdId) { error.createdId = createdId; error.moved = true; }
+        throw error;
+    });
     chain = run.catch(() => {});
     return run;
 }

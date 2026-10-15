@@ -17,21 +17,38 @@ registerStartupLauncher();
  */
 
 import { SpaceStore, ownerOf } from './space-store.js';
+import { createFavoriteContinuity } from './favorite-continuity.js';
 import { FavoriteStore, registerFavoriteMessages } from './favorite-store.js';
 import { registerSpotlightBridge } from './spotlight-bridge.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { registerBookmarkListeners } from './bookmark-events.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
+import { registerTodayFolderMessages } from './today-folder-store.js';
 
 const spaceStore = new SpaceStore();
 spaceStore.install();
-const favoriteStore = new FavoriteStore(spaceStore);
+registerTodayFolderMessages(spaceStore);
+const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity() });
 favoriteStore.install();
 registerFavoriteMessages(favoriteStore);
 const spotlightInvalidation = registerSpotlightBridge(spaceStore);
 registerBookmarkListeners(() => spotlightInvalidation.invalidateAll());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'spaceStore') return;
+    if (message.action === 'clean' || message.action === 'delete') {
+        const ownUrl = chrome.runtime.getURL('');
+        const fields = message.action === 'clean' ? ['type', 'action', 'spaceId', 'windowId'] : ['type', 'action', 'spaceId'];
+        if (sender?.id !== chrome.runtime.id || sender.url && !sender.url.startsWith(ownUrl)
+            || sender.origin && sender.origin !== ownUrl.replace(/\/$/, '')
+            || message.action === 'clean' && sender.tab && sender.tab.windowId !== message.windowId) {
+            sendResponse({ success: false, code: 'UNAUTHORIZED', error: 'Invalid Space sender.' }); return;
+        }
+        if (typeof message.spaceId !== 'string' || !message.spaceId || message.spaceId.length > 200
+            || Object.keys(message).some(key => !fields.includes(key))
+            || message.action === 'clean' && (!Number.isSafeInteger(message.windowId) || message.windowId <= 0)) {
+            sendResponse({ success: false, code: 'INVALID_REQUEST', error: 'Invalid Space cleanup request.' }); return;
+        }
+    }
     spaceStore.dispatch(message).then(spaces => sendResponse({ success: true, spaces }), error => sendResponse({ success: false, error: error.message }));
     return true;
 });
@@ -248,7 +265,7 @@ async function runAutoArchiveCheck() {
 
             // Protect Arcify favorites: never archive a tab whose URL matches a bookmark
             // in the Arcify tree (compared by origin+pathname to tolerate query/hash drift).
-            if (isProtectedFavorite(tab, protectedIds, bindings, protectedUrlKeys)) {
+            if (isProtectedFavorite(tab, protectedIds, bindings, protectedUrlKeys, favoriteStore)) {
                 // Refresh activity so protected favorites aren't re-checked repeatedly.
                 await updateTabLastActivity(tab.id);
                 continue;
@@ -271,21 +288,21 @@ async function runAutoArchiveCheck() {
 
 
         for (const tab of tabsToArchive) {
-            const tabData = {
-                url: tab.url,
-                name: tab.title || tab.url, // Use URL if title is empty
-                spaceId: ownerOf(await spaceStore.dispatch({ action: 'get' }), tab.id)?.id
-            };
-
-            // Archive only tabs owned by an extension space.
-            if (tabData.spaceId) {
-                await Utils.addArchivedTab(tabData);
-                await chrome.tabs.remove(tab.id); // Close the tab after archiving
-                await removeTabLastActivity(tab.id); // Remove activity timestamp after archiving
-            } else {
-                // Decide if you want to update its activity or leave it for next check
-                // await updateTabLastActivity(tab.id);
-            }
+            await spaceStore.run(async () => {
+                let current;
+                try { current = await chrome.tabs.get(tab.id); } catch { return; }
+                const spaceId = ownerOf(spaceStore.spaces, current.id)?.id;
+                const currentProtectedIds = new Set(spaceStore.spaces.flatMap(space => space.spaceBookmarks));
+                if (!spaceId || current.windowId !== tab.windowId || current.incognito || current.active || current.audible
+                    || isStartupLauncherTab(current) || spaceStore.isGlobalTab(current)
+                    || isProtectedFavorite(current, currentProtectedIds, await Utils.getPinnedTabStates(), protectedUrlKeys)) return;
+                await Utils.addArchivedTab({ url: current.url, name: current.title || current.url, spaceId });
+                // Favorite adoption cannot interleave with this final read/remove.
+                current = await chrome.tabs.get(current.id);
+                if (current.pinned || current.active || current.audible || spaceStore.isGlobalTab(current)) return;
+                await chrome.tabs.remove(current.id);
+                await removeTabLastActivity(current.id);
+            });
         }
 
     } catch (error) {
