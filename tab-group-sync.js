@@ -44,7 +44,14 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}, globalTabIds = 
             }
             const current = await chrome.tabs.query({ groupId });
             current.sort((a, b) => a.index - b.index);
-            if (current.length === ids.length && current.some((t, i) => t.id !== ids[i])) {
+            // Chrome may leave an unowned tab (for example, our own options
+            // page) in this group. It must not block the owned partition's
+            // order, or be adopted, ungrouped, or included in the move.
+            const ownedIds = new Set(ids);
+            const currentOwned = current.filter(tab => ownedIds.has(tab.id));
+            // The fresh group query can race a tab closing or leaving the group.
+            // Only repair when every expected member is still present.
+            if (currentOwned.length === ids.length && currentOwned.some((tab, index) => tab.id !== ids[index])) {
                 await chrome.tabs.move(ids, { index: current[0].index });
             }
         }

@@ -80,6 +80,8 @@ on:
       - 'utils.js'
       - 'tests/unit/favorites-drop*.test.js'
       - 'startup-*.js'
+      - 'tab-group-sync.js'
+      - 'tests/unit/tab-group-order.test.js'
       - 'space-store.js'
       - 'space-continuity.js'
       - 'space-order.js'

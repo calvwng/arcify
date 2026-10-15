@@ -6,6 +6,17 @@ export function selectWindowSpaceTabs(space, tabs, windowId, globalTabIds = new 
         .map(id => byId.get(id)).filter(Boolean);
 }
 
+// Bookmark traversal validates bindings; it does not define saved tab order.
+// Keep other windows' slots and verified current-window pins in place, then
+// append bindings that were not present in this panel's initial snapshot.
+export function reconcileWindowPinOrder(previousPins, boundIds, windowTabIds) {
+    const bound = new Set(boundIds);
+    return [...new Set([
+        ...previousPins.filter(id => !windowTabIds.has(id) || bound.has(id)),
+        ...boundIds
+    ])];
+}
+
 // Reorder visible members without disturbing another window's positions.
 export function mergeVisibleOrder(allIds, visibleIds) {
     const visible = new Set(visibleIds);

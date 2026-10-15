@@ -37,7 +37,7 @@ import { captureSidebarViewport, createActiveTabReveal } from './sidebar-viewpor
 import { EditSessionRegistry } from './edit-sessions.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { getTabRowAction } from './tab-row-action.js';
-import { selectWindowSpaceTabs, mergeVisibleOrder, mergeCapturedTemporaryOrder, canonicalOrderFromDisplay, saveBookmarkOperation } from './sidebar-tabs.js';
+import { selectWindowSpaceTabs, reconcileWindowPinOrder, mergeVisibleOrder, mergeCapturedTemporaryOrder, canonicalOrderFromDisplay, saveBookmarkOperation } from './sidebar-tabs.js';
 import { ownerOf } from './space-store.js';
 import { canCreateFolder, createFolder } from './folder-policy.js';
 import { loadFolderCollapsed, saveFolderCollapsed } from './folder-state.js';
@@ -753,23 +753,26 @@ async function initSidebar() {
     spaceSaveQueue.reset(spaces);
     const allTabs = await chrome.tabs.query({});
     await Utils.prunePinnedTabStates(allTabs.map(t => t.id));
+    const windowTabIds = new Set(allTabs.filter(t => t.windowId === currentWindow.id).map(t => t.id));
+    let membershipChanged = false;
     // Restore bookmark bindings using only this space's owned tabs.
     for (const space of spaces) {
         try {
+            const previousMembership = JSON.stringify([space.spaceBookmarks, space.temporaryTabs]);
             const folder = await getSpaceBookmarkFolder(space);
             const bound = await BookmarkUtils.matchTabsWithBookmarks(folder, space.id,
                 Utils.setTabNameOverride.bind(Utils), Utils.setPinnedTabState.bind(Utils), null, Utils.getPinnedUrlKey.bind(Utils), currentWindow.id);
             const previousPins = space.spaceBookmarks;
-            const windowTabIds = new Set(allTabs.filter(t => t.windowId === currentWindow.id).map(t => t.id));
-            space.spaceBookmarks = [...new Set([...previousPins.filter(id => !windowTabIds.has(id)), ...bound])];
+            space.spaceBookmarks = reconcileWindowPinOrder(previousPins, bound, windowTabIds);
             space.temporaryTabs = [...new Set([...space.temporaryTabs, ...previousPins])].filter(id => !space.spaceBookmarks.includes(id));
+            membershipChanged ||= previousMembership !== JSON.stringify([space.spaceBookmarks, space.temporaryTabs]);
             for (const id of previousPins) if (!space.spaceBookmarks.includes(id)) await Utils.removePinnedTabState(id, { preserveNativePinned: true });
         } catch (error) {
             Logger.warn('Space bookmark association needs recovery:', space.id, error);
         }
         createSpaceElement(space);
     }
-    await saveSpaces();
+    if (membershipChanged) await saveSpaces();
     const activeTab = allTabs.find(t => t.active && t.windowId === currentWindow.id);
     activeChromeTabId = activeTab?.id;
     const { activeSpaces = {} } = await chrome.storage.session.get('activeSpaces');
