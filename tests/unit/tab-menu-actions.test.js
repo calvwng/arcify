@@ -12,15 +12,16 @@ function fixture() {
     const effects = [], hooks = {}, globalTabs = new Set(), listeners = [];
     globalThis.chrome = {
         runtime: { id: 'test', getURL: path => `chrome-extension://test/${path}`, onMessage: { addListener(fn) { listeners.push(fn); } } },
-        storage: { local: { async get(key) { await hooks.storageGet?.(key); return { [key]: structuredClone(local[key]) }; }, async set(values) { await hooks.storageSet?.(values); Object.assign(local, structuredClone(values)); effects.push(['storage', structuredClone(values)]); } } },
+        storage: { local: { async get(key) { await hooks.storageGet?.(key); return { [key]: structuredClone(local[key]) }; }, async set(values) { await hooks.storageSet?.(values); Object.assign(local, structuredClone(values)); effects.push(['storage', structuredClone(values)]); await hooks.storageAfterSet?.(values); } } },
         windows: { async get(id) { return { id, type: 'normal', ...(hooks.window?.() || {}) }; } },
         tabs: { async get(id) { await hooks.tabGet?.(id); const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Closed'); return structuredClone(tab); },
+            async query(query = {}) { await hooks.tabQuery?.(query); return structuredClone(tabs.filter(tab => query.windowId === undefined || tab.windowId === query.windowId)); },
             async update(id, values) { effects.push(['update-tab', id, values]); const tab = tabs.find(tab => tab.id === id); if ('muted' in values) tab.mutedInfo.muted = values.muted; return structuredClone(tab); },
             async duplicate(id) { const next = { ...structuredClone(tabs.find(tab => tab.id === id)), id: 100 }; tabs.push(next); effects.push(['duplicate', id]); await hooks.duplicate?.(next); return next; } },
         bookmarks: { async get(id) { return structuredClone(nodes.filter(node => node.id === id)); }, async search({ title }) { return structuredClone(nodes.filter(node => node.title === title)); },
             async getChildren(id) { await hooks.children?.(id); return structuredClone(nodes.filter(node => node.parentId === id)); },
             async update(id, values) { await hooks.updateBookmark?.(id, values); Object.assign(nodes.find(node => node.id === id), values); effects.push(['update-bookmark', id, values]); return structuredClone(nodes.find(node => node.id === id)); },
-            async remove(id) { nodes.splice(nodes.findIndex(node => node.id === id), 1); effects.push(['remove-bookmark', id]); } }
+            async remove(id) { nodes.splice(nodes.findIndex(node => node.id === id), 1); effects.push(['remove-bookmark', id]); await hooks.removed?.(id); } }
     };
     Utils._pinnedStateChain = Promise.resolve(); Utils._tabNameChain = Promise.resolve();
     const store = new SpaceStore(); store.initialized = true; store.spaces = [{ id: 's', bookmarkFolderId: 'root', temporaryTabs: [1, 3], spaceBookmarks: [2, 9] }, { id: 'other', bookmarkFolderId: 'other-root', temporaryTabs: [], spaceBookmarks: [] }];
@@ -106,3 +107,91 @@ test('supported URL input is trimmed without rewriting saved spelling', () => { 
 test('invalid name and missing compare snapshot never write', async () => { const f = fixture(); for (const value of ['x'.repeat(257), 'a\nb', 1]) await assert.rejects(f.edit(f.ordinary, 'rename', value)); await assert.rejects(f.run(f.ordinary, 'rename', { value: 'Missing' })); assert.deepEqual(f.effects, []); });
 test('saved mutation errors and postwrite refresh errors are surfaced without retries', async () => { const f = fixture(); f.hooks.updateBookmark = () => { throw new Error('Bookmarks failed'); }; await assert.rejects(f.edit(f.pin, 'editUrl', 'https://new.test/'), /Bookmarks failed/); assert.deepEqual(f.effects, []); delete f.hooks.updateBookmark; f.hooks.storageSet = () => { throw new Error('Refresh failed'); }; await assert.rejects(f.edit(f.pin, 'editUrl', 'https://new.test/'), /saved pin was updated/); assert.equal(f.effects.filter(([kind]) => kind === 'update-bookmark').length, 1); });
 test('message handler rejects other extensions and foreign-window senders', () => { const f = fixture(); registerTabMenuMessages(f.store); for (const sender of [{ id: 'other' }, { id: 'test', url: 'https://bad.test/' }, { id: 'test', tab: { windowId: 20 } }]) { let response; f.listeners[0]({ type: 'tabMenuAction', ...f.ordinary, action: 'duplicate' }, sender, value => { response = value; }); assert.equal(response.success, false); } assert.deepEqual(f.effects, []); });
+
+
+for (const closed of [false, true]) for (const liveId of [2, 9]) test(`remove ${closed ? 'closed' : 'live'} pin refuses exact split pane ${liveId} before deleting bookmark`, async () => {
+    const f = fixture(); f.tabs.find(tab => tab.id === liveId).splitViewId = 77;
+    const before = structuredClone(f.store.spaces), bindings = structuredClone(f.local.pinnedTabStatesById);
+    await assert.rejects(f.run(closed ? f.closed : f.pin, 'removePin'), /End Split View/);
+    assert.deepEqual(f.effects, []); assert.deepEqual(f.store.spaces, before); assert.deepEqual(f.local.pinnedTabStatesById, bindings);
+});
+
+for (const boundary of ['lookup', 'deleted', 'storage-set']) test(`remove pin rechecks cross-window pane after ${boundary}`, async () => {
+    const f = fixture(), before = structuredClone(f.store.spaces), bindings = structuredClone(f.local.pinnedTabStatesById), aliases = structuredClone(f.local.tabNameOverridesById);
+    if (boundary === 'lookup') f.hooks.children = () => { f.hooks.children = null; f.tabs.find(tab => tab.id === 9).splitViewId = 77; };
+    if (boundary === 'deleted') f.hooks.removed = () => { f.tabs.find(tab => tab.id === 9).splitViewId = 77; };
+    if (boundary === 'storage-set') f.hooks.storageAfterSet = values => {
+        if (values.pinnedTabStatesById) { f.hooks.storageAfterSet = null; f.tabs.find(tab => tab.id === 9).splitViewId = 77; }
+    };
+    await assert.rejects(f.run(f.closed, 'removePin'), boundary === 'lookup' ? /End Split View/ : /saved pin was removed.*End Split View.*Nothing was retried or recreated/);
+    assert.deepEqual(f.store.spaces, before); assert.deepEqual(f.local.pinnedTabStatesById, bindings); assert.deepEqual(f.local.tabNameOverridesById, aliases);
+    assert.equal(f.effects.filter(([kind]) => kind === 'remove-bookmark').length, boundary === 'lookup' ? 0 : 1);
+    assert(!f.effects.some(([kind]) => kind === 'persist')); assert.equal(f.tabs.length, 4);
+});
+
+test('remove pin restores other exact bindings but preserves a newer replacement binding', async () => {
+    const f = fixture(), before = structuredClone(f.store.spaces), newer = { bookmarkId: 'twin', pinnedUrl: 'https://newer.test/' };
+    f.hooks.storageAfterSet = values => { if (values.pinnedTabStatesById) {
+        f.hooks.storageAfterSet = null; f.local.pinnedTabStatesById[2] = newer; f.tabs.find(tab => tab.id === 9).splitViewId = 77;
+    } };
+    await assert.rejects(f.run(f.closed, 'removePin'), /saved pin was removed/);
+    assert.deepEqual(f.local.pinnedTabStatesById[2], newer); assert.equal(f.local.pinnedTabStatesById[9].bookmarkId, 'pin'); assert.deepEqual(f.store.spaces, before);
+});
+
+for (const late of [false, true]) test(`duplicate rejects ${late ? 'late' : 'existing'} native split before creating a tab`, async () => {
+    const f = fixture();
+    if (late) { let reads = 0; f.hooks.tabGet = id => { if (id === 1 && ++reads === 2) f.tabs[0].splitViewId = 77; }; }
+    else f.tabs[0].splitViewId = 77;
+    await assert.rejects(f.run(f.ordinary, 'duplicate'), /End Split View/); assert.deepEqual(f.effects, []); assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 3]);
+});
+
+test('split formed during duplicate keeps the duplicate but refuses canonical pair insertion', async () => {
+    const f = fixture(); f.hooks.duplicate = () => { f.tabs[0].splitViewId = 77; f.tabs.find(tab => tab.id === 3).splitViewId = 77; };
+    await assert.rejects(f.run(f.ordinary, 'duplicate'), /duplicate was created.*End Split View/);
+    assert.deepEqual(f.effects, [['duplicate', 1]]); assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 3]); assert(f.tabs.some(tab => tab.id === 100));
+});
+
+test('remove pin checks every linked pane in a single final snapshot before deletion', async () => {
+    const f = fixture(), before = structuredClone(f.store.spaces), bindings = structuredClone(f.local.pinnedTabStatesById);
+    let snapshots = 0;
+    f.hooks.tabGet = () => { throw new Error('Closed pin guard must not read linked panes serially'); };
+    f.hooks.tabQuery = query => {
+        snapshots++; assert.deepEqual(query, {});
+        f.tabs.find(tab => tab.id === 2).splitViewId = 77;
+    };
+    await assert.rejects(f.run(f.closed, 'removePin'), /End Split View/);
+    assert.equal(snapshots, 1); assert.deepEqual(f.effects, []);
+    assert.deepEqual(f.store.spaces, before); assert.deepEqual(f.local.pinnedTabStatesById, bindings);
+});
+
+test('remove pin fails closed when its final native snapshot cannot be read', async () => {
+    const f = fixture(); f.hooks.tabQuery = () => { throw new Error('Native snapshot unavailable'); };
+    await assert.rejects(f.run(f.closed, 'removePin'), /Native snapshot unavailable/);
+    assert.deepEqual(f.effects, []); assert(f.nodes.some(node => node.id === 'pin'));
+});
+
+test('duplicate rechecks its new pane after the binding read before canonical insertion', async () => {
+    const f = fixture(); f.tabs.push({ ...f.tabs[0], id: 4 }); f.store.spaces[0].temporaryTabs.push(4);
+    f.hooks.storageGet = key => {
+        const duplicate = f.tabs.find(tab => tab.id === 100);
+        if (key === 'pinnedTabStatesById' && duplicate) {
+            duplicate.splitViewId = 77; f.tabs.find(tab => tab.id === 4).splitViewId = 77;
+        }
+    };
+    await assert.rejects(f.run(f.ordinary, 'duplicate'), /duplicate was created.*End Split View/);
+    assert.deepEqual(f.effects, [['duplicate', 1]]); assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 3, 4]);
+    assert(f.tabs.some(tab => tab.id === 100));
+});
+
+test('duplicate retains its new tab and fails closed if the final native query fails', async () => {
+    const f = fixture(); f.hooks.tabQuery = () => { throw new Error('Native snapshot unavailable'); };
+    await assert.rejects(f.run(f.ordinary, 'duplicate'), /duplicate was created.*Native snapshot unavailable/);
+    assert.deepEqual(f.effects, [['duplicate', 1]]); assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 3]);
+    assert(f.tabs.some(tab => tab.id === 100));
+});
+
+test('duplicate can still assign its new identity when the source closed after creation', async () => {
+    const f = fixture(); f.hooks.duplicate = () => { f.tabs.splice(f.tabs.findIndex(tab => tab.id === 1), 1); };
+    assert.equal((await f.run(f.ordinary, 'duplicate')).tabId, 100);
+    assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 100, 3]);
+});

@@ -1,6 +1,6 @@
 # Paired Chrome tab-menu fixture integration
 
-This fixture is wired into the paired runner for the approved tab-menu source batch, before ordinary-Favorite restart receipts and the final full-browser restart. The localhost handler precedes the generic fallback, and module/source paths are included in the paired workflow. Only syntax checks, pure tests, and production build were run locally. Native execution and screenshot evidence remain pending in the existing dedicated sandboxed GitHub Actions job.
+This fixture is wired into the paired runner for the approved tab-menu source batch, before ordinary-Favorite restart receipts and the final full-browser restart. The localhost handler precedes the generic fallback, and module/source paths are included in the paired workflow. Local checks use pure tests and production builds. The [sandboxed paired run at Arcify `3f450f3`](https://github.com/calvwng/arcify/actions/runs/38719535714) with Spotlight `019b527` passed all 39 full-suite cases on Chrome 155.0.8059.39 and retained 141 screenshots. The independent Favorite lifecycle job passed 5 cases with 17 screenshots. These are disposable CI profiles, not the user’s Helium session.
 
 The default `full` plan requires all **39** cases. The two new menu cases keep
 stable zero-based indices **37** (Space) and **38** (Tab), execute inside the

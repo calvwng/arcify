@@ -1,4 +1,5 @@
 import { firstUnusedColor } from './space-colors.js';
+import { assertNotNativeSplit } from './native-split-safety.js';
 /**
  * DOMManager - Sidebar DOM manipulation and UI component management
  * 
@@ -190,7 +191,7 @@ let activeTabContextMenuCleanup = null;
 
 export function closeTabContextMenu() { activeTabContextMenuCleanup?.(); }
 
-export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null, onAddToFavorites = null, todaySelection = null, tabActions = null) {
+export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null, onAddToFavorites = null, todaySelection = null, tabActions = null, splitActions = null) {
     activeTabContextMenuCleanup?.();
     // Remove any existing context menus
     const existingMenu = document.getElementById('tab-context-menu');
@@ -211,10 +212,24 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         if (typeof callback !== 'function') return;
         const item = document.createElement('div'); item.className = 'context-menu-item';
         item.textContent = label; item.dataset.action = action; item.setAttribute('role', 'menuitem'); item.tabIndex = 0;
-        item.addEventListener('click', () => { closeMenu(); void callback(); }, { once: true });
+        item.addEventListener('click', () => {
+            // Transfer focus before removing the menu; refresh then restores the
+            // same live row identity without overriding later user focus.
+            if (['createSplitView', 'endSplitView'].includes(action) && contextMenu.contains(document.activeElement) && tabElement.isConnected) tabElement.focus({ preventScroll: true });
+            closeMenu(); void callback();
+        }, { once: true });
         item.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click(); } });
         contextMenu.append(item);
     };
+    if (splitActions) {
+        addAction('Create Split View', splitActions.create, 'createSplitView');
+        addAction('End Split View', splitActions.end, 'endSplitView');
+        if (splitActions.hint) {
+            const hint = document.createElement('div'); hint.className = 'context-menu-hint today-split-menu-hint';
+            hint.dataset.action = 'splitViewHint'; hint.setAttribute('aria-disabled', 'true'); hint.textContent = splitActions.hint;
+            contextMenu.append(hint);
+        }
+    }
     if (multiple && !todaySelection) {
         const hint = document.createElement('div'); hint.className = 'context-menu-item'; hint.setAttribute('aria-disabled', 'true');
         hint.textContent = 'Select one pin to edit it. Drag selected pins to Favorites.'; contextMenu.append(hint);
@@ -254,10 +269,13 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         const pinInSpaceOption = document.createElement('div');
         pinInSpaceOption.className = 'context-menu-item';
         pinInSpaceOption.textContent = isPinned ? 'Remove Pin' : 'Pin Tab';
-        pinInSpaceOption.addEventListener('click', () => {
-            if (isPinned && tabActions?.removePin) void tabActions.removePin();
-            else chrome.runtime.sendMessage({ command: 'toggleSpacePin', tabId: tab.id });
+        pinInSpaceOption.addEventListener('click', async () => {
             closeMenu();
+            try {
+                assertNotNativeSplit(await chrome.tabs.get(tab.id));
+                if (isPinned && tabActions?.removePin) await tabActions.removePin();
+                else await chrome.runtime.sendMessage({ command: 'toggleSpacePin', tabId: tab.id });
+            } catch (error) { (tabActions?.report || Logger.warn)(error.message); }
         });
         contextMenu.appendChild(pinInSpaceOption);
 
@@ -302,11 +320,13 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
                 e.stopPropagation();
                 closeMenu(); // Close menu immediately for better UX
 
-                await moveTabToSpace(tab.id, space.id, false);
-                // Set the space as active, but prevent it from auto-activating a different tab
-                await setActiveSpace(space.id, false);
-                // Explicitly activate the tab that was just moved
-                await Utils.focusTab(tab.id);
+                try {
+                    await moveTabToSpace(tab.id, space.id, false);
+                    // Set the space as active, but prevent it from auto-activating a different tab
+                    await setActiveSpace(space.id, false);
+                    // Explicitly activate the tab that was just moved
+                    await Utils.focusTab(tab.id);
+                } catch (error) { (tabActions?.report || Logger.warn)(error.message); }
             });
             submenu.appendChild(submenuItem);
         });
@@ -327,7 +347,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
             submenuItem.textContent = folder.title;
             submenuItem.addEventListener('click', (e) => {
                 e.stopPropagation();
-                createSpaceFromInactive(folder.title, tab);
+                void createSpaceFromInactive(folder.title, tab).catch(error => (tabActions?.report || Logger.warn)(error.message));
                 closeMenu();
             });
             submenu.appendChild(submenuItem);
@@ -401,6 +421,17 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
 
     // Adjust position to keep within viewport
     Utils.adjustMenuPosition(contextMenu, x, y);
+    if (splitActions?.keyboard) contextMenu.querySelector('[role="menuitem"]')?.focus();
+    contextMenu.addEventListener('keydown', event => {
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        const items = [...contextMenu.querySelectorAll('[role="menuitem"]')];
+        if (!items.length) return;
+        event.preventDefault();
+        const index = items.indexOf(document.activeElement);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :
+            (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+        items[next].focus();
+    });
 
     function closeMenu() {
         contextMenu.remove();
@@ -409,7 +440,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         if (activeTabContextMenuCleanup === closeMenu) activeTabContextMenuCleanup = null;
     }
     function closeContextMenu(event) { if (!contextMenu.contains(event.target)) closeMenu(); }
-    function closeOnEscape(event) { if (event.key === 'Escape') { event.preventDefault(); closeMenu(); } }
+    function closeOnEscape(event) { if (event.key === 'Escape') { event.preventDefault(); closeMenu(); if (splitActions?.keyboard && tabElement.isConnected) tabElement.focus(); } }
     activeTabContextMenuCleanup = closeMenu;
     document.addEventListener('click', closeContextMenu, true);
     document.addEventListener('keydown', closeOnEscape, true);
@@ -556,7 +587,7 @@ export function showUrlCopyToast() {
     }, 2000);
 }
 
-export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabToTemp, currentActiveSpaceId, setActiveSpaceFunc, activatePinnedTabByURL) {
+export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabToTemp, currentActiveSpaceId, setActiveSpaceFunc, activatePinnedTabByURL, report = message => Logger.warn(message)) {
     chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         if (request.command === "quickPinToggle" || request.command === "toggleSpacePin") {
             Logger.log(`[QuickPin] Received command: ${request.command}`, { request });
@@ -597,12 +628,12 @@ export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabTo
                 if (request.command === "quickPinToggle") {
                     Logger.log("[QuickPin] Handling quickPinToggle for active tab.");
                     chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
-                        getTabAndToggle(tabs[0]);
+                        void getTabAndToggle(tabs[0]).catch(error => report(error.message));
                     });
                 } else if (request.command === "toggleSpacePin" && request.tabId) {
                     Logger.log(`[QuickPin] Handling toggleSpacePin for tabId: ${request.tabId}`);
                     chrome.tabs.get(request.tabId, function (tab) {
-                        getTabAndToggle(tab);
+                        void getTabAndToggle(tab).catch(error => report(error.message));
                     });
                 }
             });

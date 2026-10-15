@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
+import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
 import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
@@ -111,7 +113,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -701,6 +703,7 @@ try {
     await step(stepNames[2], async () => {
         const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two', '/today-selection-one': 'Today Selection One', '/today-selection-two': 'Today Selection Two', '/today-selection-four': 'Today Selection Four', '/today-selection-five': 'Today Selection Five', '/today-selection-six': 'Today Selection Six' };
         server = createServer((request, response) => {
+            if (serveNativeSplitFixture(request, response)) return;
             if (serveTabMenuFixture(request, response)) return;
             if (serveOrdinaryFavoriteFixture(request, response)) return;
             if (serveFavoriteIconFixture(request, response)) return;
@@ -1958,6 +1961,17 @@ try {
         record:async observation => { report.tabMenus = observation; await saveReport(); } }));
     } // Full-only cases 3–31, 33–35 and 37–38; preserve the original cases' order.
 
+    if (report.runMode === 'native-split') {
+        await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
+            snapshot,poll,fixture,arcifyId,
+            captureNativeWindow:async ({nonce,colors}) => {
+                const filename=`${String(report.screenshots.length+1).padStart(2,'0')}-native-split-browser-window.png`;
+                const native=await captureNativeSplitWindow({chromePid:browser.process().pid,nonce,colors,output:resolve(OUTPUT,filename)});
+                const captured={filename,label:'Native Chrome Split View with both original top-level pages',capturedAt:new Date().toISOString(),nativeWindow:true,...native};
+                report.screenshots.push(captured);await saveReport();return captured;
+            },
+            record:async evidence => { report.nativeSplit=evidence;await saveReport(); } }));
+    } else {
     await step(stepNames[36], async () => {
         ordinaryFixture = await exerciseOrdinaryFavorites({ browser,apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,
             newTabPage,pageForUrl,ui,screenshot,snapshot,poll,fixture,arcifyId,spotlightId,search,
@@ -1979,6 +1993,7 @@ try {
         browser = restarted.browser; arcifyOptions = restarted.arcifyOptions; spotlightOptions = restarted.spotlightOptions;
         return restarted.evidence;
     },{windowIsolation:false});
+    } // Preserve both original full/favorite-lifecycle endings unchanged.
 
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');
     assertNoTargetCrashes(report.targetLifecycle);

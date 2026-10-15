@@ -6,6 +6,7 @@ import { moveSpace } from './space-order.js';
 import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
 import { isPracticeUrl } from './tour-practice.js';
 import { syncSpaceGroups } from './tab-group-sync.js';
+import { hasNativeSplit, assertNotNativeSplit, assertNativeSplitMembershipPreserved } from './native-split-safety.js';
 import { Utils } from './utils.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { LocalStorage } from './localstorage.js';
@@ -211,7 +212,7 @@ export class SpaceStore {
         this.restoredMetadata = (this.restoredMetadata || []).filter(record => record.tabId !== tabId);
         this.restoreQueue = (this.restoreQueue || []).filter(record => record.tabId !== tabId);
     }
-    track(tab) {
+    track(tab, { nativeTabs = null } = {}) {
         this.liveTabs.set(tab.id, tab);
         const url = tab.url || tab.pendingUrl;
         if (tab.pinned || this.isGlobalTab(tab) || isStartupLauncherTab(tab)) {
@@ -257,11 +258,25 @@ export class SpaceStore {
             space[key].sort((a, b) => (this.restoredRanks.get(a) ?? Infinity) - (this.restoredRanks.get(b) ?? Infinity));
         } else {
             const openerIndex = space[key].indexOf(tab.openerTabId);
-            if (openerIndex >= 0) space[key].splice(openerIndex + 1, 0, tab.id);
-            else space[key].push(tab.id);
+            let insertAt = openerIndex < 0 ? space[key].length : openerIndex + 1;
+            const opener = nativeTabs ? nativeTabs.find(item => item.id === tab.openerTabId) : this.liveTabs.get(tab.openerTabId);
+            if (openerIndex >= 0 && (hasNativeSplit(opener) || nativeTabs && !opener)) {
+                // New browser-created children must not split an intact canonical
+                // pair. Only a fresh exact native pair proves its insertion edge;
+                // an uncertain opener appends without repairing browser state.
+                const peers = nativeTabs?.filter(item => item.windowId === tab.windowId &&
+                    hasNativeSplit(item) && item.splitViewId === opener?.splitViewId) || [];
+                const indices = peers.map(item => space[key].indexOf(item.id));
+                const intact = opener?.windowId === tab.windowId && peers.length === 2 && peers.some(item => item.id === tab.openerTabId) &&
+                    indices.every(index => index >= 0) && Math.abs(indices[0] - indices[1]) === 1 &&
+                    peers.every(item => !item.incognito && item.groupId === opener.groupId && item.pinned === opener.pinned) &&
+                    Math.abs(peers[0].index - peers[1].index) === 1;
+                insertAt = intact ? Math.max(...indices) + 1 : space[key].length;
+            }
+            space[key].splice(insertAt, 0, tab.id);
         }
     }
-    async persist() {
+    async persist({ skipGroupSync = false } = {}) {
         const tabs = new Map((await chrome.tabs.query({})).map(t => [t.id, t]));
         this.liveTabs = tabs;
         const liveWindows = new Set([...tabs.values()].map(t => t.windowId));
@@ -330,7 +345,7 @@ export class SpaceStore {
                 throw error;
             }
         } else await chrome.storage.session.set(spaceSessionUpdate);
-        try { await syncSpaceGroups(this.spaces, this.active, [...tabs.values()].filter(tab => this.isGlobalTab(tab)).map(tab => tab.id)); }
+        try { if (!skipGroupSync) await syncSpaceGroups(this.spaces, this.active, [...tabs.values()].filter(tab => this.isGlobalTab(tab)).map(tab => tab.id)); }
         catch (error) { console.warn('Tab group sync deferred:', error); }
     }
     async dispatch(message) {
@@ -342,16 +357,19 @@ export class SpaceStore {
             case 'get':
                 if (await this.discoverBookmarkSpaces()) await this.persist();
                 break;
-            case 'patch':
+            case 'patch': {
+                const nextSpaces = applySpacePatch(this.spaces, message.before, message.after);
+                assertNativeSplitMembershipPreserved(this.spaces, nextSpaces, await chrome.tabs.query({}));
                 for (const next of message.after) {
                     const prev = message.before.find(s => s.id === next.id);
                     for (const key of sections) if (JSON.stringify(next[key]) !== JSON.stringify(prev?.[key])) {
                         for (const id of next[key] || []) this.restoredRanks.delete(id);
                     }
                 }
-                this.spaces = applySpacePatch(this.spaces, message.before, message.after);
+                this.spaces = nextSpaces;
                 if (!this.spaces.length) this.spaces.push(await this.makeSpace(this.defaultSpaceName));
                 break;
+            }
             case 'metadata': {
                 const space = this.spaces.find(space => space.id === message.spaceId);
                 if (!space) throw new Error('This Space no longer exists.');
@@ -403,6 +421,7 @@ export class SpaceStore {
                 if (this.isGlobalTab(message.tabId)) break;
                 const target = this.spaces.find(s => s.id === message.spaceId);
                 if (target) {
+                    assertNotNativeSplit((await chrome.tabs.query({})).find(tab => tab.id === message.tabId));
                     this.provisional.delete(message.tabId);
                     this.recoveryCandidates.delete(message.tabId);
                     for (const space of this.spaces) for (const key of sections) space[key] = space[key].filter(id => id !== message.tabId);
@@ -462,7 +481,13 @@ export class SpaceStore {
     }
     install() {
         const handle = operation => this.run(async () => { await operation(); await this.persist(); }).catch(console.error);
-        chrome.tabs.onCreated.addListener(tab => handle(() => this.track(tab)));
+        chrome.tabs.onCreated.addListener(tab => handle(async () => {
+            if (!tab.openerTabId) return this.track(tab);
+            let nativeTabs;
+            try { nativeTabs = (await chrome.tabs.query({ windowId: tab.windowId })).filter(item => item.windowId === tab.windowId); }
+            catch { nativeTabs = []; }
+            this.track(nativeTabs.find(item => item.id === tab.id) || tab, { nativeTabs });
+        }));
         chrome.tabs.onUpdated.addListener((id, change, tab) => {
             if (change.url || change.pinned !== undefined) handle(() => this.track(tab));
         });
@@ -510,7 +535,7 @@ export class SpaceStore {
             this.track(await chrome.tabs.get(tabId));
         }));
         chrome.tabs.onDetached?.addListener(scheduleSync);
-        chrome.tabs.onUpdated.addListener((id, change) => { if (change.groupId !== undefined) scheduleSync(); });
+        chrome.tabs.onUpdated.addListener((id, change) => { if (change.groupId !== undefined || change.splitViewId !== undefined) scheduleSync(); });
         chrome.tabGroups.onRemoved.addListener(scheduleSync);
         chrome.tabGroups.onUpdated.addListener(scheduleSync);
         this.run(() => {}).catch(console.error);

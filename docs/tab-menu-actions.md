@@ -30,6 +30,8 @@ Aliases are projected into Spotlight snapshots, tab search, and recent results w
 The isolated paired runner includes the genuine-input Tab menu module described in
 [the paired fixture contract](tab-menu-paired-ci.md), including required screenshots,
 source-page preservation and an authenticated invalidation followed by a genuine
-return to the same mounted Spotlight query. Its real CI execution is still pending.
-
-No Chrome process was launched and no user profile data was touched. Native visual/manual validation remains a separate authorized step; automated DOM tests do not claim native browser UI validation.
+return to the same mounted Spotlight query. The [paired run at Arcify `3f450f3`](https://github.com/calvwng/arcify/actions/runs/38719535714)
+with Spotlight `019b527` passed all 39 full-suite cases, including these actions,
+on Chrome 155.0.8059.39. Native sidebar-panel layout and Helium-specific manual
+acceptance remain outstanding; the menu module exercises ordinary sidebar tabs
+in a disposable CI profile.

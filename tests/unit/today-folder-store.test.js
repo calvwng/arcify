@@ -223,3 +223,32 @@ for (const change of ['delete', 'url', 'title']) test(`final verification detect
     await assert.rejects(f.save(), error => error.batch.completed.length === 3 && /changed/.test(error.message));
     assert.equal(f.creates().length, 4);
 });
+
+for (const splitViewId of [0, 27]) test(`native split ${splitViewId} blocks the entire Today save before folder creation`, async () => {
+    const f = fixture(); f.tabs[1].splitViewId = f.tabs[2].splitViewId = splitViewId;
+    await assert.rejects(f.save(), /End Split View before moving or pinning this tab\./);
+    assert.deepEqual(f.effects, []); assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 2, 3, 9]);
+});
+
+test('Today save rechecks split membership inside the bookmark writer immediately before its first write', async () => {
+    const f = fixture(); let reads = 0;
+    f.hooks.children = id => { if (id === 'root' && ++reads === 3) f.tabs[0].splitViewId = f.tabs[1].splitViewId = 0; };
+    await assert.rejects(f.save(), /End Split View/); assert.deepEqual(f.effects, []);
+});
+
+for (const boundary of ['bookmark-create', 'binding-write', 'membership-persist']) test(`a split begun during Today ${boundary} preserves native tabs and stops remaining promotions`, async () => {
+    const f = fixture(); let injected = false;
+    const split = () => { if (!injected) { injected = true; f.tabs[0].splitViewId = f.tabs[1].splitViewId = 0; } };
+    if (boundary === 'bookmark-create') f.hooks.afterCreate = node => { if (node.url) split(); };
+    if (boundary === 'binding-write') f.hooks.storageSet = value => { if (value.pinnedTabStatesById?.[1]) split(); };
+    if (boundary === 'membership-persist') f.hooks.persist = split;
+    await assert.rejects(f.save(), error => /End Split View/.test(error.message) && error.batch.created.length === 1 && error.batch.completed.length === 0);
+    assert(injected); assert.equal(f.creates().length, 2, 'Keep the named folder and exact saved bookmark as a partial result');
+    assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 2, 3, 9]); assert.deepEqual(f.store.spaces[0].spaceBookmarks, []);
+    assert.deepEqual(f.local.pinnedTabStatesById, {}); assert.equal(f.tabs[0].splitViewId, 0); assert.equal(f.tabs[1].splitViewId, 0);
+});
+
+test('Today save accepts the native unsplit sentinel', async () => {
+    const f = fixture(); for (const tab of f.tabs) tab.splitViewId = -1;
+    assert.equal((await f.save()).completed.length, 3);
+});

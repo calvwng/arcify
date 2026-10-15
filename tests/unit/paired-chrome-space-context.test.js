@@ -7,7 +7,7 @@ import { runInNewContext } from 'node:vm';
 import { SPACE_MENU_ITEMS, SPACE_PICKER_IDS, assertSpaceContextMenu, assertSpaceIconPicker,
     assertSpaceIconProjection, assertSpaceContextUnchanged, assertSpaceIconSaved,
     assertSpaceDeleteWarning, cancelSpaceDeleteWithInput, assertSpaceContextFixtureEnvironment, captureRequiredSpaceScreenshot,
-    captureStableSpaceMenu, observeSpaceMenuEvents, observeSpaceContextOpening, assertSpaceMetadataSaved, assertSpaceFolderCreated, SPACE_COLOR_IDS, assertSpaceColorPicker, assertSpaceNameEditor, assertSpaceDetailsProjection, readSpaceDetailsProjection } from '../../scripts/paired-chrome-space-context.mjs';
+    assertSpaceFolderScreenshot, readSpaceFolderScreenshot, captureStableSpaceMenu, observeSpaceMenuEvents, observeSpaceContextOpening, assertSpaceMetadataSaved, assertSpaceFolderCreated, SPACE_COLOR_IDS, assertSpaceColorPicker, assertSpaceNameEditor, assertSpaceDetailsProjection, readSpaceDetailsProjection } from '../../scripts/paired-chrome-space-context.mjs';
 
 test('Space detail reader compares resolved theme color while preserving a genuine mismatch', () => {
     const root = {}, container = { style: { getPropertyValue: () => 'var(--chrome-purple-color, rgba(255, 255, 255, 0.1))' } };
@@ -330,4 +330,24 @@ test('passive menu diagnostics observe bounded events without mutating focus, vi
     const state = context.__spaceMenuCaptureObservation.read();
     assert.equal(state.events.length, 100); assert.equal(state.menuPresent, true); assert.equal(state.width, 224);
     context.__spaceMenuCaptureObservation.stop(); assert.equal(removals.length, 4);
+});
+
+
+const folderScreenshot = () => ({ spaceId: 'work', activeSpaceId: 'work', folderId: 'saved-folder', matches: 1, title: 'Created folder',
+    rect: { x: 8, y: 120, width: 208, height: 30 }, viewport: { width: 224, height: 600 }, unobscured: true });
+const folderScreenshotOptions = { spaceId: 'work', folder: { id: 'saved-folder', title: 'Created folder' } };
+test('created-folder screenshot requires the exact unobscured row inside its viewport', () => assertSpaceFolderScreenshot(folderScreenshot(), folderScreenshotOptions));
+for (const [name, mutate] of Object.entries({ wrongSpace: s => s.spaceId = 'other', inactive: s => s.activeSpaceId = 'other', wrongFolder: s => s.folderId = 'other', duplicate: s => s.matches = 2,
+    staleName: s => s.title = 'Old name', belowViewport: s => s.rect.y = 700, clipped: s => s.rect.x = -1, hidden: s => s.rect.height = 0, covered: s => s.unobscured = false
+})) test(`created-folder screenshot rejects ${name}`, () => { const state = folderScreenshot(); mutate(state); assert.throws(() => assertSpaceFolderScreenshot(state, folderScreenshotOptions)); });
+test('folder screenshot observer requires real hit-tested corners and center and has no scrolling or focus effect', () => {
+    const points = [], leaf = {}, other = {}; let hit = leaf;
+    const header = { getBoundingClientRect: () => ({ x: 8, y: 120, width: 208, height: 30 }), querySelector: () => ({ textContent: 'Created folder' }), contains: node => node === leaf };
+    const folder = { dataset: { bookmarkId: 'saved-folder' }, querySelector: () => header };
+    const space = { dataset: { spaceId: 'work' }, querySelectorAll: () => [folder] };
+    const context = { innerWidth: 224, innerHeight: 600, document: { querySelectorAll: () => [space], querySelector: () => space,
+        elementFromPoint: (x, y) => { points.push([x, y]); return hit; } } };
+    const read = () => runInNewContext(`(${readSpaceFolderScreenshot.toString()})({spaceId:'work',folderId:'saved-folder'})`, context);
+    assertSpaceFolderScreenshot(read(), folderScreenshotOptions); assert.deepEqual(points, [[10,122],[214,122],[10,148],[214,148],[112,135]]);
+    hit = other; assert.equal(read().unobscured, false);
 });

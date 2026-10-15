@@ -25,11 +25,14 @@ import { registerBookmarkListeners } from './bookmark-events.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { registerTodayFolderMessages } from './today-folder-store.js';
 import { registerTabMenuMessages } from './tab-menu-actions.js';
+import { registerTodaySplitMessages } from './today-split-action.js';
+import { createNativeSplitWriteGuard } from './native-split-safety.js';
 
 const spaceStore = new SpaceStore();
 spaceStore.install();
 registerTodayFolderMessages(spaceStore);
 registerTabMenuMessages(spaceStore);
+registerTodaySplitMessages(spaceStore);
 const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity() });
 favoriteStore.install();
 registerFavoriteMessages(favoriteStore);
@@ -57,10 +60,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'bookmarkOrder') return;
-    enqueueBookmarkOperation(message.operation).then(
+    let beforeWrite;
+    try { beforeWrite = createNativeSplitWriteGuard(message.guardTab); }
+    catch (error) { sendResponse({ success: false, error: error.message }); return; }
+    enqueueBookmarkOperation(message.operation, { beforeWrite }).then(
         result => sendResponse({ success: true, ...result }),
         error => sendResponse({ success: false, error: error.message, code: error.code,
-            observedOrders: error.observedOrders, moved: error.moved })
+            observedOrders: error.observedOrders, moved: error.moved, createdId: error.createdId })
     );
     return true;
 });

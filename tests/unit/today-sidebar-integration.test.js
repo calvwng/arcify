@@ -5,6 +5,7 @@ import { parseHTML } from 'linkedom';
 import { applySpacePatch, SpaceStore } from '../../space-store.js';
 import { saveTodayTabsInNewFolder } from '../../today-folder-store.js';
 import { runTabMenuAction } from '../../tab-menu-actions.js';
+import { runTodaySplitAction } from '../../today-split-action.js';
 
 // The real sidebar, Chrome listeners, close buttons and refresh coordinator are
 // exercised together. Only Chrome persistence and DOM layout/focus are fakes.
@@ -58,7 +59,7 @@ const area = state => ({ async get(keys) {
     return structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
 }, async set(next) { Object.assign(state, structuredClone(next)); }, async remove(key) { delete state[key]; } });
 let beforeTree, beforeRemove, beforeGetTab, beforeTabMenuRequest;
-const mutations = [], saveRequests = [];
+const mutations = [], saveRequests = [], splitRequests = [], nativeSplitCalls = [];
 let nextBookmarkId = 100;
 const store = new SpaceStore(); store.initialized = true; store.spaces = storedSpaces; store.active = session.activeSpaces; store.restoredRanks = new Map(); store.restoredMetadata = []; store.isGlobalTab = () => false;
 store.persist = async () => { storedSpaces = structuredClone(store.spaces); local.spaces = storedSpaces; await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); };
@@ -77,6 +78,11 @@ globalThis.chrome = {
                 saveRequests.push(structuredClone(message)); store.spaces = structuredClone(storedSpaces);
                 try { return { success: true, batch: await saveTodayTabsInNewFolder(store, message) }; }
                 catch (error) { return { success: false, error: error.message, batch: error.batch }; }
+            }
+            if (message.type === 'todaySplitAction') {
+                splitRequests.push(structuredClone(message)); store.spaces = structuredClone(storedSpaces);
+                try { return { success: true, ...await runTodaySplitAction(store, message) }; }
+                catch (error) { return { success: false, error: error.message }; }
             }
             if (message.type === 'tabMenuAction') {
                 await beforeTabMenuRequest?.(message);
@@ -353,4 +359,119 @@ for (const delayed of [false, true]) test(`newer Space editor replaces ${delayed
     // Completion of the abandoned editor releases the mutation gate for a later edit.
     await context(6); await startEdit('rename');
     event(document.getElementById('tabEditCancel'), 'click'); await wait(20);
+});
+
+// Genuine sidebar event/render/menu paths with mocked native Split APIs. These
+// tests do not stand in for the separately authorized real Chrome fixture.
+async function splitKeyboardMenu(id, key = 'F10') {
+    const target = live(id); target.focus();
+    event(target, 'keydown', { key, shiftKey: key === 'F10' }); await wait(35);
+}
+function fakeNativeSplitApis() {
+    chrome.tabs.createSplit = async ids => {
+        nativeSplitCalls.push(['create', [...ids]]);
+        for (const id of ids) tabs.find(tab => tab.id === id).splitViewId = 701;
+        return 701;
+    };
+    chrome.tabs.unsplit = async id => {
+        nativeSplitCalls.push(['end', id]);
+        for (const tab of tabs) if (tab.splitViewId === id) tab.splitViewId = -1;
+    };
+    chrome.tabs.move = async (id, { index }) => {
+        nativeSplitCalls.push(['move', id, index]);
+        const moving = tabs.find(tab => tab.id === id);
+        const list = tabs.filter(tab => tab.windowId === moving.windowId).sort((a, b) => a.index - b.index).filter(tab => tab.id !== id);
+        list.splice(index, 0, moving); list.forEach((tab, i) => { tab.index = i; });
+        return structuredClone(moving);
+    };
+}
+
+test('real sidebar feature-detects both Split APIs and exposes explanatory keyboard context menu', async () => {
+    clear(); await splitKeyboardMenu(6, 'ContextMenu');
+    assert.match(menuItem('splitViewHint').textContent, /unavailable/);
+    assert.equal(menuItem('createSplitView'), null); assert.equal(document.querySelector('.today-split-target'), null);
+    assert(document.getElementById('tab-context-menu').contains(document.activeElement));
+    clear(); assert.equal(document.activeElement, live(6));
+});
+
+test('real sidebar keyboard selected pair creates and ends native Split View without affecting other rows', async () => {
+    fakeNativeSplitApis();
+    for (const id of [101, 102, 103]) tabs.push({ id, windowId: 10, active: false, pinned: false, incognito: false, groupId: -1, title: `Split ${id}`, url: 'https://split-same.test/' });
+    for (const windowId of [10, 20]) tabs.filter(tab => tab.windowId === windowId).forEach((tab, index) => { Object.assign(tab, { index, groupId: -1, incognito: false }); });
+    storedSpaces[0].temporaryTabs.push(101, 102, 103); local.spaces = structuredClone(storedSpaces); await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); await wait(260);
+    const beforeIds = tabs.map(tab => tab.id), beforeBookmarks = structuredClone(bookmarks), beforeAliases = structuredClone(local.tabNameOverridesById);
+    event(live(101), 'click', { ctrlKey: true }); event(live(102), 'click', { ctrlKey: true }); await splitKeyboardMenu(102);
+    assert.equal(document.activeElement, menuItem('createSplitView'));
+    assert.equal(menuItem('rename'), null); assert.equal(menuItem('duplicate'), null);
+    event(document.activeElement, 'keydown', { key: 'Enter' }); await wait(320);
+    assert.deepEqual(nativeSplitCalls, [['create', [101, 102]]]);
+    assert.equal(document.activeElement, live(102)); assert(document.activeElement.isConnected);
+    assert.equal(splitRequests.length, 1); assert.deepEqual(splitRequests[0].entries.map(entry => entry.tabId), [101, 102]);
+    assert(live(101).querySelector('.today-split-badge')); assert(live(102).querySelector('.today-split-badge')); assert.equal(live(101).querySelector('.today-split-target'), null);
+    assert.deepEqual(tabs.map(tab => tab.id), beforeIds); assert.deepEqual(bookmarks, beforeBookmarks); assert.deepEqual(local.tabNameOverridesById, beforeAliases);
+    const drag = event(live(101), 'dragstart', { dataTransfer: { setData() { assert.fail('Split members cannot start moving'); } } }); assert(drag.defaultPrevented);
+    await splitKeyboardMenu(101, 'ContextMenu'); assert.equal(document.activeElement, menuItem('endSplitView'));
+    event(document.activeElement, 'keydown', { key: 'Enter' }); await wait(320);
+    assert.deepEqual(nativeSplitCalls.at(-1), ['end', 701]); assert.equal(splitRequests.at(-1).entries.length, 2);
+    assert.equal(document.activeElement, live(101)); assert(document.activeElement.isConnected);
+    assert.equal(live(101).querySelector('.today-split-badge'), null); assert(live(101).querySelector('.today-split-target'));
+});
+
+test('real sidebar split target consumes non-adjacent drag once without legacy drop or Favorite promotion', async () => {
+    clear(); const before = nativeSplitCalls.length, beforeRequests = splitRequests.length;
+    const source = live(101), target = live(103).querySelector('.today-split-target');
+    const transfer = { setData() {} }; event(source, 'dragstart', { dataTransfer: transfer });
+    assert(source.classList.contains('dragging'));
+    event(target, 'dragover', { dataTransfer: transfer }); const dropped = event(target, 'drop', { dataTransfer: transfer }); event(target, 'drop', { dataTransfer: transfer });
+    event(source, 'dragend'); await wait(360);
+    assert(dropped.defaultPrevented); assert.equal(splitRequests.length, beforeRequests + 1);
+    assert.deepEqual(nativeSplitCalls.slice(before), [['move', 103, tabs.find(tab => tab.id === 101).index + 1], ['create', [101, 103]]]);
+    assert.equal(document.querySelector('.dragging'), null); assert.equal(document.querySelector('.today-split-dragging'), null);
+    assert.deepEqual(storedSpaces[0].temporaryTabs.slice(-3), [101, 103, 102]);
+    await splitKeyboardMenu(101); event(menuItem('endSplitView'), 'click'); await wait(300);
+});
+
+test('native splitViewId event refreshes badges, and pin/promotion guards write nothing', async () => {
+    for (const id of [101, 103]) tabs.find(tab => tab.id === id).splitViewId = 702;
+    await chrome.tabs.onUpdated.emit(101, { splitViewId: 702 }, structuredClone(tabs.find(tab => tab.id === 101))); await wait(280);
+    assert(live(101).querySelector('.today-split-badge'));
+    const before = structuredClone(bookmarks), calls = nativeSplitCalls.length;
+    await context(101);
+    const pin = [...document.querySelectorAll('#tab-context-menu .context-menu-item')].find(item => item.textContent === 'Pin Tab');
+    event(pin, 'click'); await wait(30); assert.match(document.getElementById('favoritesDropNotice').textContent, /End Split View/);
+    await context(101);
+    const favorite = [...document.querySelectorAll('#tab-context-menu .context-menu-item')].find(item => item.textContent === 'Add to Favorites');
+    event(favorite, 'click'); await wait(30);
+    assert.match(document.getElementById('favoritesDropNotice').textContent, /End Split View/); assert.deepEqual(bookmarks, before); assert.equal(nativeSplitCalls.length, calls);
+    await splitKeyboardMenu(101); event(menuItem('endSplitView'), 'click'); await wait(300);
+});
+
+test('session split deferral is scoped to active window/Space and clears when projection resumes', async () => {
+    const notice = document.getElementById('todaySplitDeferralStatus');
+    await onChanged.emit({ spaceGroupSplitDeferrals: { newValue: [{ spaceId: 'alpha', windowId: 20, reason: 'native-split' }] } }, 'session');
+    assert(notice.hidden);
+    await onChanged.emit({ spaceGroupSplitDeferrals: { newValue: [{ spaceId: 'alpha', windowId: 10, reason: 'native-split' }] } }, 'session');
+    assert(!notice.hidden); assert.match(notice.textContent, /End Split View.*pending tab-group changes/);
+    const before = notice.textContent; await refresh(); assert.equal(notice.textContent, before);
+    await onChanged.emit({ spaceGroupSplitDeferrals: { newValue: [] } }, 'session'); assert(notice.hidden); assert.equal(notice.textContent, '');
+});
+
+
+test('keyboard split target returns to the live row and never steals newer focus during its request', async () => {
+    clear(); const original = chrome.tabs.createSplit;
+    try {
+        for (const stealFocus of [false, true]) {
+            let release; const waiting = new Promise(resolve => { release = resolve; });
+            chrome.tabs.createSplit = async ids => { await waiting; return original(ids); };
+            event(live(101), 'click', { ctrlKey: true }); event(live(103), 'click', { ctrlKey: true });
+            const target = live(103).querySelector('.today-split-target'); target.focus();
+            // Browsers synthesize click for Enter/Space on this native button.
+            event(target, 'click'); await wait(10);
+            assert.equal(document.activeElement, live(103));
+            if (stealFocus) document.getElementById('newTabBtn').focus();
+            release(); await wait(300);
+            assert.equal(document.activeElement, stealFocus ? document.getElementById('newTabBtn') : live(103)); assert(document.activeElement.isConnected);
+            await splitKeyboardMenu(101); event(menuItem('endSplitView'), 'click'); await wait(300);
+        }
+    } finally { chrome.tabs.createSplit = original; }
 });

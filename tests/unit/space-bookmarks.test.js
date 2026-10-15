@@ -81,3 +81,12 @@ test('bookmark tree loading is all-or-nothing and performs no recovery writes', 
     assert.deepEqual(writes, []);
     assert.equal(tree.folder.length, 2);
 });
+
+
+for (const stage of ['lookup', 'delete']) test(`trusted remove guard stops native split after ${stage} without recreating bookmark`, async () => {
+    const f = mock(); let split = false;
+    if (stage === 'lookup') { const read = chrome.bookmarks.getChildren; chrome.bookmarks.getChildren = async id => { split = true; return read(id); }; }
+    else { const remove = chrome.bookmarks.remove; chrome.bookmarks.remove = async id => { await remove(id); split = true; }; }
+    await assert.rejects(removeSpacePin({ bookmarkFolderId: 'space' }, { id: 1 }, { beforeWrite: async () => { if (split) throw new Error('End Split View'); } }), stage === 'lookup' ? /End Split View/ : /saved pin was removed.*Nothing was retried or recreated/);
+    assert.deepEqual(f.removed, stage === 'lookup' ? [] : ['bound']);
+});

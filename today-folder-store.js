@@ -2,6 +2,7 @@ import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { Utils } from './utils.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
+import { assertNotNativeSplit } from './native-split-safety.js';
 
 const MAX_TABS = 100;
 const positiveId = value => Number.isSafeInteger(value) && value > 0;
@@ -50,6 +51,7 @@ export function saveTodayTabsInNewFolder(store, request) {
             if (expectedBookmarkId ? binding?.bookmarkId !== expectedBookmarkId || binding?.pinnedUrl !== entry.url : binding?.bookmarkId) throw changed();
             let tab;
             try { tab = await chrome.tabs.get(entry.tabId); } catch { throw changed(); }
+            assertNotNativeSplit(tab);
             if (!tab || tab.id !== entry.tabId || tab.windowId !== windowId || tab.incognito || tab.pinned || isStartupLauncherTab(tab) ||
                 tab.url !== entry.url || (tab.pendingUrl && tab.pendingUrl !== entry.url)) throw changed();
             return tab;

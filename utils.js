@@ -180,32 +180,94 @@ const Utils = {
         return run;
     },
 
-    setPinnedTabState: async function (tabId, state, { onlyIfUnboundOrMatching = false } = {}) {
+    setPinnedTabState: async function (tabId, state, { onlyIfUnboundOrMatching = false, beforeWrite = null } = {}) {
         if (!tabId || !state) return;
         return this._serializePinnedStateOp(async () => {
             const states = await this.getPinnedTabStates();
             if (onlyIfUnboundOrMatching && states[tabId]?.bookmarkId && String(states[tabId].bookmarkId) !== String(state.bookmarkId)) {
                 throw new Error('The tab is now linked to a different bookmark. Refresh and try again.');
             }
-            states[tabId] = {
-                pinnedUrl: state.pinnedUrl || null,
-                bookmarkId: state.bookmarkId || null
-            };
-            await this.savePinnedTabStates(states);
+            // Optional callers can revalidate native state after queue/lock and
+            // storage-read waits, immediately before this binding write.
+            if (beforeWrite) await beforeWrite();
+            const previous = states[tabId] ? { ...states[tabId] } : undefined;
+            const written = { pinnedUrl: state.pinnedUrl || null, bookmarkId: state.bookmarkId || null };
+            states[tabId] = written;
+            try {
+                await this.savePinnedTabStates(states);
+                if (beforeWrite) await beforeWrite();
+            } catch (error) {
+                if (!beforeWrite) throw error;
+                // A native split may appear while storage.set is resolving.
+                // Restore only this call's exact binding, under the same lock;
+                // never overwrite a newer binding or delete the saved bookmark.
+                const sameBinding = (a, b) => a && b && Object.keys(a).length === Object.keys(b).length &&
+                    Object.keys(b).every(key => a[key] === b[key]);
+                try {
+                    const latest = await this.getPinnedTabStates();
+                    if (sameBinding(latest[tabId], written)) {
+                        if (previous) latest[tabId] = previous;
+                        else delete latest[tabId];
+                        await this.savePinnedTabStates(latest);
+                        const verified = (await this.getPinnedTabStates())[tabId];
+                        if (previous ? !sameBinding(verified, previous) : verified !== undefined) throw new Error('The restored binding could not be verified.');
+                    }
+                } catch {
+                    throw Object.assign(new Error(`${error.message} The live-tab binding cleanup could not be confirmed. Check Pinned before trying again.`), { cleanupUncertain: true });
+                }
+                throw error;
+            }
         });
     },
 
-    removePinnedTabState: async function (tabId, { preserveNativePinned = false } = {}) {
+    removePinnedTabState: async function (tabId, options = {}) {
         if (!tabId) return;
+        return this.removePinnedTabStates([tabId], options);
+    },
+
+    // Exact linked panes are removed together so one failing native guard cannot
+    // leave earlier panes demoted while later panes still belong to the pin.
+    removePinnedTabStates: async function (tabIds, { preserveNativePinned = false, beforeWrite = null, expectedBookmarkId = null } = {}) {
         return this._serializePinnedStateOp(async () => {
-            if (preserveNativePinned) {
-                try { if ((await chrome.tabs.get(tabId))?.pinned) return; }
-                catch { /* A closed tab's stale binding can be removed. */ }
+            const ids = [];
+            for (const tabId of [...new Set(tabIds)].filter(Boolean)) {
+                if (preserveNativePinned) {
+                    try { if ((await chrome.tabs.get(tabId))?.pinned) continue; }
+                    catch { /* A closed tab's stale binding can be removed. */ }
+                }
+                ids.push(tabId);
             }
             const states = await this.getPinnedTabStates();
-            if (states[tabId]) {
-                delete states[tabId];
+            if (beforeWrite) await beforeWrite();
+            const previous = {};
+            for (const tabId of ids) {
+                if (expectedBookmarkId && states[tabId]?.bookmarkId !== expectedBookmarkId) throw new Error('The tab is now linked to a different bookmark. Refresh and try again.');
+                if (!states[tabId]) continue;
+                previous[tabId] = { ...states[tabId] }; delete states[tabId];
+            }
+            if (!Object.keys(previous).length) return;
+            try {
                 await this.savePinnedTabStates(states);
+                if (beforeWrite) await beforeWrite();
+            } catch (error) {
+                if (!beforeWrite) throw error;
+                try {
+                    const latest = await this.getPinnedTabStates(), restored = [];
+                    for (const [key, binding] of Object.entries(previous)) {
+                        // Our write removed this key. A new binding wins.
+                        if (latest[key] !== undefined) continue;
+                        latest[key] = binding; restored.push(key);
+                    }
+                    if (restored.length) {
+                        await this.savePinnedTabStates(latest);
+                        const verified = await this.getPinnedTabStates();
+                        if (restored.some(key => !verified[key] || Object.keys(verified[key]).length !== Object.keys(previous[key]).length ||
+                            Object.keys(previous[key]).some(field => verified[key][field] !== previous[key][field]))) throw new Error('The restored binding could not be verified.');
+                    }
+                } catch {
+                    throw Object.assign(new Error(`${error.message} The live-tab binding cleanup could not be confirmed. Check Pinned before trying again.`), { cleanupUncertain: true });
+                }
+                throw error;
             }
         });
     },

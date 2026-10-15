@@ -61,9 +61,11 @@ with complete captured state invariance. Every planned screenshot is required an
 its capture metadata is retained. Pure negative validators and input-adapter tests
 are in `tests/unit/paired-chrome-space-context.test.js`.
 
-Real Chrome verification remains pending in the approved CI browser workflow; no
-local browser is launched for this batch. The new module uses ordinary
-`sidebar.html` tabs and proves sidebar reload persistence, not native-panel layout
-or a complete browser restart with the edited Space retained.
+The [paired run at Arcify `3f450f3`](https://github.com/calvwng/arcify/actions/runs/38719535714)
+with Spotlight `019b527` passed all 39 full-suite cases, including this menu,
+on Chrome 155.0.8059.39. Its separate Favorite lifecycle job passed 5 cases.
+The menu module uses ordinary `sidebar.html` tabs and proves sidebar reload
+persistence, not native-panel layout or a complete browser restart with the
+edited Space retained. Helium-specific manual acceptance remains outstanding.
 Deferred export, Live Folders, richer themes and true Profiles are tracked in
 [the backlog](BACKLOG.md#deferred-space-menu-features).

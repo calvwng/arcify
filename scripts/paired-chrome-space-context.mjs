@@ -214,6 +214,26 @@ export function readSpaceIconProjection(spaceId) {
         activeSpaceId: document.querySelector('.space.active')?.dataset.spaceId };
 }
 
+export function readSpaceFolderScreenshot({ spaceId, folderId }) {
+    const space = [...document.querySelectorAll('.space[data-space-id]')].find(node => node.dataset.spaceId === spaceId);
+    const matches = [...(space?.querySelectorAll('.folder[data-bookmark-id]') || [])].filter(node => node.dataset.bookmarkId === folderId);
+    const header = matches[0]?.querySelector(':scope > .folder-header');
+    if (!header) return null;
+    const { x, y, width, height } = header.getBoundingClientRect();
+    const points = [[x + 2, y + 2], [x + width - 2, y + 2], [x + 2, y + height - 2], [x + width - 2, y + height - 2], [x + width / 2, y + height / 2]];
+    return { spaceId, folderId, matches: matches.length, title: header.querySelector('.folder-title')?.textContent,
+        activeSpaceId: document.querySelector('.space.active')?.dataset.spaceId,
+        rect: { x, y, width, height }, viewport: { width: innerWidth, height: innerHeight },
+        unobscured: points.every(([px, py]) => header.contains(document.elementFromPoint(px, py))) };
+}
+export function assertSpaceFolderScreenshot(state, { spaceId, folder }) {
+    assert(state, 'The exact created folder header must exist for its screenshot.');
+    assert.equal(state.spaceId, spaceId); assert.equal(state.activeSpaceId, spaceId);
+    assert.equal(state.folderId, folder.id); assert.equal(state.matches, 1); assert.equal(state.title, folder.title);
+    bounds(state); assert.equal(state.unobscured, true, 'The folder-header corners and center must hit the actual visible row.');
+    return state;
+}
+
 export function readSpaceDetailsProjection(spaceId) {
     const headers = [...document.querySelectorAll('.space[data-space-id]')].filter(node => node.dataset.spaceId === spaceId);
     const chips = [...document.querySelectorAll('#spaceSwitcher button[data-space-id]')].filter(node => node.dataset.spaceId === spaceId);
@@ -429,8 +449,15 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, scre
             evidence.visibleHeader = assertSpaceIconProjection(await page.evaluate(readSpaceIconProjection, target.id),
                 { spaceId: target.id, glyph: '⭐', requireVisibleHeader: true });
             await capture(page, 'space-context-visible-header-and-switcher-icon');
-            evidence.visibleCreatedFolder = await details(page, evidence.folderCreated.folder, true);
+            const folder = evidence.folderCreated.folder, beforeFolderCapture = await read();
+            const folderHeader = await page.waitForSelector(`.space[data-space-id="${target.id}"] .folder[data-bookmark-id="${folder.id}"] > .folder-header`, { visible: true });
+            try { await folderHeader.scrollIntoView(); } finally { await folderHeader.dispose(); }
+            evidence.visibleCreatedFolder = await details(page, folder, true);
+            const inspectFolder = async () => assertSpaceFolderScreenshot(await page.evaluate(readSpaceFolderScreenshot, { spaceId: target.id, folderId: folder.id }), { spaceId: target.id, folder });
+            evidence.createdFolderScreenshotBefore = await inspectFolder();
             await capture(page, 'space-context-created-folder-renamed-header-and-theme-color');
+            evidence.createdFolderScreenshotAfter = await inspectFolder();
+            assertSpaceContextUnchanged(beforeFolderCapture, await read());
         });
         await openMenu(sidebarB.page, chip(target.id), target.name, true);
         await picker(sidebarB.page, 'star'); evidence.reset = await selectIcon(sidebarB.page, null, null);

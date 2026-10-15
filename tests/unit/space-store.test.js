@@ -595,3 +595,61 @@ test('Space rename and folder creation retain the existing backing-root boundary
     await assert.rejects(store.dispatch({ action: 'newFolder', spaceId: 'b', title: 'Must not create' }), /no longer inside the Arcify/);
     assert.deepEqual(mutations, []);
 });
+
+test('explicit split preparation can persist canonical state without triggering native group projection', async () => {
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    sync.syncTabGroups = true;
+    store.spaces[0].name = 'Canonical update';
+    await store.persist({ skipGroupSync: true });
+    assert.equal(local.spaces[0].name, 'Canonical update'); assert.deepEqual(mutations, []);
+    await store.persist(); assert(mutations.some(([kind]) => kind === 'group'));
+});
+
+test('native split updates resume deferred projection through the existing debounced event path', async () => {
+    tabs[0].splitViewId = tabs[1].splitViewId = 0;
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    sync.syncTabGroups = true;
+    await store.persist(); assert.deepEqual(mutations, []);
+    tabs[0].splitViewId = tabs[1].splitViewId = -1;
+    chrome.tabs.onUpdated.emit(1, { splitViewId: -1 }, tabs[0]);
+    await new Promise(resolve => setTimeout(resolve, 230)); await store.run(() => {});
+    assert(mutations.some(([kind]) => kind === 'group')); assert.deepEqual(session.spaceGroupSplitDeferrals, []);
+});
+
+for (const openerTabId of [1, 2]) test(`browser child from split pane ${openerTabId} inserts after exact current pair`, async () => {
+    local.spaces = [space('a', [1, 2, 4])];
+    tabs.push({ id: 4, windowId: 1, url: 'https://tail.test/', index: 2, groupId: -1 });
+    tabs[0].index = 0; tabs[1].index = 1;
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    // Intentionally stale cache: the event must consult current native metadata.
+    store.liveTabs = new Map(tabs.map(tab => [tab.id, structuredClone(tab)]));
+    tabs[0].splitViewId = tabs[1].splitViewId = 77;
+    const child = { id: 3, windowId: 1, openerTabId, url: 'https://child.test/', index: 3, groupId: -1 };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2, 3, 4]);
+    assert.equal(tabs[0].splitViewId, 77); assert.equal(tabs[1].splitViewId, 77); assert.deepEqual(mutations, []);
+});
+
+for (const uncertain of ['missing-peer', 'native-gap', 'group-mismatch', 'query-failure']) test(`uncertain split opener ${uncertain} appends without native repair`, async () => {
+    local.spaces = [space('a', [1, 2, 4])];
+    tabs.push({ id: 4, windowId: 1, url: 'https://tail.test/', index: 2, groupId: -1 });
+    tabs[0].index = 0; tabs[1].index = 1;
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    tabs[0].splitViewId = tabs[1].splitViewId = 77;
+    if (uncertain === 'missing-peer') tabs[1].splitViewId = -1;
+    if (uncertain === 'native-gap') tabs[1].index = 3;
+    if (uncertain === 'group-mismatch') tabs[1].groupId = 5;
+    const query = chrome.tabs.query;
+    if (uncertain === 'query-failure') chrome.tabs.query = async args => { if (args.windowId) throw new Error('Transient native read'); return query(args); };
+    const child = { id: 3, windowId: 1, openerTabId: 1, url: 'https://child.test/', index: 4, groupId: -1 };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2, 4, 3]); assert.deepEqual(mutations, []);
+});
+
+test('ordinary native opener child keeps existing adjacent insertion behavior', async () => {
+    local.spaces = [space('a', [1, 2])];
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    const child = { id: 3, windowId: 1, openerTabId: 1, url: 'https://child.test/', groupId: -1 };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 3, 2]); assert.deepEqual(mutations, []);
+});

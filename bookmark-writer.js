@@ -49,7 +49,7 @@ function predictRelocationOrders(parents, relocation, createdId = null) {
     return predicted;
 }
 
-async function reorderParent(parentId, desired, initial, observedOrders) {
+async function reorderParent(parentId, desired, initial, observedOrders, beforeWrite, onWrite) {
     let live = [...initial];
     for (let index = 0; index < desired.length; index++) {
         if (live[index] === desired[index]) continue;
@@ -60,6 +60,8 @@ async function reorderParent(parentId, desired, initial, observedOrders) {
                 code: 'conflict', observedOrders, moved: true
             });
         }
+        await beforeWrite?.();
+        onWrite?.();
         await chrome.bookmarks.move(desired[index], { parentId, index });
         const next = ids(await chrome.bookmarks.getChildren(parentId));
         const expected = [...live];
@@ -77,7 +79,7 @@ async function reorderParent(parentId, desired, initial, observedOrders) {
     return live;
 }
 
-async function applyOperation(request = {}, { beforeWrite, onCreated } = {}) {
+async function applyOperation(request = {}, { beforeWrite, onCreated, onWrite } = {}) {
     const parents = (request.parents || []).map(parent => ({
         parentId: String(parent.parentId),
         expected: normalizeList(parent.expectedCanonicalIds, 'expectedCanonicalIds'),
@@ -163,6 +165,7 @@ async function applyOperation(request = {}, { beforeWrite, onCreated } = {}) {
             // Trusted background callers can revalidate live sources after this
             // operation waited in the writer queue. Never accepted from a message.
             await beforeWrite?.();
+            onWrite?.();
             const created = await chrome.bookmarks.create({
                 parentId: target.parentId, index, title: relocation.title, url: relocation.url
             });
@@ -177,6 +180,8 @@ async function applyOperation(request = {}, { beforeWrite, onCreated } = {}) {
                 throw new BookmarkOrderError('Bookmark destination is invalid.', { code: 'invalid_request', observedOrders: fresh });
             }
             predictedAfterRelocation = predictRelocationOrders(parents, relocation);
+            await beforeWrite?.();
+            onWrite?.();
             await chrome.bookmarks.move(bookmarkId, { parentId: target.parentId, index: target.desired.indexOf(bookmarkId) });
         } else {
             throw new BookmarkOrderError('Bookmark relocation is invalid.', { code: 'invalid_request', observedOrders: fresh });
@@ -200,17 +205,18 @@ async function applyOperation(request = {}, { beforeWrite, onCreated } = {}) {
         }
     }
     for (const parent of parents) {
-        observedOrders[parent.parentId] = await reorderParent(parent.parentId, parent.desired, observedOrders[parent.parentId], observedOrders);
+        observedOrders[parent.parentId] = await reorderParent(parent.parentId, parent.desired, observedOrders[parent.parentId], observedOrders, beforeWrite, onWrite);
     }
     return { orders: observedOrders, createdId };
 }
 
 export function enqueueBookmarkOperation(request, { beforeWrite } = {}) {
-    let createdId = null;
-    const run = chain.then(() => applyOperation(request, { beforeWrite, onCreated: id => { createdId = id; } })).catch(error => {
+    let createdId = null, writeAttempted = false;
+    const run = chain.then(() => applyOperation(request, { beforeWrite, onCreated: id => { createdId = id; }, onWrite: () => { writeAttempted = true; } })).catch(error => {
         // A caller must be able to report an already-created record even when
         // post-write verification fails. Never delete it or retry silently.
-        if (createdId) { error.createdId = createdId; error.moved = true; }
+        if (createdId) error.createdId = createdId;
+        if (writeAttempted) error.moved = true;
         throw error;
     });
     chain = run.catch(() => {});

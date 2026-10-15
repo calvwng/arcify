@@ -54,7 +54,7 @@ test('new, omitted, duplicate or unnamed cases cannot silently escape the explic
     }
 });
 
-for (const mode of ['full', 'favorite-lifecycle']) {
+for (const mode of ['full', 'favorite-lifecycle', 'native-split']) {
     test(`${mode} requires every declared case to pass once in the declared order`, () => {
         assert.doesNotThrow(() => assertPairedChromeRunPassed(passedReport(mode)));
         const report = createPairedChromeRunReport(names, mode);
@@ -125,10 +125,10 @@ test('actual smoke orchestration preserves full order and gates only unrelated c
 
 test('workflow keeps the original full job and adds an independent mandatory fresh-runner lifecycle job', () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  [a-z-]+:\n|$(?![\s\S]))/gm)];
-    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle']);
-    const full = jobs[0][2], lifecycle = jobs[1][2];
+    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'native-split']);
+    const full = jobs[0][2], lifecycle = jobs[1][2], nativeSplit = jobs[2][2];
     const peerPin = smoke.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
-    for (const job of [full, lifecycle]) {
+    for (const job of [full, lifecycle, nativeSplit]) {
         assert.match(job, /runs-on: ubuntu-24\.04/);
         assert.match(job, /CI: 'true'/);
         assert.match(job, /ARCIFY_TEST_HEAD: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/);
@@ -154,4 +154,27 @@ test('workflow keeps the original full job and adds an independent mandatory fre
     for (const path of ['scripts/paired-chrome-run-plan.mjs', 'tests/unit/paired-chrome-run-plan.test.js']) {
         assert(workflow.includes(`      - '${path}'`), `Changes to ${path} must trigger both jobs.`);
     }
+});
+
+
+test('supplemental native split mode preserves original full39/lifecycle5 and requires real positive case', () => {
+    const report = createPairedChromeRunReport(names, 'native-split');
+    assert.deepEqual(indices(report), [0, 1, 2, 39]);
+    assert.equal(report.expectedCaseCount, 4);
+    assert.match(report.scope, /Supplemental fresh-profile native Split View positive/);
+    assert.match(report.scope, /not a full-suite result/);
+    assert.match(report.expectedCases[3].name, /real drag and keyboard create native Split View/);
+    assert.equal(createPairedChromeRunReport(names, 'full').expectedCaseCount, 39);
+    assert.equal(createPairedChromeRunReport(names, 'favorite-lifecycle').expectedCaseCount, 5);
+    const start = smoke.indexOf("    if (report.runMode === 'native-split') {");
+    const end = smoke.indexOf('    } else {', start);
+    assert(start > 0 && end > start);
+    assert.match(smoke.slice(start, end), /await step\(NATIVE_SPLIT_CASE_NAME, \(\) => exerciseNativeTodaySplit/);
+    assert.equal((smoke.match(/exerciseNativeTodaySplit\(/g) || []).length, 1);
+    assert.match(smoke, /captureNativeSplitWindow\(\{chromePid:browser.process\(\).pid/);
+    assert.match(smoke, /report.nativeSplit=evidence;await saveReport\(\)/);
+    assert.match(workflow, /ARCIFY_PAIRED_RUN_MODE: native-split/);
+    assert.match(workflow, /name: paired-chrome-native-split-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
+    assert.match(workflow, /path: arcify\/test-results\/paired-chrome-native-split\//);
+    assert.doesNotMatch(workflow, /apt-get|dpkg -i|google-chrome-stable_current|puppeteer browsers install/);
 });

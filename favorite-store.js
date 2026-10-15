@@ -1,4 +1,5 @@
 import { detachGlobalTabs } from './tab-group-sync.js';
+import { assertNotNativeSplit } from './native-split-safety.js';
 import { getSpaceBookmarkById } from './space-bookmarks.js';
 import { Utils } from './utils.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
@@ -12,6 +13,33 @@ const copy = value => structuredClone(value);
 const id = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const key = value => `${value.favoriteId}:${value.windowId}`;
+const spaceSections = ['spaceBookmarks', 'temporaryTabs'];
+function captureSpaceSource(store, tabId) {
+    const space = store.spaces.find(space => spaceSections.some(section => space[section].includes(tabId)));
+    if (!space) return null;
+    const section = spaceSections.find(section => space[section].includes(tabId));
+    return { spaceId: space.id, section, ids: [...space[section]], lastTab: space.lastTab === tabId,
+        rank: store.restoredRanks?.get(tabId), snapshot: copy(store.snapshotByTab?.get(tabId)),
+        provisional: store.provisional?.has(tabId), recovery: store.recoveryCandidates?.has(tabId),
+        restoreQueue: copy((store.restoreQueue || []).filter(entry => entry.tabId === tabId)),
+        restoredMetadata: copy((store.restoredMetadata || []).filter(entry => entry.tabId === tabId)) };
+}
+function restoreSpaceSource(store, tabId, source) {
+    if (!source || store.spaces.some(space => spaceSections.some(section => space[section].includes(tabId)))) return false;
+    const space = store.spaces.find(space => space.id === source.spaceId);
+    if (!space) return false;
+    const following = source.ids.slice(source.ids.indexOf(tabId) + 1).find(id => space[source.section].includes(id));
+    space[source.section].splice(following === undefined ? space[source.section].length : space[source.section].indexOf(following), 0, tabId);
+    if (source.lastTab && space.lastTab === undefined) space.lastTab = tabId;
+    if (source.rank !== undefined) store.restoredRanks?.set(tabId, source.rank);
+    if (source.snapshot) store.snapshotByTab?.set(tabId, source.snapshot);
+    if (source.provisional) store.provisional?.add(tabId);
+    if (source.recovery) store.recoveryCandidates?.add(tabId);
+    for (const field of ['restoreQueue', 'restoredMetadata']) {
+        if (store[field] && !store[field].some(entry => entry.tabId === tabId)) store[field].push(...source[field]);
+    }
+    return true;
+}
 const fields = {
     get: [], addTab: ['tabId', 'beforeId'],
     addBookmark: ['spaceId', 'bookmarkFolderId', 'bookmarkId', 'parentId', 'tabId', 'beforeId'],
@@ -306,6 +334,7 @@ export class FavoriteStore {
     }
     async bind(favoriteId, tab, windowId, mode) {
         const current = await this.currentTab(tab.id, windowId);
+        assertNotNativeSplit(current);
         if (mode !== 'ordinary' && !current.pinned) fail('STALE_TAB', 'This tab is no longer pinned. Its saved Favorite was kept.');
         const conflict = this.state.bindings.find(binding => binding.favoriteId === favoriteId && binding.windowId === windowId && binding.tabId !== current.id);
         if (conflict) fail('FAVORITE_CONFLICT', 'This Favorite already has a live tab in this window. Both tabs were kept.');
@@ -314,23 +343,32 @@ export class FavoriteStore {
         this.state.bindings.push({ favoriteId, windowId, tabId: current.id, ...(mode === 'ordinary' ? { mode } : {}) });
         // Keep the receipt until projection and pin-mode conversion complete.
         await this.saveSession();
-        this.spaceStore.track(current);
-        await this.spaceStore.persist();
-        await detachGlobalTabs([current.id]);
+        // Ownership persistence is asynchronous. A split formed while it was
+        // writing must be refused before a stale Tab ejects its Space owner.
         let latest = await this.currentTab(current.id, windowId);
+        assertNotNativeSplit(latest);
+        this.spaceStore.track(latest);
+        await this.spaceStore.persist();
+        assertNotNativeSplit(await this.currentTab(current.id, windowId));
+        await detachGlobalTabs([current.id]);
+        latest = await this.currentTab(current.id, windowId);
+        assertNotNativeSplit(latest);
         if (mode === 'ordinary' && latest.pinned) latest = await chrome.tabs.update(latest.id, { pinned: false });
         latest = await this.currentTab(latest.id, windowId);
         if (mode !== 'ordinary' && !latest.pinned) fail('STALE_TAB', 'This tab was unpinned while saving its Favorite. Its page was kept.');
         this.spaceExclusions.delete(`${favoriteId}:${latest.id}`);
         this.state.attempts = this.state.attempts.filter(attempt => key(attempt) !== key({ favoriteId, windowId }));
         await this.saveSession();
+        assertNotNativeSplit(await this.currentTab(current.id, windowId));
         this.scheduleIcon(this.item(favoriteId), latest);
         return latest;
     }
     async open(favoriteId, windowId, { activate = true, tabId, beforeMutation = async () => {} } = {}) {
         await this.initialize();
         await this.normalWindow(windowId);
-        const item = this.item(favoriteId), tabs = await this.reconcile();
+        // Explicit adoption is not committed until bind's fresh validation.
+        // Its pending receipt must not prematurely eject the source Space.
+        const item = this.item(favoriteId), tabs = await this.reconcile({ updateSpaces: !tabId });
         const targetKey = key({ favoriteId, windowId });
         let binding = this.state.bindings.find(binding => key(binding) === targetKey);
         let tab = binding && tabs.get(binding.tabId);
@@ -366,6 +404,7 @@ export class FavoriteStore {
         if (tab && [...this.state.bindings, ...this.state.attempts].some(binding => binding.tabId === tab.id && binding.favoriteId !== favoriteId)) fail('FAVORITE_CONFLICT', 'This tab already belongs to another Favorite. No tabs were changed.');
         if (!attempt) {
             const mode = await this.ordinaryMode() ? 'ordinary' : undefined;
+            if (tab) { tab = await this.currentTab(tab.id, windowId); assertNotNativeSplit(tab); }
             attempt = { favoriteId, windowId, tabId: tab?.id ?? null, url: item.url,
                 ...(tab ? { kind: 'adopt' } : {}), ...(mode ? { mode } : {}) };
             if (attempt.tabId !== null) this.spaceExclusions.delete(`${favoriteId}:${attempt.tabId}`);
@@ -380,6 +419,7 @@ export class FavoriteStore {
         if (tab) {
             await beforeMutation();
             tab = await this.currentTab(tab.id, windowId);
+            assertNotNativeSplit(tab);
             if (attempt.mode !== 'ordinary' && !tab.pinned) tab = await chrome.tabs.update(tab.id, { pinned: true });
         } else {
             try { await this.normalWindow(windowId); await beforeMutation(); }
@@ -412,6 +452,7 @@ export class FavoriteStore {
         if (!bookmark || String(bookmark.parentId) !== message.parentId || !allowUnsupportedUrl && !isFavoriteUrl(bookmark.url)) fail('STALE_BOOKMARK', 'The saved bookmark changed or cannot be opened.');
         if (message.tabId) {
             const tab = await this.currentTab(message.tabId, message.windowId);
+            assertNotNativeSplit(tab);
             if (message.requireNativePin && !tab.pinned) fail('STALE_TAB', 'The earlier native Favorite was unpinned. Its page was kept unchanged.');
             const state = await Utils.getPinnedTabState(tab.id);
             if (String(state?.bookmarkId) !== message.bookmarkId || !tab.pinned && !this.isOwnedBookmarkTab(tab, message.bookmarkId) && ![...space.spaceBookmarks, ...space.temporaryTabs].includes(tab.id)) {
@@ -466,43 +507,79 @@ export class FavoriteStore {
     }
     async addFavorite(message, { prepared, onItem = () => {}, validate = async () => {} } = {}) {
         let item, source, sourceMessage = message;
-        if (message.action === 'addBookmark') {
-            ({ item, source, sourceMessage } = prepared || await this.prepareBookmark(message));
-        } else {
-            source = await this.currentTab(message.tabId, message.windowId);
-            const sourceFavoriteId = this.state.bindings.find(binding => binding.tabId === source.id)?.favoriteId
-                || this.state.attempts.find(attempt => attempt.tabId === source.id)?.favoriteId;
-            item = this.items.find(item => item.id === sourceFavoriteId);
-        }
-        await validate();
-        if (!item) {
-            const url = source.url || source.pendingUrl;
-            if (!isFavoriteUrl(url)) fail('UNSUPPORTED_URL', 'Only HTTP and HTTPS links up to 16,384 characters can be saved as Favorites.');
-            item = { id: crypto.randomUUID(), title: (source.title || url).slice(0, 4096), url,
-                sourceBookmarkId: message.action === 'addBookmark' ? message.bookmarkId : null };
-            onItem(item);
-            const next = this.positioned([...this.items, item], item.id, message.beforeId);
-            if (sourceMessage.tabId) {
-                this.state.attempts.push({ favoriteId: item.id, windowId: message.windowId, tabId: sourceMessage.tabId, url: item.url, kind: 'adopt', ...(await this.ordinaryMode() ? { mode: 'ordinary' } : {}) });
-                await this.saveSession();
-                await validate();
+        const beforeOwnership = copy(this.state);
+        let spaceSource;
+        try {
+            if (message.action === 'addBookmark') {
+                ({ item, source, sourceMessage } = prepared || await this.prepareBookmark(message));
+            } else {
+                source = await this.currentTab(message.tabId, message.windowId);
+                assertNotNativeSplit(source);
+                const sourceFavoriteId = this.state.bindings.find(binding => binding.tabId === source.id)?.favoriteId
+                    || this.state.attempts.find(attempt => attempt.tabId === source.id)?.favoriteId;
+                item = this.items.find(item => item.id === sourceFavoriteId);
             }
-            await this.saveItems(next);
-        } else {
-            onItem(item);
-            if (message.beforeId !== undefined) await this.saveItems(this.positioned(this.items, item.id, message.beforeId));
+            if (sourceMessage.tabId) spaceSource = captureSpaceSource(this.spaceStore, this.exactId(sourceMessage.tabId));
+            await validate();
+            if (!item) {
+                const url = source.url || source.pendingUrl;
+                if (!isFavoriteUrl(url)) fail('UNSUPPORTED_URL', 'Only HTTP and HTTPS links up to 16,384 characters can be saved as Favorites.');
+                item = { id: crypto.randomUUID(), title: (source.title || url).slice(0, 4096), url,
+                    sourceBookmarkId: message.action === 'addBookmark' ? message.bookmarkId : null };
+                onItem(item);
+                const next = this.positioned([...this.items, item], item.id, message.beforeId);
+                if (sourceMessage.tabId) {
+                    const ordinary = await this.ordinaryMode();
+                    assertNotNativeSplit(await this.currentTab(sourceMessage.tabId, message.windowId));
+                    this.state.attempts.push({ favoriteId: item.id, windowId: message.windowId, tabId: sourceMessage.tabId, url: item.url, kind: 'adopt', ...(ordinary ? { mode: 'ordinary' } : {}) });
+                    await this.saveSession();
+                    await validate();
+                }
+                await this.saveItems(next);
+            } else {
+                onItem(item);
+                if (message.beforeId !== undefined) await this.saveItems(this.positioned(this.items, item.id, message.beforeId));
+            }
+            if (message.action === 'addBookmark') await this.validateBookmark(sourceMessage);
+            await validate();
+            const tab = await this.open(item.id, message.windowId, { activate: false, tabId: sourceMessage.tabId || prepared?.favoriteTabId,
+                beforeMutation: message.action === 'addBookmark' ? async () => {
+                    const current = await this.validateBookmark(sourceMessage);
+                    if (current.url !== source.url) fail('STALE_BOOKMARK', 'The saved URL changed while adding this Favorite. No additional tab was opened.');
+                    await validate();
+                } : async () => {} });
+            if (message.action === 'addBookmark') await this.validateBookmark(sourceMessage);
+            await validate();
+            return tab;
+        } catch (error) {
+            if (error.code === 'NATIVE_SPLIT_ACTIVE' && item && sourceMessage.tabId) {
+                const tabId = this.exactId(sourceMessage.tabId);
+                const matches = entry => entry.favoriteId === item.id && entry.windowId === message.windowId && this.exactId(entry.tabId) === tabId;
+                let removed = false;
+                for (const field of ['bindings', 'attempts']) {
+                    // Preserve any earlier owner/receipt and every unrelated
+                    // Favorite. Only this invocation's exact adoption is undone.
+                    if (beforeOwnership[field].some(matches)) continue;
+                    this.state[field] = this.state[field].filter(entry => {
+                        if (!matches(entry) || field === 'attempts' && entry.kind !== 'adopt') return true;
+                        removed = true; return false;
+                    });
+                }
+                if (removed) {
+                    this.spaceExclusions.delete(`${item.id}:${tabId}`);
+                    let cleanupError;
+                    try { await this.saveSession(); } catch (failure) { cleanupError = failure; }
+                    // Restore only a source this adoption actually excluded.
+                    // This never overwrites a newer Space or Favorite owner.
+                    if (!this.ownsTab(tabId) && restoreSpaceSource(this.spaceStore, tabId, spaceSource)) {
+                        try { await this.spaceStore.persist({ skipGroupSync: true }); } catch (failure) { cleanupError ||= failure; }
+                    }
+                    if (cleanupError) error.message += ' Restoring tab ownership could not be confirmed; refresh before trying again.';
+                }
+                if (this.items.some(saved => saved.id === item.id)) error.message += ' The saved Favorite link was kept.';
+            }
+            throw error;
         }
-        if (message.action === 'addBookmark') await this.validateBookmark(sourceMessage);
-        await validate();
-        const tab = await this.open(item.id, message.windowId, { activate: false, tabId: sourceMessage.tabId || prepared?.favoriteTabId,
-            beforeMutation: message.action === 'addBookmark' ? async () => {
-                const current = await this.validateBookmark(sourceMessage);
-                if (current.url !== source.url) fail('STALE_BOOKMARK', 'The saved URL changed while adding this Favorite. No additional tab was opened.');
-                await validate();
-            } : async () => {} });
-        if (message.action === 'addBookmark') await this.validateBookmark(sourceMessage);
-        await validate();
-        return tab;
     }
     batchSpace(message) {
         // A batch belongs to one currently displayed Space in one normal window.
@@ -644,11 +721,36 @@ export class FavoriteStore {
     async releaseTab(tabId, windowId, favoriteId) {
         if (![...this.state.bindings, ...this.state.attempts].some(entry => entry.favoriteId === favoriteId && entry.windowId === windowId && entry.tabId === this.exactId(tabId))) fail('STALE_TAB', 'This Favorite’s open tab changed. Refresh and try again.');
         const tab = await this.currentTab(tabId, windowId);
+        assertNotNativeSplit(tab);
+        const previous = copy(this.state);
+        const exclusions = [...this.spaceExclusions].filter(value => value.endsWith(`:${tab.id}`));
         for (const entry of [...this.state.bindings, ...this.state.attempts]) if (entry.tabId === tab.id) this.spaceExclusions.delete(`${entry.favoriteId}:${tab.id}`);
         this.state.bindings = this.state.bindings.filter(binding => binding.tabId !== tab.id);
         this.state.attempts = this.state.attempts.filter(attempt => attempt.tabId !== tab.id);
-        await this.saveSession();
-        const current = await this.currentTab(tab.id, windowId);
+        let current;
+        try {
+            await this.saveSession();
+            current = await this.currentTab(tab.id, windowId);
+            assertNotNativeSplit(current);
+        } catch (error) {
+            if (error.code === 'NATIVE_SPLIT_ACTIVE') {
+                const prior = [...previous.bindings, ...previous.attempts].filter(entry => entry.tabId === tab.id);
+                const currentOwners = [...this.state.bindings, ...this.state.attempts];
+                const newerOwner = currentOwners.some(entry => this.exactId(entry.tabId) === this.exactId(tab.id) || prior.some(old => key(old) === key(entry))) ||
+                    this.spaceStore.spaces.some(space => spaceSections.some(section => space[section].includes(tab.id)));
+                if (!newerOwner) {
+                    for (const field of ['bindings', 'attempts']) {
+                        previous[field].forEach((entry, index) => {
+                            if (entry.tabId === tab.id) this.state[field].splice(Math.min(index, this.state[field].length), 0, entry);
+                        });
+                    }
+                    for (const exclusion of exclusions) this.spaceExclusions.add(exclusion);
+                    try { await this.saveSession(); }
+                    catch { error.message += ' Restoring Favorite ownership could not be confirmed; refresh before trying again.'; }
+                }
+            }
+            throw error;
+        }
         const ordinary = current.pinned ? await chrome.tabs.update(current.id, { pinned: false }) : current;
         this.spaceStore.track(ordinary);
         await this.spaceStore.persist();

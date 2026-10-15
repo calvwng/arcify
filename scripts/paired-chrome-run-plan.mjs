@@ -5,11 +5,14 @@ import assert from 'node:assert/strict';
 // remain last: it intentionally invalidates the original browser-session IDs.
 const FULL_CASE_INDICES = Object.freeze([...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 37, 38, 36, 32]);
 const FAVORITE_LIFECYCLE_CASE_INDICES = Object.freeze([0, 1, 2, 36, 32]);
+// Supplemental positive capability coverage never removes full/lifecycle cases.
+export const NATIVE_SPLIT_CASE_NAME = 'Today real drag and keyboard create native Split View pairs without replacing pages';
+const NATIVE_SPLIT_CASE_INDICES = Object.freeze([0, 1, 2, 39]);
 
 function caseIndicesForMode(mode) {
-    assert(mode === 'full' || mode === 'favorite-lifecycle',
-        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full or favorite-lifecycle.`);
-    return mode === 'full' ? FULL_CASE_INDICES : FAVORITE_LIFECYCLE_CASE_INDICES;
+    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split',
+        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle or native-split.`);
+    return mode === 'full' ? FULL_CASE_INDICES : mode === 'favorite-lifecycle' ? FAVORITE_LIFECYCLE_CASE_INDICES : NATIVE_SPLIT_CASE_INDICES;
 }
 
 export function createPairedChromeRunReport(caseNames, mode = 'full') {
@@ -18,10 +21,11 @@ export function createPairedChromeRunReport(caseNames, mode = 'full') {
         'Every paired-Chrome case must be included in the explicit full run plan.');
     assert(caseNames.every(name => typeof name === 'string' && name.trim()), 'Every case requires a name.');
     assert.equal(new Set(caseNames).size, caseNames.length, 'Case names must be unique.');
-    const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseNames[caseIndex] }));
+    const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseIndex === 39 ? NATIVE_SPLIT_CASE_NAME : caseNames[caseIndex] }));
     return {
         runMode: mode,
-        scope: mode === 'full' ? 'Full paired-extension suite.' :
+        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'native-split' ?
+            'Supplemental fresh-profile native Split View positive coverage; this is not a full-suite result.' :
             'Supplemental fresh-profile Favorite lifecycle coverage; this is not a full-suite result.',
         expectedCaseCount: indices.length,
         expectedCases,

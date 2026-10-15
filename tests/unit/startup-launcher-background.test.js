@@ -5,10 +5,13 @@ import { runInNewContext } from 'node:vm';
 import { isStartupLauncherTab } from '../../startup-launcher-tab.js';
 import { ownerOf } from '../../space-store.js';
 import { projectLiveTabTitles } from '../../tab-title-projection.js';
+import { createNativeSplitWriteGuard } from '../../native-split-safety.js';
+import { enqueueBookmarkOperation } from '../../bookmark-writer.js';
 
 const source = readFileSync(new URL('../../background.js', import.meta.url), 'utf8').replace(/^import .*;\s*$/gm, '');
 function fixture() {
     const messages = [], startups = [], archives = [], removed = [], alarms = [], actions = [], globals = new Set();
+    const bookmarkCreates = [], bookmarkNodes = [];
     const local = { tabLastActivity: { 1: 1, 2: 1 }, tabNameOverridesById: {}, pinnedTabStatesById: {} };
     const tabs = [{ id: 1, url: 'chrome-extension://arcify/startup-launcher.html', title: 'Arcify launcher', active: false },
         { id: 2, url: 'https://browsing.test/', title: 'Browsing tab', active: false }];
@@ -21,20 +24,21 @@ function fixture() {
         storage: { onChanged: event, local: { get: async () => local, set: async () => {} } },
         tabs: { onActivated: event, onUpdated: event, onRemoved: event, query: async () => tabs,
             get: async id => tabs.find(tab => tab.id === id), remove: async id => removed.push(id) },
-        bookmarks: { search: async () => [] }
+        bookmarks: { search: async () => [], getChildren: async () => structuredClone(bookmarkNodes),
+            create: async data => { const node = { ...data, id: 'created' }; bookmarkCreates.push(node); bookmarkNodes.push(node); return node; } }
     };
     globalThis.chrome = chrome;
     let launcherRegistered = 0;
-    const context = { chrome, console, registerTourMessages() {}, registerBookmarkListeners() {}, registerSpotlightBridge() {},
+    const context = { chrome, console, createNativeSplitWriteGuard, enqueueBookmarkOperation, registerTourMessages() {}, registerBookmarkListeners() {}, registerSpotlightBridge() {},
         registerStartupLauncher() { launcherRegistered++; },
         isStartupLauncherTab: tab => isStartupLauncherTab(tab, chrome), ownerOf, projectLiveTabTitles, isProtectedFavorite: () => false,
-        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTabMenuMessages() {},
+        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {},
         SpaceStore: class { spaces = [{ id: 'home', spaceBookmarks: [], temporaryTabs: [1, 2] }]; install() {} async run(fn) { return fn(); } isGlobalTab(tab) { return globals.has(tab.id); } async dispatch(message) { actions.push(message); return this.spaces; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: true, autoArchiveIdleMinutes: 10 }),
             getPinnedTabStates: async () => ({}), addArchivedTab: async tab => archives.push(tab) },
         Logger: { log() {}, error(error) { throw error; } } };
     runInNewContext(source, context);
-    return { context, messages, startups, archives, removed, alarms, launcherRegistered, actions, globals, tabs, local };
+    return { context, messages, startups, archives, removed, alarms, launcherRegistered, actions, globals, tabs, local, bookmarkCreates };
 }
 
 test('startup launcher registration preserves existing auto-archive startup hook', async () => {
@@ -119,4 +123,19 @@ test('trusted exact Space cleanup enters the authoritative queue action', async 
     for (const listener of app.messages) listener(message, { id: 'arcify', url: 'chrome-extension://arcify/sidebar.html', tab: { windowId: 1 } }, reply => replies.push(reply));
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(replies[0].success, true); assert.deepEqual(app.actions, [message]);
+});
+
+
+test('background builds the queued live bookmark split guard and propagates native refusal before create', async () => {
+    const app = fixture(); Object.assign(app.tabs[1], { windowId: 10, splitViewId: 77 });
+    const request = { type: 'bookmarkOrder', guardTab: { tabId: 2, windowId: 10 },
+        operation: { parents: [{ parentId: 'p', expectedCanonicalIds: [], desiredCanonicalIds: ['$new'] }], relocation: { kind: 'create', parentId: 'p', title: 'Page', url: app.tabs[1].url } } };
+    const replies = []; for (const listener of app.messages) listener(request, { id: 'arcify' }, reply => replies.push(reply));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(replies.length, 1); assert.equal(replies[0].success, false); assert.match(replies[0].error, /End Split View/);
+    assert.deepEqual(app.bookmarkCreates, []);
+    app.tabs[1].splitViewId = -1; replies.length = 0;
+    for (const listener of app.messages) listener(request, { id: 'arcify' }, reply => replies.push(reply));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(replies[0].success, true); assert.equal(replies[0].createdId, 'created'); assert.equal(app.bookmarkCreates.length, 1);
 });

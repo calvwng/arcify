@@ -2384,3 +2384,52 @@ select:focus-visible,
 .space-choice-grid button { border-color: var(--choice-color, #52525b); overflow-wrap: anywhere; }
 .space-choice-grid button[aria-pressed="true"] { background: #3f3f46; outline: 2px solid #93c5fd; outline-offset: -2px; }
 .space-editor-status { margin: 6px 0; color: #fca5a5; overflow-wrap: anywhere; }
+
+/* Split View has its own labeled target; ordinary row edges still reorder. */
+.today-split-target {
+    flex: 0 0 auto;
+    align-self: center;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    padding: 3px 6px;
+    font-size: 10px;
+    line-height: 16px;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+}
+.tab:hover > .today-split-target,
+.tab:focus-within > .today-split-target,
+.tab.today-selected > .today-split-target,
+.today-split-dragging .tab:not(.dragging) > .today-split-target {
+    opacity: 1;
+    pointer-events: auto;
+}
+.today-split-target:focus-visible,
+.today-split-target.today-split-drop-active {
+    outline: 2px solid var(--accent-color, #4a87ff);
+    outline-offset: 2px;
+    background: rgba(74, 135, 255, 0.18);
+}
+.today-split-badge {
+    display: inline-block;
+    align-self: flex-start;
+    font-size: 10px;
+    line-height: 14px;
+    opacity: 0.75;
+}
+.today-split-menu-hint {
+    padding: 8px 12px;
+    max-width: 265px;
+    white-space: normal;
+    cursor: default;
+    opacity: 0.65;
+    font-size: 12px;
+}
+
+#todaySplitDeferralStatus {
+    position: static;
+    margin: 4px 8px 8px;
+}

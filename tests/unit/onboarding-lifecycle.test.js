@@ -26,7 +26,7 @@ function background(completed = false, onboardingVersion = undefined, version = 
         registerBookmarkListeners() {},
         registerSpotlightBridge() {},
         enqueueBookmarkOrder: async () => [],
-        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTabMenuMessages() {},
+        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {},
         SpaceStore: class { install() {} async dispatch() { return [{ id: 'home' }]; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: false }) },
         Logger: { log() {}, error() {} }

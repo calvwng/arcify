@@ -5,6 +5,7 @@ import { parseHTML } from 'linkedom';
 import { enqueueBookmarkOperation } from '../../bookmark-writer.js';
 import { applySpacePatch } from '../../space-store.js';
 import { moveSpace } from '../../space-order.js';
+import { createNativeSplitWriteGuard } from '../../native-split-safety.js';
 
 // Import and initialize the real sidebar and all its modules against a DOM.
 // Only browser facilities and persisted fixtures are substituted; no source
@@ -30,7 +31,7 @@ let storedSpaces;
 const local = { tabGroupImportDismissed: true };
 const settings = { invertTabOrder: false, syncTabGroups: false, showAllOpenTabsInCollapsedFolders: true };
 const session = { activeSpaces: { 10: 'alpha' } };
-let tree, writes = [], alerts = [], nextId = 10;
+let tree, writes = [], alerts = [], nextId = 10, hooks = {};
 const bookmark = (id, tabId = null) => ({ id, title: id, url: tabId ? tabs[tabId - 1].url : `https://${id}.test/` });
 function resetData() {
     tree = { id: 'root', title: 'Arcify', children: [{ id: 'p', title: 'Alpha', children: [
@@ -47,10 +48,11 @@ function nodes(node = tree, parentId = null) { return [{ ...node, parentId }, ..
 function getNode(id, node = tree) { return node.id === id ? node : (node.children || []).map(child => getNode(id, child)).find(Boolean); }
 const ids = parent => getNode(parent).children.map(node => node.id);
 const allIds = () => nodes().map(node => node.id).sort();
-const area = state => ({ async get(keys) {
-    if (typeof keys === 'string') return { [keys]: structuredClone(state[keys]) };
-    return structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
-}, async set(next) { Object.assign(state, structuredClone(next)); }, async remove() {} });
+const area = state => ({ async get(keys, callback) {
+    if (state === local) await hooks.storageRead?.(keys);
+    const result = typeof keys === 'string' ? { [keys]: structuredClone(state[keys]) } : structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
+    callback?.(result); return result;
+}, async set(next) { Object.assign(state, structuredClone(next)); if (state === local) await hooks.storageSet?.(next); }, async remove() {} });
 const onActivated = listeners();
 
 globalThis.window = window;
@@ -69,8 +71,8 @@ globalThis.chrome = {
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: tabs.filter(tab => tab.pinned) };
             if (message.type === 'sidebarTour') return { success: true, state: null };
             if (message.type === 'bookmarkOrder') {
-                try { return { success: true, ...await enqueueBookmarkOperation(message.operation) }; }
-                catch (error) { return { success: false, error: error.message, code: error.code }; }
+                try { return { success: true, ...await enqueueBookmarkOperation(message.operation, { beforeWrite: createNativeSplitWriteGuard(message.guardTab) }) }; }
+                catch (error) { return { success: false, error: error.message, code: error.code, moved: error.moved, createdId: error.createdId }; }
             }
             assert.equal(message.type, 'spaceStore');
             if (message.action === 'get') { const result = structuredClone(storedSpaces); return { success: true, spaces: result }; }
@@ -83,8 +85,8 @@ globalThis.chrome = {
     windows: { getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
     tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
-        async get(id) { return structuredClone(tabs.find(tab => tab.id === id)); } },
-    bookmarks: { async get(id) { return structuredClone(nodes().filter(node => node.id === id)); },
+        async get(id, callback) { const result = structuredClone(tabs.find(tab => tab.id === id)); callback?.(result); return result; } },
+    bookmarks: { async get(id) { await hooks.bookmarkGet?.(id); return structuredClone(nodes().filter(node => node.id === id)); },
         async search({ title }) { return structuredClone(nodes().filter(node => node.title === title)); },
         async getChildren(id) { return structuredClone((getNode(id)?.children || []).map(node => ({ ...node, parentId: id }))); },
         async move(id, { parentId, index }) {
@@ -96,8 +98,8 @@ globalThis.chrome = {
             writes.push({ kind: 'move', id, parentId, index });
             return structuredClone(node);
         },
-        async create(data) { const node = { ...data, id: `created-${nextId++}` }; getNode(data.parentId).children.splice(data.index, 0, node); writes.push({ kind: 'create', id: node.id }); return structuredClone(node); },
-        async remove(id) { const parent = nodes().find(item => item.children?.some(child => child.id === id)); getNode(parent.id).children.splice(getNode(parent.id).children.findIndex(child => child.id === id), 1); writes.push({ kind: 'remove', id }); }
+        async create(data) { const node = { ...data, id: `created-${nextId++}` }; getNode(data.parentId).children.splice(data.index, 0, node); writes.push({ kind: 'create', id: node.id }); await hooks.afterCreate?.(node); return structuredClone(node); },
+        async remove(id) { const parent = nodes().find(item => item.children?.some(child => child.id === id)); getNode(parent.id).children.splice(getNode(parent.id).children.findIndex(child => child.id === id), 1); writes.push({ kind: 'remove', id }); await hooks.afterRemove?.(id); }
     },
     tabGroups: { async query() { return []; } }
 };
@@ -355,4 +357,92 @@ test('actual sidebar rapid keyboard moves use the acknowledged order before sche
     await wait(10); assert.deepEqual(chipIds(), ['beta', 'gamma', 'alpha']);
     assert.deepEqual(storedSpaces.map(space => space.id), chipIds());
     await wait(180); assert.deepEqual(chipIds(), ['beta', 'gamma', 'alpha']);
+});
+
+test('native Split rows cannot start ordinary sidebar drag', async () => {
+    tabs[1].splitViewId = 71;
+    try {
+        await reset();
+        const source = row('b'), before = structuredClone(storedSpaces), bookmarkIds = allIds();
+        const start = drag(source, 'dragstart');
+        assert(start.defaultPrevented); assert.equal(document.querySelector('.dragging'), null);
+        assert.match(document.getElementById('favoritesDropNotice').textContent, /End Split View/);
+        assert.deepEqual(storedSpaces, before); assert.deepEqual(allIds(), bookmarkIds); assert.deepEqual(writes, []);
+    } finally { delete tabs[1].splitViewId; }
+});
+
+test('a native split appearing during drag is rejected before a projected bookmark or anchor can move', async () => {
+    await reset(); const source = row('b'), target = row('c'), before = structuredClone(storedSpaces), beforeTree = structuredClone(tree);
+    rect(target, 100); drag(source, 'dragstart'); drag(target, 'dragover', 101);
+    tabs[1].splitViewId = 72;
+    try {
+        drag(target, 'drop', 101); drag(source, 'dragend'); await wait(200);
+        assert.deepEqual(tree, beforeTree); assert.deepEqual(storedSpaces, before); assert.deepEqual(writes, []);
+        assert(alerts.some(message => /End Split View/.test(message)));
+        assert.equal(row('b').parentElement.className, 'folder-collapsed-tabs'); assert.deepEqual(ids('f'), ['b', 'closed']);
+    } finally { delete tabs[1].splitViewId; }
+});
+
+
+for (const phase of ['root-read', 'created', 'binding-read', 'binding-write']) test(`quick pin rechecks native split at ${phase} boundary`, async () => {
+    await reset(); const before = structuredClone(storedSpaces), beforeBindings = structuredClone(local.pinnedTabStatesById);
+    if (phase === 'root-read') hooks.bookmarkGet = async id => { if (id === 'p') { hooks.bookmarkGet = null; tabs[2].splitViewId = 81; } };
+    else hooks.afterCreate = async () => {
+        hooks.afterCreate = null;
+        if (phase === 'created') tabs[2].splitViewId = 81;
+        else if (phase === 'binding-read') hooks.storageRead = async key => { if (key === 'pinnedTabStatesById') { hooks.storageRead = null; tabs[2].splitViewId = 81; } };
+        else hooks.storageSet = async next => { if (next.pinnedTabStatesById) { hooks.storageSet = null; tabs[2].splitViewId = 81; } };
+    };
+    try {
+        await chrome.runtime.onMessage.emit({ command: 'toggleSpacePin', tabId: 3 }); await wait(220);
+        assert.deepEqual(storedSpaces, before); assert.deepEqual(local.pinnedTabStatesById, beforeBindings);
+        assert.equal(writes.filter(write => write.kind === 'create').length, phase === 'root-read' ? 0 : 1);
+        const message = document.getElementById('favoritesDropNotice').textContent;
+        assert.match(message, /End Split View/);
+        if (phase !== 'root-read') assert.match(message, /bookmark was saved.*live-tab update.*Nothing was retried/);
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        assert(temporary().querySelector('[data-tab-id="3"]')); assert.deepEqual(local.pinnedTabStatesById, beforeBindings); assert.deepEqual(storedSpaces, before);
+    } finally { hooks = {}; delete tabs[2].splitViewId; }
+});
+
+for (const phase of ['root-read', 'created', 'binding-read', 'binding-write']) test(`live bookmark drop rechecks native split at ${phase} boundary`, async () => {
+    await reset(); const before = structuredClone(storedSpaces), beforeBindings = structuredClone(local.pinnedTabStatesById);
+    const source = temporary().querySelector('[data-tab-id="3"]'), target = row('c'); rect(target, 100);
+    if (phase === 'root-read') hooks.bookmarkGet = async id => { if (id === 'p') { hooks.bookmarkGet = null; tabs[2].splitViewId = 82; } };
+    else hooks.afterCreate = async () => {
+        hooks.afterCreate = null;
+        if (phase === 'created') tabs[2].splitViewId = 82;
+        else if (phase === 'binding-read') hooks.storageRead = async key => { if (key === 'pinnedTabStatesById') { hooks.storageRead = null; tabs[2].splitViewId = 82; } };
+        else hooks.storageSet = async next => { if (next.pinnedTabStatesById) { hooks.storageSet = null; tabs[2].splitViewId = 82; } };
+    };
+    try {
+        await drop(source, target, 101);
+        assert.deepEqual(storedSpaces, before); assert.deepEqual(local.pinnedTabStatesById, beforeBindings);
+        assert.equal(writes.filter(write => write.kind === 'create').length, phase === 'root-read' ? 0 : 1);
+        assert(alerts.some(message => /End Split View/.test(message)));
+        if (phase !== 'root-read') assert(alerts.some(message => /bookmark was saved.*live-tab update.*Nothing was retried/.test(message)));
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        assert(temporary().querySelector('[data-tab-id="3"]')); assert.deepEqual(local.pinnedTabStatesById, beforeBindings); assert.deepEqual(storedSpaces, before);
+    } finally { hooks = {}; delete tabs[2].splitViewId; }
+});
+
+
+for (const phase of ['lookup', 'deleted', 'binding-write']) test(`saved-pin demotion stops native split at ${phase} without changing ownership`, async () => {
+    await reset(); const before = structuredClone(storedSpaces), bindings = structuredClone(local.pinnedTabStatesById);
+    if (phase === 'lookup') hooks.bookmarkGet = async id => { if (id === 'p') { hooks.bookmarkGet = null; tabs[1].splitViewId = 91; } };
+    else hooks.afterRemove = async () => {
+        hooks.afterRemove = null;
+        if (phase === 'deleted') tabs[1].splitViewId = 91;
+        else hooks.storageSet = async next => { if (next.pinnedTabStatesById) { hooks.storageSet = null; tabs[1].splitViewId = 91; } };
+    };
+    try {
+        await drop(row('b'), temporary(), 101);
+        assert.deepEqual(storedSpaces, before); assert.deepEqual(local.pinnedTabStatesById, bindings);
+        assert.equal(writes.filter(write => write.kind === 'remove').length, phase === 'lookup' ? 0 : 1);
+        assert(alerts.some(message => /End Split View/.test(message)));
+        if (phase !== 'lookup') assert(alerts.some(message => /saved pin was removed.*Nothing was retried or recreated/.test(message)));
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        assert.deepEqual(storedSpaces, before); assert.deepEqual(local.pinnedTabStatesById, bindings);
+        assert(document.querySelector('#spacesList [data-tab-id="2"]'), 'The same native tab remains represented even when a deleted bookmark requires fallback rendering');
+    } finally { hooks = {}; delete tabs[1].splitViewId; }
 });

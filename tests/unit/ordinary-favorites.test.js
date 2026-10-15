@@ -409,3 +409,197 @@ test('Space metadata and exact Tab edits preserve real ordinary-Favorite ownersh
     assert.equal(snapshot.spaces.find(space => space.id === 'a').name, 'Edited Space');
     assert.equal(Object.hasOwn(snapshot.spaces.find(space => space.id === 'a'), 'icon'), false);
 });
+
+for (const ordinaryFavoriteTabs of [false, true]) test(`existing native split blocks Favorite adoption before saved-link/ownership writes (${ordinaryFavoriteTabs ? 'ordinary' : 'native'})`, async () => {
+    sync.ordinaryFavoriteTabs = ordinaryFavoriteTabs;
+    const s = stores(); await s.spaces.dispatch({ action: 'get' });
+    tab(1).splitViewId = tab(2).splitViewId = 0;
+    const beforeItems = clone(local[FAVORITES_KEY]), beforeSpaces = clone(s.spaces.spaces), beforeOwnership = clone(session[FAVORITE_SESSION_KEY]);
+    await assert.rejects(s.favorites.dispatch(req('addTab', { tabId: 1 })), /End Split View before moving or pinning this tab\./);
+    assert.deepEqual(local[FAVORITES_KEY], beforeItems); assert.deepEqual(s.spaces.spaces, beforeSpaces);
+    assert.deepEqual(session[FAVORITE_SESSION_KEY], beforeOwnership); assert.deepEqual(effects, []);
+    assert.equal(tab(1).splitViewId, 0); assert.equal(tab(2).splitViewId, 0);
+});
+
+test('Favorite adoption rechecks a newly created native split after reading the prospective mode', async () => {
+    const s = stores(); await s.spaces.dispatch({ action: 'get' });
+    hooks.syncGet = keys => { if (keys === 'ordinaryFavoriteTabs') tab(1).splitViewId = tab(2).splitViewId = 7; };
+    await assert.rejects(s.favorites.dispatch(req('addTab', { tabId: 1 })), /End Split View/);
+    assert.equal(local[FAVORITES_KEY].length, 1); assert.deepEqual(s.favorites.state.attempts, []);
+    assert.deepEqual(effects, []); assert.equal(ownerOf(s.spaces.spaces, 1).id, 'a');
+});
+
+for (const stage of ['before-native-pin', 'before-bind', 'before-unpin']) test(`Favorite ${stage} boundary never mutates a late native split`, async () => {
+    sync.ordinaryFavoriteTabs = stage !== 'before-native-pin';
+    const s = stores(); await s.spaces.dispatch({ action: 'get' }); let injected = false;
+    if (stage === 'before-native-pin') hooks.localSet = value => {
+        if (value[FAVORITES_KEY]?.length === 2) { tab(1).splitViewId = tab(2).splitViewId = 0; injected = true; }
+    };
+    if (stage === 'before-bind') {
+        let afterSaved = false, reads = 0;
+        hooks.localSet = value => { if (value[FAVORITES_KEY]?.length === 2) afterSaved = true; };
+        hooks.get = id => { if (afterSaved && id === 1 && ++reads === 3) { tab(1).splitViewId = tab(2).splitViewId = 0; injected = true; } };
+    }
+    if (stage === 'before-unpin') {
+        hooks.created = created => { created.groupId = 42; groups.push({ id: 42, windowId: 1 }); };
+        hooks.ungroup = ids => { tab(ids[0]).splitViewId = 0; tab(1).splitViewId = 0; injected = true; };
+    }
+    await assert.rejects(s.favorites.dispatch(stage === 'before-unpin' ? req('open', { favoriteId: 'f' }) : req('addTab', { tabId: 1 })), /End Split View/);
+    assert(injected, `Test must reach the ${stage} race`);
+    assert(!effects.some(effect => effect[0] === 'update'), 'No pin, unpin or focus mutation may follow the native split');
+    assert(!effects.some(effect => effect[0] === 'remove' || effect[0] === 'move' || effect[0] === 'group'));
+});
+
+test('Favorite reverse drag rejects an existing native split without releasing ownership', async () => {
+    const s = stores(); const result = await s.favorites.dispatch(req('addTab', { tabId: 1 }));
+    const favoriteId = result.favorites.find(item => item.tabId === 1).id;
+    tab(1).splitViewId = tab(2).splitViewId = 0; effects.length = 0;
+    const before = clone(session[FAVORITE_SESSION_KEY]);
+    await assert.rejects(s.favorites.dispatch(req('releaseTab', { favoriteId, tabId: 1 })), /End Split View/);
+    assert.deepEqual(session[FAVORITE_SESSION_KEY], before); assert.deepEqual(effects, []); assertGlobal(s, 1);
+});
+
+test('split sentinel remains a normal Favorite source', async () => {
+    tab(1).splitViewId = -1;
+    const s = stores(); const result = await s.favorites.dispatch(req('addTab', { tabId: 1 }));
+    assert.equal(result.tab.id, 1); assertGlobal(s, 1);
+});
+
+for (const boundary of ['adoption-receipt', 'saved-link', 'binding-receipt', 'space-persist', 'final-binding-receipt']) {
+    test(`late native split during ${boundary} releases only new Favorite ownership and preserves canonical Space metadata`, async () => {
+        local.spaces[0].temporaryTabs = [1, 2]; local.spaces[1].temporaryTabs = [];
+        local.spaces[0].lastTab = 1;
+        local.tabNameOverridesById = { 1: { name: 'Original title' } };
+        local.pinnedTabStatesById = { 9: { bookmarkId: 'unrelated', pinnedUrl: 'https://unrelated.test/' } };
+        session.restoredTabRanks = [[1, 0], [2, 1]];
+        const s = stores(); await s.spaces.dispatch({ action: 'get' });
+        const beforeSpaces = clone(s.spaces.spaces), beforeDurableSpaces = clone(local.spaces);
+        const beforeSnapshots = clone(local.spaceTabSnapshot), beforeNames = clone(local.tabNameOverridesById);
+        const beforeBindings = clone(local.pinnedTabStatesById), beforeRanks = clone([...s.spaces.restoredRanks]);
+        let injected = false;
+        const split = () => { if (!injected) { injected = true; tab(1).splitViewId = tab(2).splitViewId = 0; } };
+        hooks.sessionSet = value => {
+            const state = value[FAVORITE_SESSION_KEY];
+            if (!state) return;
+            if (boundary === 'adoption-receipt' && state.attempts.some(entry => entry.tabId === 1) && !state.bindings.length) split();
+            if (boundary === 'binding-receipt' && state.bindings.some(entry => entry.tabId === 1) && state.attempts.length) split();
+            if (boundary === 'final-binding-receipt' && state.bindings.some(entry => entry.tabId === 1) && !state.attempts.length) split();
+        };
+        hooks.localSet = value => {
+            if (boundary === 'saved-link' && value[FAVORITES_KEY]?.length === 2) split();
+            if (boundary === 'space-persist' && value.spaces?.some(space => space.id === 'a' && !space.temporaryTabs.includes(1))) split();
+        };
+        await assert.rejects(s.favorites.dispatch(req('addTab', { tabId: 1 })), error =>
+            error.code === 'NATIVE_SPLIT_ACTIVE' && /saved Favorite link was kept/.test(error.message));
+        assert(injected, `The ${boundary} race must run`);
+        assert.equal(local[FAVORITES_KEY].length, 2, 'Keep the durable link without an adopted live page');
+        assert.equal(s.spaces.isGlobalTab(1), false); assert.equal(ownerOf(s.spaces.spaces, 1)?.id, 'a');
+        assert.deepEqual(s.favorites.state.bindings, []); assert.deepEqual(s.favorites.state.attempts, []);
+        assert.deepEqual(session[FAVORITE_SESSION_KEY].bindings, []); assert.deepEqual(session[FAVORITE_SESSION_KEY].attempts, []);
+        assert.deepEqual(s.spaces.spaces, beforeSpaces); assert.deepEqual(local.spaces, beforeDurableSpaces);
+        assert.deepEqual(local.spaceTabSnapshot, beforeSnapshots); assert.deepEqual(new Map(s.spaces.restoredRanks), new Map(beforeRanks));
+        assert.deepEqual(local.tabNameOverridesById, beforeNames); assert.deepEqual(local.pinnedTabStatesById, beforeBindings);
+        assert.deepEqual(effects, [], 'No native tab mutations should be needed to unwind extension ownership');
+        await s.favorites.dispatch(req('get'));
+        assert.equal(s.spaces.isGlobalTab(1), false); assert.deepEqual(s.spaces.spaces, beforeSpaces);
+        assert.deepEqual(local.spaces, beforeDurableSpaces, 'A later reconcile must not eject the refused adoption');
+    });
+}
+
+test('late split cleanup retains unrelated Favorite ownership and the source pinned-bookmark identity', async () => {
+    local.spaces[0].spaceBookmarks = [1]; local.spaces[0].temporaryTabs = [];
+    local.pinnedTabStatesById = { 1: { bookmarkId: 'bookmark', pinnedUrl: tab(1).url } };
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 2, mode: 'ordinary' }], attempts: [] };
+    const s = stores(); await s.spaces.dispatch({ action: 'get' });
+    const beforeSpaces = clone(s.spaces.spaces), beforePinned = clone(local.pinnedTabStatesById);
+    hooks.sessionSet = value => {
+        if (value[FAVORITE_SESSION_KEY]?.bindings.some(entry => entry.tabId === 1)) tab(1).splitViewId = tab(2).splitViewId = 0;
+    };
+    await assert.rejects(s.favorites.dispatch(req('addTab', { tabId: 1 })), /End Split View/);
+    assert.deepEqual(session[FAVORITE_SESSION_KEY].bindings, [{ favoriteId: 'f', windowId: 1, tabId: 2, mode: 'ordinary' }]);
+    assert.deepEqual(session[FAVORITE_SESSION_KEY].attempts, []); assert.deepEqual(s.spaces.spaces, beforeSpaces);
+    assert.deepEqual(local.pinnedTabStatesById, beforePinned); assert.equal(s.spaces.isGlobalTab(1), false); assert.equal(s.spaces.isGlobalTab(2), true);
+});
+
+test('failed late-split ownership cleanup is reported as unconfirmed and retried before later reconciliation', async () => {
+    const s = stores(); await s.spaces.dispatch({ action: 'get' });
+    const beforeSpaces = clone(s.spaces.spaces); let injected = false;
+    hooks.sessionSet = value => {
+        const state = value[FAVORITE_SESSION_KEY]; if (!state) return;
+        if (!injected && state.bindings.some(entry => entry.tabId === 1)) {
+            injected = true; tab(1).splitViewId = tab(2).splitViewId = 0;
+        } else if (injected && !state.bindings.length && !state.attempts.length) throw new Error('Cleanup storage unavailable');
+    };
+    await assert.rejects(s.favorites.dispatch(req('addTab', { tabId: 1 })), error =>
+        error.code === 'NATIVE_SPLIT_ACTIVE' && /ownership could not be confirmed/.test(error.message) && /saved Favorite link was kept/.test(error.message));
+    assert.equal(s.favorites.persistenceDirty, true); assert.deepEqual(s.spaces.spaces, beforeSpaces); assert.deepEqual(effects, []);
+    hooks.sessionSet = undefined;
+    await s.favorites.dispatch(req('get'));
+    assert.equal(s.favorites.persistenceDirty, false); assert.deepEqual(session[FAVORITE_SESSION_KEY].bindings, []);
+    assert.deepEqual(session[FAVORITE_SESSION_KEY].attempts, []); assert.deepEqual(s.spaces.spaces, beforeSpaces);
+    assert.equal(s.spaces.isGlobalTab(1), false);
+});
+
+for (const ownership of ['binding', 'attempt', 'both']) test(`release refused by a late native split restores exact ${ownership} ownership in its prior order`, async () => {
+    local[FAVORITES_KEY].push(saved('before'), saved('after'));
+    tabs.push({ id: 3, windowId: 1, url: 'https://before.test/', index: 2, pinned: false, groupId: -1 },
+        { id: 4, windowId: 1, url: 'https://after.test/', index: 3, pinned: false, groupId: -1 });
+    const binding = { favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' };
+    const receipt = { ...binding, kind: 'adopt', url: tab(1).url };
+    session[FAVORITE_SESSION_KEY] = { version: 1,
+        bindings: [{ ...binding, favoriteId: 'before', tabId: 3 }, ...(ownership === 'attempt' ? [] : [binding]), { ...binding, favoriteId: 'after', tabId: 4 }],
+        attempts: ownership === 'binding' ? [] : [receipt] };
+    const s = stores(); await s.spaces.dispatch({ action: 'get' });
+    const before = clone(session[FAVORITE_SESSION_KEY]), beforeSpaces = clone(s.spaces.spaces);
+    const beforeDurableSpaces = clone(local.spaces), beforeItems = clone(local[FAVORITES_KEY]);
+    const beforeExclusions = [...s.favorites.spaceExclusions]; let injected = false;
+    hooks.sessionSet = value => {
+        const state = value[FAVORITE_SESSION_KEY];
+        if (state && ![...state.bindings, ...state.attempts].some(entry => entry.tabId === 1)) {
+            injected = true; tab(1).splitViewId = tab(2).splitViewId = 0;
+        }
+    };
+    await assert.rejects(s.favorites.dispatch(req('releaseTab', { favoriteId: 'f', tabId: 1 })), error => error.code === 'NATIVE_SPLIT_ACTIVE');
+    assert(injected); assert.deepEqual(s.favorites.state, before); assert.deepEqual(session[FAVORITE_SESSION_KEY], before);
+    assert.deepEqual([...s.favorites.spaceExclusions], beforeExclusions); assert.deepEqual(local[FAVORITES_KEY], beforeItems);
+    assert.deepEqual(s.spaces.spaces, beforeSpaces); assert.deepEqual(local.spaces, beforeDurableSpaces);
+    assert.equal(s.spaces.isGlobalTab(1), true); assert.equal(ownerOf(s.spaces.spaces, 1), undefined); assert.deepEqual(effects, []);
+    await s.favorites.dispatch(req('get'));
+    assert.deepEqual(session[FAVORITE_SESSION_KEY], before); assert.equal(s.spaces.isGlobalTab(1), true);
+    assert.deepEqual(s.spaces.spaces, beforeSpaces); assert.deepEqual(local.spaces, beforeDurableSpaces);
+});
+
+test('late-split release restoration reports persistence uncertainty and retries before reconciliation', async () => {
+    const s = stores(); const added = await s.favorites.dispatch(req('addTab', { tabId: 1 }));
+    const favoriteId = added.favorites.find(item => item.tabId === 1).id;
+    const before = clone(session[FAVORITE_SESSION_KEY]); effects.length = 0; let injected = false;
+    hooks.sessionSet = value => {
+        const state = value[FAVORITE_SESSION_KEY]; if (!state) return;
+        if (!state.bindings.some(entry => entry.tabId === 1)) { injected = true; tab(1).splitViewId = tab(2).splitViewId = 0; }
+        else if (injected) throw new Error('Restore unavailable');
+    };
+    await assert.rejects(s.favorites.dispatch(req('releaseTab', { favoriteId, tabId: 1 })), error =>
+        error.code === 'NATIVE_SPLIT_ACTIVE' && /Restoring Favorite ownership could not be confirmed/.test(error.message));
+    assert.deepEqual(s.favorites.state, before); assert.equal(s.favorites.persistenceDirty, true);
+    assert.equal(s.spaces.isGlobalTab(1), true); assert.deepEqual(effects, []);
+    hooks.sessionSet = undefined;
+    await s.favorites.dispatch(req('get'));
+    assert.equal(s.favorites.persistenceDirty, false); assert.deepEqual(session[FAVORITE_SESSION_KEY], before);
+    assert.equal(s.spaces.isGlobalTab(1), true); assert.equal(ownerOf(s.spaces.spaces, 1), undefined);
+});
+
+test('late-split release rollback never overwrites a newer exact-tab Favorite owner', async () => {
+    local[FAVORITES_KEY].push(saved('newer'));
+    const s = stores(); const added = await s.favorites.dispatch(req('addTab', { tabId: 1 }));
+    const favoriteId = added.favorites.find(item => item.tabId === 1).id; effects.length = 0;
+    const newer = { favoriteId: 'newer', windowId: 1, tabId: 1, mode: 'ordinary' };
+    hooks.sessionSet = value => {
+        const state = value[FAVORITE_SESSION_KEY];
+        if (state && !state.bindings.some(entry => entry.tabId === 1)) {
+            tab(1).splitViewId = tab(2).splitViewId = 0;
+            s.favorites.state.bindings.push(clone(newer));
+        }
+    };
+    await assert.rejects(s.favorites.dispatch(req('releaseTab', { favoriteId, tabId: 1 })), /End Split View/);
+    assert.deepEqual(s.favorites.state.bindings, [newer]); assert.deepEqual(s.favorites.state.attempts, []); assert.deepEqual(effects, []);
+});
