@@ -1,3 +1,4 @@
+import { createContextMenuSession } from './context-menu-session.js';
 import { Utils } from './utils.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { favoriteIconCacheUrl, isFavoriteIcon } from './favorite-icons.js';
@@ -72,6 +73,8 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
     function menu(node, event) {
         event.preventDefault(); event.stopPropagation();
         disposeMenu();
+        const session = createContextMenuSession(document, { onEscape: () => { if (node.isConnected) node.focus(); } });
+        disposeMenu = session.close;
         document.getElementById('tab-context-menu')?.remove();
         const menu = document.createElement('div');
         menu.id = 'tab-context-menu'; menu.className = 'context-menu'; menu.setAttribute('role', 'menu');
@@ -82,7 +85,7 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
         const item = (text, action) => {
             const button = document.createElement('button'); button.type = 'button'; button.className = 'context-menu-item';
             button.textContent = text; button.setAttribute('role', 'menuitem');
-            button.addEventListener('click', () => { disposeMenu(); void action(); });
+            button.addEventListener('click', () => { if (!session.active) return; session.close(); void action(); });
             menu.appendChild(button);
         };
         item(favoriteId && !tabId ? 'Open Favorite' : 'Go to Tab', () => activate(node));
@@ -92,9 +95,7 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
         }, 'Tab closed. Your Favorite is saved.'));
         if (favoriteId) item('Remove Favorite', () => run(`remove:${favoriteId}`, () => request('remove', { favoriteId }), 'Favorite removed. Open pages and source bookmarks were kept.'));
         else item('Keep as saved Favorite', () => run(`adopt:${tabId}`, () => request('addTab', { tabId }), 'Favorite saved across Spaces and windows.'));
-        const outside = event => { if (!menu.contains(event.target)) disposeMenu(); };
         const keydown = event => {
-            if (event.key === 'Escape') { event.preventDefault(); disposeMenu(); node.focus(); return; }
             if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key) || !menu.contains(document.activeElement)) return;
             event.preventDefault();
             const options = [...menu.querySelectorAll('button')], current = options.indexOf(document.activeElement);
@@ -102,14 +103,14 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
                 : (current + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length;
             options[next]?.focus();
         };
-        disposeMenu = () => { menu.remove(); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', keydown); disposeMenu = () => {}; };
-        document.body.appendChild(menu);
+        if (!session.attach(menu)) return;
+        session.onClose(() => document.removeEventListener('keydown', keydown));
         const bounds = menu.getBoundingClientRect?.(), viewport = document.defaultView;
         if (bounds && viewport) {
             menu.style.left = `${Math.max(5, Math.min(x, viewport.innerWidth - bounds.width - 5))}px`;
             menu.style.top = `${Math.max(5, Math.min(y, viewport.innerHeight - bounds.height - 5))}px`;
         }
-        document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', keydown);
+        document.addEventListener('keydown', keydown);
         menu.firstElementChild?.focus();
     }
 
@@ -168,10 +169,6 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
         for (const node of existing.values()) node.remove();
         const placeholder = container.querySelector('.pinned-placeholder-container');
         if (placeholder) placeholder.style.display = rows.length ? 'none' : 'block';
-        let notice = document.getElementById('nativeFavoritesNotice');
-        if (!notice) { notice = document.createElement('p'); notice.id = 'nativeFavoritesNotice'; notice.className = 'native-favorites-notice'; container.after(notice); }
-        notice.textContent = 'Browser pins are kept as they are. Right-click one and choose “Keep as saved Favorite” to keep its icon after closing.';
-        notice.hidden = !rows.some(row => !row.saved);
     }
 
     return { refresh, request, getSnapshot: () => snapshot, dispose() { ++generation; disposeMenu(); } };

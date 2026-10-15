@@ -2314,7 +2314,6 @@ select:focus-visible,
 }
 .appearance-reset:disabled { opacity: .5; cursor: default; }
 #sidebarAppearanceStatus { margin-top: 8px; }
-.native-favorites-notice { font-size: 11px; line-height: 1.4; margin: -10px 0 0; opacity: .8; }
 .context-menu button.context-menu-item { display: block; width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .context-menu button.context-menu-item:hover, .context-menu button.context-menu-item:focus-visible { background: #eee; }
 

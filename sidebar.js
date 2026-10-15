@@ -1,3 +1,4 @@
+import { createContextMenuSession } from './context-menu-session.js';
 import { createSpaceContextMenu, spaceDeleteMessage } from './space-context-menu.js';
 import { getSpaceIcon } from './space-icons.js';
 import { projectSpaceOrder } from './space-order.js';
@@ -2872,70 +2873,78 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
         closeTabContextMenu();
         e.preventDefault();
         e.stopPropagation();
-        const todaySnapshot = !isPinned && !isBookmarkOnly ? todaySelection.freeze(tabElement) : null;
-        const pinSnapshot = isPinned && tabElement.dataset.bookmarkId ? bookmarkSelection.freeze(tabElement) : null;
-        const splitActions = todaySnapshot ? todaySplit.actionsFor(tabElement, todaySnapshot) : null;
-        if (isPinned || isBookmarkOnly) todaySelection.clear();
-        if (pinSnapshot?.error) { showFavoritesStatus(pinSnapshot.error); return; }
-        if (todaySnapshot?.error) { showFavoritesStatus(todaySnapshot.error); return; }
-        // Opening a context menu (including a later cancelled name dialog) must
-        // never create the Arcify root as an incidental side effect.
-        const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
-        let allBookmarkSpaceFolders;
+        const menuSession = createContextMenuSession(document, { onEscape: () => {
+            if (keyboard && tabElement.isConnected) tabElement.focus();
+        } });
+        let attached = false;
         try {
-            const folder = await getSpaceBookmarkFolder(space);
-            allBookmarkSpaceFolders = await chrome.bookmarks.getChildren(folder.parentId);
-        } catch {
-            // A missing bookmark root must not hide ordinary Close/Archive
-            // actions. Only the save command needs that root; its writer checks
-            // it after confirmation without creating a replacement implicitly.
-            allBookmarkSpaceFolders = [];
-        }
-        if (todaySnapshot && !todaySelection.validate(todaySnapshot)) return;
-        let actions;
-        try {
-            let muted = false;
-            if (!isBookmarkOnly) muted = Boolean((await chrome.tabs.get(tab.id)).mutedInfo?.muted);
-            actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || 1, muted });
-        } catch (error) { showFavoritesStatus(error.message); return; }
-        if (menuRequest !== tabContextMenuRequest || pendingActiveSpaceId || todaySnapshot && !todaySelection.validate(todaySnapshot) || pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
-        showTabContextMenu(
-            keyboard ? tabElement.getBoundingClientRect().left : e.pageX,
-            keyboard ? tabElement.getBoundingClientRect().bottom : e.pageY,
-            tab,
-            isPinned,
-            isBookmarkOnly,
-            tabElement,
-            closeTab,
-            spaces,
-            moveTabToSpace,
-            setActiveSpace,
-            allBookmarkSpaceFolders,
-            createSpaceFromInactive,
-            actions.useCurrentUrl,
-            async () => {
-                try {
-                    assertNotNativeSplit(await chrome.tabs.get(tab.id));
-                    if (tabElement.dataset.bookmarkId) {
-                        const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
-                        await addBookmarkFavorite({ windowId: currentWindow.id, spaceId: space?.id,
-                            bookmarkFolderId: space?.bookmarkFolderId, bookmarkId: tabElement.dataset.bookmarkId,
-                            parentId: tabElement.parentElement?.closest('.folder')?.dataset.bookmarkId || space?.bookmarkFolderId,
-                            tabId: tab.id });
-                    } else await savedFavoritesUI.request('addTab', { tabId: tab.id });
-                    showFavoritesStatus('Favorite saved across Spaces and windows.');
-                    await updatePinnedFavicons();
-                } catch (error) { showFavoritesStatus(error.message); }
-            },
-            todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot) } : null,
-            { ...actions, report: showFavoritesStatus },
-            splitActions ? { ...splitActions, keyboard,
-                ...(splitActions.create || splitActions.end ? { beginInteraction: () => {
-                    const session = editorSessions.begin('tab', tab.id);
-                    return () => { void editorSessions.complete(session); };
-                } } : {})
-            } : null
-        );
+            const todaySnapshot = !isPinned && !isBookmarkOnly ? todaySelection.freeze(tabElement) : null;
+            const pinSnapshot = isPinned && tabElement.dataset.bookmarkId ? bookmarkSelection.freeze(tabElement) : null;
+            const splitActions = todaySnapshot ? todaySplit.actionsFor(tabElement, todaySnapshot) : null;
+            if (isPinned || isBookmarkOnly) todaySelection.clear();
+            if (pinSnapshot?.error) { showFavoritesStatus(pinSnapshot.error); return; }
+            if (todaySnapshot?.error) { showFavoritesStatus(todaySnapshot.error); return; }
+            // Opening a context menu (including a later cancelled name dialog) must
+            // never create the Arcify root as an incidental side effect.
+            const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
+            let allBookmarkSpaceFolders;
+            try {
+                const folder = await getSpaceBookmarkFolder(space);
+                allBookmarkSpaceFolders = await chrome.bookmarks.getChildren(folder.parentId);
+            } catch {
+                // A missing bookmark root must not hide ordinary Close/Archive
+                // actions. Only the save command needs that root; its writer checks
+                // it after confirmation without creating a replacement implicitly.
+                allBookmarkSpaceFolders = [];
+            }
+            if (todaySnapshot && !todaySelection.validate(todaySnapshot)) return;
+            let actions;
+            try {
+                let muted = false;
+                if (!isBookmarkOnly) muted = Boolean((await chrome.tabs.get(tab.id)).mutedInfo?.muted);
+                actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || 1, muted });
+            } catch (error) { showFavoritesStatus(error.message); return; }
+            if (!menuSession.active || menuRequest !== tabContextMenuRequest || pendingActiveSpaceId || todaySnapshot && !todaySelection.validate(todaySnapshot) || pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
+            showTabContextMenu(
+                keyboard ? tabElement.getBoundingClientRect().left : e.pageX,
+                keyboard ? tabElement.getBoundingClientRect().bottom : e.pageY,
+                tab,
+                isPinned,
+                isBookmarkOnly,
+                tabElement,
+                closeTab,
+                spaces,
+                moveTabToSpace,
+                setActiveSpace,
+                allBookmarkSpaceFolders,
+                createSpaceFromInactive,
+                actions.useCurrentUrl,
+                async () => {
+                    try {
+                        assertNotNativeSplit(await chrome.tabs.get(tab.id));
+                        if (tabElement.dataset.bookmarkId) {
+                            const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
+                            await addBookmarkFavorite({ windowId: currentWindow.id, spaceId: space?.id,
+                                bookmarkFolderId: space?.bookmarkFolderId, bookmarkId: tabElement.dataset.bookmarkId,
+                                parentId: tabElement.parentElement?.closest('.folder')?.dataset.bookmarkId || space?.bookmarkFolderId,
+                                tabId: tab.id });
+                        } else await savedFavoritesUI.request('addTab', { tabId: tab.id });
+                        showFavoritesStatus('Favorite saved across Spaces and windows.');
+                        await updatePinnedFavicons();
+                    } catch (error) { showFavoritesStatus(error.message); }
+                },
+                todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot) } : null,
+                { ...actions, report: showFavoritesStatus },
+                splitActions ? { ...splitActions, keyboard,
+                    ...(splitActions.create || splitActions.end ? { beginInteraction: () => {
+                        const session = editorSessions.begin('tab', tab.id);
+                        return () => { void editorSessions.complete(session); };
+                    } } : {})
+                } : null,
+                menuSession
+            );
+            attached = true;
+        } finally { if (!attached) menuSession.close(); }
     };
     tabElement.addEventListener('contextmenu', openTabContextMenu);
     if (!isPinned && !isBookmarkOnly) tabElement.addEventListener('keydown', event => {
@@ -3507,52 +3516,52 @@ function setupFolderContextMenu(folderElement, space, item = null) {
     folderElement.addEventListener('contextmenu', async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const contextMenu = document.createElement('div');
-        contextMenu.classList.add('context-menu');
-        contextMenu.style.position = 'fixed';
-        contextMenu.style.left = `${e.clientX}px`;
-        contextMenu.style.top = `${e.clientY}px`;
+        const menuSession = createContextMenuSession(document);
+        let attached = false;
+        try {
+            const contextMenu = document.createElement('div');
+            contextMenu.id = 'folder-context-menu';
+            contextMenu.setAttribute('role', 'menu');
+            contextMenu.classList.add('context-menu');
+            contextMenu.style.position = 'fixed';
+            contextMenu.style.left = `${e.clientX}px`;
+            contextMenu.style.top = `${e.clientY}px`;
 
-        const spaceElement = folderElement.closest('.space');
-        const spaceFolder = await getSpaceBookmarkFolder(space);
-        const folderId = folderElement.dataset.bookmarkId;
-        if (folderId && await canCreateFolder(spaceFolder.id, folderId)) {
-            const newFolderOption = document.createElement('div');
-            newFolderOption.classList.add('context-menu-item');
-            newFolderOption.textContent = 'New Folder';
-            newFolderOption.addEventListener('click', async () => {
-                contextMenu.remove();
-                await createNewFolder(spaceElement, folderElement);
+            const spaceElement = folderElement.closest('.space');
+            const spaceFolder = await getSpaceBookmarkFolder(space);
+            const folderId = folderElement.dataset.bookmarkId;
+            if (folderId && await canCreateFolder(spaceFolder.id, folderId)) {
+                const newFolderOption = document.createElement('div');
+                newFolderOption.classList.add('context-menu-item');
+                newFolderOption.textContent = 'New Folder';
+                newFolderOption.addEventListener('click', async () => {
+                    if (!menuSession.active) return;
+                    menuSession.close();
+                    await createNewFolder(spaceElement, folderElement);
+                });
+                contextMenu.appendChild(newFolderOption);
+            }
+
+            const deleteOption = document.createElement('div');
+            deleteOption.classList.add('context-menu-item');
+            deleteOption.textContent = 'Delete Folder';
+            deleteOption.addEventListener('click', async () => {
+                if (!menuSession.active) return;
+                menuSession.close();
+                if (confirm('Are you sure you want to delete this folder and all its contents?')) {
+                    if (folderId) await chrome.bookmarks.removeTree(folderId);
+                    editorSessions.dispose('folder', folderId);
+                    const parentFolder = folderElement.parentElement.closest('.folder');
+                    disposeEditorsInElement(folderElement);
+                    folderElement.remove();
+                    if (parentFolder) updateFolderPlaceholder(parentFolder);
+                    updatePinnedSectionPlaceholders();
+                }
             });
-            contextMenu.appendChild(newFolderOption);
-        }
 
-        const deleteOption = document.createElement('div');
-        deleteOption.classList.add('context-menu-item');
-        deleteOption.textContent = 'Delete Folder';
-        deleteOption.addEventListener('click', async () => {
-            if (confirm('Are you sure you want to delete this folder and all its contents?')) {
-                if (folderId) await chrome.bookmarks.removeTree(folderId);
-                editorSessions.dispose('folder', folderId);
-                const parentFolder = folderElement.parentElement.closest('.folder');
-                disposeEditorsInElement(folderElement);
-                folderElement.remove();
-                if (parentFolder) updateFolderPlaceholder(parentFolder);
-                updatePinnedSectionPlaceholders();
-            }
-            contextMenu.remove();
-        });
-
-        contextMenu.appendChild(deleteOption);
-        document.body.appendChild(contextMenu);
-
-        // Close context menu when clicking outside
-        const closeContextMenu = (e) => {
-            if (!contextMenu.contains(e.target)) {
-                contextMenu.remove();
-                document.removeEventListener('click', closeContextMenu);
-            }
-        };
-        document.addEventListener('click', closeContextMenu);
+            contextMenu.appendChild(deleteOption);
+            if (!folderElement.isConnected || !menuSession.active) return;
+            attached = menuSession.attach(contextMenu);
+        } finally { if (!attached) menuSession.close(); }
     });
 }

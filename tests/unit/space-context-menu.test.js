@@ -113,7 +113,7 @@ test('stale targets and save failures do not act on another Space; errors remain
 
 test('repeated submissions serialize, modal focus is bounded, and drag-busy state cannot open a menu', async () => {
     const f = fixture(); f.setBusy(true); f.event(f.chip('b'), 'contextmenu');
-    assert.equal(f.document.querySelector('[role="menu"]'), null); f.setBusy(false);
+    assert.equal(Boolean(f.document.querySelector('[role="menu"]')), false); f.setBusy(false);
     f.event(f.chip('b'), 'contextmenu'); f.choose('Rename');
     const controls = [...f.document.querySelectorAll('[role="dialog"] input, [role="dialog"] button')];
     controls.at(-1).focus(); f.event(f.document, 'keydown', { key: 'Tab' }); assert.equal(f.document.activeElement, controls[0]);
@@ -128,11 +128,11 @@ test('outside pointer, competing context menu and window resize dismiss the old 
     for (const type of ['pointerdown', 'contextmenu']) {
         f.event(f.chip('b'), 'contextmenu');
         f.event(outside, type);
-        assert.equal(f.document.querySelector('[role="menu"]'), null);
+        assert.equal(Boolean(f.document.querySelector('[role="menu"]')), false);
     }
     f.event(f.chip('b'), 'contextmenu');
     f.event(f.document.defaultView, 'resize');
-    assert.equal(f.document.querySelector('[role="menu"]'), null);
+    assert.equal(Boolean(f.document.querySelector('[role="menu"]')), false);
     assert.deepEqual(f.writes, []);
 });
 
@@ -146,4 +146,29 @@ test('failed disabled-control saves restore dialog focus and Tab cannot escape w
     assert.equal(f.document.activeElement.dataset.choice, 'none');
     f.document.body.focus(); assert(f.event(f.document, 'keydown', { key: 'Tab', shiftKey: true }).defaultPrevented);
     assert.equal(f.document.activeElement.textContent, 'Cancel');
+});
+
+
+test('Space menus close on external focus loss without stealing focus; editors survive the same events', () => {
+    const f = fixture(), outside = f.document.getElementById('outside');
+    for (const exit of ['blur', 'hidden', 'pagehide']) {
+        const leave = () => {
+            outside.focus();
+            if (exit === 'hidden') {
+                Object.defineProperty(f.document, 'visibilityState', { configurable: true, value: 'hidden' });
+                f.event(f.document, 'visibilitychange');
+                delete f.document.visibilityState;
+            } else f.event(f.document.defaultView, exit);
+        };
+        f.event(f.chip('b'), 'contextmenu'); leave();
+        assert.equal(Boolean(f.document.querySelector('[role="menu"]')), false);
+        assert.equal(f.document.activeElement, outside);
+        f.event(f.chip('b'), 'contextmenu'); f.choose('Rename');
+        const dialog = f.document.querySelector('[role="dialog"]'); leave();
+        assert.equal(f.document.querySelector('[role="dialog"]'), dialog);
+        assert.equal(f.document.activeElement, outside);
+        f.event(f.document, 'keydown', { key: 'Escape' });
+        assert.equal(f.document.querySelector('[role="dialog"]'), null);
+    }
+    assert.deepEqual(f.writes, []);
 });

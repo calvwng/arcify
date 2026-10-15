@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { tabToSelector } from './paired-chrome-sidebar-appearance.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { clickFreshResult } from './paired-chrome-ui.mjs';
+import { randomBytes } from 'node:crypto';
+import { exerciseExternalMenuDismissal, readMenuPreservedState } from './paired-chrome-menu-focus.mjs';
 
 export function assertSpaceContextFixtureEnvironment(env = process.env, uid = process.getuid?.()) {
     assert.equal(env.GITHUB_ACTIONS, 'true', 'The real Space-menu fixture is restricted to GitHub Actions.');
@@ -266,16 +268,16 @@ export function readSpaceDetailsProjection(spaceId) {
 
 // Fixture setup/cleanup uses synthetic, exact-owned data; every feature action
 // below uses real mouse/keyboard input. No DOM value assignment or synthetic events.
-export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, screenshot, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
+export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForUrl, ui, screenshot, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
     assertSpaceContextFixtureEnvironment();
-    for (const fn of [newTabPage, ui, screenshot, snapshot, poll]) assert.equal(typeof fn, 'function');
+    for (const fn of [newTabPage, pageForUrl, ui, screenshot, snapshot, poll]) assert.equal(typeof fn, 'function');
     const initial = await snapshot();
     assert(initial.spaces[0]?.bookmarkFolderId);
     const original = await apiPage.evaluate(async () => ({
         activeSpaces: (await chrome.storage.session.get('activeSpaces')).activeSpaces || {},
         activeTabs: (await chrome.tabs.query({ active: true })).map(tab => ({ id: tab.id, windowId: tab.windowId }))
     }));
-    let target, seedFolder, sidebarA, sidebarB, primaryError;
+    let target, seedFolder, sidebarA, sidebarB, outsideWindow, outsidePage, primaryError;
     const seededTabs = [], evidence = { realMouseAndKeyboard: true, nativePanel: false, screenshots: [] };
     const capture = async (page, label) => {
         const result = await captureRequiredSpaceScreenshot(screenshot, page, label); evidence.screenshots.push(result); return result;
@@ -337,6 +339,11 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, scre
         return { before, after, proof, projection: await projection(page, glyph) };
     };
     try {
+        const outsideUrl = `${fixture.base}/tab-menu/${randomBytes(16).toString('hex')}/outside`;
+        outsideWindow = await apiPage.evaluate(url => chrome.windows.create({ url, type: 'normal', focused: false }), outsideUrl);
+        assert(![fixture.windowA, fixture.windowB].includes(outsideWindow.id));
+        outsidePage = await pageForUrl(outsideUrl); await outsidePage.waitForSelector('#page-state');
+        await ui(outsidePage, 'Initialize the disposable external window before identity baselines', () => outsidePage.click('#page-state'));
         seedFolder = await apiPage.evaluate(async ({ baseFolderId }) => {
             const [base] = await chrome.bookmarks.get(baseFolderId);
             if (!base?.parentId) throw new Error('Fixture requires an existing Arcify bookmark root.');
@@ -372,8 +379,22 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, scre
         await ui(page, 'Cancel header Space menu with Escape', () => page.keyboard.press('Escape'));
         assertSpaceContextUnchanged(beforeHeaderCancel, await read());
         assert.equal(await page.$eval('.space.active .space-name', node => node === document.activeElement), true);
-        evidence.switcherMenu = await openMenu(page, chip(target.id), target.name);
-        evidence.picker = await picker(page, 'none');
+        evidence.outsideOpen = await openMenu(page, chip(target.id), target.name);
+        evidence.outsidePreservedBefore = await apiPage.evaluate(readMenuPreservedState);
+        evidence.outsideFocus = await exerciseExternalMenuDismissal({ sidebar: page, destination: outsidePage,
+            menuSelector: '.space-context-menu', label: 'inactive-space', ui, screenshot, poll, record });
+        assertSpaceContextUnchanged(evidence.outsideOpen.before, await read());
+        evidence.outsidePreservedAfter = await apiPage.evaluate(readMenuPreservedState);
+        assert.deepEqual(evidence.outsidePreservedAfter, evidence.outsidePreservedBefore);
+        // Reopen through genuine keyboard input and choose the icon picker. Its
+        // existing Cancel, later Save and exact-state assertions prove the menu
+        // interaction gate is released rather than only hiding stale pixels.
+        evidence.switcherMenu = await openMenu(page, chip(target.id), target.name, true);
+        evidence.picker = await ui(page, 'Choose Change Space Icon with genuine Enter after outside dismissal', () => observeSpaceContextOpening({
+            read, inactive: inactiveTarget(page),
+            open: async () => { await page.keyboard.press('Home'); await page.keyboard.press('Enter'); await page.waitForSelector('.space-editor', { visible: true }); },
+            inspect: async () => assertSpaceIconPicker(await page.evaluate(readSpaceContextSurface), target.name, 'none')
+        }));
         await ui(page, 'Verify real Tab wrap in the icon dialog', async () => {
             await tabToSelector(page, '.space-editor > button');
             await page.keyboard.press('Tab');
@@ -513,6 +534,7 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, scre
         throw error;
     } finally {
         await finishBookmarkFixture([
+            async () => { if (outsideWindow) await apiPage.evaluate(id => chrome.windows.remove(id), outsideWindow.id); },
             () => apiPage.evaluate(async ({ activeSpaces }) => {
                 for (const [windowId, spaceId] of Object.entries(activeSpaces)) {
                     const result = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'activate', windowId: Number(windowId), spaceId });

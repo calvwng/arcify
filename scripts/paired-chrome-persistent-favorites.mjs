@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
+import { captureVisibleFailurePage } from './paired-chrome-ui.mjs';
+import { exerciseExternalMenuDismissal, readMenuPreservedState } from './paired-chrome-menu-focus.mjs';
 import { FAVORITE_FAVICON_PATH, waitForRetainedFavoriteIcon } from './paired-chrome-favorite-icons.mjs';
 
 // Actual Chrome scenario. Seed data uses real APIs; adoption, open and removal
 // use genuine renderer clicks. Native tab closure uses chrome.tabs.remove, not
 // an assertion that DevTools dispatched the user's physical Ctrl+W shortcut.
-export async function exercisePersistentFavorites({ apiPage, newTabPage, ui, screenshot, snapshot, poll,
-    fixture, arcifyId }) {
+export async function exercisePersistentFavorites({ apiPage, newTabPage, pageForUrl, ui, screenshot, snapshot, poll,
+    fixture, arcifyId, record = async () => {} }) {
     const sideUrl = `chrome-extension://${arcifyId}/sidebar.html`;
     const state = await snapshot();
     const space = state.spaces.find(item => item.id === state.activeSpaceId);
@@ -36,8 +40,34 @@ export async function exercisePersistentFavorites({ apiPage, newTabPage, ui, scr
         const handle = await surface.evaluateHandle(text => [...document.querySelectorAll('#tab-context-menu button')].find(button => button.textContent === text),text);
         try { assert(handle.asElement()); await handle.asElement().click(); } finally { await handle.dispose(); }
     });
-    let thirdWindow,thirdSidebar,adoptedTab,adoptedFavorite,thirdAdopted;
+    let thirdWindow,thirdSidebar,adoptedTab,adoptedFavorite,thirdAdopted,outsideWindow,outsidePage,primaryError;
+    const outsideFocus = [];
+    const proveOutsideFocus = async (selector, label) => {
+        await ui(page, `Right-click exact ${label}`, async () => {
+            await page.waitForSelector(selector, { visible: true }); await page.click(selector, { button: 'right' });
+            await page.waitForSelector('#tab-context-menu', { visible: true });
+        });
+        const before = await apiPage.evaluate(readMenuPreservedState);
+        const focus = await exerciseExternalMenuDismissal({ sidebar: page, destination: outsidePage,
+            menuSelector: '#tab-context-menu', label, ui, screenshot, poll, record });
+        const after = await apiPage.evaluate(readMenuPreservedState);
+        assert.deepEqual(after, before, 'Favorite dismissal preserves every native tab, bookmark, Space and saved record.');
+        await ui(page, `Reopen ${label} and verify genuine keyboard dismissal`, async () => {
+            await page.click(selector, { button: 'right' }); await page.waitForSelector('#tab-context-menu', { visible: true });
+            await page.keyboard.press('End');
+            assert.equal(await page.$eval('#tab-context-menu', node => node.lastElementChild === document.activeElement), true);
+            await page.keyboard.press('Escape');
+            await page.waitForFunction(() => !document.getElementById('tab-context-menu'), { polling: 50 });
+        });
+        assert.deepEqual(await apiPage.evaluate(readMenuPreservedState), before);
+        outsideFocus.push({ label, before, after, focus, reopenedKeyboard: true });
+    };
     try {
+        const outsideUrl = `${fixture.base}/tab-menu/${randomBytes(16).toString('hex')}/outside`;
+        outsideWindow = await apiPage.evaluate(url => chrome.windows.create({ url, type: 'normal', focused: false }), outsideUrl);
+        assert(![fixture.windowA, fixture.windowB].includes(outsideWindow.id));
+        outsidePage = await pageForUrl(outsideUrl); await outsidePage.waitForSelector('#page-state');
+        await ui(outsidePage, 'Initialize the disposable external window before identity baselines', () => outsidePage.click('#page-state'));
         const added = await request(page,fixture.windowA,'addBookmark',{spaceId:space.id,bookmarkFolderId:space.bookmarkFolderId,
             bookmarkId:source.id,parentId:source.parentId});
         const saved = added.favorites.find(item => item.sourceBookmarkId === source.id); assert(saved?.tabId);
@@ -45,6 +75,7 @@ export async function exercisePersistentFavorites({ apiPage, newTabPage, ui, scr
         const faviconTab = await poll(() => liveTab(saved.tabId), tab => tab.status === 'complete' && tab.url === source.url
             && tab.favIconUrl === `${fixture.base}${FAVORITE_FAVICON_PATH}`, 'real localhost Favorite favicon discovery');
         const retainedIconBefore = await waitForRetainedFavoriteIcon({ apiPage, sidebar: page, favoriteId: saved.id, expectedUrl: source.url, closed: false, poll });
+        await proveOutsideFocus(icon(saved.id), 'saved-favorite');
         await clickIcon(page,saved.id);
         await poll(() => liveTab(saved.tabId),tab => tab.active,'exact Favorite activation');
         // This is the same real onRemoved path regardless of close affordance.
@@ -87,6 +118,12 @@ export async function exercisePersistentFavorites({ apiPage, newTabPage, ui, scr
         adoptedTab = await apiPage.evaluate(options => chrome.tabs.create(options),{windowId:fixture.windowA,url:`${fixture.base}/favorite-explicit-adoption`,pinned:true,active:false});
         adoptedTab = await poll(() => liveTab(adoptedTab.id),tab => tab.url === `${fixture.base}/favorite-explicit-adoption` && tab.status === 'complete','native adoption candidate committed navigation');
         await page.waitForSelector(`#pinnedFavicons .native-favorite[data-tab-id="${adoptedTab.id}"]`);
+        const nativeSelector = `#pinnedFavicons .native-favorite[data-tab-id="${adoptedTab.id}"]`;
+        const nativePresentation = await page.evaluate(selector => ({ nativeCount: document.querySelectorAll(selector).length,
+            persistentHintCount: document.querySelectorAll('#nativeFavoritesNotice, .native-favorites-notice').length }), nativeSelector);
+        assert.equal(nativePresentation.nativeCount, 1); assert.equal(nativePresentation.persistentHintCount, 0,
+            'An ordinary native pin must not render the removed persistent migration hint.');
+        await proveOutsideFocus(nativeSelector, 'native-pin');
         const beforeAdoption = await get();
         assert(!beforeAdoption.favorites.some(item => item.tabId === adoptedTab.id),'Upgrade must not silently adopt an ordinary native pin.');
         const idsBeforeAdoption = (await apiPage.evaluate(windowId => chrome.tabs.query({windowId}),fixture.windowA)).map(tab => tab.id).sort();
@@ -115,12 +152,22 @@ export async function exercisePersistentFavorites({ apiPage, newTabPage, ui, scr
         await poll(get,state => state.favorites.find(item => item.id === saved.id)?.tabId === null,'closed saved Favorite prepared for Spotlight search');
         await ui(page,'Capture shared saved Favorite and preserved source',() => screenshot(page,'saved-favorite-explicit-removal-keeps-pages-and-source'));
         return {favoriteId:saved.id,source,initial,closed,reopenedId,reopened:reopenedTab,reused,thirdClosed,thirdOpened,
-            faviconTab,retainedIconBefore,retainedIconClosed,
+            faviconTab,retainedIconBefore,retainedIconClosed,outsideFocus,nativePresentation,
             adoptedFavorite,beforeAdoption,adopted,beforeRemoval,afterRemoval,sourceAfter:await sourceNow(),
             realMouse:true,closure:'Actual chrome.tabs.remove on active native Favorite; physical Ctrl+W not asserted',nativePanel:false};
+    } catch (error) {
+        primaryError = error;
+        const failureScreenshot = await captureVisibleFailurePage(page, 'persistent-favorites-menu-failure',
+            () => screenshot(page, 'persistent-favorites-menu-failure', false, { fullPage: false }));
+        await record({ phase: 'persistent-favorites-failed', outsideFocus, failureScreenshot,
+            error: { message: error.message, stack: error.stack } }).catch(() => {});
+        throw error;
     } finally {
-        if (thirdWindow) await apiPage.evaluate(id => chrome.windows.remove(id),thirdWindow.id);
-        if (adoptedTab) await apiPage.evaluate(async id => { if ((await chrome.tabs.query({})).some(tab => tab.id === id)) await chrome.tabs.remove(id); },adoptedTab.id);
-        await apiPage.evaluate(id => chrome.tabs.remove(id),sidebar.tab.id);
+        await finishBookmarkFixture([
+            async () => { if (outsideWindow) await apiPage.evaluate(id => chrome.windows.remove(id),outsideWindow.id); },
+            async () => { if (thirdWindow) await apiPage.evaluate(id => chrome.windows.remove(id),thirdWindow.id); },
+            async () => { if (adoptedTab) await apiPage.evaluate(async id => { if ((await chrome.tabs.query({})).some(tab => tab.id === id)) await chrome.tabs.remove(id); },adoptedTab.id); },
+            () => apiPage.evaluate(id => chrome.tabs.remove(id),sidebar.tab.id)
+        ], primaryError, record);
     }
 }

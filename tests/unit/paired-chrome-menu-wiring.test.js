@@ -33,6 +33,8 @@ test('nonce page server runs before generic fallback without replacing existing 
 
 test('paired workflow watches menu sources and tests while retaining reviewed peer and sandbox boundaries', () => {
     for (const path of ['scripts/paired-chrome-space-context.mjs', 'scripts/paired-chrome-tab-menu.mjs',
+        'scripts/paired-chrome-menu-focus.mjs', 'tests/unit/paired-chrome-menu-focus.test.js',
+        'context-menu-session.js', 'tests/unit/context-menu-session.test.js',
         'tests/unit/paired-chrome-space-context.test.js', 'tests/unit/paired-chrome-tab-menu.test.js', 'tests/unit/paired-chrome-menu-wiring.test.js',
         'space-context-menu.js', 'space-icons.js', 'space-colors.js', 'localstorage.js', 'tab-menu-*.js', 'tab-title-projection.js', 'domManager.js']) {
         assert(workflow.includes(`- '${path}'`), `Missing trigger path ${path}`);

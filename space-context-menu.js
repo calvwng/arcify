@@ -1,3 +1,4 @@
+import { createContextMenuSession } from './context-menu-session.js';
 import { SPACE_ICONS, getSpaceIcon } from './space-icons.js';
 import { SPACE_COLORS } from './space-colors.js';
 
@@ -7,12 +8,13 @@ export const spaceDeleteMessage = space => `Delete Space “${space.name}”? Th
 // opening a menu or editor never selects a Space or changes its order.
 export function createSpaceContextMenu({ document, roots, getSpace, update, newFolder, remove,
     confirm = message => globalThis.confirm(message), report = () => {}, isBusy = () => false, onOpen = () => {} }) {
-    let surface = null, origin = null, targetId = null, kind = null;
+    let surface = null, origin = null, targetId = null, kind = null, menuSession = null;
     function restoreFocus() {
         const fallback = [...document.querySelectorAll('#spaceSwitcher button[data-space-id]')].find(button => button.dataset.spaceId === targetId);
         (origin?.isConnected ? origin : fallback)?.focus();
     }
     function close(restore = true) {
+        menuSession?.close(); menuSession = null;
         surface?.remove(); surface = null; kind = null;
         if (restore) restoreFocus();
     }
@@ -117,7 +119,10 @@ export function createSpaceContextMenu({ document, roots, getSpace, update, newF
             try { current(); Promise.resolve(action()).catch(error => { close(); report(error.message); }); }
             catch (error) { close(); report(error.message); }
         }, surface, 'menuitem');
-        document.body.appendChild(surface);
+        const localSurface = surface;
+        menuSession = createContextMenuSession(document, { onEscape: restoreFocus });
+        menuSession.onClose(() => { if (surface === localSurface) { surface = null; kind = null; } });
+        if (!menuSession.attach(localSurface)) return;
         const rect = trigger.getBoundingClientRect(), size = surface.getBoundingClientRect();
         const view = document.defaultView;
         const x = event.type === 'keydown' ? rect.left : event.clientX;
@@ -160,7 +165,6 @@ export function createSpaceContextMenu({ document, roots, getSpace, update, newF
             }
         }
     });
-    document.defaultView.addEventListener('blur', () => { if (kind === 'menu') close(false); });
     document.defaultView.addEventListener('resize', () => { if (kind === 'menu') close(false); });
     return { open, close };
 }

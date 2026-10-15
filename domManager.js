@@ -1,3 +1,4 @@
+import { createContextMenuSession } from './context-menu-session.js';
 import { firstUnusedColor } from './space-colors.js';
 import { assertNotNativeSplit } from './native-split-safety.js';
 /**
@@ -191,8 +192,12 @@ let activeTabContextMenuCleanup = null;
 
 export function closeTabContextMenu() { activeTabContextMenuCleanup?.(); }
 
-export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null, onAddToFavorites = null, todaySelection = null, tabActions = null, splitActions = null) {
+export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null, onAddToFavorites = null, todaySelection = null, tabActions = null, splitActions = null, menuSession = null) {
     activeTabContextMenuCleanup?.();
+    const session = menuSession || createContextMenuSession(document, { onEscape: () => {
+        if (splitActions?.keyboard && tabElement.isConnected) tabElement.focus();
+    } });
+    if (!session.active) return;
     // Remove any existing context menus
     const existingMenu = document.getElementById('tab-context-menu');
     if (existingMenu) {
@@ -417,19 +422,17 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     }
 
     // --- Add to DOM and setup closing ---
-    document.body.appendChild(contextMenu);
+    session.attach(contextMenu);
 
     // Adjust position to keep within viewport
     Utils.adjustMenuPosition(contextMenu, x, y);
     // A Split menu freezes exact row identities. Hold incidental re-renders
     // until this interaction finishes; the writer still checks live native state.
     const finishInteraction = splitActions?.beginInteraction?.();
-    let closed = false;
-    // Other menu surfaces may replace this shared host directly.
-    const observer = finishInteraction ? new document.defaultView.MutationObserver(() => {
-        if (!contextMenu.isConnected) closeMenu();
-    }) : null;
-    observer?.observe(document.body, { childList: true });
+    session.onClose(() => {
+        if (activeTabContextMenuCleanup === closeMenu) activeTabContextMenuCleanup = null;
+        finishInteraction?.();
+    });
     if (splitActions?.keyboard) contextMenu.querySelector('[role="menuitem"]')?.focus();
     contextMenu.addEventListener('keydown', event => {
         if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
@@ -442,21 +445,8 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         items[next].focus();
     });
 
-    function closeMenu() {
-        if (closed) return;
-        closed = true;
-        observer?.disconnect();
-        contextMenu.remove();
-        document.removeEventListener('click', closeContextMenu, true);
-        document.removeEventListener('keydown', closeOnEscape, true);
-        if (activeTabContextMenuCleanup === closeMenu) activeTabContextMenuCleanup = null;
-        finishInteraction?.();
-    }
-    function closeContextMenu(event) { if (!contextMenu.contains(event.target)) closeMenu(); }
-    function closeOnEscape(event) { if (event.key === 'Escape') { event.preventDefault(); closeMenu(); if (splitActions?.keyboard && tabElement.isConnected) tabElement.focus(); } }
+    function closeMenu() { session.close(); }
     activeTabContextMenuCleanup = closeMenu;
-    document.addEventListener('click', closeContextMenu, true);
-    document.addEventListener('keydown', closeOnEscape, true);
 }
 
 export async function showArchivedTabsPopup(activeSpaceId) {

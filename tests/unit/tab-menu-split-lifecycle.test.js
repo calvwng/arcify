@@ -16,7 +16,7 @@ test('Split menu releases its interaction gate exactly once for every exit', asy
     try {
         const row = document.querySelector('.tab');
         const event = (node, type, extra = {}) => { const e = new window.Event(type, { bubbles: true, cancelable: true }); Object.assign(e, extra); node.dispatchEvent(e); };
-        for (const exit of ['Enter', 'mouse', 'Escape', 'outside', 'superseding', 'removed', 'explicit']) await t.test(exit, async () => {
+        for (const exit of ['Enter', 'mouse', 'Escape', 'outside', 'superseding', 'removed', 'explicit', 'blur', 'hidden', 'pagehide']) await t.test(exit, async () => {
             let begins = 0, ends = 0, calls = 0;
             const open = () => showTabContextMenu(10, 10, { id: 11, url: 'https://fixture/left' }, false, false, row,
                 () => {}, [], () => {}, () => {}, [], () => {}, null, null, { count: 2, save: () => {} }, null,
@@ -28,6 +28,14 @@ test('Split menu releases its interaction gate exactly once for every exit', asy
             if (exit === 'mouse') event(item, 'click');
             if (exit === 'Escape') event(item, 'keydown', { key: 'Escape' });
             if (exit === 'outside') event(document.getElementById('outside'), 'click');
+            if (['blur', 'hidden', 'pagehide'].includes(exit)) {
+                document.getElementById('outside').focus();
+                if (exit === 'hidden') {
+                    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+                    event(document, 'visibilitychange'); delete document.visibilityState;
+                } else event(window, exit);
+                assert.equal(document.activeElement, document.getElementById('outside'));
+            }
             if (exit === 'explicit') closeTabContextMenu();
             if (exit === 'removed') { item.parentElement.remove(); await new Promise(resolve => setImmediate(resolve)); }
             if (exit === 'superseding') { open(); assert.equal(begins, 2); assert.equal(ends, 1); }

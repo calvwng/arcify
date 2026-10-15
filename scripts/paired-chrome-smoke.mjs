@@ -101,6 +101,7 @@ const report = {
         imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, runnerUid: process.getuid?.() },
     screenshots: [], diagnostics: [], targetLifecycle: [],
     limits: [
+        'Outside-focus menu checks use ordinary sidebar.html tabs and a separate disposable localhost browser window with trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; actual native-panel external focus and Helium remain manual.',
         'Workspace rendering regressions use sidebar.html in a regular tab. Dedicated command checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking/focus and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
@@ -1899,7 +1900,8 @@ try {
     });
 
     await step(stepNames[28], async () => {
-        persistentFixture = await exercisePersistentFavorites({apiPage:arcifyOptions,newTabPage,ui,screenshot,snapshot,poll,fixture,arcifyId});
+        persistentFixture = await exercisePersistentFavorites({apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,snapshot,poll,fixture,arcifyId,
+            record:async observation => { report.persistentFavoriteMenus ||= []; report.persistentFavoriteMenus.push(observation); await saveReport(); } });
         return persistentFixture;
     });
     await step(stepNames[29], () => exerciseFavoriteSearch({apiPage:arcifyOptions,newTabPage,ui,screenshot,snapshot,poll,fixture,spotlightId,persistentFixture,search,sidebarInput,restartWorker:restartFavoriteWorker,
@@ -1952,7 +1954,7 @@ try {
 
     // Menu fixtures own disposable data and finish before ordinary-Favorite
     // restart receipts are captured or a full restart changes window identities.
-    await step(stepNames[37], () => exerciseSpaceContextBasics({ apiPage:arcifyOptions,newTabPage,ui,screenshot,
+    await step(stepNames[37], () => exerciseSpaceContextBasics({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
         snapshot,poll,fixture,arcifyId,
         record:async observation => { report.spaceContextMenus ||= []; report.spaceContextMenus.push(observation); await saveReport(); } }));
 

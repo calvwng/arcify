@@ -519,7 +519,8 @@ test('existing browser pins remain native until explicit per-tab adoption and na
         { id: 202, windowId: 10, pinned: true, active: false, index: 2, title: 'Existing B', url: 'https://legacy.test/b' });
     await chrome.tabs.onMoved.emit(201, { windowId: 10 }); await wait(80);
     assert.equal(favorites().querySelectorAll('.native-favorite').length, 2); assert.deepEqual(local.persistentFavorites, savedOrder);
-    assert.equal(document.getElementById('nativeFavoritesNotice').hidden, false);
+    assert.equal(document.getElementById('nativeFavoritesNotice'), null);
+    assert.equal(document.querySelector('.native-favorites-notice'), null);
     effects = [];
     const first = favorites().querySelector('.native-favorite[data-tab-id="201"]');
     const second = favorites().querySelector('.native-favorite[data-tab-id="202"]');

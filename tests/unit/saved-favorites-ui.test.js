@@ -43,13 +43,16 @@ function fixture() {
         setWindow(id) { windowId = id; context.windowId = id; }, setBeforeGet(value) { beforeGet = value; } };
 }
 
-test('real renderer keeps stable saved IDs, visible closed state and unmanaged native adoption notice', async () => {
+test('real renderer keeps stable saved IDs, visible closed state and native distinction without migration hint', async () => {
     const f = fixture(); await f.ui.refresh();
     assert.deepEqual([...f.container.querySelectorAll('.pinned-favicon')].map(node => node.dataset.favoriteId || node.dataset.tabId), ['one', 'two', '20']);
     assert(f.row('one').classList.contains('active')); assert.equal(f.row('two').dataset.tabId, undefined);
     assert.equal(f.row('two').querySelector('.favorite-state').textContent, 'Closed');
     assert.match(f.row('two').getAttribute('aria-label'), /Closed.*click to open/);
-    assert.match(f.document.getElementById('nativeFavoritesNotice').textContent, /Right-click.*Keep as saved Favorite/);
+    assert.equal(Boolean(f.document.getElementById('nativeFavoritesNotice')), false);
+    assert.equal(Boolean(f.document.querySelector('.native-favorites-notice')), false);
+    assert.match(f.container.querySelector('.native-favorite').getAttribute('aria-label'), /Browser pin · not saved/);
+    assert(!f.document.body.textContent.includes('Browser pins are kept as they are.'));
     assert(f.calls.every(message => message.action === 'get'), 'render must never adopt, pin, open or close tabs');
 });
 
@@ -149,4 +152,34 @@ test('source bookmark client forwards exact provenance only, fails local context
     assert.deepEqual(f.calls.at(-1), { type: 'favoriteStore', action: 'addBookmark', windowId: 1, spaceId: 's', bookmarkFolderId: 'root', bookmarkId: 'b', parentId: 'folder', tabId: 10, beforeId: 'one' });
     f.context.activeSpaceId = 'other'; await assert.rejects(add(source), /changed/); assert.equal(f.calls.length, 1);
     await assert.rejects(favoriteRequest('get', { windowId: 1 }, { runtime: { sendMessage: async () => ({ success: false, error: 'Tracking unavailable', code: 'UNCERTAIN_CREATE' }) } }), { message: 'Tracking unavailable', code: 'UNCERTAIN_CREATE' });
+});
+
+
+test('saved and native Favorite menus dismiss on external focus loss without activating or stealing focus', async () => {
+    const f = fixture(); await f.ui.refresh();
+    let focused = f.document.body;
+    Object.defineProperty(f.document, 'activeElement', { get: () => focused });
+    const oldFocus = f.window.HTMLElement.prototype.focus;
+    f.window.HTMLElement.prototype.focus = function () { focused = this; };
+    try {
+        for (const node of [f.row('one'), f.container.querySelector('.native-favorite')]) {
+            for (const exit of ['blur', 'hidden', 'pagehide']) {
+                const before = structuredClone(f.calls);
+                f.event(node, 'contextmenu'); assert(f.document.getElementById('tab-context-menu'));
+                f.document.body.focus();
+                if (exit === 'hidden') {
+                    Object.defineProperty(f.document, 'visibilityState', { configurable: true, value: 'hidden' });
+                    f.event(f.document, 'visibilitychange');
+                    delete f.document.visibilityState;
+                } else f.event(f.window, exit);
+                assert.equal(Boolean(f.document.getElementById('tab-context-menu')), false);
+                assert.equal(f.document.activeElement, f.document.body);
+                assert.deepEqual(f.calls, before);
+                f.event(node, 'keydown', { key: 'ContextMenu' });
+                assert(f.document.getElementById('tab-context-menu'));
+                f.event(f.document, 'keydown', { key: 'Escape' });
+                assert.equal(f.document.activeElement, node);
+            }
+        }
+    } finally { f.ui.dispose(); f.window.HTMLElement.prototype.focus = oldFocus; }
 });

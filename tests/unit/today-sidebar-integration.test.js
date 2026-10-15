@@ -14,6 +14,7 @@ const { document } = window;
 const listeners = () => {
     const callbacks = [];
     return { addListener(callback) { callbacks.push(callback); },
+        removeListener(callback) { const index = callbacks.indexOf(callback); if (index >= 0) callbacks.splice(index, 1); },
         async emit(...args) { await Promise.all(callbacks.map(callback => callback(...args))); } };
 };
 const onChanged = listeners(), onMessage = listeners();
@@ -69,6 +70,7 @@ Object.assign(globalThis, { window, document, Event: window.Event, Node: window.
     matchMedia: () => ({ matches: true, addEventListener() {} }),
     ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
     MutationObserver: window.MutationObserver,
+    cancelAnimationFrame() {},
     alert(message) { assert.fail(message); }
 });
 globalThis.chrome = {
@@ -435,7 +437,7 @@ test('native update refresh does not invalidate a freshly opened keyboard End me
 
 test('Split menu cancellation resumes queued refresh without a native action', async () => {
     const before = nativeSplitCalls.length;
-    for (const exit of ['Escape', 'outside', 'superseding', 'removed']) {
+    for (const exit of ['Escape', 'outside', 'superseding', 'removed', 'blur', 'hidden', 'pagehide']) {
         clear(); event(live(101), 'click', { ctrlKey: true }); event(live(102), 'click', { ctrlKey: true });
         await splitKeyboardMenu(101);
         const original = live(101); assert(menuItem('createSplitView'));
@@ -445,7 +447,10 @@ test('Split menu cancellation resumes queued refresh without a native action', a
         if (exit === 'outside') event(document.body, 'click');
         if (exit === 'superseding') await context(6);
         if (exit === 'removed') document.getElementById('tab-context-menu').remove();
-        await wait(260); assert.notEqual(live(101), original, `${exit} releases pending refresh`);
+        if (['blur', 'hidden', 'pagehide'].includes(exit)) leaveSidebar(exit);
+        await wait(260);
+        if (['blur', 'hidden', 'pagehide'].includes(exit)) assert.equal(document.activeElement, document.getElementById('newTabBtn'));
+        assert.notEqual(live(101), original, `${exit} releases pending refresh`);
         clear();
     }
     assert.equal(nativeSplitCalls.length, before);
@@ -604,4 +609,106 @@ test('keyboard split target returns to the live row and never steals newer focus
             await splitKeyboardMenu(101); event(menuItem('endSplitView'), 'click'); await wait(300);
         }
     } finally { chrome.tabs.createSplit = original; }
+});
+
+
+function leaveSidebar(exit) {
+    // Model focus having already moved away. Dismissal must not focus a row or
+    // menu as its queued refresh completes; the real browser fixture tests the
+    // OS/tab focus boundary separately.
+    document.getElementById('newTabBtn').focus();
+    if (exit === 'hidden') {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+        event(document, 'visibilitychange'); delete document.visibilityState;
+    } else event(window, exit);
+}
+
+const existingFolder = () => content().querySelector('.folder[data-bookmark-id]');
+async function folderContext() { event(existingFolder(), 'contextmenu', { clientX: 20, clientY: 40 }); await wait(30); }
+
+test('visible Today, saved/live pin and folder menus dismiss across external focus boundaries', async () => {
+    clear(); const before = structuredClone(mutations);
+    for (const open of [() => context(6), () => pinContext('b10'), () => context(1), folderContext]) {
+        for (const exit of ['blur', 'hidden', 'pagehide']) {
+            await open(); assert(document.querySelector('#tab-context-menu, #folder-context-menu'));
+            leaveSidebar(exit); await wait(40);
+            assert.equal(document.querySelector('#tab-context-menu, #folder-context-menu'), null);
+            assert.equal(document.activeElement, document.getElementById('newTabBtn'));
+            await open(); assert(document.querySelector('#tab-context-menu, #folder-context-menu')); clear();
+        }
+    }
+    assert.deepEqual(mutations, before);
+});
+
+test('async Today/live-pin/closed-pin menu preparations cannot reopen after leaving the sidebar', async () => {
+    clear(); const before = structuredClone(mutations);
+    for (const kind of ['today', 'live-pin', 'closed-pin']) for (const exit of ['blur', 'hidden', 'pagehide', 'pointerdown', 'Escape']) {
+        let release; const waiting = new Promise(resolve => { release = resolve; });
+        const target = kind === 'today' ? live(6) : kind === 'live-pin' ? live(1) : row('b10');
+        if (kind === 'closed-pin') beforeTree = () => waiting;
+        else beforeGetTab = id => [1, 6].includes(id) ? waiting : undefined;
+        try {
+            event(target, 'contextmenu', { pageX: 20, pageY: 40 }); await wait(10);
+            if (['blur', 'hidden', 'pagehide'].includes(exit)) leaveSidebar(exit);
+            else if (exit === 'Escape') clear();
+            else event(document.body, 'pointerdown');
+        } finally { beforeTree = null; beforeGetTab = null; release(); }
+        await wait(35);
+        assert.equal(document.getElementById('tab-context-menu'), null, `${kind}/${exit} must cancel pending attachment`);
+        clear();
+    }
+    assert.deepEqual(mutations, before);
+});
+
+test('async folder preparation is canceled by focus loss or a newer menu and cannot override it', async () => {
+    clear(); const before = structuredClone(mutations), originalGet = chrome.bookmarks.get;
+    for (const exit of ['blur', 'hidden', 'pagehide', 'space']) {
+        let release; const waiting = new Promise(resolve => { release = resolve; });
+        chrome.bookmarks.get = async id => { if (id === 'p') await waiting; return originalGet(id); };
+        try {
+            event(existingFolder(), 'contextmenu', { clientX: 20, clientY: 40 }); await wait(10);
+            if (exit === 'space') event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'), 'keydown', { key: 'F10', shiftKey: true });
+            else leaveSidebar(exit);
+        } finally { chrome.bookmarks.get = originalGet; release(); }
+        await wait(35);
+        assert.equal(document.getElementById('folder-context-menu'), null);
+        if (exit === 'space') assert(document.querySelector('.space-context-menu'));
+        clear();
+    }
+    assert.deepEqual(mutations, before);
+});
+
+test('folder actions retire their menu before a native prompt; cancellation allows immediate reopening', async () => {
+    clear(); const before = structuredClone(mutations), previousConfirm = globalThis.confirm; let confirms = 0;
+    globalThis.confirm = () => {
+        confirms++;
+        assert.equal(document.getElementById('folder-context-menu'), null);
+        leaveSidebar('blur'); return false;
+    };
+    try {
+        await folderContext();
+        event([...document.querySelectorAll('#folder-context-menu .context-menu-item')].find(item => item.textContent === 'Delete Folder'), 'click');
+        await wait(30); assert.equal(confirms, 1); assert.deepEqual(mutations, before);
+        await folderContext(); assert(document.getElementById('folder-context-menu')); clear();
+    } finally { if (previousConfirm === undefined) delete globalThis.confirm; else globalThis.confirm = previousConfirm; }
+});
+
+test('choosing an editor ends the menu lifecycle without closing the new tab or Today dialog', async () => {
+    clear(); const before = structuredClone(mutations);
+    for (const kind of ['tab', 'today']) {
+        await context(6);
+        if (kind === 'tab') { event(menuItem('rename'), 'click'); await wait(25); }
+        else dialog();
+        const id = kind === 'tab' ? 'tabEditDialog' : 'todayFolderDialog';
+        const overlay = document.getElementById(id); assert(overlay);
+        assert.equal(document.getElementById('tab-context-menu'), null);
+        for (const exit of ['blur', 'hidden', 'pagehide']) {
+            leaveSidebar(exit); await wait(10);
+            assert.equal(document.getElementById(id), overlay);
+            assert.equal(document.activeElement, document.getElementById('newTabBtn'));
+        }
+        event(document.getElementById(kind === 'tab' ? 'tabEditCancel' : 'todayFolderCancel'), 'click'); await wait(30);
+        assert.equal(document.getElementById(id), null);
+    }
+    assert.deepEqual(mutations, before);
 });

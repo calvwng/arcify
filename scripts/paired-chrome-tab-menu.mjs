@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
+import { exerciseExternalMenuDismissal, readMenuPreservedState } from './paired-chrome-menu-focus.mjs';
 
 export function assertTabMenuFixtureEnvironment(env = process.env, uid = process.getuid?.()) {
     assert.equal(env.GITHUB_ACTIONS, 'true', 'The real tab-menu fixture is restricted to GitHub Actions.');
@@ -13,7 +14,7 @@ export function assertTabMenuFixtureEnvironment(env = process.env, uid = process
 
 /** Register before the generic localhost response in the parent fixture server. */
 export function serveTabMenuFixture(request, response) {
-    const match = /^\/tab-menu\/([a-f0-9]{32})\/(ordinary|pin|away|edited|stale)$/.exec(new URL(request.url, 'http://127.0.0.1').pathname);
+    const match = /^\/tab-menu\/([a-f0-9]{32})\/(ordinary|pin|away|edited|stale|outside)$/.exec(new URL(request.url, 'http://127.0.0.1').pathname);
     if (!match) return false;
     const title = `Tab Menu ${match[2]} ${match[1]}`, documentId = randomBytes(16).toString('hex');
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:" });
@@ -165,7 +166,7 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
     assert(space?.bookmarkFolderId);
     const base = `${fixture.base}/tab-menu/${nonce}`, alias = `MenuAlias ${nonce}`, renamedPin = `Saved Menu Pin ${nonce}`;
     const evidence = { nonce, surface: 'regular sidebar.html tab', nativePanel: false, realMouseKeyboard: true, checkpoints: [], screenshots: [] };
-    const ownedTabs = new Set(), pageStates = new Map(); let sidebar, spotlight, folderId, staleBookmarkId, primaryError;
+    const ownedTabs = new Set(), pageStates = new Map(); let sidebar, spotlight, folderId, staleBookmarkId, outsideWindow, outsidePage, primaryError;
     const settings = await apiPage.evaluate(() => chrome.storage.sync.get(['invertTabOrder', 'syncTabGroups']));
     const checkpoint = async (phase, data) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
     const capture = async label => {
@@ -227,6 +228,11 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
     };
     try {
         await setOption('invertTabOrder', false); await setOption('syncTabGroups', false);
+        outsideWindow = await apiPage.evaluate(url => chrome.windows.create({ url, type: 'normal', focused: false }), `${base}/outside`);
+        assert(![fixture.windowA, fixture.windowB].includes(outsideWindow.id));
+        outsidePage = await pageForUrl(`${base}/outside`);
+        await outsidePage.waitForSelector('#page-state');
+        await ui(outsidePage, 'Initialize the disposable external window before identity baselines', () => outsidePage.click('#page-state'));
         const ordinary = await makeTab(`${base}/ordinary`), ordinaryPage = await pageForUrl(`${base}/ordinary`);
         await ui(ordinaryPage, 'Type genuine ordinary source page state', () => ordinaryPage.type('#page-state', '-ordinary-kept'));
         pageStates.set(ordinary.id, ordinaryPage);
@@ -251,6 +257,33 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             if (await sidebar.page.$eval(selector, node => node.classList.contains('collapsed'))) await sidebar.page.click(`${selector} > .folder-header`);
             await sidebar.page.waitForSelector(pin(seeded.live.id), { visible: true });
         });
+        // A separate disposable window keeps all native tab.active bits and
+        // Space membership stable. Window B remains under the parent invariant.
+        for (const [label, selector, menuSelector] of [
+            ['ordinary-tab', row(ordinary.id), '#tab-context-menu'],
+            ['closed-space-pin', pin(seeded.closed.id), '#tab-context-menu'],
+            ['saved-folder', `.space.active .folder[data-bookmark-id="${folderId}"] > .folder-header`, '#folder-context-menu']
+        ]) {
+            const open = async () => {
+                if (menuSelector === '#tab-context-menu') return menu(selector);
+                await ui(sidebar.page, 'Right-click exact saved folder', async () => {
+                    await sidebar.page.waitForSelector(selector, { visible: true });
+                    await sidebar.page.click(selector, { button: 'right' });
+                    await sidebar.page.waitForSelector(menuSelector, { visible: true });
+                });
+            };
+            await open(); const before = await read(), preservedBefore = await apiPage.evaluate(readMenuPreservedState);
+            const focus = await exerciseExternalMenuDismissal({ sidebar: sidebar.page, destination: outsidePage,
+                menuSelector, label, ui, screenshot, poll, record });
+            const after = await read(); assertTabMenuCancelled(before, after);
+            const preservedAfter = await apiPage.evaluate(readMenuPreservedState);
+            assert.deepEqual(preservedAfter, preservedBefore, 'Outside dismissal preserves full durable and current-session ownership.');
+            await open();
+            await ui(sidebar.page, `Dismiss reopened ${label} menu with genuine Escape`, () => sidebar.page.keyboard.press('Escape'));
+            await sidebar.page.waitForFunction(selector => !document.querySelector(selector), { polling: 50 }, menuSelector);
+            assertTabMenuCancelled(before, await read());
+            await checkpoint('outside-focus', { label, before, after, preservedBefore, preservedAfter, focus, reopenedEscape: true });
+        }
         await menu(row(ordinary.id)); const beforeCancel = await read(); await item('rename');
         await sidebar.page.waitForSelector('#tabEditDialog'); await capture('tab-menu-ordinary-rename-cancel');
         await ui(sidebar.page, 'Cancel rename with genuine Escape', () => sidebar.page.keyboard.press('Escape')); await settled();
@@ -390,6 +423,7 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
         throw error;
     } finally {
         await finishBookmarkFixture([
+            async () => { if (outsideWindow) await apiPage.evaluate(id => chrome.windows.remove(id), outsideWindow.id); },
             () => apiPage.evaluate(async ids => { const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); const present = ids.filter(id => live.has(id)); if (present.length) await chrome.tabs.remove(present); }, [...ownedTabs]),
             async () => { if (folderId) await apiPage.evaluate(id => chrome.bookmarks.removeTree(id), folderId); },
             // A moved stale fixture can be outside its root if failure interrupted
