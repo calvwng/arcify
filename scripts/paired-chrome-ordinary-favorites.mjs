@@ -1,6 +1,7 @@
 /** Real Chrome orchestration only. Import is safe; no browser is launched here. */
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
+import { assertReloadFixtureProvenance, readFixturePageIdentity } from './paired-chrome-reload-fixtures.mjs';
 import { FAVORITE_FAVICON_PATH, waitForRetainedFavoriteIcon } from './paired-chrome-favorite-icons.mjs';
 import { requestScopedFavorite } from './paired-chrome-favorites-restart.mjs';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
@@ -127,13 +128,38 @@ export function assertCommittedFavoriteWitness(state, { arcifyId, spotlightId })
     return journal;
 }
 
+export function assertReloadWindowSelection(before, after) {
+    const windows = state => {
+        assert(Array.isArray(state.groupState.windows), 'Complete native window observations are required');
+        const value = state.groupState.windows.map(({ id, type, incognito }) => ({ id, type, incognito })).sort((a, b) => a.id - b.id);
+        assert.equal(new Set(value.map(window => window.id)).size, value.length);
+        for (const window of value) {
+            assert(Number.isSafeInteger(window.id) && window.id >= 0);
+            assert.equal(typeof window.type, 'string'); assert.equal(typeof window.incognito, 'boolean');
+        }
+        for (const tab of state.tabs) assert(value.some(window => window.id === tab.windowId), 'Every native tab must belong to an observed live window');
+        return value;
+    };
+    const previousWindows = windows(before), currentWindows = windows(after);
+    assert.deepEqual(currentWindows, previousWindows, 'Reload cannot add, remove or change a live browser window');
+    const live = new Set(previousWindows.map(window => String(window.id)));
+    const stale = new Set(Object.keys(before.groupState.activeSpaces).filter(id => !live.has(id)));
+    for (const id of stale) if (Object.hasOwn(after.groupState.activeSpaces, id)) {
+        assert.equal(after.groupState.activeSpaces[id], before.groupState.activeSpaces[id], 'Reload cannot change a stale selected Space key');
+    }
+    const selected = state => Object.fromEntries(Object.entries(state.groupState.activeSpaces).filter(([id]) => !stale.has(id)));
+    assert.deepEqual(selected(after), selected(before), 'Reload must preserve every selected logical Space in live windows');
+}
+
 // Chrome clears storage.session on extension reload. tab-group-sync.js rebuilds
 // its session-only projection with fresh numeric group IDs; stable Space IDs and
 // exact membership remain authoritative. Observe the entire browser, not only
 // the Favorite's window, and never derive ownership from URLs or group titles.
-export function assertReloadGroupContinuity(before, after) {
-    const logicalSpaces = state => state.groupState.spaces.map(({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
-        ({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs }));
+export function assertReloadGroupContinuity(before, after, { ids, fixtureReload } = {}) {
+    const helpers = ids ? assertReloadFixtureProvenance(before, after, ids, fixtureReload)
+        : { before: new Set(), after: new Set(), prior: { ownIds: new Set() }, current: { ownIds: new Set() } };
+    const logicalSpaces = (state, excluded) => state.groupState.spaces.map(({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
+        ({ id, name, color, bookmarkFolderId, spaceBookmarks: spaceBookmarks.filter(id => !excluded.has(id)), temporaryTabs: temporaryTabs.filter(id => !excluded.has(id)) }));
     for (const state of [before, after]) {
         assert(state.groupState && Array.isArray(state.groupState.spaces) && Array.isArray(state.groupState.groups),
             'Reload requires complete all-window Space and native group observations');
@@ -141,15 +167,17 @@ export function assertReloadGroupContinuity(before, after) {
         assert(state.groupState.activeSpaces && typeof state.groupState.activeSpaces === 'object');
     }
     assert.equal(after.groupState.syncTabGroups, before.groupState.syncTabGroups, 'Reload must preserve group sync setting');
-    assert.deepEqual(after.groupState.activeSpaces, before.groupState.activeSpaces, 'Reload must preserve every selected logical Space');
+    assertReloadWindowSelection(before, after);
     assert.equal(after.snapshot.windowId, before.snapshot.windowId);
     assert.equal(after.snapshot.activeSpaceId, before.snapshot.activeSpaceId, 'Reload must preserve the current snapshot selected Space');
-    assert.deepEqual(after.snapshot.spaces, before.snapshot.spaces, 'Reload must preserve published logical Space membership and order');
+    const publishedSpaces = (state, excluded) => state.snapshot.spaces.map(space => ({ ...space,
+        ...Object.fromEntries(['tabIds', 'pinnedTabIds', 'temporaryTabIds'].map(key => [key, space[key].filter(id => !excluded.has(id))])) }));
+    assert.deepEqual(publishedSpaces(after, helpers.after), publishedSpaces(before, helpers.before), 'Reload must preserve published logical Space membership and order');
     const projectedOwners = state => state.snapshot.tabs.filter(tab => /^https?:/.test(tab.url || ''))
         .map(({ id, windowId, spaceId }) => ({ id, windowId, spaceId })).sort((a, b) => a.id - b.id);
     assert.deepEqual(projectedOwners(after), projectedOwners(before), 'Reload must preserve published exact tab-to-Space ownership');
-    assert.deepEqual(logicalSpaces(after), logicalSpaces(before), 'Reload must preserve stable Space identity, metadata, section membership and order');
-    const semanticGroups = state => {
+    assert.deepEqual(logicalSpaces(after, helpers.after), logicalSpaces(before, helpers.before), 'Reload must preserve stable Space identity, metadata, section membership and order');
+    const semanticGroups = (state, excluded, ownHelpers) => {
         const { spaces, groups, syncTabGroups, activeSpaces } = state.groupState;
         const byId = new Map(state.tabs.map(tab => [tab.id, tab]));
         assert.equal(byId.size, state.tabs.length, 'Native tab IDs must be unique');
@@ -182,19 +210,23 @@ export function assertReloadGroupContinuity(before, after) {
             assert(members.every(tab => tab.windowId === group.windowId), 'Native groups cannot span or change windows');
             assert(members.every((tab, index) => Number.isSafeInteger(tab.index) && tab.index === members[0].index + index),
                 'Native group members must retain a contiguous ordered partition');
-            const spaceId = owners.get(members[0].id);
+            // Proven own-extension setup pages can inherit a Chrome group even
+            // though Arcify deliberately excludes them from logical ownership.
+            // Validate raw contiguity above; exempt only their exact observed IDs.
+            const logicalMembers = members.filter(tab => !ownHelpers.has(tab.id));
+            const spaceId = owners.get(logicalMembers[0]?.id);
             const projected = syncTabGroups && spaceId !== undefined;
             if (projected) {
                 const space = spaces.find(item => item.id === spaceId);
                 const expected = [...space.spaceBookmarks, ...space.temporaryTabs].filter(id => byId.get(id).windowId === group.windowId);
-                assert.deepEqual(members.map(tab => tab.id), expected, 'Native group must preserve its exact ordered Space/window partition');
+                assert.deepEqual(logicalMembers.map(tab => tab.id), expected, 'Native group must preserve its exact ordered Space/window partition');
                 assert.equal(group.title, space.name, 'Native group title must match its stable Space');
                 assert.equal(group.color, space.color, 'Native group color must match its stable Space');
                 assert.equal(group.collapsed, Boolean(activeSpaces[group.windowId] && activeSpaces[group.windowId] !== spaceId),
                     'Native group collapse must match the observed active Space');
             }
             return { firstIndex: members[0].index, projected, identity: projected ? { spaceId } : { groupId: group.id },
-                windowId: group.windowId, title: group.title, color: group.color, collapsed: group.collapsed, memberIds: members.map(tab => tab.id) };
+                windowId: group.windowId, title: group.title, color: group.color, collapsed: group.collapsed, memberIds: members.filter(tab => !excluded.has(tab.id)).map(tab => tab.id) };
         }).sort((a, b) => a.windowId - b.windowId || a.firstIndex - b.firstIndex);
         if (syncTabGroups) for (const windowId of new Set(state.tabs.map(tab => tab.windowId))) {
             const expected = spaces.filter(space => [...space.spaceBookmarks, ...space.temporaryTabs].some(id => byId.get(id).windowId === windowId)).map(space => space.id);
@@ -205,10 +237,10 @@ export function assertReloadGroupContinuity(before, after) {
         // close/reopen. Group and member relative order must stay exact.
         return orderedGroups.map(({ firstIndex, projected, ...group }) => group);
     };
-    assert.deepEqual(semanticGroups(after), semanticGroups(before), 'Reload must preserve native group membership, window, order, title, color and collapse');
+    assert.deepEqual(semanticGroups(after, helpers.after, helpers.current.ownIds), semanticGroups(before, helpers.before, helpers.prior.ownIds), 'Reload must preserve native group membership, window, order, title, color and collapse');
 }
 
-export function assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision = true } = {}) {
+export function assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision = true, fixtureReload } = {}) {
     const previous = assertCommittedFavoriteWitness(before, ids), current = assertCommittedFavoriteWitness(after, ids);
     assert.equal(current.epoch, previous.epoch, 'Same-browser extension reload must retain the proven session epoch');
     assert.equal(current.generation, previous.generation, 'Reload must not alter pairing identity');
@@ -218,7 +250,7 @@ export function assertSameBrowserFavoriteContinuity(before, after, ids, { requir
     const web = tabs => tabs.filter(tab => /^https?:/.test(tab.url || ''));
     const exactWebIdentities = tabs => identities(web(tabs)).map(({ groupId, ...identity }) => identity);
     assert.deepEqual(exactWebIdentities(after.tabs), exactWebIdentities(before.tabs), 'Reload cannot adopt, duplicate, close or alter existing web tabs');
-    assertReloadGroupContinuity(before, after);
+    assertReloadGroupContinuity(before, after, fixtureReload ? { ids, fixtureReload } : {});
 }
 
 /**
@@ -247,6 +279,28 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
     assert.equal(originalSettings.ordinaryFavoriteTabs ?? false, false, 'The fixture starts in the product default pinned mode');
     const space = originalSnapshot.spaces.find(item => item.id === originalSnapshot.activeSpaceId);
     assert(space?.bookmarkFolderId); assert.notEqual(fixture.spaces.work, fixture.spaces.personal);
+    const initialControls = await Promise.all([apiPage.evaluate(readFixturePageIdentity), spotlightApiPage.evaluate(readFixturePageIdentity)]);
+    const controlWindowId = initialControls[0].tab.windowId;
+    assert.equal(initialControls[1].tab.windowId, controlWindowId);
+    assert.notEqual(controlWindowId, windowId);
+    const observeFixturePages = async nativeTabs => {
+        const pages = await Promise.all([apiPage.evaluate(readFixturePageIdentity), spotlightApiPage.evaluate(readFixturePageIdentity)]);
+        for (const id of [arcifyId, spotlightId]) {
+            const url = `chrome-extension://${id}/installation-onboarding.html`;
+            const matches = nativeTabs.filter(tab => tab.url === url);
+            assert(matches.length <= 1, 'Onboarding fixture endpoint must be unique');
+            if (matches.length) pages.push(await (await pageForUrl(url)).evaluate(readFixturePageIdentity));
+        }
+        return { controlWindowId, pages };
+    };
+    let fixtureObserver;
+    const stopFixtureObserver = async () => {
+        if (!fixtureObserver) return;
+        const { page, key } = fixtureObserver;
+        await page.evaluate(key => { const value = globalThis[key]; if (!value) return;
+            chrome.tabs.onCreated.removeListener(value.created); chrome.tabs.onRemoved.removeListener(value.removed); delete globalThis[key]; }, key);
+        fixtureObserver = null;
+    };
     const read = async (favoriteId, includeWitness = false) => {
         const projected = await get(), snap = await snapshot(windowId);
         const values = await apiPage.evaluate(async ({ sourceIds, includeWitness }) => {
@@ -258,10 +312,11 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
             }));
             return { durable: local.persistentFavorites, iconCache: local.favoriteIconCache ?? null, continuity: local.favoriteContinuity,
                 session: session.favoriteSession, receipt: session.favoriteContinuityReceipt, tabs: await chrome.tabs.query({}), sources,
-                ...(includeWitness ? { groupState: { spaces: local.spaces, groups: await chrome.tabGroups.query({}),
+                ...(includeWitness ? { groupState: { spaces: local.spaces, groups: await chrome.tabGroups.query({}), windows: await chrome.windows.getAll({}),
                     syncTabGroups: (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups ?? false, activeSpaces: session.activeSpaces || {} } } : {}) };
         }, { sourceIds: sources.map(source => source.id), includeWitness });
         return { ...values, favorites: projected.favorites, snapshot: snap,
+            ...(includeWitness ? { fixturePages: await observeFixturePages(values.tabs) } : {}),
             ...(favoriteId ? { render: await sidebar.page.evaluate(readOrdinaryFavoriteRender, favoriteId) } : {}),
             ...(includeWitness ? { witness: await spotlightApiPage.evaluate(async () => (await chrome.storage.session.get('arcifyFavoriteWitness')).arcifyFavoriteWitness) } : {}) };
     };
@@ -435,28 +490,45 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
                 const value = await read(favorite.id, true); reloadEvidence.before = value; return value;
             }, accepts(value => {
                 assertCommittedFavoriteWitness(value, ids);
-                assertReloadGroupContinuity(value, value);
+                assertReloadGroupContinuity(value, value, { ids });
             }), `committed reciprocal witness and settled group projection before ${name} reload`);
             await checkpoint('before-same-browser-reload', { name });
+            const observerPage = name === 'arcify' ? spotlightApiPage : apiPage;
+            const observerKey = `__reloadFixturePages_${nonce}_${name}`;
+            const observerBefore = await observerPage.evaluate(readFixturePageIdentity);
+            await observerPage.evaluate(key => {
+                if (globalThis[key]) throw new Error('Fixture reload observer already exists');
+                const events = { created: [], removed: [] };
+                const created = tab => events.created.push({ id: tab.id, windowId: tab.windowId, url: tab.url, pendingUrl: tab.pendingUrl });
+                const removed = (tabId, info) => events.removed.push({ tabId, windowId: info.windowId, isWindowClosing: info.isWindowClosing });
+                globalThis[key] = { events, created, removed };
+                chrome.tabs.onCreated.addListener(created); chrome.tabs.onRemoved.addListener(removed);
+            }, observerKey);
+            fixtureObserver = { page: observerPage, key: observerKey };
             const lifecycle = await reload();
             assert(lifecycle?.evidence && lifecycle.arcifyOptions && lifecycle.spotlightOptions, 'Reload callback must supply strict raw lifecycle evidence and fresh API contexts');
             reloadEvidence.lifecycle = lifecycle.evidence;
+            const fixtureReload = reloadEvidence.fixtureReload = { name, controlWindowId, lifecycle: lifecycle.evidence, observerBefore };
+            fixtureReload.observerAfter = await observerPage.evaluate(readFixturePageIdentity);
             apiPage = lifecycle.arcifyOptions; spotlightApiPage = lifecycle.spotlightOptions;
             if (name === 'arcify') { sidebar = await newTabPage(sideUrl, windowId); sidebars.push(sidebar.tab.id); }
             const after = await poll(async () => {
-                const value = await read(favorite.id, true); reloadEvidence.after = value; return value;
+                const value = await read(favorite.id, true); reloadEvidence.after = value;
+                fixtureReload.nativeEvents = await observerPage.evaluate(key => globalThis[key].events, observerKey);
+                return value;
             }, accepts(value => {
                 assertCommittedFavoriteWitness(value, ids);
                 assertOrdinaryFavoriteState(value, { favoriteId: favorite.id, tabId: reopenedTab.id, windowId, url: source.url });
-                assertReloadGroupContinuity(value, value);
+                assertReloadGroupContinuity(value, value, { ids });
             }), `same exact ordinary Favorite binding after ${name} reload`);
             // Persist both raw observations before any semantic continuity check,
             // so a failed assertion remains independently diagnosable.
             await checkpoint('observed-same-browser-reload', { name });
-            assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision: name === 'arcify' });
+            assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision: name === 'arcify', fixtureReload });
             const retained = await icon(favorite.id, false, retainedBefore.cacheEntry.faviconDataUrl);
             assert.deepEqual(retained.record, retainedBefore.record); assert.deepEqual(retained.cacheEntry, retainedBefore.cacheEntry);
             reloadEvidence.retained = retained;
+            await stopFixtureObserver();
             await checkpoint('same-browser-reload-continuity', { name, favoriteId: favorite.id, tabId: reopenedTab.id });
         }
         await toggle('ordinaryFavoriteTabs', false);
@@ -486,6 +558,7 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
         await checkpoint('failed-without-native-input-retry').catch(() => {});
         throw error;
     } finally {
+        await stopFixtureObserver().catch(() => {});
         if (removalKey) await apiPage.evaluate(key => {
             const trace = globalThis[key]; if (trace) chrome.tabs.onRemoved.removeListener(trace.listener); delete globalThis[key];
         }, removalKey).catch(() => {});

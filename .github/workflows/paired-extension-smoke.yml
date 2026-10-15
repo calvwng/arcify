@@ -8,6 +8,7 @@ on:
       - '.github/workflows/paired-extension-smoke.yml'
       - 'scripts/paired-chrome-smoke.mjs'
       - 'scripts/paired-chrome-run-plan.mjs'
+      - 'scripts/paired-chrome-reload-fixtures.mjs'
       - 'tests/unit/paired-chrome-run-plan.test.js'
       - 'scripts/paired-chrome-sandbox.mjs'
       - 'scripts/paired-chrome-ui.mjs'

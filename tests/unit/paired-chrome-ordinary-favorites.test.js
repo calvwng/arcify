@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { serveOrdinaryFavoriteFixture, assertOrdinaryFavoriteState, assertOnlyNativeFavoriteClosed,
-    assertOrdinaryFavoriteReopened, assertCommittedFavoriteWitness, assertSameBrowserFavoriteContinuity,
+    assertOrdinaryFavoriteReopened, assertCommittedFavoriteWitness, assertSameBrowserFavoriteContinuity, assertReloadGroupContinuity,
     readOrdinaryFavoriteRender, observedOwnershipFingerprint, summarizeFavoriteOwnership } from '../../scripts/paired-chrome-ordinary-favorites.mjs';
 
 const arcifyId = 'a'.repeat(32), spotlightId = 'b'.repeat(32), nonce = 'c'.repeat(32);
@@ -16,7 +16,7 @@ function state() {
     const other = { id: 44, windowId: 20, url: 'http://127.0.0.1/other', pinned: false, incognito: false, groupId: 8, index: 0, active: true, status: 'complete' };
     const value = { favorites: [{ ...record, tabId: 33 }], durable: [structuredClone(record)], iconCache: { entries: [{ favoriteId: record.id, faviconDataUrl: 'exact-bytes' }] },
         sources: [structuredClone(source)], tabs: [live, other],
-        groupState: { syncTabGroups: true, activeSpaces: { 10: 'work', 20: 'personal' },
+        groupState: { windows: [{ id: 10, type: 'normal', incognito: false }, { id: 20, type: 'normal', incognito: false }], syncTabGroups: true, activeSpaces: { 10: 'work', 20: 'personal' },
             spaces: [{ id: 'work', name: 'Work', color: 'blue', bookmarkFolderId: 'folder-1', spaceBookmarks: [], temporaryTabs: [] },
                 { id: 'personal', name: 'Personal', color: 'red', bookmarkFolderId: 'folder-2', spaceBookmarks: [], temporaryTabs: [44] }],
             groups: [{ id: 8, windowId: 20, title: 'Personal', color: 'red', collapsed: false }] },
@@ -257,6 +257,7 @@ test('disabled sync preserves native group IDs and metadata rather than allowing
 });
 test('unrelated native groups retain exact IDs even while Space sync is enabled', () => {
     const before = groupedReloadState();
+    before.groupState.windows.push({ id: 30, type: 'normal', incognito: false });
     before.tabs.push({ id: 60, windowId: 30, index: 0, url: 'about:blank', groupId: 90, pinned: false, incognito: false });
     before.groupState.groups.push({ id: 90, windowId: 30, title: 'Unowned', color: 'grey', collapsed: false });
     assert.doesNotThrow(() => assertSameBrowserFavoriteContinuity(before, witness(structuredClone(before), 6), ids));
@@ -280,6 +281,7 @@ test('reload evidence persists raw before and after observations before semantic
 
 test('known-ID pending Favorite receipts remain global and explicitly ungrouped during reload', () => {
     const before = groupedReloadState();
+    before.groupState.windows.push({ id: 30, type: 'normal', incognito: false });
     before.tabs.push({ id: 61, windowId: 30, index: 0, url: 'https://pending.test/', groupId: -1, pinned: false, incognito: false });
     before.session.attempts.push({ favoriteId: 'pending', tabId: 61, windowId: 30, mode: 'ordinary', kind: 'create' });
     before.session.attempts.push({ favoriteId: 'unknown', tabId: null, windowId: 30, mode: 'ordinary', kind: 'create' });
@@ -287,4 +289,130 @@ test('known-ID pending Favorite receipts remain global and explicitly ungrouped 
     assert.doesNotThrow(() => assertSameBrowserFavoriteContinuity(before, renumberGroups(structuredClone(before)), ids));
     const after = renumberGroups(structuredClone(before)); after.tabs.find(tab => tab.id === 61).groupId = 1080;
     assert.throws(() => assertSameBrowserFavoriteContinuity(before, after, ids), /explicitly ungrouped/);
+});
+
+function fixtureReloadPair(name = 'spotlight') {
+    const before = groupedReloadState();
+    before.groupState.windows.push({ id: 30, type: 'normal', incognito: false });
+    before.groupState.activeSpaces[30] = 'home';
+    before.groupState.spaces.push({ id: 'home', name: 'Home', color: 'grey', bookmarkFolderId: 'home-folder', spaceBookmarks: [], temporaryTabs: [60, 71, 73] });
+    const native = (id, url, groupId, index) => ({ id, url, groupId, index, windowId: 30, pinned: false, incognito: false });
+    before.tabs.push(native(60, 'about:blank', 90, 2), native(70, `chrome-extension://${arcifyId}/options.html`, -1, 0),
+        native(71, `chrome-extension://${spotlightId}/options.html`, 90, 3),
+        native(72, `chrome-extension://${arcifyId}/installation-onboarding.html`, -1, 1),
+        native(73, `chrome-extension://${spotlightId}/installation-onboarding.html`, 90, 4));
+    before.groupState.groups.push({ id: 90, windowId: 30, title: 'Home', color: 'grey', collapsed: false });
+    const capture = state => ({ controlWindowId: 30, pages: state.tabs.filter(tab => [70, 71, 72, 73, 80, 81, 82, 83].includes(tab.id)).map(tab => ({
+        extensionId: tab.url.split('/')[2], documentUrl: tab.url,
+        tab: Object.fromEntries(['id', 'windowId', 'url', 'pinned', 'incognito'].map(key => [key, tab[key]])) })) });
+    before.fixturePages = capture(before);
+    const after = structuredClone(before), oldIds = name === 'arcify' ? [70, 72] : [71, 73];
+    for (const tab of after.tabs) if (oldIds.includes(tab.id)) tab.id += 10;
+    if (name === 'arcify') {
+        after.tabs.find(tab => tab.id === 80).groupId = 90;
+        [82, 60, 71, 73, 80].forEach((id, index) => { after.tabs.find(tab => tab.id === id).index = index; });
+    } else after.groupState.spaces.at(-1).temporaryTabs = [60, 81, 83];
+    after.fixturePages = capture(after);
+    const sourceId = ids[`${name}Id`], peerId = ids[name === 'arcify' ? 'spotlightId' : 'arcifyId'];
+    const workerUrl = `chrome-extension://${sourceId}/background.js`;
+    const fixtureReload = { name, controlWindowId: 30,
+        lifecycle: { name, view: { url: `chrome-extension://${sourceId}/options.html`, closed: true },
+            identity: { id: sourceId, url: workerUrl, globalType: 'ServiceWorkerGlobalScope' },
+            observations: [{ phase: 'before-reload', target: { targetId: 'old-worker', type: 'service_worker', url: workerUrl } }],
+            replacement: { targetId: 'new-worker', type: 'service_worker', url: workerUrl } },
+        observerBefore: before.fixturePages.pages.find(page => page.documentUrl === `chrome-extension://${peerId}/options.html`),
+        observerAfter: after.fixturePages.pages.find(page => page.documentUrl === `chrome-extension://${peerId}/options.html`),
+        nativeEvents: { removed: oldIds.map(tabId => ({ tabId, windowId: 30, isWindowClosing: false })),
+            created: oldIds.map((id, index) => ({ id: id + 10, windowId: 30, url: index ? `chrome-extension://${sourceId}/installation-onboarding.html` : 'about:blank' })) } };
+    witness(after, 6);
+    return { before, after, fixtureReload };
+}
+const checkFixturePair = ({ before, after, fixtureReload }) => assertSameBrowserFavoriteContinuity(before, after, ids, { fixtureReload });
+
+test('proven Spotlight fixture replacement changes only exact setup member IDs', () => {
+    const value = fixtureReloadPair();
+    assert.throws(() => assertSameBrowserFavoriteContinuity(value.before, value.after, ids), /section membership/);
+    assert.doesNotThrow(() => checkFixturePair(value));
+    assert(value.after.groupState.spaces.at(-1).temporaryTabs.includes(60), 'The control about:blank tab is retained');
+});
+test('proven fresh Arcify options may inherit a native group without logical ownership', () => {
+    const value = fixtureReloadPair('arcify');
+    assert.doesNotThrow(() => checkFixturePair(value));
+    assert.doesNotThrow(() => assertReloadGroupContinuity(value.after, value.after, { ids }));
+});
+test('new onboarding addition requires exact creation provenance even with no old onboarding', () => {
+    const value = fixtureReloadPair();
+    value.before.tabs = value.before.tabs.filter(tab => tab.id !== 73);
+    value.before.fixturePages.pages = value.before.fixturePages.pages.filter(page => page.tab.id !== 73);
+    value.before.groupState.spaces.at(-1).temporaryTabs = [60, 71];
+    value.fixtureReload.nativeEvents.removed = value.fixtureReload.nativeEvents.removed.filter(event => event.tabId !== 73);
+    assert.doesNotThrow(() => checkFixturePair(value));
+});
+for (const [label, mutate] of [
+    ['wrong extension', v => { v.after.fixturePages.pages.find(p => p.tab.id === 81).extensionId = 'c'.repeat(32); }],
+    ['wrong exact path', v => { const page = v.after.fixturePages.pages.find(p => p.tab.id === 81); page.documentUrl = page.tab.url = `chrome-extension://${spotlightId}/other.html`; v.after.tabs.find(t => t.id === 81).url = page.tab.url; }],
+    ['options URL query suffix', v => { const page = v.after.fixturePages.pages.find(p => p.tab.id === 81); page.documentUrl += '?fake'; page.tab.url = page.documentUrl; v.after.tabs.find(t => t.id === 81).url = page.tab.url; }],
+    ['wrong helper window', v => { v.after.fixturePages.pages.find(p => p.tab.id === 81).tab.windowId = 20; v.after.tabs.find(t => t.id === 81).windowId = 20; }],
+    ['unobserved fixture ID', v => { v.after.fixturePages.pages.find(p => p.tab.id === 81).tab.id = 999; }],
+    ['missing options creation', v => { v.fixtureReload.nativeEvents.created.shift(); }],
+    ['duplicate options creation', v => { v.fixtureReload.nativeEvents.created.push({ ...v.fixtureReload.nativeEvents.created[0] }); }],
+    ['wrong creation window', v => { v.fixtureReload.nativeEvents.created[0].windowId = 20; }],
+    ['wrong onboarding source', v => { v.fixtureReload.nativeEvents.created[1].url = 'about:blank'; }],
+    ['missing old options removal', v => { v.fixtureReload.nativeEvents.removed.shift(); }],
+    ['closing control window', v => { v.fixtureReload.nativeEvents.removed[0].isWindowClosing = true; }],
+    ['wrong removed tab', v => { v.fixtureReload.nativeEvents.removed[0].tabId = 60; }],
+    ['changed observer realm', v => { v.fixtureReload.observerAfter = { ...v.fixtureReload.observerAfter, extensionId: spotlightId }; }],
+    ['wrong reload identity', v => { v.fixtureReload.lifecycle.identity.id = arcifyId; }],
+    ['same worker reused', v => { v.fixtureReload.lifecycle.replacement.targetId = 'old-worker'; }],
+    ['source realm never invalidated', v => { v.fixtureReload.lifecycle.view.closed = false; }],
+    ['duplicate exact endpoint', v => { v.after.tabs.push({ ...v.after.tabs.find(t => t.id === 81), id: 999 }); }],
+    ['helper assigned wrong Space', v => { v.after.groupState.spaces.at(-1).temporaryTabs = [60, 83]; v.after.groupState.spaces[0].temporaryTabs.push(81); }],
+    ['helper converted to saved pin', v => { v.after.groupState.spaces.at(-1).spaceBookmarks = [81]; v.after.groupState.spaces.at(-1).temporaryTabs = [60, 83]; }],
+    ['real control tab closed', v => { v.after.tabs = v.after.tabs.filter(t => t.id !== 60); v.after.groupState.spaces.at(-1).temporaryTabs = [81, 83]; }],
+    ['control Space removed', v => { v.after.groupState.spaces.pop(); }],
+    ['control group collapse changed', v => { v.after.groupState.groups.at(-1).collapsed = true; }],
+    ['control group color changed', v => { v.after.groupState.groups.at(-1).color = 'green'; }],
+    ['real group members reordered', v => { v.after.tabs.find(t => t.id === 41).index = 2; v.after.tabs.find(t => t.id === 42).index = 1; }],
+    ['control group title changed', v => { v.after.groupState.groups.at(-1).title = 'Different'; }],
+    ['real web tab changed', v => { v.after.tabs.find(t => t.id === 41).url += '?changed'; }],
+    ['real web tab moved Space', v => { v.after.groupState.spaces[0].spaceBookmarks = []; v.after.groupState.spaces[1].temporaryTabs.push(41); }],
+    ['live selected Space changed', v => { v.after.groupState.activeSpaces[10] = 'personal'; }],
+]) {
+    test(`fixture provenance normalization rejects ${label}`, () => {
+        const value = fixtureReloadPair(); mutate(value); assert.throws(() => checkFixturePair(value));
+    });
+}
+test('own-helper first member cannot hide a changed real partition or noncontiguity', () => {
+    const value = fixtureReloadPair('arcify');
+    [82, 80, 60, 71, 73].forEach((id, index) => { value.after.tabs.find(t => t.id === id).index = index; });
+    assert.doesNotThrow(() => checkFixturePair(value));
+    value.after.tabs.find(tab => tab.id === 60).index = 10;
+    assert.throws(() => checkFixturePair(value), /contiguous/);
+});
+test('only already-closed-window selected-Space garbage may disappear', () => {
+    const before = groupedReloadState(); before.groupState.activeSpaces[999] = 'work';
+    const after = renumberGroups(structuredClone(before)); delete after.groupState.activeSpaces[999];
+    assert.doesNotThrow(() => assertSameBrowserFavoriteContinuity(before, after, ids));
+    const unchanged = renumberGroups(structuredClone(before));
+    assert.doesNotThrow(() => assertSameBrowserFavoriteContinuity(before, unchanged, ids));
+});
+for (const [label, mutate] of [
+    ['new stale key', after => { after.groupState.activeSpaces[999] = 'work'; }],
+    ['missing complete window evidence', after => { delete after.groupState.windows; }],
+    ['new live empty window', after => { after.groupState.windows.push({ id: 999, type: 'normal', incognito: false }); }],
+    ['disappeared live window', after => { after.groupState.windows.pop(); }],
+    ['changed window type', after => { after.groupState.windows[0].type = 'popup'; }],
+    ['missing window type', after => { delete after.groupState.windows[0].type; }],
+    ['changed private window', after => { after.groupState.windows[0].incognito = true; }],
+    ['lost live selection', after => { delete after.groupState.activeSpaces[20]; }],
+]) {
+    test(`selected-Space garbage normalization rejects ${label}`, () => {
+        const before = groupedReloadState(), after = renumberGroups(structuredClone(before)); mutate(after);
+        assert.throws(() => assertSameBrowserFavoriteContinuity(before, after, ids));
+    });
+}
+test('a changed stale selected-Space value is not normalized', () => {
+    const before = groupedReloadState(); before.groupState.activeSpaces[999] = 'work';
+    const after = renumberGroups(structuredClone(before)); after.groupState.activeSpaces[999] = 'personal';
+    assert.throws(() => assertSameBrowserFavoriteContinuity(before, after, ids), /stale selected Space/);
 });
