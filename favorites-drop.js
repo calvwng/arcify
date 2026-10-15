@@ -63,7 +63,7 @@ export function createFavoritesDragSource({ document, getContext, selection = nu
         if (source.kind === 'folder') return { error: 'Favorites does not accept folders. Open the folder and select its bookmarks.' };
         if (source.kind === 'live' && !Number.isInteger(source.tabId)) return { error: 'This item cannot be added to Favorites.' };
         return { source, hint: source.kind === 'bookmarks'
-            ? `Add ${source.bookmarks.length} bookmarks to Favorites in visible order. Opens or reuses pinned tabs; source bookmarks stay in their folders.`
+            ? `Add supported bookmarks from ${source.bookmarks.length} selected to Favorites in visible order. Other URL types are skipped. Opens or reuses pinned tabs; source bookmarks stay in their folders.`
             : source.kind === 'bookmark' && !source.tabId
             ? 'Opens a pinned tab in this window and saves a Favorite. Your saved bookmark stays in its folder.'
             : source.kind === 'saved' ? 'Reorder your saved Favorites across Spaces and windows.'
@@ -94,11 +94,13 @@ export function createSavedBookmarkFavoriteDrop({ getContext, api = globalThis.c
 // a partial result cannot be mistaken for an atomic success or retried blindly.
 export function describeBookmarkBatchOutcome(batch) {
     if (!Array.isArray(batch?.entries)) return null;
-    const groups = ['completed', 'failed', 'unattempted'].map(status => batch.entries.filter(entry => entry.status === status));
-    const [completed, failed, unattempted] = groups;
-    const summary = `${completed.length} completed, ${failed.length} failed, ${unattempted.length} not attempted.`;
-    if (batch.complete) return `${summary} Source bookmarks stay in their folders.`;
+    const groups = ['completed', 'failed', 'unattempted', 'skipped'].map(status => batch.entries.filter(entry => entry.status === status));
+    const [completed, failed, unattempted, skipped] = groups;
+    const summary = `${completed.length} completed, ${failed.length} failed, ${unattempted.length} not attempted${skipped.length ? `, ${skipped.length} skipped` : ''}.`;
+    const skippedDetails = skipped.map(entry => `Skipped ${entry.title ? `“${entry.title}” (bookmark ${entry.bookmarkId})` : `bookmark ${entry.bookmarkId}`}: ${entry.reason || 'Only HTTP and HTTPS bookmarks can be saved as Favorites.'}`).join(' ');
+    if (batch.complete) return `${summary}${skippedDetails ? ` ${skippedDetails}` : ''} Source bookmarks stay in their folders.`;
     const details = [
+        skippedDetails,
         completed.length && `Completed bookmark IDs: ${completed.map(entry => entry.bookmarkId).join(', ')}.`,
         ...failed.map(entry => `Failed bookmark ${entry.bookmarkId}: ${entry.error || entry.code || 'The result could not be verified.'}`),
         unattempted.length && `Not attempted bookmark IDs: ${unattempted.map(entry => entry.bookmarkId).join(', ')}.`

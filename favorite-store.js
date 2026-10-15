@@ -321,12 +321,12 @@ export class FavoriteStore {
         }
         return tab;
     }
-    async validateBookmark(message) {
+    async validateBookmark(message, { allowUnsupportedUrl = false } = {}) {
         const space = this.spaceStore.spaces.find(space => space.id === message.spaceId);
         if (!space || space.bookmarkFolderId !== message.bookmarkFolderId || this.spaceStore.active[message.windowId]
             && this.spaceStore.active[message.windowId] !== space.id) fail('STALE_BOOKMARK', 'The bookmark or its Space changed. Drag it again.');
         const bookmark = await getSpaceBookmarkById(space, message.bookmarkId);
-        if (!bookmark || String(bookmark.parentId) !== message.parentId || !isFavoriteUrl(bookmark.url)) fail('STALE_BOOKMARK', 'The saved bookmark changed or cannot be opened.');
+        if (!bookmark || String(bookmark.parentId) !== message.parentId || !allowUnsupportedUrl && !isFavoriteUrl(bookmark.url)) fail('STALE_BOOKMARK', 'The saved bookmark changed or cannot be opened.');
         if (message.tabId) {
             const tab = await this.currentTab(message.tabId, message.windowId);
             if (message.requireNativePin && !tab.pinned) fail('STALE_TAB', 'The earlier native Favorite was unpinned. Its page was kept unchanged.');
@@ -337,8 +337,8 @@ export class FavoriteStore {
         }
         return bookmark;
     }
-    async prepareBookmark(message) {
-        const source = await this.validateBookmark(message);
+    async prepareBookmark(message, { allowUnsupportedUrl = false } = {}) {
+        const source = await this.validateBookmark(message, { allowUnsupportedUrl });
         const item = this.items.find(item => item.sourceBookmarkId === message.bookmarkId);
         let sourceMessage = message;
         const legacyBindings = await Utils.getPinnedTabStates();
@@ -377,7 +377,8 @@ export class FavoriteStore {
             fail('FAVORITE_CONFLICT', 'This bookmark already has another native Favorite in this window. Use its existing icon; no tab was changed.');
         }
         if (!sourceMessage.tabId && legacyNative.length === 1) sourceMessage = { ...message, tabId: legacyNative[0].id, requireNativePin: true };
-        await this.validateBookmark(sourceMessage);
+        const current = await this.validateBookmark(sourceMessage, { allowUnsupportedUrl });
+        if (current.url !== source.url) fail('STALE_BOOKMARK', 'The saved bookmark URL changed while preparing this Favorite. Select it again.');
         return { item, source, sourceMessage };
     }
     async addFavorite(message, { prepared, onItem = () => {}, validate = async () => {} } = {}) {
@@ -393,7 +394,7 @@ export class FavoriteStore {
         await validate();
         if (!item) {
             const url = source.url || source.pendingUrl;
-            if (!isFavoriteUrl(url)) fail('UNSUPPORTED_URL', 'Only HTTP and HTTPS links can be saved as Favorites.');
+            if (!isFavoriteUrl(url)) fail('UNSUPPORTED_URL', 'Only HTTP and HTTPS links up to 16,384 characters can be saved as Favorites.');
             item = { id: crypto.randomUUID(), title: (source.title || url).slice(0, 4096), url,
                 sourceBookmarkId: message.action === 'addBookmark' ? message.bookmarkId : null };
             onItem(item);
@@ -432,7 +433,8 @@ export class FavoriteStore {
         this.batchSpace(message);
         // Preserve a discovered native receipt's exact tab identity at every
         // later lookup. Its disappearance must never turn into a new create.
-        const prepared = await this.prepareBookmark(previous?.sourceMessage || message);
+        const prepared = await this.prepareBookmark(previous?.sourceMessage || message, { allowUnsupportedUrl: true });
+        prepared.skipped = !isFavoriteUrl(prepared.source.url);
         if (previous && (prepared.source.url !== previous.source.url
             || this.exactId(prepared.sourceMessage.tabId) !== this.exactId(previous.sourceMessage.tabId))) {
             fail('STALE_BOOKMARK', 'A selected bookmark or its live tab changed. Select it again.');
@@ -502,15 +504,7 @@ export class FavoriteStore {
             await this.normalWindow(message.windowId);
             this.batchSpace(message);
             if (message.beforeId !== null) this.item(message.beforeId);
-            // Remove the selected IDs conceptually before resolving the anchor.
-            // Inserting each entry before this one fixed, unselected ID preserves
-            // selection order even when some or all Favorites already exist.
-            const selected = new Set(message.bookmarks.map(entry => entry.bookmarkId));
-            const anchorIndex = this.items.findIndex(item => item.id === message.beforeId);
-            const beforeId = message.beforeId === null ? null
-                : this.items.slice(anchorIndex).find(item => !selected.has(item.sourceBookmarkId))?.id ?? null;
             for (index = 0; index < requests.length; index++) {
-                requests[index].beforeId = beforeId;
                 prepared[index] = await this.prepareBatchBookmark(requests[index]);
             }
             // A later async lookup may have invalidated an earlier row. Check
@@ -518,9 +512,21 @@ export class FavoriteStore {
             for (index = 0; index < requests.length; index++) {
                 prepared[index] = await this.prepareBatchBookmark(requests[index], prepared[index]);
             }
+            // Only supported selections move. A skipped bookmark may already
+            // have a saved HTTP(S) Favorite, whose position remains untouched.
+            const selected = new Set(requests.filter((_, i) => !prepared[i].skipped).map(entry => entry.bookmarkId));
+            const anchorIndex = this.items.findIndex(item => item.id === message.beforeId);
+            const beforeId = message.beforeId === null ? null
+                : this.items.slice(anchorIndex).find(item => !selected.has(item.sourceBookmarkId))?.id ?? null;
+            for (const request of requests) request.beforeId = beforeId;
             for (index = 0; index < requests.length; index++) {
                 prepared[index] = await this.prepareBatchBookmark(requests[index], prepared[index]);
                 const entry = batch.entries[index];
+                if (prepared[index].skipped) {
+                    Object.assign(entry, { status: 'skipped', title: (prepared[index].source.title || 'Untitled bookmark').slice(0, 4096),
+                        code: 'UNSUPPORTED_URL', reason: 'Only HTTP and HTTPS links up to 16,384 characters can be saved as Favorites.' });
+                    continue;
+                }
                 const tab = await this.addFavorite(requests[index], { prepared: prepared[index],
                     onItem: item => { entry.favoriteId = item.id; },
                     validate: () => this.validateBatchBookmark(requests[index], prepared[index]) });
@@ -528,6 +534,9 @@ export class FavoriteStore {
             }
             index = -1;
             batch.complete = true;
+            // The caller refreshes its view separately. An all-skipped action
+            // performs no reconciliation, icon work, or storage/tab mutations.
+            if (batch.entries.every(entry => entry.status === 'skipped')) return { batch };
             return { ...await this.read(message.windowId), batch };
         } catch (error) {
             if (index >= 0 && index < batch.entries.length) {

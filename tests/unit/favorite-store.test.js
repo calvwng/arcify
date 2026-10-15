@@ -789,7 +789,7 @@ test('batch interleaves new and already-saved entries into one stable ordered bl
     assert.deepEqual(result.batch.entries.map(entry => entry.tabId), [103, 100, 104]); assert.equal(creates().length, 5);
 });
 
-for (const change of ['deleted', 'moved', 'folder', 'source-space', 'missing-active', 'active', 'tab-window', 'tab-binding', 'unsupported', 'folder-entry']) {
+for (const change of ['deleted', 'moved', 'folder', 'source-space', 'missing-active', 'active', 'tab-window', 'tab-binding', 'folder-entry']) {
     test(`batch preflight rejects late ${change} entry before any saved/session/tab mutation`, async () => {
         const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
         let entries = [batchBookmark('twin'), batchBookmark('bookmark', { tabId: 2 })];
@@ -801,7 +801,6 @@ for (const change of ['deleted', 'moved', 'folder', 'source-space', 'missing-act
         if (change === 'active') spaceStore.active[1] = 'other';
         if (change === 'tab-window') get(2).windowId = 2;
         if (change === 'tab-binding') local.pinnedTabStatesById[2].bookmarkId = 'twin';
-        if (change === 'unsupported') nodes.find(node => node.id === 'bookmark').url = 'javascript:alert(1)';
         if (change === 'folder-entry') entries[1] = batchBookmark('nested', { parentId: 'folder' });
         const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(entries)));
         assert.equal(error.batch.complete, false); assert.equal(error.batch.entries.some(entry => entry.status === 'completed'), false);
@@ -1026,4 +1025,186 @@ test('batch known second receipt recovers after binding write failure on worker 
     assert.equal(creates().length, 2); hooks.sessionBeforeSet = undefined;
     const result = await newStore({ captureIcon: async () => null, install: false }).dispatch(input);
     assert.deepEqual(result.batch.entries.map(entry => entry.tabId), [100, 101, 102]); assert.equal(creates().length, 3);
+});
+
+for (const count of [4, 8, 32, 100]) test(`diagnostic deep nested mixed same-URL ${count}-bookmark batch has no size boundary`, async () => {
+    const parents = ['folder', 'nested', 'deep', 'deeper'];
+    nodes.push({ id: 'deep', parentId: 'nested', title: 'Deep' }, { id: 'deeper', parentId: 'deep', title: 'Deeper' });
+    const entries = Array.from({ length: count }, (_, i) => {
+        const bookmarkId = `diagnostic-${i}`, parentId = parents[i % parents.length];
+        nodes.push({ id: bookmarkId, parentId, title: bookmarkId, url: URL });
+        if (i % 2) return { bookmarkId, parentId };
+        const tabId = 1000 + i;
+        tabs.push({ id: tabId, windowId: 1, pinned: false, title: bookmarkId, url: `https://navigated.test/${i}` });
+        local.pinnedTabStatesById[tabId] = { bookmarkId, pinnedUrl: URL };
+        spaceStore.spaces[0].spaceBookmarks.push(tabId);
+        return { bookmarkId, parentId, tabId };
+    });
+    const source = copy(nodes), store = newStore({ captureIcon: async () => null });
+    const result = await store.dispatch(batchRequest(entries));
+    assert.equal(result.batch.complete, true);
+    assert.deepEqual(result.favorites.map(item => item.sourceBookmarkId), entries.map(entry => entry.bookmarkId));
+    assert.equal(creates().length, count / 2);
+    assert.equal(updates().length, count / 2);
+    assert.equal(new Set(result.batch.entries.map(entry => entry.tabId)).size, count);
+    for (const [index, entry] of result.batch.entries.entries()) {
+        if (index % 2 === 0) { assert.equal(entry.tabId, 1000 + index); assert.equal(get(entry.tabId).url, `https://navigated.test/${index}`); }
+    }
+    assert.deepEqual(nodes, source);
+    const repeated = await store.dispatch(batchRequest(entries));
+    assert.deepEqual(repeated.batch, result.batch);
+    assert.equal(creates().length, count / 2);
+    assert.equal(updates().length, count / 2);
+});
+
+for (const reason of ['wrong-parent', 'missing-node']) test(`diagnostic ${reason} exactly reproduces zero-of-eight screenshot outcome before mutation`, async () => {
+    const ids = ['28', '22', '23', '24', '25', '26', '27', '29'];
+    addBatchNodes(...ids);
+    const entries = ids.map(bookmarkId => batchBookmark(bookmarkId));
+    if (reason === 'wrong-parent') entries[0].parentId = 'folder';
+    if (reason === 'missing-node') nodes = nodes.filter(node => node.id !== '28');
+    const source = copy(nodes), writes = [];
+    hooks.localBeforeSet = value => writes.push(copy(value));
+    hooks.sessionBeforeSet = value => writes.push(copy(value));
+    const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(entries)));
+    assert.equal(error.message, 'The saved bookmark changed or cannot be opened.');
+    assert.deepEqual(batchStatuses(error), ['failed', ...Array(7).fill('unattempted')]);
+    assert.deepEqual(effects, []); assert.deepEqual(writes, []); assert.deepEqual(nodes, source);
+});
+
+test('diagnostic seventh source preflight failure reports zero completed without implying that failed source was first', async () => {
+    const ids = Array.from({ length: 8 }, (_, index) => String(index + 22));
+    addBatchNodes(...ids);
+    const entries = ids.map(bookmarkId => batchBookmark(bookmarkId));
+    entries[6].parentId = 'folder';
+    const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+    const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(entries)));
+    assert.equal(error.message, 'The saved bookmark changed or cannot be opened.');
+    assert.deepEqual(batchStatuses(error), [...Array(6).fill('unattempted'), 'failed', 'unattempted']);
+    assert.deepEqual(error.batch.entries.filter(entry => entry.status === 'unattempted').map(entry => entry.bookmarkId), ['22', '23', '24', '25', '26', '27', '29']);
+    assert.equal(error.batch.entries.find(entry => entry.status === 'failed').bookmarkId, '28');
+    assert.deepEqual(effects, []); assert.deepEqual(writes, []);
+});
+
+const unsupportedUrl = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/restore.html';
+const skippedEntry = (bookmarkId, title) => ({ bookmarkId, status: 'skipped', title,
+    code: 'UNSUPPORTED_URL', reason: 'Only HTTP and HTTPS links up to 16,384 characters can be saved as Favorites.' });
+
+for (const skippedIndex of [0, 3, 6, 7]) test(`mixed eight-bookmark batch skips unsupported source at index ${skippedIndex} and preserves every supported identity`, async () => {
+    const ids = Array.from({ length: 8 }, (_, index) => `mixed-${index}`); addBatchNodes(...ids);
+    const skippedId = ids[skippedIndex], liveId = ids[(skippedIndex + 1) % ids.length];
+    Object.assign(nodes.find(node => node.id === skippedId), { url: unsupportedUrl, title: 'Tabs Backup & Restore' });
+    local.pinnedTabStatesById[2] = { bookmarkId: liveId, pinnedUrl: nodes.find(node => node.id === liveId).url };
+    const input = batchRequest(ids.map(bookmarkId => batchBookmark(bookmarkId, bookmarkId === liveId ? { tabId: 2 } : {})));
+    const before = copy(nodes), store = newStore({ captureIcon: async () => null }), result = await store.dispatch(input);
+    assert.equal(result.batch.complete, true);
+    assert.deepEqual(result.batch.entries[skippedIndex], skippedEntry(skippedId, 'Tabs Backup & Restore'));
+    const supported = result.batch.entries.filter(entry => entry.status === 'completed');
+    assert.deepEqual(result.favorites.map(item => item.sourceBookmarkId), ids.filter(id => id !== skippedId));
+    assert.equal(new Set(supported.map(entry => entry.tabId)).size, 7);
+    assert.equal(supported.find(entry => entry.bookmarkId === liveId).tabId, 2);
+    assert.equal(creates().length, 6); assert.deepEqual(updates(), [['update', 2, { pinned: true }]]);
+    assert.equal(get(2).url, 'https://navigated.test/'); assert.deepEqual(nodes, before);
+    const repeated = await store.dispatch(input); assert.deepEqual(repeated.batch, result.batch);
+    assert.equal(creates().length, 6); assert.equal(updates().length, 1);
+});
+
+test('all unsupported schemes and oversized HTTP URL skip without storage, tab, icon, or reconciliation mutations', async () => {
+    const urls = [unsupportedUrl, 'chrome://settings/', 'file:///tmp/example.html', 'javascript:alert(1)', 'data:text/plain,example', 'ftp://example.test/', `https://example.test/${'x'.repeat(16384)}`];
+    const ids = urls.map((_, index) => `unsupported-${index}`); addBatchNodes(...ids);
+    for (const [index, bookmarkId] of ids.entries()) nodes.find(node => node.id === bookmarkId).url = urls[index];
+    local[FAVORITES_KEY] = [{ id: 'old-favorite', title: 'Old Favorite', url: URL, sourceBookmarkId: null }];
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'old-favorite', windowId: 1, tabId: 1 }],
+        attempts: [{ favoriteId: 'removed-favorite', windowId: 1, tabId: null, url: URL }] };
+    const before = { local: copy(local), session: copy(session), nodes: copy(nodes), tabs: copy(tabs) }, writes = []; let captures = 0;
+    hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+    const store = newStore({ captureIcon: async () => { captures++; return null; } }), result = await store.dispatch(batchRequest(ids.map(id => batchBookmark(id))));
+    assert.deepEqual(result, { batch: { complete: true, entries: ids.map(id => skippedEntry(id, id)) } });
+    await iconIdle(store);
+    assert.equal(captures, 0); assert.deepEqual(writes, []); assert.deepEqual(effects, []);
+    assert.deepEqual({ local, session, nodes, tabs }, before); assert.deepEqual(store.state, before.session[FAVORITE_SESSION_KEY]);
+});
+
+for (const change of ['parent', 'deleted', 'folder', 'active', 'missing-active', 'tab-window', 'tab-binding', 'tab-space', 'private-tab']) {
+    test(`unsupported source still rejects stale ${change} provenance during whole-selection preflight`, async () => {
+        nodes.find(node => node.id === 'bookmark').url = unsupportedUrl;
+        const input = batchRequest([batchBookmark('twin'), batchBookmark('bookmark', { tabId: 2 })]);
+        if (change === 'parent') nodes.find(node => node.id === 'bookmark').parentId = 'folder';
+        if (change === 'deleted') nodes = nodes.filter(node => node.id !== 'bookmark');
+        if (change === 'folder') nodes.find(node => node.id === 'nested').parentId = 'outside';
+        if (change === 'active') spaceStore.active[1] = 'other';
+        if (change === 'missing-active') delete spaceStore.active[1];
+        if (change === 'tab-window') get(2).windowId = 2;
+        if (change === 'tab-binding') local.pinnedTabStatesById[2].bookmarkId = 'twin';
+        if (change === 'tab-space') spaceStore.spaces[0].spaceBookmarks = [];
+        if (change === 'private-tab') get(2).incognito = true;
+        const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+        const before = copy(nodes), error = await batchError(newStore({ captureIcon: async () => null }).dispatch(input));
+        assert.equal(error.batch.complete, false); assert(!error.batch.entries.some(entry => ['completed', 'skipped'].includes(entry.status)));
+        assert.deepEqual(writes, []); assert.deepEqual(effects, []); assert.deepEqual(nodes, before);
+    });
+}
+
+for (const [initialUrl, laterUrl] of [[URL, unsupportedUrl], [unsupportedUrl, URL], [unsupportedUrl, 'chrome://settings/']]) {
+    test(`preflight rechecks source URL before treating it as supported or skipped: ${initialUrl.slice(0, 20)} to ${laterUrl.slice(0, 20)}`, async () => {
+        nodes.find(node => node.id === 'bookmark').url = initialUrl;
+        let reads = 0;
+        hooks.bookmarks = id => { if (id === 'nested' && ++reads === 3) nodes.find(node => node.id === 'bookmark').url = laterUrl; };
+        const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+        const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
+        assert.equal(error.code, 'STALE_BOOKMARK'); assert.deepEqual(batchStatuses(error), ['failed', 'unattempted']);
+        assert.deepEqual(writes, []); assert.deepEqual(effects, []);
+    });
+}
+
+test('unsupported source changed between execution members stops without opening or adopting its new URL', async () => {
+    addBatchNodes('last'); nodes.find(node => node.id === 'twin').url = unsupportedUrl;
+    hooks.created = () => { nodes.find(node => node.id === 'twin').url = URL; };
+    const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(['bookmark', 'twin', 'last'].map(id => batchBookmark(id)))));
+    assert.equal(error.code, 'STALE_BOOKMARK'); assert.deepEqual(batchStatuses(error), ['completed', 'failed', 'unattempted']);
+    assert.equal(creates().length, 1); assert.equal(local[FAVORITES_KEY].length, 1);
+});
+
+test('later uncertain create retains preceding skipped detail and does not retry any source automatically', async () => {
+    addBatchNodes('last'); Object.assign(nodes.find(node => node.id === 'bookmark'), { url: unsupportedUrl, title: '<b>Tabs & restore</b>' });
+    hooks.created = () => { throw new Error('Chrome response lost after create'); };
+    const input = batchRequest(['bookmark', 'twin', 'last'].map(id => batchBookmark(id)));
+    const error = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(input));
+    assert.equal(error.code, 'UNCERTAIN_RESULT'); assert.deepEqual(batchStatuses(error), ['skipped', 'failed', 'unattempted']);
+    assert.deepEqual(error.batch.entries[0], skippedEntry('bookmark', '<b>Tabs & restore</b>'));
+    assert.equal(error.batch.entries[1].saved, true); assert.equal(error.batch.entries[1].tabId, undefined);
+    assert.equal(creates().length, 1); assert.equal(get(100).pinned, true); assert.equal(local[FAVORITES_KEY].length, 1);
+    hooks.created = undefined;
+    const retried = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(input));
+    assert.equal(retried.code, 'UNCERTAIN_RESULT'); assert.equal(creates().length, 1);
+});
+
+test('skipped existing Favorite remains an unselected anchor and keeps its saved HTTP record unchanged', async () => {
+    addBatchNodes('third', 'fourth'); const store = newStore({ captureIcon: async () => null });
+    for (const bookmarkId of ['bookmark', 'twin', 'third', 'fourth']) await store.dispatch(bookmark({ bookmarkId }));
+    const skipped = copy(local[FAVORITES_KEY].find(item => item.sourceBookmarkId === 'twin'));
+    nodes.find(node => node.id === 'twin').url = unsupportedUrl;
+    const result = await store.dispatch(batchRequest(['fourth', 'twin', 'bookmark'].map(id => batchBookmark(id)), { beforeId: skipped.id }));
+    assert.deepEqual(result.favorites.map(item => item.sourceBookmarkId), ['fourth', 'bookmark', 'twin', 'third']);
+    assert.deepEqual(batchStatuses({ batch: result.batch }), ['completed', 'skipped', 'completed']);
+    assert.deepEqual(local[FAVORITES_KEY].find(item => item.id === skipped.id), skipped); assert.equal(creates().length, 4);
+});
+
+test('batch-only unsupported classification cannot be requested by a caller to broaden single-add URL policy', async () => {
+    nodes.find(node => node.id === 'bookmark').url = unsupportedUrl;
+    await assert.rejects(newStore({ captureIcon: async () => null }).dispatch(bookmark()), { code: 'STALE_BOOKMARK' });
+    assert.throws(() => validateFavoriteRequest({ ...batchRequest(), allowUnsupportedUrl: true }), { code: 'INVALID_REQUEST' });
+    assert.throws(() => validateFavoriteRequest(bookmark({ allowUnsupportedUrl: true })), { code: 'INVALID_REQUEST' });
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined);
+});
+
+for (const laterUrl of ['https://changed.test/', 'chrome://settings/']) test(`skipped execution rejects URL change observed by its final inner source read: ${laterUrl}`, async () => {
+    nodes.find(node => node.id === 'bookmark').url = unsupportedUrl;
+    nodes.find(node => node.id === 'twin').url = unsupportedUrl;
+    let reads = 0;
+    hooks.bookmarks = id => { if (id === 'nested' && ++reads === 10) nodes.find(node => node.id === 'bookmark').url = laterUrl; };
+    const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+    const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
+    assert.equal(error.code, 'STALE_BOOKMARK'); assert.deepEqual(batchStatuses(error), ['failed', 'unattempted']);
+    assert.deepEqual(writes, []); assert.deepEqual(effects, []);
 });

@@ -93,14 +93,14 @@ test('existing bookmark and live sources reuse exact saved identity for beforeId
 
 test('bookmark batches exclude every selected exact Favorite identity and advance anchors within the moving block', () => {
     const f = fixture();
-    const source = { ...f.external, kind: 'bookmarks', bookmarks: [{ bookmarkId: 'bookmark-b' }, { bookmarkId: 'bookmark-d' }] };
+    const source = { ...f.external, kind: 'bookmarks', bookmarks: [{ bookmarkId: 'bookmark-b', url: 'https://b.test/' }, { bookmarkId: 'bookmark-d', url: 'https://d.test/' }] };
     const before = f.resolve(source, f.point('c'));
     assert.equal(before.beforeId, 'c'); assert.equal(before.index, 1);
     for (const placement of ['before', 'after']) {
         assert.equal(f.resolve(source, f.point('b', placement)).beforeId, 'c');
         assert.equal(f.resolve(source, f.point('d', placement)).beforeId, 'e');
     }
-    const allSelected = { ...source, bookmarks: f.favorites.map(item => ({ bookmarkId: item.sourceBookmarkId })) };
+    const allSelected = { ...source, bookmarks: f.favorites.map(item => ({ bookmarkId: item.sourceBookmarkId, url: 'https://supported.test/' })) };
     const onlyNativeBoundary = f.resolve(allSelected, f.point('c'));
     assert.equal(onlyNativeBoundary.beforeId, null); assert.equal(onlyNativeBoundary.reference, f.nodes.get('11'));
     assert.equal(onlyNativeBoundary.placement, 'before');
@@ -137,4 +137,18 @@ test('native synthetic append uses the last target’s real right half and row c
         const reordered = ['12', '13']; reordered.splice(destination.index, 0, '11');
         assert.deepEqual(reordered, ['12', '13', '11']);
     }
+});
+
+
+test('selected unsupported source keeps its existing Favorite as the exact preview anchor', () => {
+    const f = fixture();
+    const source = { ...f.external, kind: 'bookmarks', bookmarks: [
+        { bookmarkId: 'bookmark-b', url: 'https://b.test/' },
+        { bookmarkId: 'bookmark-c', pinnedUrl: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html', url: 'https://navigated.test/' },
+        { bookmarkId: 'bookmark-d', url: 'https://d.test/' }
+    ] };
+    const before = f.resolve(source, f.point('c'));
+    assert.equal(before.beforeId, 'c'); assert.equal(before.reference, f.nodes.get('c')); assert.equal(before.placement, 'before');
+    const after = f.resolve(source, f.point('c', 'after'));
+    assert.equal(after.beforeId, 'e'); assert.equal(after.reference, f.nodes.get('c')); assert.equal(after.placement, 'after');
 });

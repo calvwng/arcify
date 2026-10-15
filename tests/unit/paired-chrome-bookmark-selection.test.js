@@ -1,7 +1,7 @@
 // Evidence-validator tests only; importing these modules never launches Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace, installBookmarkDragTrace, readBookmarkDragState, prepareBookmarkSidebar, moveInsideBookmarkDropTarget } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { assertSkippedBookmarkOutcome, assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace, installBookmarkDragTrace, readBookmarkDragState, prepareBookmarkSidebar, moveInsideBookmarkDropTarget } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 const selection = () => ({ ids: ['a','b','d'], count: 3, text: '3 bookmarks selected', rows: ['a','b','d'].map(id => ({ id, ariaSelected: 'true', visible: true })) });
 test('selection requires exact visible order, announced count and accessible state', () => {
     assertBookmarkSelection(selection(), ['a','b','d']);
@@ -192,3 +192,12 @@ test('target approach failure cannot replay pointer input or a drop',async()=>{
 test('unusable target geometry refuses pointer input',async()=>{
     await assert.rejects(()=>moveInsideBookmarkDropTarget({mouse:{move:async()=>assert.fail('must not move')}},{x:1,y:2,width:10,height:48}),/interior/);
 });
+
+const mixedOutcome = () => ({ state: 'warning', message: '7 completed, 0 failed, 0 not attempted, 1 skipped. Skipped “Extension Page” (bookmark 28): Only HTTP and HTTPS links can be saved as Favorites. Source bookmarks stay in their folders.' });
+test('mixed batch evidence requires visible named skip while retaining supported completion', () => {
+    assertSkippedBookmarkOutcome(mixedOutcome(), { completed: 7, title: 'Extension Page', bookmarkId: '28' });
+});
+for (const [name, change] of Object.entries({ success: s => s.state = 'success', missingReason: s => s.message = s.message.replace('Only HTTP and HTTPS', 'Unsupported'),
+    wrongCount: s => s.message = s.message.replace('7 completed', '8 completed'), wrongId: s => s.message = s.message.replace('bookmark 28', 'bookmark 29'),
+    wrongTitle: s => s.message = s.message.replace('Extension Page', 'Other Page'), missingPreservation: s => s.message = s.message.replace('Source bookmarks stay in their folders.', '')
+})) test(`mixed batch evidence rejects ${name}`, () => { const status = mixedOutcome(); change(status); assert.throws(() => assertSkippedBookmarkOutcome(status, { completed: 7, title: 'Extension Page', bookmarkId: '28' })); });

@@ -1,3 +1,5 @@
+import { isFavoriteUrl } from './spotlight-bridge-protocol.js';
+
 const icons = container => [...container.querySelectorAll(':scope > .pinned-favicon')];
 const identity = node => node.dataset.favoriteId || node.dataset.tabId;
 
@@ -19,7 +21,10 @@ export function resolveFavoritesDrop({ container, source, target, clientX, clien
         ? favorites.find(item => item.sourceBookmarkId === source.bookmarkId)?.id
         : source.kind === 'live' ? favorites.find(item => item.tabId === source.tabId)?.id : null;
     const moving = source.kind === 'native' ? source.element : members.find(node => node.dataset.favoriteId === movingId);
-    const batchIds = source.kind === 'bookmarks' ? new Set(source.bookmarks.map(item => item.bookmarkId)) : null;
+    // Preview only: unsupported selected sources stay put and remain valid
+    // insertion anchors. The writer re-reads every URL and identity before writes.
+    const batchIds = source.kind === 'bookmarks' ? new Set(source.bookmarks
+        .filter(item => isFavoriteUrl(item.pinnedUrl || item.url)).map(item => item.bookmarkId)) : null;
     const batchFavoriteIds = batchIds ? new Set(favorites.filter(item => batchIds.has(item.sourceBookmarkId)).map(item => item.id)) : null;
     const internal = source.kind === 'saved' || source.kind === 'native';
     if (internal && (!members.includes(source.element) || moving !== source.element || source.element.contains(target))) return null;

@@ -761,7 +761,7 @@ test('actual batch drag shows count and marker, preserves source bookmarks, and 
     assert.equal(started.dataTransfer.effectAllowed, 'copy'); assert.equal(ghost.dataset.count, '3');
     assert.equal(document.querySelectorAll('.dragging').length, 1);
     drag(target(), 'dragover', 25); assert.equal(favoriteMarker().hidden, false, `Batch marker status: ${status()}; ${favoriteMarker().outerHTML}`);
-    assert.match(status(), /Add 3 bookmarks/);
+    assert.match(status(), /3 selected/);
     drag(target(), 'drop', 25); assert.equal(favorites().getAttribute('aria-busy'), 'true');
     drag(row('b'), 'dragend'); await wait(260);
     assert.deepEqual(batchRequests()[0], { type: 'favoriteStore', action: 'addBookmarks', windowId: 10, spaceId: 'alpha', bookmarkFolderId: 'p', beforeId: null,
@@ -852,4 +852,120 @@ test('actual selected equal-URL bookmarks remain distinct exact Favorites and in
     const opened = tabs.filter(tab => tab.pinned); assert.equal(opened.length, 2); assert.equal(new Set(opened.map(tab => tab.id)).size, 2);
     assert(opened.every(tab => tab.url === getNode('c').url && tab.active === false));
     assert.deepEqual(tree, original); assert.deepEqual(writes, []); assert.equal(batchRequests().length, 1);
+});
+
+for (const count of [4, 8, 32]) test(`actual ${count}-bookmark nested batch with four closed saved Favorites retains every parent and exact identity`, async () => {
+    await resetFavorites();
+    const selectedIds = Array.from({ length: count }, (_, index) => `large-${index}`);
+    const first = selectedIds.slice(0, count / 2).map(id => bookmark(id));
+    const second = selectedIds.slice(count / 2).map(id => ({ ...bookmark(id), url: first[0].url }));
+    getNode('f').children = [...first, { id: 'large-nested', title: 'Nested batch', children: second }];
+    local['folderCollapsed:f'] = false; local['folderCollapsed:large-nested'] = false;
+    local.persistentFavorites = selectedIds.slice(0, 4).map(id => ({ id: `saved-${id}`, sourceBookmarkId: id,
+        title: getNode(id).title, url: getNode(id).url }));
+    favoriteStore.initialized = false;
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
+    await onChanged.emit({ persistentFavorites: { newValue: structuredClone(local.persistentFavorites) } }, 'local');
+    await wait(180);
+    const originalTree = structuredClone(tree), existing = structuredClone(local.persistentFavorites);
+    for (const id of selectedIds) selectBookmark(id);
+    assert.deepEqual(selectedBookmarkIds(), selectedIds);
+    await drop(row(selectedIds.at(-1)), savedIcon(existing[0].id), 25);
+    assert.equal(favorites().dataset.dropState, 'success', status());
+    assert.equal(batchRequests().length, 1);
+    assert.deepEqual(batchRequests()[0].bookmarks.map(({ bookmarkId, parentId }) => [bookmarkId, parentId]),
+        selectedIds.map((id, index) => [id, index < count / 2 ? 'f' : 'large-nested']));
+    assert.deepEqual(local.persistentFavorites.map(item => item.sourceBookmarkId), selectedIds);
+    assert.deepEqual(local.persistentFavorites.slice(0, 4), existing);
+    assert.equal(new Set(session.favoriteSession.bindings.map(item => item.tabId)).size, count);
+    assert.equal(effects.filter(([kind]) => kind === 'create').length, count);
+    assert(tabs.filter(tab => tab.pinned).every(tab => tab.active === false));
+    assert.deepEqual(tree, originalTree); assert.deepEqual(writes, []);
+    assert.match(status(), new RegExp(`${count} completed, 0 failed, 0 not attempted`));
+});
+
+test('actual eight-row mixed batch skips its seventh extension bookmark visibly and reuses supported instances', async () => {
+    await resetFavorites();
+    const selectedIds = Array.from({ length: 8 }, (_, index) => `mixed-${index}`);
+    getNode('f').children = selectedIds.map((id, index) => ({ ...bookmark(id),
+        title: index === 6 ? 'Extension Page' : `Supported ${index + 1}`,
+        url: index === 6 ? 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html' : `https://same-${index % 3}.test/` }));
+    local['folderCollapsed:f'] = false;
+    local.persistentFavorites = selectedIds.slice(0, 4).map(id => ({ id: `saved-${id}`, sourceBookmarkId: id,
+        title: getNode(id).title, url: getNode(id).url }));
+    favoriteStore.initialized = false;
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
+    await onChanged.emit({ persistentFavorites: { newValue: structuredClone(local.persistentFavorites) } }, 'local');
+    await wait(180);
+    const original = structuredClone(tree), supported = selectedIds.filter(id => id !== 'mixed-6');
+    selectBookmark(selectedIds[0]); selectBookmark(selectedIds.at(-1), { shiftKey: true });
+    assert.deepEqual(selectedBookmarkIds(), selectedIds);
+    await drop(row('mixed-3'), savedIcon('saved-mixed-0'), 25);
+    assert.equal(favorites().dataset.dropState, 'warning', status());
+    assert.match(status(), /7 completed, 0 failed, 0 not attempted, 1 skipped/);
+    assert.match(status(), /Skipped “Extension Page” \(bookmark mixed-6\): Only HTTP and HTTPS/);
+    assert.equal(document.querySelector('#favoritesDropStatus script'), null);
+    assert.deepEqual(local.persistentFavorites.map(item => item.sourceBookmarkId), supported);
+    assert.equal(tabs.filter(tab => tab.pinned).length, 7);
+    assert(!tabs.some(tab => tab.url.startsWith('chrome-extension:')));
+    const live = structuredClone(session.favoriteSession.bindings), saved = structuredClone(local.persistentFavorites);
+    selectBookmark(selectedIds[0]); selectBookmark(selectedIds.at(-1), { shiftKey: true });
+    await drop(row('mixed-3'), savedIcon('saved-mixed-0'), 25);
+    assert.equal(favorites().dataset.dropState, 'warning', status());
+    assert.deepEqual(local.persistentFavorites, saved); assert.deepEqual(session.favoriteSession.bindings, live);
+    assert.equal(effects.filter(([kind]) => kind === 'create').length, 7);
+    assert.deepEqual(tree, original); assert.deepEqual(writes, []);
+});
+
+test('actual all-unsupported batch shows each skipped title without opening tabs or altering source bookmarks', async () => {
+    await resetFavorites();
+    getNode('p').children.push({ id: 'unsupported-one', title: '<script>Extension</script>', url: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html' },
+        { id: 'unsupported-two', title: 'Browser Settings', url: 'chrome://settings/' });
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+    const original = structuredClone(tree); selectBookmark('unsupported-one'); selectBookmark('unsupported-two');
+    await drop(row('unsupported-one'), target(), 25);
+    assert.equal(favorites().dataset.dropState, 'warning', status());
+    assert.match(status(), /0 completed, 0 failed, 0 not attempted, 2 skipped/);
+    assert.match(status(), /<script>Extension<\/script>/); assert.match(status(), /Browser Settings/);
+    assert.equal(document.querySelector('#favoritesDropStatus script'), null, 'titles are text, never HTML');
+    assert.deepEqual(effects, []); assert.deepEqual(local.persistentFavorites, []);
+    assert.deepEqual(tree, original); assert.deepEqual(writes, []);
+});
+
+test('actual mixed batch still rejects stale unsupported provenance before adding any valid entry', async () => {
+    await resetFavorites();
+    getNode('p').children.push({ id: 'unsupported', title: 'Extension Page', url: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html' });
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+    selectBookmark('c'); selectBookmark('unsupported'); const source = row('c'); drag(source, 'dragstart');
+    const index = getNode('p').children.findIndex(item => item.id === 'unsupported');
+    getNode('g').children.push(...getNode('p').children.splice(index, 1));
+    const changed = structuredClone(tree);
+    drag(target(), 'dragover', 25); drag(target(), 'drop', 25); drag(source, 'dragend'); await wait(180);
+    assert.equal(favorites().dataset.dropState, 'error'); assert.match(status(), /0 completed, 1 failed, 1 not attempted/);
+    assert.doesNotMatch(status(), /skipped/); assert.deepEqual(effects, []); assert.deepEqual(local.persistentFavorites, []);
+    assert.deepEqual(tree, changed); assert.deepEqual(writes, []);
+});
+
+test('actual mixed preview preserves a skipped existing Favorite as the exact insertion anchor', async () => {
+    await resetFavorites();
+    const old = { id: 'saved-c', title: getNode('c').title, url: getNode('c').url, sourceBookmarkId: 'c' };
+    local.persistentFavorites = [old];
+    getNode('c').url = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/options.html';
+    getNode('p').children.push(bookmark('d'), bookmark('e'));
+    favoriteStore.initialized = false;
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
+    await onChanged.emit({ persistentFavorites: { newValue: structuredClone(local.persistentFavorites) } }, 'local');
+    await wait(180);
+    const original = structuredClone(tree);
+    selectBookmark('c'); selectBookmark('e', { shiftKey: true });
+    const source = row('d'), destination = savedIcon('saved-c');
+    drag(source, 'dragstart'); drag(destination, 'dragover', 25);
+    assert.equal(favoriteMarker().hidden, false); assert.equal(favoriteMarker().dataset.beforeId, 'saved-c');
+    drag(destination, 'drop', 25); drag(source, 'dragend'); await wait(180);
+    assert.equal(favorites().dataset.dropState, 'warning', status());
+    assert.equal(batchRequests()[0].beforeId, 'saved-c');
+    assert.deepEqual(local.persistentFavorites.map(item => item.sourceBookmarkId), ['d', 'e', 'c']);
+    assert.deepEqual(local.persistentFavorites.at(-1), old);
+    assert.equal(effects.filter(([kind]) => kind === 'create').length, 2);
+    assert.deepEqual(tree, original); assert.deepEqual(writes, []);
 });

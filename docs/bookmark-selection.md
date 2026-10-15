@@ -44,6 +44,14 @@ is shared across Spaces/windows, but this drop does not open tabs in other windo
 or switch Spaces. Retained icons and the native Ctrl+W pinned-tab confirmation keep
 their existing behavior.
 
+Favorites support HTTP and HTTPS bookmarks up to 16,384 URL characters. In a
+mixed batch, unsupported links
+(such as an extension’s own page) are **skipped**, with each skipped bookmark’s
+title and reason shown in the result. Supported bookmarks are added in their
+visible order. An all-unsupported batch makes no changes. Skipping does not
+delete or change any source bookmark, and does not permit navigation to extension
+or browser-internal URLs.
+
 The initial batch destination is **Favorites only**. Dropping a selected batch on
 a Space, folder, temporary-tab list or other legacy single-item destination is
 rejected. It must not silently move only the physical row being dragged.
@@ -55,7 +63,10 @@ hidden, deleted, moved or rebound source invalidates that frozen drag rather tha
 silently shrinking the batch. A changed visible view or order, including replacement
 rows or unrelated visible additions, also requires a fresh drag; nothing replays
 automatically. The background writer checks the entire selection before starting,
-then rechecks each source as it processes the batch serially.
+then rechecks each source as it processes the batch serially. Missing, moved,
+changed, or wrongly bound sources are still errors, including an unsupported
+bookmark whose identity changed; they are never converted into URL-type skips.
+A stale source found during the whole-selection preflight prevents every write.
 
 Chrome operations are not a transaction. If a later operation fails, completed
 entries stay in Favorites and the remaining entries are not attempted. The status

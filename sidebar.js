@@ -389,7 +389,7 @@ async function updatePinnedFavicons() {
                 result = await savedFavoritesUI.request('addTab', { tabId, beforeId });
             }
             await updatePinnedFavicons();
-            if (result?.batch) finishDrop(describeBookmarkBatchOutcome(result.batch), result.warning ? 'warning' : 'success');
+            if (result?.batch) finishDrop(describeBookmarkBatchOutcome(result.batch), result.warning || result.batch.entries.some(entry => entry.status === 'skipped') ? 'warning' : 'success');
             else if (result?.warning) finishDrop(result.warning, 'warning');
             else finishDrop(source.kind === 'native' ? 'Browser pins reordered.' : source.kind === 'saved' ? 'Saved Favorites reordered.' : 'Added to Favorites. Your source bookmarks stay in their folders.', 'success');
             if (pinnedFavicons.dataset.dropState === 'pending') finishDrop('Favorites updated.', 'success');

@@ -330,3 +330,20 @@ test('partial failure data survives request rejection and reports completed, fai
     assert.match(text, /Failed bookmark b: Pin was not verified/); assert.match(text, /Not attempted bookmark IDs: c/); assert.match(text, /Nothing was retried automatically/);
     assert.match(describeBookmarkBatchOutcome({ complete: true, entries: batch.entries.slice(0, 1) }), /1 completed, 0 failed, 0 not attempted/);
 });
+
+test('mixed successful batch names unsupported bookmarks and keeps skipped distinct from failed', () => {
+    const batch = { complete: true, entries: [
+        { bookmarkId: 'a', status: 'completed' },
+        { bookmarkId: '28', status: 'skipped', title: 'Extension Settings', reason: 'Only HTTP and HTTPS bookmarks can be saved as Favorites.' }
+    ] };
+    const text = describeBookmarkBatchOutcome(batch);
+    assert.match(text, /1 completed, 0 failed, 0 not attempted, 1 skipped/);
+    assert.match(text, /Skipped “Extension Settings” \(bookmark 28\): Only HTTP and HTTPS/);
+    assert.match(text, /Source bookmarks stay in their folders/);
+    const allSkipped = describeBookmarkBatchOutcome({ complete: true, entries: batch.entries.slice(1) });
+    assert.match(allSkipped, /0 completed, 0 failed, 0 not attempted, 1 skipped/);
+    const partial = describeBookmarkBatchOutcome({ complete: false, entries: [...batch.entries,
+        { bookmarkId: 'later', status: 'failed', error: 'Result unknown' }, { bookmarkId: 'last', status: 'unattempted' }] });
+    assert.match(partial, /1 completed, 1 failed, 1 not attempted, 1 skipped/);
+    assert.match(partial, /Skipped “Extension Settings”/); assert.match(partial, /Nothing was retried automatically/);
+});

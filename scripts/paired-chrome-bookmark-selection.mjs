@@ -206,10 +206,19 @@ export function assertBatchFavoriteResult(before, after, { bookmarkIds, beforeId
     return { favoriteIds: batch.map(item => item.id), tabIds: batch.map(item => item.tabId), order };
 }
 
+export function assertSkippedBookmarkOutcome(status, { completed, title, bookmarkId, skippedCount = 1 }) {
+    assert.equal(status.state, 'warning', 'A mixed result must visibly distinguish skipped entries from full success.');
+    assert(status.message.includes(`${completed} completed, 0 failed, 0 not attempted, ${skippedCount} skipped`));
+    assert(status.message.includes(`Skipped “${title}” (bookmark ${bookmarkId})`), 'The skipped exact source must be named.');
+    assert.match(status.message, /Only HTTP and HTTPS/);
+    assert.match(status.message, /Source bookmarks stay in their folders/);
+    return status;
+}
+
 export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, screenshot, screenshotBytes, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
     const initial = await snapshot(), space = initial.spaces.find(item => item.id === initial.activeSpaceId);
     assert(space?.bookmarkFolderId);
-    const seed = await apiPage.evaluate(async ({ parentId, base }) => {
+    const seed = await apiPage.evaluate(async ({ parentId, base, extensionId }) => {
         const root = await chrome.bookmarks.create({ parentId, title: 'Batch Selection Fixture' });
         try {
         const a = await chrome.bookmarks.create({ parentId: root.id, title: 'Batch A', url: `${base}/favorite-persistent` });
@@ -220,9 +229,15 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         const d = await chrome.bookmarks.create({ parentId: root.id, title: 'Batch D Same URL', url: `${base}/favorite-persistent` });
         const e = await chrome.bookmarks.create({ parentId: root.id, title: 'Batch E', url: `${base}/batch-e` });
         const control = await chrome.bookmarks.create({ parentId: root.id, title: 'Batch Disposable Control', url: `${base}/batch-control` });
-        return { root, a, open, b, closed, hidden, d, e, control };
+        const mixed = await chrome.bookmarks.create({ parentId: root.id, title: 'Mixed URL Batch Fixture' });
+        const mixedEntries = [];
+        for (let index = 0; index < 8; index++) mixedEntries.push(await chrome.bookmarks.create({ parentId: mixed.id,
+            title: index === 6 ? 'Unsupported Extension Page' : `Mixed Supported ${index + 1}`,
+            url: index === 6 ? `chrome-extension://${extensionId}/startup-launcher.html?mixed-skip-fixture=1` : `${base}/batch-mixed-${index % 3}` }));
+        const unsupportedExtra = await chrome.bookmarks.create({ parentId: mixed.id, title: 'Unsupported Browser Settings', url: 'chrome://settings/' });
+        return { root, a, open, b, closed, hidden, d, e, control, mixed, mixedEntries, unsupportedExtra };
         } catch (error) { try { await chrome.bookmarks.removeTree(root.id); } catch (cleanup) { error.cleanupError = cleanup.message; } throw error; }
-    }, { parentId: space.bookmarkFolderId, base: fixture.base });
+    }, { parentId: space.bookmarkFolderId, base: fixture.base, extensionId: arcifyId });
     const originalInvert = await apiPage.$eval('#invertTabOrder', element => element.checked);
     const restoreOrdering = async () => {
         if (originalInvert !== await apiPage.$eval('#invertTabOrder', element => element.checked))
@@ -238,7 +253,7 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
     const page = sidebar.page;
     const row = id => `.space.active .tab[data-bookmark-id="${id}"]`;
     const folder = id => `.space.active .folder[data-bookmark-id="${id}"]`;
-    const leafIds = [seed.a.id, seed.b.id, seed.hidden.id, seed.d.id, seed.e.id, seed.control.id];
+    const leafIds = [seed.a.id, seed.b.id, seed.hidden.id, seed.d.id, seed.e.id, seed.control.id, ...seed.mixedEntries.map(item => item.id), seed.unsupportedExtra.id];
     const read = async () => {
         const data = await apiPage.evaluate(async windowId => {
             const bookmark = ({ id, parentId, index, title, url, children }) => ({ id, parentId, index, title,
@@ -272,7 +287,7 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
     };
     const observations = [];
     let ordinaryTabId = null, primaryError = null;
-    const drag = async ({ sourceId, beforeId, expectedIds, label, afterStart }) => ui(page, label, async () => {
+    const drag = async ({ sourceId, beforeId, expectedIds, label, afterStart, skipped = null }) => ui(page, label, async () => {
         const targetSelector = `#pinnedFavicons .saved-favorite[data-favorite-id="${beforeId}"]`;
         await page.waitForSelector(targetSelector);
         const source = await page.$(row(sourceId)), target = await page.$(targetSelector);
@@ -308,7 +323,12 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
             if (!afterStart) {
                 await page.waitForFunction(previous => Number(document.getElementById('pinnedFavicons').dataset.dropOperation || 0) > previous && document.getElementById('pinnedFavicons').getAttribute('aria-busy') === 'false', { polling: 50 }, operation);
                 const status = await page.$eval('#pinnedFavicons', node => ({ state: node.dataset.dropState, message: document.getElementById('favoritesDropStatus').textContent }));
-                assert.equal(status.state, 'success', JSON.stringify(status)); await record({ label, completed: status });
+                if (skipped) {
+                    const skippedEntries = Array.isArray(skipped) ? skipped : [skipped];
+                    for (const item of skippedEntries) assertSkippedBookmarkOutcome(status, { completed: expectedIds.length - skippedEntries.length, title: item.title, bookmarkId: item.id, skippedCount: skippedEntries.length });
+                }
+                else assert.equal(status.state, 'success', JSON.stringify(status));
+                await record({ label, completed: status });
             } else {
                 await page.waitForFunction(() => !document.querySelector('.dragging') && document.getElementById('pinnedFavicons').getAttribute('aria-busy') !== 'true', { polling: 50 });
                 const result = await page.$eval('#pinnedFavicons', node => ({ operation: Number(node.dataset.dropOperation || 0), state: node.dataset.dropState, message: document.getElementById('favoritesDropStatus').textContent }));
@@ -334,7 +354,7 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         await page.waitForSelector('#bookmarkSelectionStatus');
         await page.evaluate(installBookmarkSelectionTrace);
         await page.waitForSelector(`.space.active[data-space-id="${space.id}"]`);
-        await setExpanded(seed.root.id, true); await setExpanded(seed.open.id, true); await setExpanded(seed.closed.id, false);
+        await setExpanded(seed.root.id, true); await setExpanded(seed.open.id, true); await setExpanded(seed.closed.id, false); await setExpanded(seed.mixed.id, false);
         for (const id of [seed.a.id, seed.b.id, seed.d.id, seed.e.id]) await page.waitForSelector(row(id), { visible: true });
         assert.equal(await page.$eval(row(seed.hidden.id), node => node.getClientRects().length), 0);
         const visibleOrder = [seed.a.id, seed.b.id, seed.d.id, seed.e.id, seed.control.id];
@@ -432,7 +452,42 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         await record({ phase: 'selection-trace-before-reload', inputTrace });
         await page.reload(); await page.waitForSelector('#bookmarkSelectionStatus'); await selection([]);
         assert.deepEqual(await read(), afterDeletion, 'Reload clears only the page selection.');
-        return { source: seed, chosen, firstProof, repeatProof, observations, inputTrace, modifierInput: 'real Control/Shift on Linux',
+        // Reproduce the reported eight-row shape: seventh source is an extension
+        // page. Real input must add only the seven HTTP(S) records and explicitly
+        // name the skipped row; no fixture-side filtering changes the selection.
+        await setExpanded(seed.root.id, true); await setExpanded(seed.open.id, false); await setExpanded(seed.mixed.id, true);
+        const mixedIds = seed.mixedEntries.map(item => item.id), skipped = seed.mixedEntries[6];
+        const supportedIds = mixedIds.filter(id => id !== skipped.id);
+        await click(row(mixedIds[0]), ['Control']); await click(row(mixedIds.at(-1)), ['Shift']); await selection(mixedIds);
+        const beforeMixed = await read();
+        await drag({ sourceId: mixedIds[3], beforeId: anchor, expectedIds: mixedIds, skipped,
+            label: 'eight-bookmark-batch-explicitly-skips-seventh-extension-url' });
+        await poll(async () => { const state = await snapshot(); return apiPage.evaluate(async favorites => Promise.all(favorites.map(async favorite => ({ favorite, tab: await chrome.tabs.get(favorite.tabId) }))),
+            state.favorites.filter(item => supportedIds.includes(item.sourceBookmarkId)));
+        }, entries => entries.length === 7 && entries.every(({ favorite, tab }) => tab.status === 'complete' && tab.url === favorite.url), 'seven supported mixed-batch pages finish loading');
+        const firstMixed = await read();
+        const mixedProof = assertBatchFavoriteResult(beforeMixed, firstMixed, { bookmarkIds: supportedIds, beforeId: anchor, newCount: 7 });
+        assert(!firstMixed.favorites.some(item => item.sourceBookmarkId === skipped.id));
+        assert(!firstMixed.tabs.some(tab => tab.url === skipped.url), 'Unsupported extension page must never be opened.');
+        await screenshot(page, 'mixed-batch-seven-completed-one-named-skip-sources-preserved');
+        await ui(page, 'Reset selection before repeat mixed batch', () => page.keyboard.press('Escape'));
+        await click(row(mixedIds[0]), ['Control']); await click(row(mixedIds.at(-1)), ['Shift']); await selection(mixedIds);
+        await drag({ sourceId: mixedIds[3], beforeId: anchor, expectedIds: mixedIds, skipped,
+            label: 'repeated-mixed-batch-reuses-seven-exact-instances' });
+        const mixedRepeatProof = assertBatchFavoriteResult(firstMixed, await read(), { bookmarkIds: supportedIds, beforeId: anchor, newCount: 0 });
+        await record({ phase: 'mixed-url-batch-proof', selectedIds: mixedIds, skipped: { id: skipped.id, title: skipped.title, scheme: 'chrome-extension:' }, mixedProof, mixedRepeatProof });
+        await ui(page, 'Reset selection before all-unsupported batch', () => page.keyboard.press('Escape'));
+        const unsupportedIds = [skipped.id, seed.unsupportedExtra.id];
+        await click(row(skipped.id), ['Control']); await click(row(seed.unsupportedExtra.id), ['Control']); await selection(unsupportedIds);
+        const beforeUnsupported = await read();
+        await drag({ sourceId: skipped.id, beforeId: anchor, expectedIds: unsupportedIds, skipped: [skipped, seed.unsupportedExtra],
+            label: 'all-unsupported-selection-reports-both-skips-without-mutation' });
+        assert.deepEqual(await read(), beforeUnsupported, 'All-unsupported selection must not reorder Favorites, open tabs, change Spaces or mutate bookmarks.');
+        await screenshot(page, 'all-unsupported-drop-names-both-skips-and-keeps-existing-state');
+        await record({ phase: 'all-unsupported-batch-proof', selectedIds: unsupportedIds, unchanged: true });
+
+
+        return { source: seed, chosen, firstProof, repeatProof, mixedProof, mixedRepeatProof, observations, inputTrace, modifierInput: 'real Control/Shift on Linux',
             realMouseDrag: true, nativePinnedTabsVerified: true, sourcePreserved: true,
             limits: ['Cmd modifier covered by DOM tests, not Linux physical input.', 'Native side-panel layout and OS drag-image appearance remain manual.', 'Partial API-failure injection is unit coverage; real browser case covers deletion during a frozen drag.'] };
     } catch (error) {
