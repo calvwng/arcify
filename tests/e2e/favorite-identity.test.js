@@ -1,4 +1,5 @@
 import { launchBrowserWithExtension, openSidebar } from './helpers/extension-helper.js';
+import { focusSidebarForInteraction } from './helpers/sidebar-focus.js';
 
 // No internet dependency: all tab navigation uses a local fixture server.
 let url;
@@ -7,6 +8,7 @@ let server;
 let browser, page, fixture;
 const row = id => `.space.active .tab[data-tab-id="${id}"]`;
 async function toggle(id) {
+    await focusSidebarForInteraction(page);
     await page.waitForFunction(id => {
         const el = document.querySelector(`.space.active .tab[data-tab-id="${id}"]`);
         if (!el) return false;
