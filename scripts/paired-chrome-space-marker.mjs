@@ -145,3 +145,21 @@ export async function recordSpaceDragObservation({ report, read, save, label, fa
     try { await save(); }
     catch (error) { report.diagnostics.push({ type:'space-drag-report-write-error', message:error.message }); }
 }
+
+// A painted marker can outlive the last accepted target when the pointer crosses
+// from a chip's text span into its padding. Require a fresh native dragover on
+// the actual final button before the fixture performs its single mouse release.
+export function assertAcceptedSpaceDragover(state, { sourceSpaceId, anchorSpaceId, placement, x, y, after }) {
+    assert.equal(state.visibility, 'visible'); assert.equal(state.hasFocus, true);
+    assert.equal(state.truncated, 0, 'Final-target evidence cannot be truncated.');
+    const event = state.events.filter(item => ['dragenter','dragover','dragleave','drop','dragend'].includes(item.type)).at(-1);
+    assert(event && event.type === 'dragover', 'The final target needs its own accepted dragover before release.');
+    assert(event.at > after, 'An earlier nested-span dragover is not final-target acceptance.');
+    assert.equal(event.trusted, true); assert.equal(event.target.tag, 'BUTTON');
+    assert.equal(event.target.spaceId, anchorSpaceId);
+    assert(Math.abs(event.x - x) <= 1 && Math.abs(event.y - y) <= 1, 'Acceptance must match the final real pointer position.');
+    assert.equal(event.readDefaultPrevented, true); assert.equal(event.readDropEffect, 'move');
+    assert.equal(state.marker?.hidden, false); assert.equal(state.marker.sourceSpaceId, sourceSpaceId);
+    assert.equal(state.marker.anchorSpaceId, anchorSpaceId); assert.equal(state.marker.placement, placement);
+    return event;
+}

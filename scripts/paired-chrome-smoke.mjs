@@ -33,7 +33,7 @@ import { snapshotChromeLaunchOptions } from './paired-chrome-browser-restart.mjs
 import { exerciseFavoritesBrowserRestart } from './paired-chrome-favorites-restart.mjs';
 import { exerciseFavoriteSearch } from './paired-chrome-favorite-search.mjs';
 import { assertSavedBookmarkFavorite } from './paired-chrome-favorites.mjs';
-import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels, installSpaceDragObservation, readSpaceDragObservation, recordSpaceDragObservation } from './paired-chrome-space-marker.mjs';
+import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels, installSpaceDragObservation, readSpaceDragObservation, recordSpaceDragObservation, assertAcceptedSpaceDragover } from './paired-chrome-space-marker.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { installColdSetupObserver, readColdSetupObserver, stopColdSetupObserver, waitForColdSetupQuiescence } from './paired-chrome-cold-setup.mjs';
@@ -1814,6 +1814,15 @@ try {
                     const tx = placement === 'before' ? to.x+2 : to.x+to.width-2,ty = to.y+to.height/2;
                     await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
                     await page.mouse.move(x,y-12,{steps:5}); await page.mouse.move(tx,ty,{steps:20});
+                    const beforeSettle = await page.evaluate(readSpaceDragObservation);
+                    const finalTarget = {sourceSpaceId:sourceId,anchorSpaceId:targetId,placement,
+                        x:tx+(placement === 'before' ? 1 : -1),y:ty,after:beforeSettle.events.at(-1)?.at ?? -1};
+                    // One real final motion within the button, before the first
+                    // release. No input replay, arbitrary delay, or synthetic drop.
+                    await page.mouse.move(finalTarget.x,finalTarget.y,{steps:2});
+                    const accepted = await poll(() => page.evaluate(readSpaceDragObservation),state => {
+                        try { assertAcceptedSpaceDragover(state,finalTarget); return true; } catch { return false; }
+                    },'fresh accepted native dragover on the exact final Space button');
                     await page.waitForFunction(({targetId,placement}) => {
                         const marker = document.querySelector('.space-drop-anchor');
                         return marker && !marker.hidden && marker.dataset.anchorSpaceId === targetId && marker.dataset.placement === placement;
@@ -1827,7 +1836,9 @@ try {
                     const afterCapture = assertSpaceDropMarker(await page.evaluate(readSpaceDropMarker),
                         {sourceSpaceId:sourceId,anchorSpaceId:targetId,placement});
                     assert.deepEqual(afterCapture.rect,marker.rect,'Capture must not shift the drop destination.');
-                    const hover = {marker,paint,screenshot:captured.filename,afterCapture};
+                    assertAcceptedSpaceDragover(await page.evaluate(readSpaceDragObservation),finalTarget);
+                    const hover = {marker,paint,screenshot:captured.filename,afterCapture,
+                        acceptedFinalTarget:assertAcceptedSpaceDragover(accepted,finalTarget)};
                     markerEvidence.push(hover);
                     await page.mouse.up(); mouseDown = false;
                     await recordSpaceDragObservation({report,label,read:()=>page.evaluate(readSpaceDragObservation),save:saveReport});

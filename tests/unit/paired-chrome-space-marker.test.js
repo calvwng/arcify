@@ -117,3 +117,24 @@ test('post-release diagnostic failures cannot prevent the unchanged product asse
     await recordSpaceDragObservation({report,label:'drop',read:async()=>{throw new Error('probe unavailable');},save:async()=>{throw new Error('save unavailable');}});
     reached=true; assert.equal(reached,true); assert.equal(report.diagnostics.length,2);
 });
+
+
+import { assertAcceptedSpaceDragover } from '../../scripts/paired-chrome-space-marker.mjs';
+const finalTarget = {sourceSpaceId:'source',anchorSpaceId:'home',placement:'before',x:11,y:864,after:234};
+const acceptedFinalTarget = () => ({visibility:'visible',hasFocus:true,truncated:0,
+    events:[{type:'dragover',at:235,trusted:true,target:{tag:'BUTTON',spaceId:'home'},x:11,y:864,
+        readDefaultPrevented:true,readDropEffect:'move'}],
+    marker:{hidden:false,sourceSpaceId:'source',anchorSpaceId:'home',placement:'before'}});
+test('fresh real final-button dragover authorizes one subsequent fixture release', () => {
+    assert.equal(assertAcceptedSpaceDragover(acceptedFinalTarget(),finalTarget).at,235);
+});
+for(const [name,alter] of Object.entries({
+    staleSpan:state=>{state.events[0].target.tag='SPAN';state.events[0].x=26;state.events[0].at=233;},
+    enterOnly:state=>{state.events.push({...state.events[0],type:'dragenter',at:236});},
+    cancelled:state=>{state.events.push({...state.events[0],type:'dragend',at:236});},
+    untrusted:state=>{state.events[0].trusted=false;}, wrongTarget:state=>{state.events[0].target.spaceId='other';},
+    wrongPointer:state=>{state.events[0].x=26;}, notAccepted:state=>{state.events[0].readDefaultPrevented=false;},
+    refusedMove:state=>{state.events[0].readDropEffect='none';}, staleEvent:state=>{state.events[0].at=234;},
+    wrongPlacement:state=>{state.marker.placement='after';}, blurred:state=>{state.hasFocus=false;},
+    truncated:state=>{state.truncated=1;}, hiddenMarker:state=>{state.marker.hidden=true;}
+}))test(`final-button acceptance rejects ${name}`,()=>{const state=acceptedFinalTarget();alter(state);assert.throws(()=>assertAcceptedSpaceDragover(state,finalTarget));});
