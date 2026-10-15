@@ -1,3 +1,4 @@
+import { createSidebarNewTabRow, placeNewTabRow } from './sidebar-new-tab.js';
 import { createContextMenuSession } from './context-menu-session.js';
 import { createSpaceContextMenu, spaceDeleteMessage } from './space-context-menu.js';
 import { getSpaceIcon } from './space-icons.js';
@@ -78,18 +79,6 @@ const spacesList = document.getElementById('spacesList');
 const spaceSwitcher = document.getElementById('spaceSwitcher');
 const addSpaceBtn = document.getElementById('addSpaceBtn');
 const newTabBtn = document.getElementById('newTabBtn');
-const spotlightBtn = document.getElementById('spotlightBtn');
-spotlightBtn?.addEventListener('click', async () => {
-    const status = document.getElementById('spotlightStatus');
-    spotlightBtn.disabled = true;
-    status.textContent = 'Connecting to Spotlight…';
-    try {
-        const response = await chrome.runtime.sendMessage({ type: 'spotlightBridgeLaunch', windowId: currentWindow.id });
-        if (!response?.ok) throw new Error(response?.error?.message || 'Spotlight did not respond.');
-        status.textContent = '';
-    } catch (error) { status.textContent = `${error.message} Pair it in Settings.`; }
-    finally { spotlightBtn.disabled = false; }
-});
 const spaceTemplate = document.getElementById('spaceTemplate');
 
 // Global state
@@ -631,6 +620,15 @@ const spaceSaveQueue = new SpacePatchQueue(
 let pendingSpaceSaves = Promise.resolve();
 let pendingSaveCount = 0;
 let sidebarReady = false;
+createSidebarNewTabRow({ button: newTabBtn, status: document.getElementById('spotlightStatus'),
+    getContext: () => {
+        const displayedSpace = newTabBtn.closest('.space');
+        const ready = sidebarReady && displayedSpace?.classList.contains('active') &&
+            displayedSpace.style.display !== 'none' && displayedSpace.dataset.spaceId === activeSpaceId;
+        return { windowId: ready ? currentWindow?.id : null, spaceId: activeSpaceId };
+    },
+    sendRequest: message => chrome.runtime.sendMessage(message)
+});
 let editorSessions;
 const refreshCoordinator = new RefreshCoordinator({
     readSpaces: async () => {
@@ -662,6 +660,8 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
         render = false;
         refreshCoordinator.invalidateSpaces();
     }
+    const restoreNewTabFocus = document.activeElement === newTabBtn && document.hasFocus?.() !== false;
+    const newTabSpaceId = newTabBtn.closest('.space')?.dataset.spaceId;
     const projection = list => JSON.stringify(list.map(({ id, name, color, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
         ({ id, name, color, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs })));
     let needsRender = projection(spaces) !== projection(next);
@@ -710,6 +710,13 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
         pendingActiveSpaceId = null;
     }
     if (!spaces.some(s => s.id === activeSpaceId)) activeSpaceId = spaces[0]?.id;
+    // A metadata replacement may remove the button's parent. Reattach only to
+    // that same visible Space here; a different active view commits after its
+    // async render so a newly opened editor can still defer the switch.
+    const previousNewTabSpace = getSpaceElement(newTabSpaceId);
+    if (previousNewTabSpace?.style.display !== 'none') {
+        placeNewTabRow(newTabBtn, previousNewTabSpace, { restoreFocus: restoreNewTabFocus });
+    }
     bookmarkSelection.reconcile();
     if (needsRender && render) {
         await activateSpaceInDOM(activeSpaceId, spaces, updateSpaceSwitcher);
@@ -754,6 +761,7 @@ async function initSidebar() {
     previousSpaceId = activeSpaceId;
     setupDOMElements(createNewSpace, () => spaces);
     sidebarReady = true;
+    newTabBtn.disabled = false;
     refreshCoordinator.schedule();
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'session' && changes.activeSpaces && sidebarReady) {
@@ -1030,6 +1038,9 @@ function createSpaceElement(space) {
 
     // Add to DOM
     spacesList.appendChild(spaceElement);
+    if (space.id === activeSpaceId && (!newTabBtn.closest('.space') || newTabBtn.closest('.space').dataset.spaceId === space.id)) {
+        placeNewTabRow(newTabBtn, spaceContainer);
+    }
 
     // Set up settings button to open extension options
     const settingsButton = spaceElement.querySelector('#space-settings');
@@ -1268,7 +1279,7 @@ async function setActiveSpace(spaceId, updateTab = true) {
         bookmarkSelection.clear();
         previousSpaceId = activeSpaceId;
         const activeEditor = document.activeElement?.closest?.(`[data-space-id="${activeSpaceId}"]`);
-        if (activeEditor) document.activeElement.blur();
+        if (activeEditor && document.activeElement !== newTabBtn) document.activeElement.blur();
         editorSessions.dispose('folder-pending', activeSpaceId);
     }
     pendingActiveSpaceId = null;

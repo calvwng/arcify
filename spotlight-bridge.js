@@ -1,3 +1,4 @@
+import { createSidebarNewTabLauncher } from './sidebar-new-tab-launch.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { ownerOf, tabIds } from './space-store.js';
 import { getSpaceBookmarkById, getSpaceBookmarkTree } from './space-bookmarks.js';
@@ -216,6 +217,7 @@ export function registerSpotlightBridge(store) {
     const invalidation = registerSpotlightInvalidation(store);
     const handle = createSpotlightBridge(store);
     const handleSidebar = createSidebarCommandHandler();
+    const launchNewTab = createSidebarNewTabLauncher(store);
     chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => {
         if (request?.type === SIDEBAR_COMMAND_TYPE) return handleSidebar(request, sender, sendResponse);
         handle(request, sender).then(sendResponse);
@@ -223,6 +225,11 @@ export function registerSpotlightBridge(store) {
     });
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (request?.type !== 'spotlightBridgeLaunch') return;
+        if (request.fallbackToNewTab !== undefined) {
+            launchNewTab(request, sender).then(sendResponse, error => sendResponse({ ok: false,
+                error: { code: error.code || 'FAILED', message: error.message } }));
+            return true;
+        }
         (async () => {
             if (sender.id !== chrome.runtime.id || !isWindowId(request.windowId)) throw bridgeError('INVALID_REQUEST', 'Invalid launch context.');
             await chrome.windows.get(request.windowId);

@@ -1,3 +1,4 @@
+import { placeNewTabRow } from './sidebar-new-tab.js';
 import { appendTodayMovePicker } from './today-space-move-ui.js';
 import { createContextMenuSession } from './context-menu-session.js';
 import { firstUnusedColor } from './space-colors.js';
@@ -93,9 +94,6 @@ export function setupDOMElements(createNewSpace, getSpaces = () => []) {
     });
 
     document.getElementById('createSpaceBtn').addEventListener('click', createNewSpace);
-    newTabBtn.addEventListener('click', () => {
-        chrome.tabs.create({});
-    });
 
     const createSpaceColorSwatch = document.getElementById('createSpaceColorSwatch');
     createSpaceColorSwatch.addEventListener('click', (e) => {
@@ -168,13 +166,15 @@ export function activateTabInDOM(tabId) {
     }
 }
 
-export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher) {
+export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher, { restoreFocus = document.activeElement === newTabBtn && document.hasFocus?.() !== false } = {}) {
     // Show/hide space containers
     document.querySelectorAll('.space').forEach(s => {
         const isActive = s.dataset.spaceId === String(spaceId);
         s.classList.toggle('active', isActive);
         s.style.display = isActive ? 'flex' : 'none';
     });
+
+    placeNewTabRow(newTabBtn, getSpaceElement(spaceId), { restoreFocus });
 
     // Get space color and update sidebar container background
     const space = spaces.find(s => s.id === spaceId);

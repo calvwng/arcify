@@ -3,6 +3,7 @@ import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NA
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
 import { exerciseTodayMove, serveTodayMoveFixture } from './paired-chrome-today-move.mjs';
+import { exerciseNativeNewTabRow } from './paired-chrome-newtab-row.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
 import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
@@ -60,7 +61,7 @@ const stepNames = [
     'Overlay current-tab URL navigation preserves identity',
     'Empty-space helper selection and new-tab URL opening',
     'Chrome new-tab override renders Spotlight',
-    'Sidebar-tab launch button and helper reuse',
+    'Today New Tab row launches Spotlight and reuses its helper',
     'Group sync on/off preserves authoritative spaces',
     'Real malformed and wrong-window requests are rejected',
     'MV3 worker stop/wake preserves duplicate-request journal',
@@ -106,7 +107,7 @@ const report = {
     screenshots: [], diagnostics: [], targetLifecycle: [],
     limits: [
         'Outside-focus menu checks use ordinary sidebar.html tabs and a separate disposable localhost browser window with trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; actual native-panel external focus and Helium remain manual.',
-        'Workspace rendering regressions use sidebar.html in a regular tab. Dedicated command checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking/focus and Helium behavior remain manual.',
+        'General workspace rendering regressions use sidebar.html in a regular tab. Command, Today Move and unified New Tab row checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
         'The ordinary-Favorite close case separately sends one native XTEST Ctrl+W to the verified Chrome window under CI Xvfb and requires exact tab/target destruction. It does not claim physical keyboard hardware or Helium shortcut acceptance.',
@@ -897,10 +898,10 @@ try {
     await step(stepNames[8], async () => {
         const sidebar = sidebarFixture;
         await activate(sidebar.tab.id);
-        await sidebar.page.waitForSelector('#spotlightBtn');
+        await sidebar.page.waitForSelector('.space.active .temporary-tabs > #newTabBtn:not([disabled])');
         await sidebar.page.waitForSelector('#spacesList > .space');
         const before = new Set((await tabsIn(fixture.windowA)).map(tab => tab.id));
-        await screenshot(sidebar.page, 'sidebar-html-regular-tab-not-native-sidepanel'); await clickUI(sidebar.page, '#spotlightBtn');
+        await screenshot(sidebar.page, 'sidebar-html-regular-tab-not-native-sidepanel'); await clickUI(sidebar.page, '#newTabBtn');
         const after = await poll(() => tabsIn(fixture.windowA), tabs => tabs.some(tab => !before.has(tab.id) && tab.url === `chrome-extension://${spotlightId}/newtab.html`), 'sidebar button helper launch');
         const helper = after.find(tab => !before.has(tab.id) && tab.url === `chrome-extension://${spotlightId}/newtab.html`);
         const helperPage = await pageForUrl(helper.url); await helperPage.waitForSelector('[data-testid="spotlight-input"]');
@@ -1027,8 +1028,12 @@ try {
         const sourceTabAfter = await tab(helper.tab.id);
         assertSidebarHelperUnchanged(sourceBefore, { tabId: sourceTabAfter.id, windowId: sourceTabAfter.windowId, tabUrl: sourceTabAfter.url, pendingUrl: sourceTabAfter.pendingUrl, pageUrl: helper.page.url(), closed: helper.page.isClosed() }, { extensionId: spotlightId });
         assert.deepEqual((await tabsIn(fixture.windowA)).map(tab => tab.id), before.map(tab => tab.id), 'Opening a panel must not create or close a tab.');
+        const { page: rowPage } = await resolveNativeSidebarTarget();
+        const newTabRow = await exerciseNativeNewTabRow({ page: await observePage(rowPage), helper, apiPage: arcifyOptions,
+            peerPage: spotlightOptions, spotlightId, windowId: fixture.windowA, snapshot, poll, ui, search, activate, screenshot,
+            record: async observation => { report.nativeNewTabRow = observation; await saveReport(); } });
         await closeNativeSidebar(); await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
-        return { startupOffer: offered, repeatedOffer: repeated, focusBefore, focusExplicitlySetForEnter: true, actualBrowserStartupTested: false, sourceBefore, native };
+        return { startupOffer: offered, repeatedOffer: repeated, focusBefore, focusExplicitlySetForEnter: true, actualBrowserStartupTested: false, sourceBefore, native, newTabRow };
     });
     await step(stepNames[15], async () => {
         // Observe actual paired requests before helper creation, including any

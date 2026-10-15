@@ -882,3 +882,19 @@ test('pairing revocation during tab activation suppresses the later window focus
     assert.deepEqual(writes('tab.update'), [['tab.update', 5, { active: true }]]);
     assert.deepEqual(writes('window.update'), []);
 });
+
+test('registered New Tab row uses the real SpaceStore queue and owns one default-provider fallback in an empty Space', async () => {
+    const store = await makeStore({ install: true }); store.active[1] = 'empty';
+    delete local[PEER_KEY]; windows.find(window => window.id === 1).focused = true;
+    const create = chrome.tabs.create;
+    chrome.tabs.create = options => create({ ...options, url: `chrome-extension://${PEER}/newtab.html`, openerTabId: 1 });
+    registerSpotlightBridge(store);
+    const request = { type: 'spotlightBridgeLaunch', windowId: 1, spaceId: 'empty', fallbackToNewTab: true };
+    const sender = { id: SELF, url: chrome.runtime.getURL('sidebar.html'), origin: `chrome-extension://${SELF}`, frameId: 0 };
+    const result = await new Promise(resolve => chrome.runtime.onMessage.listeners[0](request, sender, resolve));
+    await settle(store);
+    assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.outcome, 'new-tab');
+    assert.equal(ownerOf(store.spaces, result.tabId)?.id, 'empty'); assert.equal(store.active[1], 'empty');
+    assert.equal(writes('tab.create').length, 1); assert.equal(getTab(result.tabId).windowId, 1); assert.equal(getTab(result.tabId).active, true);
+    assert.equal(writes('tab.update').filter(call => call[1] !== result.tabId).length, 0);
+});

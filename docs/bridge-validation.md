@@ -363,10 +363,14 @@ Repeat relevant cases with Chrome group sync **off** and **on**.
 6. Open current-tab and new-tab overlays using Alt+L and Alt+T (or configured
    shortcuts). Check focus, keyboard selection, Enter/Escape, close/cancel, repeated
    clicks, and updated results while a slower prior search is still outstanding.
-7. Launch from **Search with Spotlight** in each Arcify sidebar. Confirm window
-   targeting/focus, repeated launches keep the overlay open, and reopening during
-   close animation or after worker restart stays visible. Normal shortcuts still
-   toggle. Confirm the original New Tab button still works.
+7. Launch from the **+ New Tab** row below Today’s divider in each Arcify sidebar.
+   Confirm window targeting/focus, repeated launches keep the overlay open, and
+   reopening during close animation or after worker restart stays visible. Normal
+   shortcuts still toggle; Ctrl+T stays unchanged. Disconnect the companion and
+   confirm one ordinary browser-default new tab in the same Space/window. The row
+   stays outside Today’s sortable items in empty Spaces and inverted order.
+   A pending request coalesces repeated clicks; ambiguous post-launch failures
+   report uncertainty without automatically creating a second tab.
 8. Open new tabs from each window while editing/sidebar refresh is pending;
    confirm membership/order and that stale snapshots never erase newer tabs.
 9. Reload either extension; refresh existing content-script pages; suspend/stop

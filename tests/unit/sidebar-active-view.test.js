@@ -39,6 +39,8 @@ const area = state => ({ async get(keys) {
 }, async set(next) { Object.assign(state, structuredClone(next)); }, async remove() {} });
 const onActivated = listeners();
 let beforeRead;
+const newTabRequests = [];
+let beforeNewTab;
 let beforeWindow;
 let currentWindowId = 10;
 let beforeTree;
@@ -54,6 +56,7 @@ globalThis.MutationObserver = window.MutationObserver;
 globalThis.chrome = {
     runtime: { onMessage: listeners(), getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'spotlightBridgeLaunch') { newTabRequests.push(structuredClone(message)); return beforeNewTab?.(message) || { ok: true, outcome: 'spotlight' }; }
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: tabs.filter(tab => tab.pinned) };
             if (message.type === 'sidebarTour') return { success: true, state: null };
             assert.equal(message.type, 'spaceStore');
@@ -431,4 +434,100 @@ test('a delayed callback from a previous panel window cannot cancel a newer loca
     await previousWindowCallback({ id: 99 });
     release.resolve(); await settled('beta');
     assert(document.querySelector('.space[data-space-id="beta"] .tab[data-tab-id="2"]').classList.contains('active'));
+});
+
+const newTabButton = document.getElementById('newTabBtn');
+function assertNewTabRow(spaceId) {
+    const space = document.querySelector(`.space[data-space-id="${spaceId}"]`);
+    assert.equal(document.querySelectorAll('#newTabBtn').length, 1);
+    assert.equal(space.querySelector('.temp-header').nextElementSibling, newTabButton);
+    assert.equal(newTabButton.nextElementSibling, space.querySelector('[data-tab-type="temporary"]'));
+    assert.equal(newTabButton.closest('.tabs-container'), null);
+    assert.equal(document.getElementById('spotlightBtn'), null);
+    assert.equal(document.querySelector('.new-tab-btn-container button'), null);
+    assert.equal(newTabButton.hidden, false);
+}
+
+test('actual sidebar moves one New Tab identity across empty/nonempty Spaces and metadata replacement', async () => {
+    for (const id of ['empty', 'alpha', 'beta']) { await selectSession(id); await settled(id); assertNewTabRow(id); }
+    const before = newTabButton.closest('.space');
+    storedSpaces.find(space => space.id === 'beta').color = 'green'; await publishSpaces(); await wait(240);
+    assertNewTabRow('beta'); assert.notEqual(newTabButton.closest('.space'), before);
+    for (const id of ['bookmarkSelectionStatus', 'todaySelectionStatus', 'spotlightStatus', 'urlCopyToast']) {
+        assert(document.querySelector('.new-tab-btn-container').contains(document.getElementById(id)), `${id} retains its stable notice host`);
+    }
+    assert(document.getElementById('arcify-tour').nextElementSibling.matches('.new-tab-btn-container'));
+});
+
+test('actual sidebar New Tab retains one in-flight gesture across external Space refresh and deletion', async () => {
+    await selectSession('alpha'); await settled('alpha'); const gate = deferred(); beforeNewTab = () => gate.promise;
+    const before = newTabRequests.length; newTabButton.click(); await wait(0);
+    assert.equal(newTabButton.getAttribute('aria-busy'), 'true');
+    await selectSession('empty'); await settled('empty'); assertNewTabRow('empty'); newTabButton.click();
+    storedSpaces = storedSpaces.filter(space => space.id !== 'empty'); await publishSpaces(); await wait(240);
+    assertNewTabRow(visible()[0]); newTabButton.click();
+    assert.equal(newTabRequests.length, before + 1);
+    assert.deepEqual(newTabRequests.at(-1), { type: 'spotlightBridgeLaunch', windowId: 10, spaceId: 'alpha', fallbackToNewTab: true });
+    gate.resolve({ ok: true, outcome: 'spotlight' }); await wait(0); beforeNewTab = null;
+    assert.equal(newTabButton.getAttribute('aria-busy'), 'false');
+});
+
+test('actual sidebar keeps New Tab above inverted Today items and outside their order', async () => {
+    await selectSession('alpha'); await settled('alpha');
+    const alpha = storedSpaces.find(space => space.id === 'alpha'), beta = storedSpaces.find(space => space.id === 'beta');
+    const beforeAlpha = [...alpha.temporaryTabs], beforeBeta = [...beta.temporaryTabs];
+    beta.temporaryTabs = beta.temporaryTabs.filter(id => id !== 2); alpha.temporaryTabs = [1, 2];
+    await publishSpaces(); await wait(240);
+    const get = chrome.storage.sync.get;
+    chrome.storage.sync.get = async () => ({ invertTabOrder: true });
+    try {
+        await onChanged.emit({ invertTabOrder: { newValue: true } }, 'sync'); await wait(300);
+        assertNewTabRow('alpha');
+        assert.deepEqual([...newTabButton.nextElementSibling.querySelectorAll('.tab')].map(row => Number(row.dataset.tabId)), [2, 1]);
+    } finally {
+        chrome.storage.sync.get = get; alpha.temporaryTabs = beforeAlpha; beta.temporaryTabs = beforeBeta;
+        await publishSpaces(); await onChanged.emit({ invertTabOrder: { newValue: false } }, 'sync'); await wait(300);
+    }
+});
+
+test('actual sidebar restores focused New Tab only after destination visibility and synchronous metadata replacement', async () => {
+    await selectSession('alpha'); await settled('alpha');
+    let focused = document.body, hasFocus = true;
+    const activeDescriptor = Object.getOwnPropertyDescriptor(document, 'activeElement'), hasFocusOriginal = document.hasFocus;
+    Object.defineProperty(document, 'activeElement', { configurable: true, get: () => focused }); document.hasFocus = () => hasFocus;
+    const ownFocus = newTabButton.focus;
+    newTabButton.focus = function () {
+        if (!this.isConnected) return;
+        for (let node = this; node; node = node.parentElement) if (node.hidden || node.style?.display === 'none') return;
+        focused = this;
+    };
+    try {
+        newTabButton.focus(); await selectSession('beta'); await settled('beta');
+        assertNewTabRow('beta'); assert.equal(document.activeElement, newTabButton);
+        const space = newTabButton.closest('.space'), remove = space.remove;
+        space.remove = function () { if (this.contains(focused)) focused = document.body; return remove.call(this); };
+        storedSpaces.find(space => space.id === 'beta').color = 'purple'; await publishSpaces(); await wait(240);
+        assertNewTabRow('beta'); assert.equal(document.activeElement, newTabButton);
+        hasFocus = false; focused = document.body;
+        storedSpaces.find(space => space.id === 'beta').color = 'blue'; await publishSpaces(); await wait(240);
+        assert.equal(document.activeElement, document.body);
+    } finally {
+        newTabButton.focus = ownFocus; document.hasFocus = hasFocusOriginal;
+        if (activeDescriptor) Object.defineProperty(document, 'activeElement', activeDescriptor); else delete document.activeElement;
+    }
+});
+
+test('a deferred old-view New Tab click cannot target the hidden logical Space or disturb an editor draft', async () => {
+    await selectSession('alpha'); await settled('alpha');
+    const input = document.querySelector('.space[data-space-id="alpha"] .space-name');
+    input.value = 'Unsubmitted Space draft'; input.dispatchEvent(new window.Event('focus'));
+    const before = newTabRequests.length;
+    try {
+        await selectSession('beta'); await wait(160);
+        assert.deepEqual(visible(), ['alpha']); assertNewTabRow('alpha');
+        newTabButton.click(); await wait(0);
+        assert.equal(newTabRequests.length, before); assert.equal(input.value, 'Unsubmitted Space draft');
+        assert.match(document.getElementById('spotlightStatus').textContent, /finish loading/);
+    } finally { input.dispatchEvent(new window.Event('blur')); }
+    await settled('beta'); assertNewTabRow('beta');
 });

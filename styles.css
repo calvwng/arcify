@@ -683,17 +683,22 @@ h3 {
     background-color: rgba(255, 255, 255, 0.2);
     border: none;
     color: #333;
-    padding: 12px;
-    border-radius: 12px;
+    padding: var(--tab-padding, 8px);
+    border-radius: 8px;
     cursor: pointer;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 8px;
-    font-size: 16px;
+    font-size: var(--tab-font-size, 14px);
     width: 100%;
     transition: background-color 0.3s ease;
 }
+
+.new-tab-btn[hidden] { display: none; }
+.new-tab-btn[aria-busy="true"] { cursor: progress; opacity: 0.7; }
+.new-tab-btn:focus-visible { outline: 2px solid var(--accent-color, #4d8dff); outline-offset: -2px; }
+#spotlightStatus:not(:empty) { padding: 4px 8px; font-size: 12px; }
 
 .new-tab-btn:hover {
     background-color: rgba(255, 255, 255, 0.3);

@@ -38,8 +38,9 @@ validating Spotlight.
    an incoming request. The **Copy ID** buttons can help avoid transcription errors.
 5. After both saves, click **Check connection** in Arcify and **Refresh status** in
    Spotlight. Both must report connected. A saved ID alone is not a live connection.
-   The Arcify sidebar's **Search with Spotlight** button opens Spotlight in that
-   sidebar's window. The original **New Tab** button keeps its existing behavior.
+   The Arcify sidebar's **+ New Tab** row below Today’s divider opens Spotlight
+   in that sidebar's window, with the guarded [ordinary-new-tab fallback](sidebar-new-tab.md)
+   when its read-only handshake confirms the companion is unavailable.
 6. Run the manual matrix in [bridge-validation.md](bridge-validation.md) with
    **Sync Spaces to Chrome Tab Groups** both off and on before using a real profile.
 
@@ -75,8 +76,12 @@ Chrome may already have completed the action.
   or opens that exact bookmark. Equal URLs in different spaces remain distinct.
 - Use Spotlight's current-tab mode to navigate the same tab while preserving its
   workspace. New-tab mode creates a tab in the selected Arcify space.
-- Use **Search with Spotlight** in the Arcify sidebar to launch Spotlight for that
-  window. Optional native tab-group sync does not determine bridge membership.
+- Use the **+ New Tab** row immediately below Today’s divider in the Arcify
+  sidebar to launch Spotlight for that window. If its read-only handshake confirms
+  the companion is unavailable/unpaired, the row opens an ordinary browser-default
+  new tab. Ambiguous dispatched launches never create a fallback tab. See
+  [Today New Tab row](sidebar-new-tab.md). Optional native tab-group sync does not
+  determine bridge membership.
 
 ### Open the Arcify sidebar from Spotlight
 
