@@ -1,7 +1,7 @@
 /** CI-only real paired Chrome exercise. Importing this module never launches Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { replaceInputText, captureVisibleFailurePage } from './paired-chrome-ui.mjs';
+import { replaceInputText, captureVisibleFailurePage, clickFreshResult } from './paired-chrome-ui.mjs';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { exerciseExternalMenuDismissal, readMenuPreservedState } from './paired-chrome-menu-focus.mjs';
@@ -151,6 +151,18 @@ export async function readRenamedTabSearch({ page, ui, poll, query, alias, sourc
     });
 }
 
+/** Reacquire only a proven pre-input stale handle; never replay a menu action. */
+export async function openFreshTabMenu({ page, selector, menuSelector, record = async () => {} }) {
+    await clickFreshResult(async remaining => {
+        const element = await page.waitForSelector(selector, { visible: true, timeout: remaining });
+        assert(element, 'The exact context-menu target must exist.');
+        return { click: () => element.click({ button: 'right' }), dispose: () => element.dispose() };
+    }, record);
+    // Keep the postcondition outside the reacquisition boundary: once genuine
+    // input succeeds, even a missing menu or timeout must fail without a replay.
+    await page.waitForSelector(menuSelector, { visible: true });
+}
+
 /**
  * Parent must provide existing sandbox-verified Chrome, real bridge snapshot,
  * genuine-input ui(), required screenshot(), diagnostics and cleanup ownership.
@@ -205,7 +217,8 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             await sidebar.page.click('#favoritesDropDismiss');
             await sidebar.page.waitForFunction(() => document.getElementById('favoritesDropNotice')?.hidden === true, { polling: 50 });
         }
-        await sidebar.page.waitForSelector(selector, { visible: true }); await sidebar.page.click(selector, { button: 'right' }); await sidebar.page.waitForSelector('#tab-context-menu', { visible: true });
+        await openFreshTabMenu({ page: sidebar.page, selector, menuSelector: '#tab-context-menu',
+            record: observation => checkpoint('context-menu-input', { selector, menuSelector: '#tab-context-menu', ...observation }) });
     });
     const item = async action => ui(sidebar.page, `Choose ${action} through tab menu`, () => sidebar.page.click(`#tab-context-menu [data-action="${action}"]`));
     const openEditor = async (selector, action) => { await menu(selector); await item(action); await sidebar.page.waitForSelector('#tabEditDialog', { visible: true }); };
@@ -267,9 +280,8 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             const open = async () => {
                 if (menuSelector === '#tab-context-menu') return menu(selector);
                 await ui(sidebar.page, 'Right-click exact saved folder', async () => {
-                    await sidebar.page.waitForSelector(selector, { visible: true });
-                    await sidebar.page.click(selector, { button: 'right' });
-                    await sidebar.page.waitForSelector(menuSelector, { visible: true });
+                    await openFreshTabMenu({ page: sidebar.page, selector, menuSelector,
+                        record: observation => checkpoint('context-menu-input', { selector, menuSelector, ...observation }) });
                 });
             };
             await open(); const before = await read(), preservedBefore = await apiPage.evaluate(readMenuPreservedState);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 import { assertTabMenuFixtureEnvironment, serveTabMenuFixture, assertTabMenuCancelled, assertTabMenuClosedTargetGone, assertTabMenuAlias,
-    assertTabMenuSavedEdit, assertTabMenuMuted, assertTabMenuDuplicated, assertTabMenuPinRemoved, watchTabMenuInvalidation, readRenamedTabSearch } from '../../scripts/paired-chrome-tab-menu.mjs';
+    assertTabMenuSavedEdit, assertTabMenuMuted, assertTabMenuDuplicated, assertTabMenuPinRemoved, watchTabMenuInvalidation, readRenamedTabSearch, openFreshTabMenu } from '../../scripts/paired-chrome-tab-menu.mjs';
 
 function aliasSearchHarness({ stale = false, query = 'nonce', twinChanged = false, timeOrigin = 42 } = {}) {
     let visible = false;
@@ -175,6 +175,96 @@ test('fixture uses real UI transport, required screenshots, existing cleanup, no
     const source = await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8');
     assert.match(source, /assertTabMenuFixtureEnvironment\(\);/); assert.match(source, /finishBookmarkFixture\(/);
     assert.match(source, /screenshot\(sidebar\.page, label, true\)/); assert.match(source, /captureVisibleFailurePage/);
-    assert.match(source, /page\.click\(selector, \{ button: 'right' \}\)/); assert.match(source, /replaceInputText/); assert.match(source, /input\.press\('KeyV'\)/);
+    assert.match(source, /element\.click\(\{ button: 'right' \}\)/); assert.match(source, /openFreshTabMenu\(\{ page: sidebar\.page, selector, menuSelector: '#tab-context-menu'/); assert.match(source, /openFreshTabMenu\(\{ page: sidebar\.page, selector, menuSelector,/); assert.match(source, /replaceInputText/); assert.match(source, /input\.press\('KeyV'\)/);
     assert.doesNotMatch(source, /navigator\.clipboard\.read|overridePermissions|--no-sandbox|\.launch\(|dispatchEvent\(|\.value\s*=(?!=)|type:\s*['"]tabMenuAction['"]/);
+});
+
+// This is the locked Puppeteer scroll failure from the hosted run: no mouse
+// dispatch occurred. A fresh handle may be acquired for the same exact target.
+function detachedMenuRowError() {
+    const error = new Error('Node is detached from document');
+    error.stack = 'Error: Node is detached from document\n' +
+        '    at CdpElementHandle.assertConnectedElement (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1314:23)\n' +
+        '    at async CdpElementHandle.scrollIntoView (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/cdp/ElementHandle.js:106:13)\n' +
+        '    at async CdpElementHandle.<anonymous> (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:119:20)\n' +
+        '    at async CdpElementHandle.scrollIntoViewIfNeeded (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1326:13)\n' +
+        '    at async CdpElementHandle.click (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:722:13)';
+    return error;
+}
+function menuInputHarness({ failures = [], menuError, lookupError, recordError, selector = '.space.active .tab[data-tab-id="275"]', menuSelector = '#tab-context-menu' } = {}) {
+    const calls = [], records = [];
+    let acquired = 0, dispatched = 0, disposed = 0, postconditions = 0;
+    const page = {
+        async waitForSelector(actual, options) {
+            calls.push({ selector: actual, ...options });
+            if (actual === menuSelector) {
+                postconditions++;
+                assert.equal(dispatched, 1, 'Menu readiness is checked only after one successful genuine input.');
+                if (menuError) throw menuError;
+                return {};
+            }
+            assert.equal(actual, selector); assert.equal(options.visible, true);
+            assert(options.timeout > 0 && options.timeout <= 20_000);
+            if (lookupError) throw lookupError;
+            const index = acquired++;
+            return {
+                async click(options) {
+                    assert.deepEqual(options, { button: 'right' });
+                    if (failures[index]) throw failures[index];
+                    dispatched++;
+                },
+                async dispose() { disposed++; }
+            };
+        }
+    };
+    return { page, selector, menuSelector, calls, records,
+        record: async observation => { records.push(observation); if (recordError) throw recordError; },
+        counts: () => ({ acquired, dispatched, disposed, postconditions }) };
+}
+for (const [label, selector, menuSelector] of [
+    ['ordinary row', '.space.active .tab[data-tab-id="275"]', '#tab-context-menu'],
+    ['saved folder', '.space.active .folder[data-bookmark-id="102"] > .folder-header', '#folder-context-menu']
+]) test(`context opening reacquires a detached ${label} before one exact right-click`, async () => {
+    const h = menuInputHarness({ failures: [detachedMenuRowError()], selector, menuSelector });
+    await openFreshTabMenu(h);
+    assert.deepEqual(h.counts(), { acquired: 2, dispatched: 1, disposed: 2, postconditions: 1 });
+    assert.deepEqual(h.calls.map(call => call.selector), [selector, selector, menuSelector]);
+    assert.deepEqual(h.records.map(item => [item.attempt, item.status]), [[1, 'detached-before-input'], [2, 'clicked']]);
+});
+test('successful context opening uses exactly one real right-click and disposes its handle', async () => {
+    const h = menuInputHarness(); await openFreshTabMenu(h);
+    assert.deepEqual(h.counts(), { acquired: 1, dispatched: 1, disposed: 1, postconditions: 1 });
+    assert.deepEqual(h.records, [{ attempt: 1, status: 'clicked' }]);
+});
+test('context opening stops after three pre-input detachments without dispatching input', async () => {
+    const failures = Array.from({ length: 3 }, detachedMenuRowError), h = menuInputHarness({ failures });
+    await assert.rejects(openFreshTabMenu(h), error => error === failures[2]);
+    assert.deepEqual(h.counts(), { acquired: 3, dispatched: 0, disposed: 3, postconditions: 0 });
+});
+for (const [label, error] of [
+    ['uncertain mouse dispatch', Object.assign(detachedMenuRowError(), { stack: detachedMenuRowError().stack + '\n    at async CdpMouse.click (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/cdp/Input.js:300:17)' })],
+    ['unrecognized detachment', new Error('Node is detached from document')],
+    ['arbitrary transport failure', new Error('Protocol error: target closed')]
+]) test(`context opening never retries ${label}`, async () => {
+    const h = menuInputHarness({ failures: [error] });
+    await assert.rejects(openFreshTabMenu(h), actual => actual === error);
+    assert.deepEqual(h.counts(), { acquired: 1, dispatched: 0, disposed: 1, postconditions: 0 });
+    assert.deepEqual(h.records, []);
+});
+test('a missing menu after successful input fails without replaying the right-click', async () => {
+    const menuError = new Error('Waiting for visible context menu timed out'), h = menuInputHarness({ menuError });
+    await assert.rejects(openFreshTabMenu(h), error => error === menuError);
+    assert.deepEqual(h.counts(), { acquired: 1, dispatched: 1, disposed: 1, postconditions: 1 });
+    assert.equal(h.records.length, 1);
+});
+test('failed input checkpoint persistence never repeats a completed context opening', async () => {
+    const recordError = new Error('Checkpoint write failed'), h = menuInputHarness({ recordError });
+    await assert.rejects(openFreshTabMenu(h), error => error === recordError);
+    assert.deepEqual(h.counts(), { acquired: 1, dispatched: 1, disposed: 1, postconditions: 0 });
+});
+test('missing exact context target fails without a broader lookup or mouse input', async () => {
+    const lookupError = new Error('Exact selector not found'), h = menuInputHarness({ lookupError });
+    await assert.rejects(openFreshTabMenu(h), error => error === lookupError);
+    assert.deepEqual(h.counts(), { acquired: 0, dispatched: 0, disposed: 0, postconditions: 0 });
+    assert.equal(h.calls.length, 1);
 });
