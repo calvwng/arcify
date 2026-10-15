@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createFavoriteContinuity, configureFavoriteContinuityPeer, CONTINUITY_LOCAL_KEY as LOCAL, CONTINUITY_SESSION_KEY as RECEIPT, validContinuityState } from '../../favorite-continuity.js';
+import { createFavoriteContinuity, configureFavoriteContinuityPeer, CONTINUITY_LOCAL_KEY as LOCAL, CONTINUITY_SESSION_KEY as RECEIPT, validContinuityState, encodeFavoriteContinuityState } from '../../favorite-continuity.js';
 import { PEER_KEY, PAIRING_GENERATION_KEY as GENERATION } from '../../spotlight-bridge-protocol.js';
 const PEER = 'b'.repeat(32), OTHER = 'c'.repeat(32);
 const clone = value => structuredClone(value);
@@ -37,6 +37,47 @@ function fixture() {
     f.reload = () => { for (const key of Object.keys(session)) delete session[key]; return f.adapter().load({ session: null, items }); };
     return f;
 }
+
+test('canonical ownership encoding fixes object key order without changing arrays, values or pending null IDs', () => {
+    const value = state(); value.attempts.push({ favoriteId: 'pending', windowId: 1, tabId: null, url: 'https://pending.test/', mode: 'ordinary' });
+    assert.equal(encodeFavoriteContinuityState(value), '{"attempts":[{"favoriteId":"pending","mode":"ordinary","tabId":null,"url":"https://pending.test/","windowId":1}],"bindings":[{"favoriteId":"favorite","mode":"ordinary","tabId":10,"windowId":1}],"version":1}');
+    const reordered = { attempts: value.attempts.map(entry => Object.fromEntries(Object.entries(entry).reverse())),
+        bindings: value.bindings.map(entry => Object.fromEntries(Object.entries(entry).reverse())), version: 1 };
+    assert.notEqual(JSON.stringify(reordered), JSON.stringify(value));
+    assert.equal(encodeFavoriteContinuityState(reordered), encodeFavoriteContinuityState(value));
+});
+
+for (const proof of ['session', 'mirror']) for (const field of ['bindings', 'attempts', 'tabId', 'windowId', 'mode', 'url']) {
+    test(`canonical fingerprint still rejects changed ${field} in ${proof} proof`, async () => {
+        const f = fixture(), adapter = f.adapter();
+        const records = [...items, { ...items[0], id: 'second' }];
+        const value = state(); value.bindings.push({ favoriteId: 'second', windowId: 1, tabId: 11, mode: 'ordinary' });
+        value.attempts = value.bindings.map(entry => ({ ...entry, url: items[0].url }));
+        await adapter.load({ session: null, items: records }); await adapter.save({ state: value, items: records });
+        const altered = proof === 'session' ? f.session.favoriteSession : f.local[LOCAL].state;
+        if (field === 'bindings' || field === 'attempts') altered[field].reverse();
+        else if (field === 'url') altered.attempts[0].url = 'https://changed.test/';
+        else for (const entry of [altered.bindings[0], altered.attempts[0]]) {
+            if (field === 'mode') delete entry.mode;
+            else entry[field] += 10;
+        }
+        assert(validContinuityState(altered), 'A digest mismatch, not malformed state, must reject the candidate');
+        assert.notEqual(encodeFavoriteContinuityState(altered), encodeFavoriteContinuityState(value));
+        const oldEpoch = f.local[LOCAL].epoch;
+        if (proof === 'mirror') for (const key of Object.keys(f.session)) delete f.session[key];
+        f.calls.length = 0;
+        assert.deepEqual(await f.adapter().load({ session: f.session.favoriteSession ?? null, items: records }), empty());
+        assert(f.calls.filter(call => call.command === 'write').every(call => call.receipt.epoch !== oldEpoch));
+    });
+}
+
+for (const proof of ['session', 'mirror']) test(`old fingerprint schema in ${proof} proof is refused even with a canonical hash`, async () => {
+    const f = fixture(); await f.seed(); const oldEpoch = f.local[LOCAL].epoch;
+    if (proof === 'session') f.session[RECEIPT].schema = 'exact-global-favorites-v1';
+    else { f.local[LOCAL].schema = 'exact-global-favorites-v1'; for (const key of Object.keys(f.session)) delete f.session[key]; }
+    assert.deepEqual(await f.adapter().load({ session: f.session.favoriteSession ?? null, items }), empty());
+    assert.notEqual(f.local[LOCAL].epoch, oldEpoch);
+});
 
 test('Arcify-only reload recovers exact identity with opaque matching session witness and navigated URL', async () => {
     const f = fixture(); await f.seed(); const oldEpoch = f.local[LOCAL].epoch; f.calls.length = 0;

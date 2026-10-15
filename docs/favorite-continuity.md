@@ -58,6 +58,13 @@ before any Space restoration/adoption. A surviving own session with a matching
 receipt digest is preferred; legacy pinned-only session state can start a new
 compatible epoch. A mismatched own receipt is not repaired from the durable mirror.
 
+Local schema `exact-global-favorites-v2` fingerprints canonical JSON: recursively
+sorted object keys, with array order and all ownership values preserved. Browser
+storage may reorder object properties without changing the ownership state.
+Pre-fix `v1` insertion-order receipts are incompatible and fail closed, even if a
+hash happens to match; they are not migrated by rehashing unproven current data.
+Saved Favorite records remain intact, but old live bindings can project closed.
+
 Each current-session ownership save performs these awaited steps:
 
 1. Write an invalid local mirror tombstone.

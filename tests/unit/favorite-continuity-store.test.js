@@ -9,6 +9,9 @@ import { createSpotlightBridge } from '../../spotlight-bridge.js';
 // Real shared worker queue, both stores and group projector. Only browser APIs
 // are mocked. These tests do not claim native keyboard or browser acceptance.
 const clone = value => structuredClone(value);
+// Chrome storage serialization does not promise insertion-order preservation.
+const sortedObjects = value => Array.isArray(value) ? value.map(sortedObjects)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sortedObjects(value[key])])) : value;
 const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, emit(...args) { for (const fn of this.listeners) fn(...clone(args)); } });
 const saved = id => ({ id, title: id, url: 'https://same.test/', sourceBookmarkId: null });
 const space = (id, tabs = []) => ({ id, name: id, color: 'blue', bookmarkFolderId: id, spaceBookmarks: [], temporaryTabs: tabs });
@@ -16,7 +19,7 @@ let local, session, sync, tabs, effects, hooks, nodes, groups, nextId;
 const tab = id => { const result = tabs.find(tab => tab.id === id); if (!result) throw new Error('No tab'); return result; };
 function area(data, name) {
     return { async get(keys) { await hooks[`${name}Get`]?.(keys); const names = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys || data); return Object.fromEntries(names.map(key => [key, clone(data[key] ?? (typeof keys === 'object' && !Array.isArray(keys) ? keys[key] : undefined))])); },
-        async set(value) { await hooks[`${name}Set`]?.(value); Object.assign(data, clone(value)); } };
+        async set(value) { await hooks[`${name}Set`]?.(value); Object.assign(data, hooks.sortedStorage ? sortedObjects(clone(value)) : clone(value)); } };
 }
 function stores({ install = false, ownershipPersistence } = {}) {
     const spaces = new SpaceStore(), favorites = new FavoriteStore(spaces, { captureIcon: async () => null, ownershipPersistence });
@@ -85,6 +88,24 @@ const pairedStores = () => stores({ ownershipPersistence: continuity() });
 const clearSession = () => { for (const key of Object.keys(session)) delete session[key]; };
 const bridgeRequest = (command, payload = {}) => ({ type: 'arcify-bridge', version: 1, requestId: crypto.randomUUID(), windowId: 1, command, ...payload });
 const sender = { id: PEER, origin: `chrome-extension://${PEER}` };
+
+for (const ordinary of [false, true]) for (const reload of [false, true]) {
+    test(`actual ${ordinary ? 'ordinary' : 'pinned'} Favorite survives ${reload ? 'witnessed reload' : 'worker restart'} after storage reorders object keys`, async () => {
+        hooks.sortedStorage = true; sync.ordinaryFavoriteTabs = ordinary;
+        const first = pairedStores(); await first.favorites.dispatch(req('open', { favoriteId: 'f' }));
+        const before = await first.favorites.dispatch(req('get'));
+        const epoch = local[CONTINUITY_LOCAL_KEY].epoch;
+        assert.notEqual(JSON.stringify(first.favorites.state), JSON.stringify(session[FAVORITE_SESSION_KEY]));
+        assert.deepEqual(first.favorites.state, session[FAVORITE_SESSION_KEY]);
+        if (reload) clearSession(); else offline = true; // Own session must not need its companion.
+        const second = pairedStores(); const after = await second.favorites.dispatch(req('get'));
+        assert.deepEqual(after.favorites, before.favorites);
+        assert.equal(after.favorites[0].tabId, 100); assertGlobal(second, 100);
+        assert.equal(local[CONTINUITY_LOCAL_KEY].epoch, epoch);
+        assert.equal(tab(100).pinned, !ordinary);
+        assert.equal(effects.filter(effect => effect[0] === 'create').length, 1);
+    });
+}
 
 test('actual stores recover a witnessed ordinary Favorite before Space restore adopts stale exact membership', async () => {
     const first = pairedStores(); await first.favorites.dispatch(req('open', { favoriteId: 'f' }));

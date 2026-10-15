@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
-import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture } from './paired-chrome-ordinary-favorites.mjs';
+import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership } from './paired-chrome-ordinary-favorites.mjs';
 import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
 import { exerciseSidebarAppearance } from './paired-chrome-sidebar-appearance.mjs';
 import { exerciseBookmarkMultiSelection, assertNativeDragSourceStable } from './paired-chrome-bookmark-selection.mjs';
@@ -327,6 +327,12 @@ async function launchOverlay(mode = 'new-tab') {
 
 async function restartFavoriteWorker(favoriteId, tabId) {
     const beforeSnapshot = await snapshot();
+    const readOwnership = async () => summarizeFavoriteOwnership(await arcifyOptions.evaluate(async () => {
+        const session = await chrome.storage.session.get(['favoriteSession', 'favoriteContinuityReceipt']);
+        const local = await chrome.storage.local.get('favoriteContinuity');
+        return { session: session.favoriteSession, receipt: session.favoriteContinuityReceipt, continuity: local.favoriteContinuity };
+    }));
+    report.favoriteWorkerOwnership = { beforeTermination: await readOwnership() }; await saveReport();
     const url = `chrome-extension://${arcifyId}/background.js`;
     const oldTarget = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === url);
     const worker = await oldTarget.worker();
@@ -340,7 +346,9 @@ async function restartFavoriteWorker(favoriteId, tabId) {
                 const network = await networkTargets.get(oldTarget); assert(network);
                 const id = network.id(); await network.detach(); networkTargets.delete(oldTarget); return id;
             },record:async observation => { observations.push(observation); await saveReport(); }});
+        report.favoriteWorkerOwnership.afterTermination = await readOwnership(); await saveReport();
         const afterSnapshot = await snapshot();
+        report.favoriteWorkerOwnership.afterWake = await readOwnership(); await saveReport();
         assert.deepEqual(afterSnapshot.favorites,beforeSnapshot.favorites,'Worker restart must preserve every saved record and exact binding.');
         assert.equal(afterSnapshot.favorites.find(item => item.id === favoriteId)?.tabId,tabId);
         assert.deepEqual(afterSnapshot.tabs.map(item=>item.id).sort((a,b)=>a-b),beforeSnapshot.tabs.map(item=>item.id).sort((a,b)=>a-b),'Read-only worker wake cannot duplicate a Favorite.');

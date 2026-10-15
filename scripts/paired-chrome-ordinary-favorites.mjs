@@ -12,6 +12,23 @@ const identities = tabs => tabs.map(nativeIdentity).sort((a, b) => a.id - b.id);
 const favoriteSelector = id => `#pinnedFavicons .saved-favorite[data-favorite-id="${id}"]`;
 const accepts = assertion => value => { try { assertion(value); return true; } catch { return false; } };
 
+// Independent observation encoder: match the documented canonical contract,
+// rather than trusting the provider's own fingerprint implementation.
+const canonicalOwnership = value => Array.isArray(value) ? value.map(canonicalOwnership)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalOwnership(value[key])])) : value;
+export const observedOwnershipFingerprint = session => createHash('sha256').update(JSON.stringify(canonicalOwnership(session))).digest('hex');
+
+/** Persist only ownership IDs, key order and opaque receipts; omit links/icons. */
+export function summarizeFavoriteOwnership({ session, receipt, continuity }) {
+    const summarizeReceipt = value => value ? Object.fromEntries(['version', 'schema', 'phase', 'epoch', 'revision', 'peerId', 'generation', 'peerGeneration', 'fingerprint']
+        .filter(key => value[key] !== undefined).map(key => [key, value[key]])) : null;
+    const entries = values => (values || []).map(value => ({ keys: Object.keys(value), ...Object.fromEntries(['favoriteId', 'windowId', 'tabId', 'mode', 'kind']
+        .filter(key => value[key] !== undefined).map(key => [key, value[key]])) }));
+    return { session: session ? { version: session.version, keys: Object.keys(session), bindings: entries(session.bindings), attempts: entries(session.attempts),
+        rawFingerprint: createHash('sha256').update(JSON.stringify(session)).digest('hex'), canonicalFingerprint: observedOwnershipFingerprint(session) } : null,
+        receipt: summarizeReceipt(receipt), mirror: summarizeReceipt(continuity) };
+}
+
 /** Call before the generic localhost response; a genuine document supplies the nonce/title/icon. */
 export function serveOrdinaryFavoriteFixture(request, response) {
     const path = new URL(request.url, 'http://127.0.0.1').pathname;
@@ -92,12 +109,12 @@ export function assertOrdinaryFavoriteReopened(before, after, { favoriteId, prev
 /** The mirror is recoverable only with an exact, independently retained peer receipt. */
 export function assertCommittedFavoriteWitness(state, { arcifyId, spotlightId }) {
     const { continuity: journal, receipt, witness, session, durable } = state;
-    assert.equal(journal?.version, 1); assert.equal(journal?.schema, 'exact-global-favorites-v1');
+    assert.equal(journal?.version, 1); assert.equal(journal?.schema, 'exact-global-favorites-v2');
     assert.equal(journal.phase, 'committed'); assert.equal(journal.peerId, spotlightId);
     assert.equal(typeof journal.epoch, 'string'); assert(journal.epoch.length > 0);
     assert.equal(typeof journal.generation, 'string'); assert(journal.generation.length > 0);
     assert(Number.isSafeInteger(journal.revision) && journal.revision > 0);
-    assert.equal(journal.fingerprint, createHash('sha256').update(JSON.stringify(session)).digest('hex'));
+    assert.equal(journal.fingerprint, observedOwnershipFingerprint(session));
     assert.deepEqual(journal.state, session);
     assert.deepEqual(journal.items, durable.map(({ id, url, sourceBookmarkId }) => [id, url, sourceBookmarkId]));
     for (const key of ['version', 'schema', 'epoch', 'revision', 'peerId', 'generation', 'fingerprint']) assert.equal(receipt?.[key], journal[key], `Own receipt ${key}`);

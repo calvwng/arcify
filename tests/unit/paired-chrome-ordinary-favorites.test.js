@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { serveOrdinaryFavoriteFixture, assertOrdinaryFavoriteState, assertOnlyNativeFavoriteClosed,
     assertOrdinaryFavoriteReopened, assertCommittedFavoriteWitness, assertSameBrowserFavoriteContinuity,
-    readOrdinaryFavoriteRender } from '../../scripts/paired-chrome-ordinary-favorites.mjs';
+    readOrdinaryFavoriteRender, observedOwnershipFingerprint, summarizeFavoriteOwnership } from '../../scripts/paired-chrome-ordinary-favorites.mjs';
 
 const arcifyId = 'a'.repeat(32), spotlightId = 'b'.repeat(32), nonce = 'c'.repeat(32);
 const source = { id: 'source-1', parentId: 'folder-1', index: 0, title: 'Ordinary Favorite', url: `http://127.0.0.1/favorite-ordinary/${nonce}` };
@@ -23,15 +23,38 @@ function state() {
     return witness(value);
 }
 function witness(value, revision = 5) {
-    const journal = { version: 1, schema: 'exact-global-favorites-v1', phase: 'committed', epoch: 'browser-epoch', revision,
+    const journal = { version: 1, schema: 'exact-global-favorites-v2', phase: 'committed', epoch: 'browser-epoch', revision,
         peerId: spotlightId, generation: 'arcify-generation', peerGeneration: 'spotlight-generation',
-        fingerprint: createHash('sha256').update(JSON.stringify(value.session)).digest('hex'),
+        fingerprint: observedOwnershipFingerprint(value.session),
         items: value.durable.map(({ id, url, sourceBookmarkId }) => [id, url, sourceBookmarkId]), state: structuredClone(value.session) };
     value.continuity = journal;
     value.receipt = Object.fromEntries(['version', 'schema', 'epoch', 'revision', 'peerId', 'generation', 'fingerprint'].map(key => [key, journal[key]]));
     value.witness = { version: 1, peerId: arcifyId, peerGeneration: journal.peerGeneration, epoch: journal.epoch, writerGeneration: journal.generation, revision };
     return value;
 }
+
+test('independent witness evidence hashes canonical objects with the exact ownership values', () => {
+    const value = state(), expected = '{"attempts":[],"bindings":[{"favoriteId":"saved-1","mode":"ordinary","tabId":33,"windowId":10}],"version":1}';
+    assert.equal(observedOwnershipFingerprint(value.session), createHash('sha256').update(expected).digest('hex'));
+    value.session = { attempts: [], bindings: [{ tabId: 33, mode: 'ordinary', windowId: 10, favoriteId: record.id }], version: 1 };
+    assertCommittedFavoriteWitness(value, ids);
+    value.continuity.schema = 'exact-global-favorites-v1';
+    assert.throws(() => assertCommittedFavoriteWitness(value, ids));
+});
+
+test('worker restart evidence records exact ownership and raw/canonical fingerprints without links or icon bytes', () => {
+    const value = state(); value.session.attempts.push({ favoriteId: 'pending', windowId: 10, tabId: null, mode: 'ordinary', url: source.url });
+    const evidence = summarizeFavoriteOwnership(value);
+    assert.deepEqual(evidence.session.keys, ['version', 'bindings', 'attempts']);
+    assert.equal(evidence.session.bindings[0].tabId, 33);
+    assert.equal(evidence.session.attempts[0].tabId, null);
+    assert.equal(evidence.session.rawFingerprint, createHash('sha256').update(JSON.stringify(value.session)).digest('hex'));
+    assert.equal(evidence.session.canonicalFingerprint, observedOwnershipFingerprint(value.session));
+    assert.notEqual(evidence.session.rawFingerprint, evidence.session.canonicalFingerprint);
+    assert(!JSON.stringify(evidence).includes(source.url)); assert(!JSON.stringify(evidence).includes('exact-bytes'));
+    assert.equal(evidence.receipt.fingerprint, value.receipt.fingerprint);
+    assert.equal(evidence.mirror.revision, value.continuity.revision);
+});
 function closedState(before = state()) {
     const value = structuredClone(before);
     value.tabs = value.tabs.filter(tab => tab.id !== 33);

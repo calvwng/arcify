@@ -5,13 +5,18 @@ import { isStartupLauncherTab } from './startup-launcher-tab.js';
 export const CONTINUITY_LOCAL_KEY = 'favoriteContinuity';
 export const CONTINUITY_SESSION_KEY = 'favoriteContinuityReceipt';
 const SESSION_KEY = 'favoriteSession';
-const SCHEMA = 'exact-global-favorites-v1';
+const SCHEMA = 'exact-global-favorites-v2';
 const empty = () => ({ version: 1, bindings: [], attempts: [] });
 const copy = value => structuredClone(value);
 const id = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
 const same = (a, b) => a.peerId === b.peerId && a.generation === b.generation;
 const identity = item => [item.id, item.url, item.sourceBookmarkId];
-const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(value)))))
+// Storage may reconstruct object properties in a different order. Sort only
+// object keys: array order, exact IDs, values and optional fields still matter.
+export const encodeFavoriteContinuityState = value => JSON.stringify(value, (_key, entry) =>
+    entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? Object.fromEntries(Object.keys(entry).sort().map(key => [key, entry[key]])) : entry);
+const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(encodeFavoriteContinuityState(value)))))
     .map(byte => byte.toString(16).padStart(2, '0')).join('');
 const receiptFields = value => ({ epoch: value.epoch, writerGeneration: value.generation, revision: value.revision });
 
