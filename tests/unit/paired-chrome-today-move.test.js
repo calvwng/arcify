@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
-import { assertTodayMoved, assertTodayMoveUnchanged, assertTodayMoveRejected, assertTodayMoveTrace, assertTodayMoveReload, assertTodayMoveHelperClosed, waitForTodayMoveHelperCleanup, todayMoveReloadVerdict,
+import { assertTodayMoved, assertTodayMoveUnchanged, assertTodayMoveRejected, assertTodayMoveTrace, assertTodayMoveReload, assertTodayMoveHelperClosed, waitForTodayMoveHelperCleanup, todayMoveReloadVerdict, readTodayMoveSpaceTarget, waitForTodayMoveSpaceSelection,
     installTodayMoveTrace, installTodayMoveNativeTrace, assertTodayMoveNativeQuiet, readTodayMovePage, serveTodayMoveFixture, todayMoveDestination } from '../../scripts/paired-chrome-today-move.mjs';
 
 function sample({ groupSync = false, inverted = false } = {}) {
@@ -105,6 +105,63 @@ test('passive lifecycle guard rejects transient activation, replacement and wind
     finally { if (prior === undefined) delete globalThis.chrome; else globalThis.chrome = prior; delete globalThis.__todayMoveNativeTrace; }
 });
 
+function selectionReadback() {
+    return { snapshot: { windowId: 7, activeSpaceId: 'destination', tabs: [{ id: 11, windowId: 7, active: true, spaceId: 'destination' }] },
+        rendered: { url: 'chrome-extension://arcify/sidebar.html', visibility: 'visible', width: 350, height: 800, devicePixelRatio: 1,
+            switcher: { x: 8, y: 750, width: 330, height: 40, visible: true }, selectedSpaces: ['destination'], selectedVisible: true, visibleSpaces: ['destination'] },
+        target: { count: 1, spaceId: 'source', nodeId: 1, connected: true, enabled: true, visible: true, x: 80, y: 750, width: 90, height: 40 } };
+}
+const selectionOptions = { spaceId: 'destination', windowId: 7, extensionId: 'arcify', targetSpaceId: 'source', activeTabId: 11 };
+const boundedPoll = async (read, accept) => { for (let index = 0; index < 8; index++) { const state = await read(); if (accept(state)) return state; } throw new Error('Selection did not settle'); };
+for (const [name, change] of Object.entries({
+    staleAuthority: s => s.snapshot.activeSpaceId = 'source', wrongWindow: s => s.snapshot.windowId = 8,
+    wrongActiveTab: s => s.snapshot.tabs[0].id = 12, staleActiveOwner: s => s.snapshot.tabs[0].spaceId = 'source',
+    staleChipSelection: s => s.rendered.selectedSpaces = ['source'], staleContent: s => s.rendered.visibleSpaces = ['source'],
+    hiddenPanel: s => s.rendered.visibility = 'hidden', ordinarySidebar: s => s.rendered.url = 'https://example.test/sidebar.html',
+    missingChip: s => s.target.count = 0, duplicateChip: s => s.target.count = 2, wrongChip: s => s.target.spaceId = 'destination',
+    detachedChip: s => s.target.connected = false, obscuredChip: s => s.target.visible = false, disabledChip: s => s.target.enabled = false
+})) test(`Space transition cannot authorize input with ${name}`, async () => {
+    const stale = selectionReadback(); change(stale); const pristine = structuredClone(stale); let clicks = 0;
+    await assert.rejects(async () => { await waitForTodayMoveSpaceSelection({ ...selectionOptions, read: async () => stale, poll: boundedPoll }); clicks++; }, /Selection did not settle/);
+    assert.equal(clicks, 0); assert.deepEqual(stale, pristine);
+});
+
+test('Space transition waits for exact authoritative/rendered destination and stable chip incarnation before one click', async () => {
+    const first = selectionReadback(), stale = structuredClone(first), replacement = structuredClone(first);
+    stale.snapshot.activeSpaceId = 'source'; replacement.target.nodeId++;
+    const states = [stale, first, replacement, replacement]; let reads = 0, clicks = 0;
+    const result = await waitForTodayMoveSpaceSelection({ ...selectionOptions, read: async () => states[reads++], poll: boundedPoll });
+    clicks++; assert.equal(result, replacement); assert.equal(reads, 4); assert.equal(clicks, 1);
+    // A nonready observation must reset stability, even if the same chip later returns.
+    reads = 0; const interrupted = [first, stale, first, first];
+    await waitForTodayMoveSpaceSelection({ ...selectionOptions, read: async () => interrupted[reads++], poll: boundedPoll }); assert.equal(reads, 4);
+    clicks = 0;
+    await assert.rejects(async () => {
+        await waitForTodayMoveSpaceSelection({ ...selectionOptions, read: async () => first, poll: boundedPoll });
+        clicks++; throw new Error('Click failed after readiness');
+    }, /Click failed after readiness/);
+    assert.equal(clicks, 1, 'A failed input must propagate without replay.');
+    const source = selectionReadback(); source.snapshot.activeSpaceId = 'source'; source.rendered.selectedSpaces = ['source']; source.rendered.visibleSpaces = ['source'];
+    await waitForTodayMoveSpaceSelection({ ...selectionOptions, spaceId: 'source', activeTabId: undefined, read: async () => source, poll: boundedPoll });
+});
+
+test('read-only chip probe detects replacement despite identical labels and geometry', () => {
+    const { document } = parseHTML('<html><body><div id="spaceSwitcher"><button data-space-id="source">Source</button></div></body></html>');
+    const keys = ['document', 'getComputedStyle', 'innerWidth', 'innerHeight', '__todayMoveChipIdentity'];
+    const prior = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
+    Object.assign(globalThis, { document, getComputedStyle: () => ({ display: 'block', visibility: 'visible' }), innerWidth: 350, innerHeight: 800 });
+    delete globalThis.__todayMoveChipIdentity;
+    const mount = node => { node.getBoundingClientRect = () => ({ x: 80, y: 750, width: 90, height: 40 }); document.elementFromPoint = () => node; };
+    try {
+        const node = document.querySelector('button'); mount(node); const first = readTodayMoveSpaceTarget('source');
+        assert.equal(first.visible, true); assert.equal(first.connected, true); assert.deepEqual(readTodayMoveSpaceTarget('source'), first);
+        const replacement = node.cloneNode(true); node.replaceWith(replacement); mount(replacement);
+        assert.notEqual(readTodayMoveSpaceTarget('source').nodeId, first.nodeId);
+        assert.deepEqual(readTodayMoveSpaceTarget('absent'), { count: 0 }); replacement.after(replacement.cloneNode(true));
+        assert.deepEqual(readTodayMoveSpaceTarget('source'), { count: 2 });
+    } finally { for (const key of keys) { if (prior[key] === undefined) delete globalThis[key]; else globalThis[key] = prior[key]; } }
+});
+
 test('helper cleanup readiness requires native, canonical and authenticated snapshot convergence without exemptions', () => {
     const state = sample().after, receipt = { tabId: 100, windowId: 7 };
     assert.equal(assertTodayMoveHelperClosed(state, receipt), state);
@@ -184,6 +241,16 @@ test('new full cases retain existing stable IDs and real native host, paired ref
     assert.match(helper, /assert.equal\(hosting.tab, null\)/); assert.match(helper, /assert.equal\(hosting.windowId, windowId\)/);
     assert.match(helper, /page.click\(todayRow\(id\), \{ button: 'right' \}\)/); assert.match(helper, /clickBookmarkFixtureRow\(native.page/);
     assert.match(helper, /assertTodayMoveNativeQuiet\(nativeEvents\)/);
+    const transition = helper.slice(helper.indexOf('// Visiting the moved page intentionally'), helper.indexOf('const savedPin ='));
+    assert.match(transition, /spaceId: destination.id, activeTabId: seed\[0\]/);
+    assert.match(transition, /foreground-destination-selection-settled/); assert.match(transition, /source-selection-settled-for-rejections/);
+    const destinationReady = transition.indexOf('await waitForTodayMoveSpaceSelection');
+    const sourceClick = transition.indexOf("await input('Return to source Space");
+    const sourceReady = transition.lastIndexOf('await waitForTodayMoveSpaceSelection');
+    assert(destinationReady >= 0 && destinationReady < sourceClick && sourceClick < sourceReady);
+    assert.equal((transition.match(/native\.page\.click\(/g) || []).length, 1);
+    assert.doesNotMatch(transition, /catch|setTimeout|sleep|retry/);
+
     assert.match(helper, /assertTodayMoveTrace\(trace/); assert.match(helper, /watchTodayInvalidation/); assert.match(helper, /readSpotlightRows/);
     assert.match(helper, /const closedHelper = await native.close\(\)/);
     const baseline = helper.indexOf('const beforeReload = await waitForTodayMoveHelperCleanup');

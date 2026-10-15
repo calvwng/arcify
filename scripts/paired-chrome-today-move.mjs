@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { clickBookmarkFixtureRow, finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { readTodaySelection, assertTodaySelection, watchTodayInvalidation } from './paired-chrome-today-selection.mjs';
 import { assertReloadWindowSelection } from './paired-chrome-ordinary-favorites.mjs';
-import { readSpotlightRows, readNativeSidebarRender } from './paired-chrome-sidebar.mjs';
+import { readSpotlightRows, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity } from './paired-chrome-sidebar.mjs';
 
 export const TODAY_MOVE_ACTION = '#tab-context-menu [data-action="moveTodayTabsToSpace"]';
 export const todayMoveDestination = id => `#tab-context-menu [data-action="moveTodayToDestination"][data-space-id="${id}"]`;
@@ -121,6 +121,37 @@ export function assertTodayMoveNativeQuiet(events) {
 export function readTodayMovePage() {
     return { url: location.href, documentId: document.body.dataset.documentId, timeOrigin: performance.timeOrigin,
         value: document.querySelector('#move-input')?.value, topLevel: window === window.top, frameCount: document.querySelectorAll('iframe,frame').length };
+}
+
+/** Read-only node identity catches chip replacement even when rendered labels are unchanged. */
+export function readTodayMoveSpaceTarget(spaceId) {
+    const matches = [...document.querySelectorAll('#spaceSwitcher > button[data-space-id]')].filter(node => node.dataset.spaceId === spaceId);
+    if (matches.length !== 1) return { count: matches.length };
+    const node = matches[0], rect = node.getBoundingClientRect(), style = getComputedStyle(node);
+    const probe = globalThis.__todayMoveChipIdentity ||= { nodes: new WeakMap(), sequence: 0 };
+    if (!probe.nodes.has(node)) probe.nodes.set(node, ++probe.sequence);
+    const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+    return { count: 1, spaceId: node.dataset.spaceId, nodeId: probe.nodes.get(node), connected: node.isConnected, enabled: !node.disabled,
+        visible: style.display !== 'none' && style.visibility === 'visible' && rect.width > 0 && rect.height > 0 &&
+            x > 0 && x < innerWidth && y > 0 && y < innerHeight && node.contains(document.elementFromPoint(x, y)),
+        x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+}
+
+/** A foreground action finishes before its activation/session-driven panel redraw can finish. */
+export async function waitForTodayMoveSpaceSelection({ read, poll, spaceId, windowId, extensionId, targetSpaceId, activeTabId }) {
+    let previous = null;
+    return poll(read, state => {
+        const { snapshot, rendered, target } = state;
+        const ready = snapshot.windowId === windowId && snapshot.activeSpaceId === spaceId &&
+            (activeTabId === undefined || snapshot.tabs.filter(tab => tab.active && tab.windowId === windowId).length === 1 &&
+                snapshot.tabs.some(tab => tab.id === activeTabId && tab.windowId === windowId && tab.active && tab.spaceId === spaceId)) &&
+            nativeSidebarRenderReady(rendered, extensionId) && rendered.selectedSpaces[0] === spaceId &&
+            target.count === 1 && target.spaceId === targetSpaceId && Number.isSafeInteger(target.nodeId) && target.nodeId > 0 &&
+            target.connected === true && target.enabled === true && target.visible === true;
+        if (!ready) { previous = null; return false; }
+        const identity = JSON.stringify({ rendered: nativeSidebarRenderIdentity(rendered), target });
+        const stable = identity === previous; previous = identity; return stable;
+    }, 'authoritative and native rendered Space selection with a stable exact Space chip before input');
 }
 
 export function assertTodayMoveHelperClosed(state, closedHelper) {
@@ -279,9 +310,15 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
         });
         // Return to the exact content page; a native panel does not require a helper tab for its actions.
         await ui(pages.get(seed[0]), 'Return to the moved active content page', async () => {});
-        // Visiting the moved page intentionally selects its owning Space. Explicitly choose source for negative tests.
+        // Visiting the moved page intentionally selects its owner asynchronously. Wait for that redraw before acquiring a chip.
+        const readSelection = async () => ({ snapshot: await snapshot(windowId), rendered: await native.page.evaluate(readNativeSidebarRender),
+            target: await native.page.evaluate(readTodayMoveSpaceTarget, source.id) });
+        const selectionOptions = { read: readSelection, poll, windowId, extensionId: arcifyId, targetSpaceId: source.id };
+        const foregroundSelection = await waitForTodayMoveSpaceSelection({ ...selectionOptions, spaceId: destination.id, activeTabId: seed[0] });
+        await checkpoint('foreground-destination-selection-settled', { foregroundSelection, sourceRendered, searchBefore, searchAfter, searchSurface, invalidation });
         await input('Return to source Space for rejection checks', () => native.page.click(`#spaceSwitcher button[data-space-id="${source.id}"]`));
-        await poll(() => snapshot(windowId), state => state.activeSpaceId === source.id, 'source selected for guarded operations');
+        const rejectionSelection = await waitForTodayMoveSpaceSelection({ ...selectionOptions, spaceId: source.id });
+        await checkpoint('source-selection-settled-for-rejections', { rejectionSelection });
         const savedPin = `.space.active [data-bookmark-id="${pinId}"]`;
         await input('Inspect saved-pin exclusion', async () => { await native.page.click(savedPin, { button: 'right' }); await native.page.waitForSelector('#tab-context-menu'); assert.equal(await native.page.$(TODAY_MOVE_ACTION), null); }); await clear();
         const favorite = await native.page.$('#pinnedFavicons .saved-favorite'); assert(favorite, 'Prior full-suite Favorite fixture must remain available for exclusion.'); await favorite.dispose();
