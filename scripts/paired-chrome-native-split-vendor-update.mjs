@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { copyFile, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime } from './paired-chrome-sandbox.mjs';
@@ -69,8 +70,21 @@ export function localPackageAptOptions(root) {
         'APT::Get::allow-remove-essential=false', 'APT::Get::Fix-Broken=false'].flatMap(value => ['-o', value]);
 }
 
+export function vendorArchiveCachePath(root, candidate) {
+    localPackageAptOptions(root); // Reuse the strict generated temporary-root check.
+    assert.equal(candidate.package, PACKAGE);
+    assert.equal(candidate.architecture, 'amd64');
+    assert(chromeMajor(candidate.version) >= MINIMUM_MAJOR);
+    return `${root}/archives/${PACKAGE}_${candidate.version}_amd64.deb`;
+}
+
+export async function stageVendorArchive(source, destination) {
+    // Do not overwrite a cache entry: fresh private state must contain only these verified bytes.
+    await copyFile(source, destination, constants.COPYFILE_EXCL);
+}
+
 /** Injectable commands and filesystem reads allow pure tests without apt or network activity. */
-export async function updateFromVendorPackage({ root, installedVersion, run, inspectArchive, evidence }) {
+export async function updateFromVendorPackage({ root, installedVersion, run, inspectArchive, stageArchive = stageVendorArchive, evidence }) {
     const path = `${root}/google-chrome-stable.deb`;
     const receipt = run('/usr/bin/curl', vendorDownloadArgs(path));
     readVendorReceipt(receipt); // Reject a bad transport receipt before parsing any archive metadata.
@@ -78,12 +92,19 @@ export async function updateFromVendorPackage({ root, installedVersion, run, ins
     evidence.download = validateVendorDownload(receipt, downloaded.size);
     const candidate = validateVendorArchive(downloaded.metadata, downloaded.sha256, installedVersion);
     evidence.candidate = candidate;
-    const install = ['--no-download', '--only-upgrade', '--no-remove', '--no-install-recommends', '--assume-yes', 'install', path];
+    // APT 2.7 resolves a --no-download local archive to an absolute path only when
+    // its canonical package_version_arch.deb is already in Dir::Cache::Archives.
+    const cachedPath = vendorArchiveCachePath(root, candidate);
+    await stageArchive(path, cachedPath);
+    const stagedArchive = await inspectArchive(cachedPath);
+    assert.deepEqual(stagedArchive, downloaded, 'Staged archive differs from the HTTPS-verified bytes/metadata');
+    evidence.archiveCache = { path: cachedPath, bytes: stagedArchive.size, sha256: stagedArchive.sha256, version: candidate.version };
+    const install = ['--no-download', '--only-upgrade', '--no-remove', '--no-install-recommends', '--assume-yes', 'install', cachedPath];
     const apt = args => run('/usr/bin/sudo', ['-n', '/usr/bin/apt-get', ...localPackageAptOptions(root), ...args]);
     evidence.plan = validateUpgradePlan(apt(['--simulate', ...install]), candidate, installedVersion);
     // An exact local package is the sole input; no repository download or dependency change is allowed.
     validateUpgradePlan(apt(['--simulate', ...install]), candidate, installedVersion);
-    const finalArchive = await inspectArchive(path);
+    const finalArchive = await inspectArchive(cachedPath);
     assert.deepEqual(finalArchive, downloaded, 'Downloaded archive changed after identity/digest validation');
     apt(install);
     return candidate;
@@ -105,7 +126,7 @@ async function inspectExistingVendorKeyFile() {
 }
 
 export async function prepareVendorChrome({ env = process.env, uid = process.getuid?.(), platform = process.platform,
-    inspect = inspectInstalledChromeRuntime, inspectPackaging = inspectChromePackagingState, inspectVendorKey = inspectExistingVendorKeyFile, prepareDirectory, run, inspectArchive, evidence = {} }) {
+    inspect = inspectInstalledChromeRuntime, inspectPackaging = inspectChromePackagingState, inspectVendorKey = inspectExistingVendorKeyFile, prepareDirectory, run, inspectArchive, stageArchive, evidence = {} }) {
     validateUpdateEnvironment(env, uid, platform);
     evidence.before = await inspect(CHROME_EXECUTABLE);
     assert.equal(evidence.before.package.architecture, 'amd64');
@@ -118,7 +139,7 @@ export async function prepareVendorChrome({ env = process.env, uid = process.get
     evidence.packagingBefore = await inspectPackaging();
     evidence.existingVendorKeyBefore = await inspectVendorKey();
     const root = await prepareDirectory(); evidence.temporaryRoot = root;
-    const candidate = await updateFromVendorPackage({ root, installedVersion: version, run, inspectArchive, evidence });
+    const candidate = await updateFromVendorPackage({ root, installedVersion: version, run, inspectArchive, stageArchive, evidence });
     evidence.packagingAfter = await inspectPackaging();
     evidence.existingVendorKeyAfter = await inspectVendorKey();
     assert.deepEqual(evidence.packagingAfter, evidence.packagingBefore, 'Existing vendor defaults and source/trust configuration must remain unchanged');

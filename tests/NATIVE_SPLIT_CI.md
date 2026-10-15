@@ -22,8 +22,10 @@ routing is preserved. Downloads have explicit time/size limits and no alternate
 host or retry fallback.
 
 The package must identify exactly `google-chrome-stable`, amd64, version 155+.
-The updater records the received archive's SHA256 and checks the same bytes and
-metadata again immediately before installation. Two apt simulations may plan only
+The updater records the received archive's SHA256, stages an exclusive copy under
+APT's exact `package_version_arch.deb` basename in the isolated archive cache, and
+verifies the staged bytes/metadata against the download. It checks that same cached
+file again immediately before installation. Two apt simulations may plan only
 the existing Chrome upgrade; apt then installs that exact local file with
 `--no-download`, no repository inputs, no new dependencies, no removals, no
 held-package overrides and no downgrade. Missing integrity/metadata, old versions,
@@ -57,6 +59,24 @@ SHA256 meaning, command results, and before/after package/policy evidence. Pure 
 tests mock downloads and package-manager commands; no local installation or browser
 launch is part of validation. The exact-head CI job must still verify the live
 vendor package, installation, sandbox and positive native API together.
+
+### Verified transport and archive-path correction
+
+[Head fef648a](https://github.com/calvwng/arcify/actions/runs/38727088293/job/116395518568)
+received the exact Google HTTPS URL with HTTP 200 and successful TLS verification,
+validated Chrome `155.0.8059.79-1` amd64, and produced two Chrome-only plans.
+Installation then stopped before unpack because `--no-download` left APT's internal
+archive basename relative when its canonical cache file was absent. This was not a
+signature, permission, sandbox or vendor-download failure.
+
+[APT's archive constructor](https://github.com/Debian/apt/blob/2.7.14/apt-pkg/acquire-item.cc#L3274-L3320)
+derives `package_version_arch.deb` and resolves it to an absolute completed local
+archive when that file already exists in `Dir::Cache::Archives` with the expected
+size. The updater now stages and SHA256/metadata-checks that exact cache file before
+both plans and installation. `--no-download`, the empty repository inputs, Chrome-only
+plan, and every existing provenance/security guard remain in force. Pure tests
+verify staging, stale-cache rejection and tampered-copy rejection without executing
+apt; another exact-head CI run is still required for live installation evidence.
 
 ### Preserved signed-source failure history
 
