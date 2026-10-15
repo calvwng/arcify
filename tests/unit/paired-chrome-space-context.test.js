@@ -7,7 +7,7 @@ import { runInNewContext } from 'node:vm';
 import { SPACE_MENU_ITEMS, SPACE_PICKER_IDS, assertSpaceContextMenu, assertSpaceIconPicker,
     assertSpaceIconProjection, assertSpaceContextUnchanged, assertSpaceIconSaved,
     assertSpaceDeleteWarning, cancelSpaceDeleteWithInput, assertSpaceContextFixtureEnvironment, captureRequiredSpaceScreenshot,
-    observeSpaceContextOpening, assertSpaceMetadataSaved, assertSpaceFolderCreated, SPACE_COLOR_IDS, assertSpaceColorPicker, assertSpaceNameEditor, assertSpaceDetailsProjection, readSpaceDetailsProjection } from '../../scripts/paired-chrome-space-context.mjs';
+    captureStableSpaceMenu, observeSpaceMenuEvents, observeSpaceContextOpening, assertSpaceMetadataSaved, assertSpaceFolderCreated, SPACE_COLOR_IDS, assertSpaceColorPicker, assertSpaceNameEditor, assertSpaceDetailsProjection, readSpaceDetailsProjection } from '../../scripts/paired-chrome-space-context.mjs';
 
 test('Space detail reader compares resolved theme color while preserving a genuine mismatch', () => {
     const root = {}, container = { style: { getPropertyValue: () => 'var(--chrome-purple-color, rgba(255, 255, 255, 0.1))' } };
@@ -130,7 +130,7 @@ test('Space fixture is restricted to non-root GitHub CI before touching any brow
 const shot = () => ({ filename: '01-space.png', label: 'proof', url: 'chrome-extension://fixture/sidebar.html', capturedAt: '2026-10-15T06:00:00.000Z' });
 test('every capture explicitly requires a screenshot and retains returned metadata', async () => {
     const page = {}, expected = shot(); let calls = 0;
-    const actual = await captureRequiredSpaceScreenshot(async (...args) => { calls++; assert.deepEqual(args, [page, 'proof', true]); return expected; }, page, 'proof');
+    const actual = await captureRequiredSpaceScreenshot(async (...args) => { calls++; assert.deepEqual(args, [page, 'proof', true, { fullPage: false }]); return expected; }, page, 'proof');
     assert.equal(actual, expected); assert.equal(calls, 1);
 });
 for (const [name, mutate] of Object.entries({ missingFilename: s => delete s.filename, wrongFormat: s => s.filename = 'proof.jpg', wrongLabel: s => s.label = 'other', missingUrl: s => delete s.url,
@@ -288,4 +288,46 @@ test('icon-modal Cancel uses real input and checks pre-open state plus restored 
     assert.match(source, /Cancel the icon picker[^\n]+page\.click\('\.space-editor > button'\)/);
     assert.match(source, /evidence\.iconCancelled = \{ before: evidence\.picker\.before, after: await read\(\) \}/);
     assert.match(source, /assertSpaceContextUnchanged\(evidence\.iconCancelled\.before, evidence\.iconCancelled\.after\);\n        assert\.equal\(await page\.\$eval\(chip\(target\.id\), node => node === document\.activeElement\), true\)/);
+});
+
+
+test('stable menu capture proves surface before foreground, before screenshot and afterward', async () => {
+    const events = [], records = [];
+    const result = await captureStableSpaceMenu({ name: 'Work',
+        observe: async () => { events.push('observe'); return { surface: menu(), observation: { events: [] } }; },
+        record: async state => records.push(structuredClone(state)),
+        foreground: async action => { events.push('foreground'); await action(); },
+        capture: async () => events.push('capture') });
+    assert.deepEqual(events, ['observe', 'foreground', 'observe', 'capture', 'observe']);
+    assert.deepEqual(result.map(item => item.phase), ['before-foreground', 'before-screenshot', 'after-screenshot']);
+    assert.equal(records.length, 3);
+});
+for (const missingAt of [0, 1, 2]) test(`missing menu at capture checkpoint ${missingAt} fails without reopening or replay`, async () => {
+    let reads = 0, captures = 0, foregrounds = 0; const records = [];
+    await assert.rejects(captureStableSpaceMenu({ name: 'Work',
+        observe: async () => ({ surface: reads++ === missingAt ? null : menu() }),
+        record: async state => records.push(structuredClone(state)),
+        foreground: async action => { foregrounds++; await action(); },
+        capture: async () => { captures++; } }), /must remain present/);
+    assert.equal(reads, missingAt + 1); assert.equal(captures, missingAt === 2 ? 1 : 0);
+    assert.equal(foregrounds, missingAt ? 1 : 0); assert.equal(records.length, missingAt + 1);
+});
+test('capture failure preserves its original error even if diagnostic surface disappears', async () => {
+    let reads = 0, captures = 0; const original = Error('Original capture failure');
+    await assert.rejects(captureStableSpaceMenu({ name: 'Work',
+        observe: async () => ({ surface: ++reads === 3 ? null : menu() }), record: async () => {},
+        foreground: action => action(), capture: async () => { captures++; throw original; } }), error => error === original);
+    assert.equal(reads, 3); assert.equal(captures, 1);
+});
+test('passive menu diagnostics observe bounded events without mutating focus, viewport or menu', () => {
+    const handlers = new Map(), removals = [], root = {};
+    const window = { addEventListener: (name, fn) => handlers.set(name, fn), removeEventListener: (name, fn) => removals.push([name, fn]) };
+    const document = { visibilityState: 'visible', hasFocus: () => true, querySelector: () => root,
+        addEventListener: window.addEventListener, removeEventListener: window.removeEventListener };
+    const context = { window, document, innerWidth: 224, innerHeight: 600 };
+    runInNewContext(`(${observeSpaceMenuEvents.toString()})()`, context);
+    for (let i = 0; i < 110; i++) handlers.get('blur')({ type: 'blur' });
+    const state = context.__spaceMenuCaptureObservation.read();
+    assert.equal(state.events.length, 100); assert.equal(state.menuPresent, true); assert.equal(state.width, 224);
+    context.__spaceMenuCaptureObservation.stop(); assert.equal(removals.length, 4);
 });

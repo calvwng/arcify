@@ -9,12 +9,42 @@ export function assertSpaceContextFixtureEnvironment(env = process.env, uid = pr
     assert.notEqual(uid, 0, 'The Space-menu fixture never disables the native Chrome sandbox for root.');
 }
 export async function captureRequiredSpaceScreenshot(screenshot, page, label) {
-    const captured = await screenshot(page, label, true);
+    const captured = await screenshot(page, label, true, { fullPage: false });
     assert(captured, `Required screenshot evidence is missing: ${label}`);
     assert.match(captured.filename, /\.png$/); assert.equal(captured.label, label);
     assert.equal(typeof captured.url, 'string'); assert(captured.url.length > 0);
     assert(Number.isFinite(Date.parse(captured.capturedAt)), 'Screenshot evidence must include its capture timestamp.');
     return captured;
+}
+
+// Passive diagnostics only: no focus, input, resize or surface restoration.
+export function observeSpaceMenuEvents() {
+    const events = [], snapshot = type => ({ type, at: Date.now(), visibility: document.visibilityState,
+        focused: document.hasFocus(), width: innerWidth, height: innerHeight,
+        menuPresent: Boolean(document.querySelector('.space-context-menu')) });
+    const record = event => { if (events.length < 100) events.push(snapshot(event.type)); };
+    for (const name of ['blur', 'focus', 'resize']) window.addEventListener(name, record);
+    document.addEventListener('visibilitychange', record);
+    globalThis.__spaceMenuCaptureObservation = { read: () => ({ ...snapshot('read'), events: [...events] }),
+        stop: () => { for (const name of ['blur', 'focus', 'resize']) window.removeEventListener(name, record);
+            document.removeEventListener('visibilitychange', record); } };
+}
+export async function captureStableSpaceMenu({ observe, capture, foreground, record, name }) {
+    const stages = [];
+    const checkpoint = async phase => {
+        const state = await observe(); stages.push({ phase, ...state });
+        await record({ phase: 'space-menu-capture-observation', stages });
+        assertSpaceContextMenu(state.surface, name);
+    };
+    await checkpoint('before-foreground');
+    await foreground(async () => {
+        await checkpoint('before-screenshot');
+        let primaryError;
+        try { await capture(); } catch (error) { primaryError = error; }
+        try { await checkpoint('after-screenshot'); } catch (error) { primaryError ||= error; }
+        if (primaryError) throw primaryError;
+    });
+    return stages;
 }
 
 export const SPACE_COLOR_IDS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'];
@@ -30,6 +60,7 @@ const bounds = state => {
 };
 
 export function assertSpaceContextMenu(state, name) {
+    assert(state, 'The exact Space menu must remain present before input or capture.');
     assert.equal(state.role, 'menu'); assert.equal(state.name, `Space options: ${name}`);
     assert.equal(state.visible, true); assert.equal(state.focusInside, true); bounds(state);
     assert.deepEqual(state.items.map(item => item.label), SPACE_MENU_ITEMS);
@@ -407,8 +438,13 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, scre
         const beforeResetReload = await read();
         await ui(sidebarB.page, 'Reload reset Space icon in the second window', () => sidebarB.page.reload({ waitUntil: 'domcontentloaded' }));
         evidence.resetReload = await projection(sidebarB.page, null); assertSpaceContextUnchanged(beforeResetReload, await read());
+        await sidebarB.page.evaluate(observeSpaceMenuEvents);
         await openMenu(sidebarB.page, chip(target.id), target.name);
-        await ui(sidebarB.page, 'Capture exact Space Delete command before cancellation', () => capture(sidebarB.page, 'space-context-delete-cancel-keeps-saved-subtree'));
+        evidence.deleteCapture = await captureStableSpaceMenu({ name: target.name, record,
+            observe: async () => ({ observation: await sidebarB.page.evaluate(() => globalThis.__spaceMenuCaptureObservation.read()),
+                surface: await sidebarB.page.evaluate(readSpaceContextSurface) }),
+            foreground: action => ui(sidebarB.page, 'Capture exact Space Delete command before cancellation', action),
+            capture: () => capture(sidebarB.page, 'space-context-delete-cancel-keeps-saved-subtree') });
         const beforeDeleteCancel = await read();
         assert.equal(seededTabs.filter(id => beforeDeleteCancel.tabs.some(tab => tab.id === id)).length, 2);
         assert(flatten(beforeDeleteCancel.bookmarks).some(node => node.parentId === target.bookmarkFolderId && !node.url));
@@ -420,6 +456,10 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, scre
         await record({ phase: 'space-context-basics-complete', target, ...evidence }); return evidence;
     } catch (error) {
         primaryError = error;
+        if (sidebarB?.page && !sidebarB.page.isClosed()) {
+            try { evidence.deleteCaptureLast = await sidebarB.page.evaluate(() => globalThis.__spaceMenuCaptureObservation?.read() || null); }
+            catch (diagnosticError) { evidence.deleteCaptureDiagnosticError = diagnosticError.message; }
+        }
         await record({ phase: 'space-context-basics-failed', target, seedFolder, seededTabs, ...evidence, error: { message: error.message, stack: error.stack } }).catch(() => {});
         throw error;
     } finally {
