@@ -368,3 +368,38 @@ test('ordinary click without a readiness predicate keeps the existing single-cli
     await performVisibleClick(h.page, '#button', h.record);
     assert.equal(clicks, 1); assert.equal(h.records.at(-1).phase, 'completed');
 });
+
+
+function detachedScrollError() {
+    const error = new Error('Node is detached from document');
+    error.stack = 'Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1314:23)\n    at async CdpElementHandle.scrollIntoView (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/cdp/ElementHandle.js:106:13)';
+    return error;
+}
+test('drag target detached during scrolling is freshly verified and reacquired before any mouse input', async () => {
+    const h = dragGeometryHarness([{error: detachedScrollError(), detached: 'target'}, {}]);
+    const result = await locateFreshDragGeometry(h.page, '#source', '#target', h.record, {pause: h.pause});
+    assert.equal(result.target, h.handles[3]);
+    assert.equal(h.records[0].status, 'detached-during-scroll-before-input');
+    assert.equal(h.records[0].targetCurrent, false);
+    assert.equal(h.calls.filter(item => item.includes('dispose')).length, 2);
+});
+test('persistent scroll detachment still fails after the existing three-read bound', async () => {
+    const error = detachedScrollError();
+    const h = dragGeometryHarness([{error, detached: 'target'}]);
+    await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, {pause: h.pause}), value => value === error);
+    assert.equal(h.records.length, 3);
+    assert.equal(h.calls.filter(item => item.includes('dispose')).length, 6);
+});
+test('a scroll detachment message alone cannot authorize a new lookup', async () => {
+    const error = new Error('Node is detached from document');
+    const h = dragGeometryHarness([{error, detached: 'target'}]);
+    await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, {pause: h.pause}), value => value === error);
+    assert.equal(h.calls.filter(item => item.includes('lookup')).length, 2);
+});
+test('a driver detachment stack cannot authorize lookup when the observed target is still current', async () => {
+    const error = detachedScrollError();
+    const h = dragGeometryHarness([{error}]);
+    await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, {pause: h.pause}), value => value === error);
+    assert.equal(h.calls.filter(item => item.includes('lookup')).length, 2);
+    assert.equal(h.records.length, 0);
+});

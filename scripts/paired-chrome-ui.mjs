@@ -130,6 +130,19 @@ export async function locateFreshDragGeometry(page, sourceSelector, targetSelect
                 retained = true;
                 return { source, target, from, to };
             }
+        } catch (error) {
+            // scrollIntoView checks attachment before any mouse input. It can
+            // lose the target between lookup and the later connectivity reads.
+            // Require both the locked-driver origin and a fresh detached/replaced
+            // DOM proof; generic errors and uncertain input are never replayed.
+            const preInputScroll = error.message === 'Node is detached from document'
+                && /^Error: Node is detached from document\n    at CdpElementHandle\.assertConnectedElement \([^\n]*\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js:\d+:\d+\)\n    at async CdpElementHandle\.scrollIntoView \([^\n]*\/puppeteer-core\/lib\/puppeteer\/cdp\/ElementHandle\.js:\d+:\d+\)/.test(error.stack || '');
+            if (!preInputScroll || !target) throw error;
+            const targetCurrent = await target.evaluate((element, selector) =>
+                element.isConnected && element === document.querySelector(selector), targetSelector);
+            if (targetCurrent) throw error;
+            await record({ attempt, targetCurrent, status: 'detached-during-scroll-before-input', error: error.message });
+            if (attempt === maxAttempts) throw error;
         } finally {
             if (!retained) {
                 await source?.dispose().catch(() => {});
