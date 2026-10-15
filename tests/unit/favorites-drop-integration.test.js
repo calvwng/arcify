@@ -97,7 +97,7 @@ globalThis.chrome = {
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
     storage: { onChanged, local: area(local), sync: area(settings), session: area(session) },
-    windows: { async get(id) { if (![10, 99].includes(id)) throw new Error('Window missing'); return { id, type: 'normal', incognito: false }; }, async update(id) { return { id }; }, getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
+    windows: { async get(id) { if (![10, 99].includes(id)) throw new Error('Window missing'); return { id, type: 'normal', incognito: false }; }, async update(id) { return { id }; }, getCurrent(_options, callback) { if (callback) { if (hooks.currentWindow) hooks.currentWindow(callback); else callback({ id: 10 }); } return Promise.resolve({ id: 10 }); } },
     tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved', 'onReplaced'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id) { await hooks.tabGet?.(id); const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Tab closed'); return structuredClone(tab); },
@@ -107,7 +107,7 @@ globalThis.chrome = {
         async remove(id) { effects.push(['remove', id]); const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); await chrome.tabs.onRemoved.emit(id, { windowId: 10, isWindowClosing: false }); } },
     bookmarks: { async get(id) { return structuredClone(nodes().filter(node => node.id === id)); },
         async search({ title }) { return structuredClone(nodes().filter(node => node.title === title)); },
-        async getChildren(id) { if (startupPinRace && id === 'p') { startupPinRace = false; tabs[0].pinned = true; } return structuredClone((getNode(id)?.children || []).map(node => ({ ...node, parentId: id }))); },
+        async getChildren(id) { await hooks.children?.(id); if (startupPinRace && id === 'p') { startupPinRace = false; tabs[0].pinned = true; } return structuredClone((getNode(id)?.children || []).map(node => ({ ...node, parentId: id }))); },
         async move(id, { parentId, index }) {
             const node = getNode(id), parent = nodes().find(item => item.children?.some(child => child.id === id));
             if (!node || !parent) throw new Error('Missing bookmark');
@@ -667,6 +667,75 @@ test('actual ordinary closed-bookmark activation/re-render/blur preserves only i
     assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
     assert.equal(local.persistentFavorites.length, 0, 'range selection never adds Favorites');
     drag(document.body, 'keydown', 0, { key: 'Escape' });
+});
+
+test('actual delayed internal render retains a newer exact modifier selection', async () => {
+    await resetFavorites();
+    selectBookmark('c', {}); await wait(240);
+    assert(row('c').dataset.tabId, 'ordinary activation has established the exact live row');
+    let release, entered;
+    const blocked = new Promise(resolve => { release = resolve; });
+    const rendering = new Promise(resolve => { entered = resolve; });
+    hooks.children = async id => { if (id === 'p') { entered(); await blocked; } };
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
+    await rendering;
+    const original = row('c');
+    selectBookmark('a', { shiftKey: true });
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
+    release(); hooks.children = null;
+    await wait(180);
+    assert.notEqual(row('c'), original, 'the real asynchronous renderer replaced the selected row');
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
+    assert.equal(document.getElementById('bookmarkSelectionStatus').dataset.count, '3');
+    assert.deepEqual(writes, []); assert.deepEqual(batchRequests(), []);
+    drag(document.body, 'keydown', 0, { key: 'Escape' });
+});
+
+test('actual rapid ordinary click then Shift retains the saved selection through closed-to-live binding', async () => {
+    await resetFavorites();
+    let release, entered;
+    const blocked = new Promise(resolve => { release = resolve; });
+    const opening = new Promise(resolve => { entered = resolve; });
+    hooks.create = async () => { entered(); await blocked; };
+    const original = row('c');
+    selectBookmark('c', {});
+    await opening;
+    assert.equal(row('c'), original); assert.equal(row('c').dataset.tabId, undefined);
+    selectBookmark('a', { shiftKey: true });
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
+    release(); hooks.create = null;
+    await wait(240);
+    assert.notEqual(row('c'), original); assert(row('c').dataset.tabId);
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
+    assert.equal(document.getElementById('bookmarkSelectionStatus').dataset.count, '3');
+    assert.deepEqual(writes, []); assert.deepEqual(batchRequests(), []);
+    drag(document.body, 'keydown', 0, { key: 'Escape' });
+});
+
+test('actual delayed activation callback does not erase a newer modifier selection', async () => {
+    await resetFavorites();
+    selectBookmark('a', {}); await wait(180);
+    let complete;
+    hooks.currentWindow = callback => { complete = callback; };
+    await onActivated.emit({ windowId: 10, tabId: 1 });
+    assert.equal(typeof complete, 'function');
+    selectBookmark('c', { shiftKey: true });
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
+    await complete({ id: 10 }); hooks.currentWindow = null;
+    await wait(180);
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
+    await onActivated.emit({ windowId: 99, tabId: 1 });
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c'], 'a foreign window activation cannot clear selection');
+    hooks.currentWindow = callback => { complete = callback; };
+    await onActivated.emit({ windowId: 10, tabId: 2 });
+    await complete({ id: 99 });
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c'], 'a moved sidebar rejects the formerly owned window using the fresh lookup');
+    await onActivated.emit({ windowId: 99, tabId: 2 });
+    await complete({ id: 99 }); hooks.currentWindow = null;
+    assert.deepEqual(selectedBookmarkIds(), [], 'activation in the freshly verified window still clears');
+    selectBookmark('a'); selectBookmark('c', { shiftKey: true });
+    await onActivated.emit({ windowId: 10, tabId: 2 });
+    assert.deepEqual(selectedBookmarkIds(), [], 'a later genuine source-window activation still clears selection');
 });
 
 test('ordinary singleton drag retains row identity while selection count appears and a refresh waits', async () => {

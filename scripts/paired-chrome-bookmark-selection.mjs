@@ -33,6 +33,26 @@ export function installBookmarkDragTrace() {
         globalThis.__pairedBatchDragEvents.push({ type, trusted: event.isTrusted, bookmarkId: event.target.closest?.('.tab')?.dataset.bookmarkId ?? null, dropEffect: event.dataTransfer?.dropEffect ?? null });
     }, { capture: true, passive: true });
 }
+
+// Passive evidence only: retain input/selection timing across asynchronous
+// renders so a real regression cannot be mistaken for an undelivered gesture.
+export function installBookmarkSelectionTrace() {
+    globalThis.__pairedBookmarkSelectionTrace = [];
+    const record = event => {
+        const status = document.getElementById('bookmarkSelectionStatus');
+        globalThis.__pairedBookmarkSelectionTrace.push({ ...event, at: performance.now(), focused: document.hasFocus(),
+            ids: [...document.querySelectorAll('.space.active .tab.bookmark-selected')].map(node => node.dataset.bookmarkId), count: Number(status?.dataset.count || 0) });
+        if (globalThis.__pairedBookmarkSelectionTrace.length > 200) globalThis.__pairedBookmarkSelectionTrace.shift();
+    };
+    for (const type of ['click', 'focus', 'blur']) window.addEventListener(type, event => {
+        const input = { type, trusted: event.isTrusted, bookmarkId: event.target.closest?.('.tab')?.dataset.bookmarkId || null,
+            shift: Boolean(event.shiftKey), control: Boolean(event.ctrlKey), meta: Boolean(event.metaKey) };
+        record(input); if (type === 'click') queueMicrotask(() => record({ ...input, type: 'click-microtask' }));
+    }, { capture: true, passive: true });
+    new MutationObserver(() => record({ type: 'selection-status' })).observe(document.getElementById('bookmarkSelectionStatus'), {
+        attributes: true, attributeFilter: ['data-count', 'hidden'], childList: true
+    });
+}
 export async function cancelHeldBookmarkDrag(page) {
     await favoriteDragInputClient(page).send('Input.cancelDragging').catch(() => {});
     const ended = await page.evaluate(() => !document.querySelector('.dragging') && globalThis.__pairedBatchDragEvents?.some(event => event.type === 'dragend' && event.trusted)).catch(() => false);
@@ -240,6 +260,8 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         }
     });
     try {
+        await page.waitForSelector('#bookmarkSelectionStatus');
+        await page.evaluate(installBookmarkSelectionTrace);
         // Previous cases restore the user's default (inverted) order. This
         // scenario deliberately asserts A→B→D, so select that display mode via
         // the actual options UI rather than silently sorting observed rows.
@@ -340,15 +362,17 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         await screenshot(page, 'deleted-batch-member-shows-no-drop-destination');
         await ui(page, 'Clear stale drag selection before reload', () => page.keyboard.press('Escape'));
         await click(row(seed.a.id), ['Control']); await click(row(seed.d.id), ['Control']); await selection([seed.a.id, seed.d.id]);
+        const inputTrace = await page.evaluate(() => globalThis.__pairedBookmarkSelectionTrace);
+        await record({ phase: 'selection-trace-before-reload', inputTrace });
         await page.reload(); await page.waitForSelector('#bookmarkSelectionStatus'); await selection([]);
         assert.deepEqual(await read(), afterDeletion, 'Reload clears only the page selection.');
-        return { source: seed, chosen, firstProof, repeatProof, observations, modifierInput: 'real Control/Shift on Linux',
+        return { source: seed, chosen, firstProof, repeatProof, observations, inputTrace, modifierInput: 'real Control/Shift on Linux',
             realMouseDrag: true, nativePinnedTabsVerified: true, sourcePreserved: true,
             limits: ['Cmd modifier covered by DOM tests, not Linux physical input.', 'Native side-panel layout and OS drag-image appearance remain manual.', 'Partial API-failure injection is unit coverage; real browser case covers deletion during a frozen drag.'] };
     } catch (error) {
         primaryError = error;
         const failure = { phase: 'failed-before-cleanup', error: error.message };
-        try { failure.selection = await page.evaluate(readBookmarkSelection); } catch (observation) { failure.observationError = observation.message; }
+        try { failure.selection = await page.evaluate(readBookmarkSelection); failure.inputTrace = await page.evaluate(() => globalThis.__pairedBookmarkSelectionTrace); } catch (observation) { failure.observationError = observation.message; }
         try { await record(failure); } catch (observation) { error.diagnosticError = observation.message; }
         throw error;
     } finally {

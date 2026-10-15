@@ -90,14 +90,14 @@ test('selection order follows rendered/inverted order rather than click order', 
 });
 
 test('logical ordinary-click anchor survives closed-to-live render and blur, without preserving any selected rows', () => {
-    const f = fixture(); f.click('a'); f.selection.clearForRender();
+    const f = fixture(); f.click('a');
     const original = f.row('a'), replacement = original.cloneNode(true);
     replacement.dataset.tabId = '42'; replacement.dataset.pinnedUrl = original.dataset.url;
     f.selection.register(replacement); original.replaceWith(replacement); f.selection.reconcile();
     f.selection.onActivation(42); f.event(f.window, 'blur');
     assert.deepEqual(f.ids(), []);
     f.click('c', { shiftKey: true }); assert.deepEqual(f.ids(), ['a', 'b', 'c']);
-    f.selection.clearForRender(); replacement.dataset.pinnedUrl = 'https://other-saved.test/'; f.selection.reconcile();
+    replacement.dataset.pinnedUrl = 'https://other-saved.test/'; f.selection.reconcile();
     f.click('d', { shiftKey: true }); assert.deepEqual(f.ids(), ['d']);
 });
 
@@ -121,16 +121,120 @@ test('Space and pinned-root changes clear selection and never reuse an old ancho
     f.context.spaces[0].bookmarkFolderId = 'replacement'; f.selection.reconcile(); assert.deepEqual(f.ids(), []);
 });
 
-test('hidden, moved, removed, rebound and duplicate rows are pruned instead of matched by URL', () => {
-    for (const change of ['hidden', 'moved', 'removed', 'rebound', 'duplicate']) {
+test('hidden, moved, removed, changed saved URL and duplicate rows are pruned instead of matched by URL', () => {
+    for (const change of ['hidden', 'moved', 'removed', 'saved-url', 'duplicate']) {
         const f = fixture(); f.click('b', { ctrlKey: true }); f.click('d', { ctrlKey: true });
         if (change === 'hidden') f.row('b').parentElement.classList.add('collapsed');
         if (change === 'moved') f.row('a').parentElement.append(f.row('b'));
         if (change === 'removed') f.row('b').remove();
-        if (change === 'rebound') f.row('b').dataset.tabId = '9';
+        if (change === 'saved-url') f.row('b').dataset.url = 'https://other-saved.test/';
         if (change === 'duplicate') { const duplicate = f.row('b').cloneNode(true); f.selection.register(duplicate); f.row('b').after(duplicate); }
         f.selection.reconcile(); assert.deepEqual(f.ids(), ['d'], change);
     }
+});
+
+test('registered replacement rows retain exact saved-bookmark UI selection but never old drag authority', () => {
+    const f = fixture(); f.click('a', { ctrlKey: true }); f.click('d', { shiftKey: true });
+    const snapshot = f.selection.freeze(f.row('a'));
+    const expected = ['a', 'b', 'c', 'projected', 'd'];
+    for (const id of expected) {
+        const original = f.row(id), replacement = original.cloneNode(true);
+        replacement.querySelector('span').textContent = `New title for ${id}`;
+        f.selection.register(replacement); original.replaceWith(replacement);
+    }
+    assert.equal(f.selection.validate(snapshot), false, 'replacement rejects authority even before observer reconciliation');
+    f.selection.reconcile();
+    assert.deepEqual(f.ids(), expected);
+    assert.equal(f.document.getElementById('bookmarkSelectionStatus').dataset.count, '5');
+    for (const id of expected) assert.equal(f.row(id).getAttribute('aria-selected'), 'true');
+    assert.equal(f.selection.validate(snapshot), false);
+    const fresh = f.selection.freeze(f.row('b'));
+    assert.equal(f.selection.validate(fresh), true);
+    assert.deepEqual(fresh.entries.map(entry => entry.bookmarkId), expected);
+    assert(fresh.entries.every(entry => entry.element === f.row(entry.bookmarkId)));
+});
+
+test('pre-drag selection follows exact saved bookmarks through closed/live rebinding and live navigation', () => {
+    for (const change of ['open', 'rebind', 'close', 'navigate']) {
+        const f = fixture();
+        f.row('b').dataset.pinnedUrl = f.row('b').dataset.url;
+        f.click('a', { ctrlKey: true }); f.click('b', { ctrlKey: true });
+        const snapshot = f.selection.freeze(f.row('a'));
+        const id = change === 'open' ? 'a' : 'b';
+        const original = f.row(id), replacement = original.cloneNode(true);
+        if (change === 'open') { replacement.dataset.tabId = '42'; replacement.dataset.pinnedUrl = original.dataset.url; }
+        if (change === 'rebind') replacement.dataset.tabId = '43';
+        if (change === 'close') delete replacement.dataset.tabId;
+        if (change === 'navigate') replacement.dataset.url = 'https://live-navigation.test/';
+        f.selection.register(replacement); original.replaceWith(replacement); f.selection.reconcile();
+        assert.deepEqual(f.ids(), ['a', 'b'], change);
+        assert.equal(f.selection.validate(snapshot), false, change);
+        const fresh = f.selection.freeze(f.row('a'));
+        assert.equal(f.selection.validate(fresh), true, change);
+        const entry = fresh.entries.find(entry => entry.bookmarkId === id);
+        assert.equal(entry.tabId, replacement.dataset.tabId === undefined ? null : Number(replacement.dataset.tabId));
+        assert.equal(entry.url, replacement.dataset.url);
+    }
+});
+
+test('same-element metadata changes retain selection and frozen identity; saved identity changes do not', () => {
+    const f = fixture(); f.click('a', { ctrlKey: true }); f.click('b', { ctrlKey: true });
+    const snapshot = f.selection.freeze(f.row('a'));
+    f.row('a').title = 'Updated title'; f.row('a').querySelector('span').textContent = 'Updated title';
+    f.row('a').querySelector('img').src = 'https://same.test/icon.png'; f.selection.reconcile();
+    assert.deepEqual(f.ids(), ['a', 'b']); assert.equal(f.selection.validate(snapshot), true);
+    f.row('b').dataset.pinnedUrl = 'https://new-saved.test/'; f.selection.reconcile();
+    assert.deepEqual(f.ids(), ['a']); assert.equal(f.selection.validate(snapshot), false);
+});
+
+test('unselected visible changes invalidate frozen view order and never restore old authority', () => {
+    for (const change of ['order', 'hidden', 'removed', 'replaced', 'binding', 'added']) {
+        const f = fixture(); f.click('a', { ctrlKey: true }); f.click('b', { ctrlKey: true });
+        const snapshot = f.selection.freeze(f.row('a')), e = f.row('e'), root = e.parentElement;
+        if (change === 'order') root.prepend(e);
+        if (change === 'hidden') e.hidden = true;
+        if (change === 'removed') e.remove();
+        if (change === 'replaced') { const replacement = e.cloneNode(true); f.selection.register(replacement); e.replaceWith(replacement); }
+        if (change === 'binding') e.dataset.tabId = '42';
+        if (change === 'added') { const added = e.cloneNode(true); added.dataset.bookmarkId = 'added'; f.selection.register(added); root.append(added); }
+        assert.equal(f.selection.validate(snapshot), false, `${change} before reconciliation`);
+        f.selection.reconcile();
+        assert.deepEqual(f.ids(), ['a', 'b'], change);
+        if (change === 'added') f.row('added').remove();
+        else if (change === 'replaced') f.row('e').replaceWith(e);
+        else if (change === 'binding') delete e.dataset.tabId;
+        else { e.hidden = false; root.append(e); }
+        f.selection.reconcile();
+        assert.equal(f.selection.validate(snapshot), false, `${change} cannot revive an invalidated snapshot`);
+    }
+});
+
+test('deferred activation respects newer input, but harmless render revisions cannot suppress its clear', () => {
+    for (const intent of ['modifier', 'ordinary', 'escape', 'clear', 'drag']) {
+        const f = fixture(); f.click('a', { ctrlKey: true }); f.click('b', { ctrlKey: true });
+        const complete = f.selection.captureActivation();
+        if (intent === 'modifier') f.click('d', { ctrlKey: true });
+        if (intent === 'ordinary') { f.click('c'); f.click('d', { shiftKey: true }); }
+        if (intent === 'escape') { f.event(f.document.body, 'keydown', { key: 'Escape' }); f.click('d', { ctrlKey: true }); }
+        if (intent === 'clear') { f.selection.clear(); f.click('d', { ctrlKey: true }); }
+        if (intent === 'drag') f.selection.freeze(f.row('a'));
+        const expected = f.ids(); complete(); assert.deepEqual(f.ids(), expected, intent);
+    }
+    const f = fixture(); f.click('a', { ctrlKey: true });
+    const complete = f.selection.captureActivation(), original = f.row('a'), replacement = original.cloneNode(true);
+    f.selection.register(replacement); original.replaceWith(replacement); f.selection.reconcile();
+    assert.deepEqual(f.ids(), ['a']); complete(); assert.deepEqual(f.ids(), [], 'only a render occurred, so activation still clears');
+});
+
+test('logical retention never crosses a changed source window and blur still clears the batch', () => {
+    const f = fixture(); f.click('a', { ctrlKey: true }); f.click('b', { ctrlKey: true });
+    f.context.windowId = 11; f.selection.reconcile(); assert.deepEqual(f.ids(), []);
+    f.click('d', { shiftKey: true }); assert.deepEqual(f.ids(), ['d'], 'old window anchor is discarded');
+    f.event(f.window, 'blur'); assert.deepEqual(f.ids(), []);
+    f.click('a', { shiftKey: true }); assert.deepEqual(f.ids(), ['a', 'b', 'c', 'projected', 'd']);
+    f.event(f.document.body, 'keydown', { key: 'Escape' }); assert.deepEqual(f.ids(), []);
+    f.click('c', { shiftKey: true }); assert.deepEqual(f.ids(), ['c'], 'Escape discards the anchor too');
+    assert.deepEqual(fixture().ids(), [], 'a new sidebar instance starts without saved selection');
 });
 
 test('selection never accepts temporary, inactive-space, unregistered or hidden rows', () => {

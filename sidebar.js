@@ -2319,8 +2319,6 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
     }
     if (!pinnedContainer.isConnected || !tempContainer.isConnected || !canCommit()) return false;
 
-    if (space.id === activeSpaceId) bookmarkSelection.clearForRender();
-
     pinnedContainer.querySelectorAll('.tab, .folder, .bookmark-association-error').forEach(el => {
         disposeEditorsInElement(el);
         el.remove();
@@ -3191,6 +3189,7 @@ function handleTabActivated(activeInfo) {
         Logger.log('Skipping tab creation handler - space is being created');
         return;
     }
+    const completeSelectionActivation = bookmarkSelection.captureActivation();
     chrome.windows.getCurrent({ populate: false }, async (currentWindow) => {
         if (activeInfo.windowId !== currentWindow.id) {
             Logger.log('New tab is in a different window, ignoring...');
@@ -3198,7 +3197,7 @@ function handleTabActivated(activeInfo) {
         }
 
         Logger.log('Tab activated:', activeInfo);
-        bookmarkSelection.onActivation(activeInfo.tabId);
+        completeSelectionActivation();
         activeChromeTabId = activeInfo.tabId;
         // Find which space contains this tab
         const spaceWithTab = spaces.find(space =>

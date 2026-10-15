@@ -1,7 +1,7 @@
 // Evidence-validator tests only; importing these modules never launches Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 const selection = () => ({ ids: ['a','b','d'], count: 3, text: '3 bookmarks selected', rows: ['a','b','d'].map(id => ({ id, ariaSelected: 'true', visible: true })) });
 test('selection requires exact visible order, announced count and accessible state', () => {
     assertBookmarkSelection(selection(), ['a','b','d']);
@@ -115,3 +115,23 @@ for (const [label, mutate] of Object.entries({
     resized: value => value.rect.height += 2, missingStart: value => delete value.startRect,
     missingRect: value => delete value.rect
 })) test(`native drag geometry rejects ${label}`, () => { const value = nativeGeometry(); mutate(value); assert.throws(() => assertNativeDragSourceStable(value)); });
+
+
+test('passive selection trace records trusted modifier evidence without dispatching input or changing selection', async () => {
+    const keys = ['document', 'window', 'MutationObserver', '__pairedBookmarkSelectionTrace'];
+    const originals = keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]), listeners = new Map();
+    const rows = [{ dataset: { bookmarkId: 'a' } }, { dataset: { bookmarkId: 'b' } }], status = { dataset: { count: '2' } }; let mutation;
+    try {
+        globalThis.document = { getElementById: id => { assert.equal(id, 'bookmarkSelectionStatus'); return status; }, hasFocus: () => true, querySelectorAll: () => rows };
+        globalThis.window = { addEventListener: (type, callback, options) => { assert.deepEqual(options, { capture: true, passive: true }); listeners.set(type, callback); } };
+        globalThis.MutationObserver = class { constructor(callback) { mutation = callback; } observe(node) { assert.equal(node, status); } };
+        installBookmarkSelectionTrace();
+        listeners.get('click')({ type: 'click', isTrusted: true, shiftKey: true, target: { closest: () => rows[0] } });
+        await new Promise(resolve => queueMicrotask(resolve));
+        assert.deepEqual(globalThis.__pairedBookmarkSelectionTrace.map(item => item.type), ['click', 'click-microtask']);
+        assert(globalThis.__pairedBookmarkSelectionTrace.every(item => item.trusted && item.shift && item.bookmarkId === 'a' && item.count === 2));
+        assert.deepEqual(rows.map(item => item.dataset.bookmarkId), ['a', 'b']); assert.equal(status.dataset.count, '2');
+        for (let i = 0; i < 210; i++) mutation();
+        assert.equal(globalThis.__pairedBookmarkSelectionTrace.length, 200);
+    } finally { for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } }
+});

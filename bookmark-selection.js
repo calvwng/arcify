@@ -3,7 +3,7 @@ const ROW = '.tab[data-bookmark-id]';
 const CONTROL = 'button, input, textarea, select, a, [contenteditable="true"], [role="button"]';
 const modifiers = event => event.shiftKey || event.ctrlKey || event.metaKey;
 const same = (a, b) => a && b && ['element', 'bookmarkId', 'parentId', 'tabId', 'url', 'pinnedUrl'].every(key => a[key] === b[key]);
-const sameAnchor = (a, b) => a && b && a.bookmarkId === b.bookmarkId && a.parentId === b.parentId &&
+const sameBookmark = (a, b) => a && b && a.bookmarkId === b.bookmarkId && a.parentId === b.parentId &&
     (a.pinnedUrl || a.url) === (b.pinnedUrl || b.url);
 const sameContext = (a, b) => a && b && ['windowId', 'spaceId', 'bookmarkFolderId'].every(key => a[key] === b[key]);
 
@@ -11,7 +11,7 @@ const sameContext = (a, b) => a && b && ['windowId', 'spaceId', 'bookmarkFolderI
 // Space participate; neither CSS classes nor transfer text create authority.
 export function createBookmarkSelection({ document, getContext }) {
     const registered = new WeakMap();
-    let selected = new Map(), anchor = null, scope = null, revision = 0, image = null;
+    let selected = new Map(), anchor = null, scope = null, view = [], revision = 0, interaction = 0, image = null;
     const status = document.createElement('div');
     status.id = 'bookmarkSelectionStatus'; status.className = 'bookmark-selection-status';
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.setAttribute('aria-atomic', 'true');
@@ -63,26 +63,33 @@ export function createBookmarkSelection({ document, getContext }) {
             : selected.size ? `${selected.size} bookmark${selected.size === 1 ? '' : 's'} selected. Drag to Favorites. Escape clears selection.` : '';
     }
     function clear() {
+        interaction++;
         if (selected.size || anchor) revision++;
         selected.clear(); anchor = null; scope = null; paint();
     }
-    function clearForRender() {
-        // A logical range anchor is not a selected row or drag authority. It
-        // may survive closed→live rebinding, but only after visible ID/parent/
-        // saved-URL and context reconciliation against newly registered rows.
+    function clearForActivation() {
+        // Activation/blur clears the batch, but a still-visible exact saved
+        // bookmark may remain the logical range anchor.
         if (selected.size) revision++;
         selected.clear(); paint();
     }
     function reconcile() {
         const current = context(), entries = visible(current);
         if (!sameContext(scope, current)) { clear(); scope = current; }
-        let changed = false;
+        let changed = view.length !== entries.length || entries.some((entry, index) => !same(entry, view[index]));
+        view = entries;
         for (const [id, value] of selected) {
-            if (!same(value, entries.find(entry => entry.bookmarkId === id))) { selected.delete(id); changed = true; }
+            const next = entries.find(entry => entry.bookmarkId === id);
+            // UI selection belongs to an exact saved bookmark, not its current
+            // DOM row or live tab. Only registered, visible rows in this context
+            // can replace it. Every strict descriptor change still invalidates
+            // a frozen drag through the revision and immutable view comparison.
+            if (!sameBookmark(value, next)) { selected.delete(id); changed = true; }
+            else if (!same(value, next)) { selected.set(id, next); changed = true; }
         }
         if (anchor) {
             const nextAnchor = entries.find(entry => entry.bookmarkId === anchor.bookmarkId);
-            if (!sameAnchor(anchor, nextAnchor)) { anchor = null; changed = true; }
+            if (!sameBookmark(anchor, nextAnchor)) { anchor = null; changed = true; }
             else anchor = nextAnchor;
         }
         if (changed) { revision++; paint(); }
@@ -103,7 +110,7 @@ export function createBookmarkSelection({ document, getContext }) {
             else selected.set(entry.bookmarkId, entry);
             anchor = entry;
         }
-        revision++; paint(); return true;
+        interaction++; revision++; paint(); return true;
     }
     function register(element) {
         if (!element.dataset.bookmarkId || registered.has(element)) return;
@@ -133,17 +140,21 @@ export function createBookmarkSelection({ document, getContext }) {
         });
     }
     function freeze(element) {
+        interaction++;
         const entries = reconcile(), entry = entries.find(item => item.element === element);
         if (!entry) { clear(); return null; }
         if (!selected.has(entry.bookmarkId)) { selected = new Map([[entry.bookmarkId, entry]]); anchor = entry; revision++; paint(); }
         if (selected.size > MAX_BOOKMARK_SELECTION) return { error: `Select at most ${MAX_BOOKMARK_SELECTION} bookmarks for one Favorites drop. Nothing was added.` };
-        return Object.freeze({ ...scope, revision,
-            entries: Object.freeze(entries.filter(item => selected.has(item.bookmarkId)).map(item => Object.freeze({ ...item }))) });
+        const visibleEntries = Object.freeze(entries.map(item => Object.freeze({ ...item })));
+        return Object.freeze({ ...scope, revision, visibleEntries,
+            entries: Object.freeze(visibleEntries.filter(item => selected.has(item.bookmarkId))) });
     }
     function validate(snapshot) {
         if (!snapshot || snapshot.revision !== revision || !sameContext(snapshot, context())) return false;
-        const entries = visible().filter(entry => selected.has(entry.bookmarkId));
-        return entries.length === snapshot.entries.length && entries.every((entry, index) => same(entry, snapshot.entries[index]));
+        const entries = visible();
+        if (entries.length !== snapshot.visibleEntries.length || entries.some((entry, index) => !same(entry, snapshot.visibleEntries[index]))) return false;
+        const selectedEntries = entries.filter(entry => selected.has(entry.bookmarkId));
+        return selectedEntries.length === snapshot.entries.length && selectedEntries.every((entry, index) => same(entry, snapshot.entries[index]));
     }
     function dragImage(event, count) {
         image?.remove(); image = null;
@@ -153,7 +164,14 @@ export function createBookmarkSelection({ document, getContext }) {
         document.body.append(image); event.dataTransfer.setDragImage(image, 20, 20);
     }
     function clearDragImage() { image?.remove(); image = null; }
-    function onActivation() { clearForRender(); reconcile(); }
+    function onActivation() { clearForActivation(); reconcile(); }
+    function captureActivation() {
+        const started = interaction;
+        // Browser ownership is checked by the caller before completion. An
+        // asynchronous activation must not clear a newer user gesture, while
+        // a harmless render alone must not suppress the activation clear.
+        return () => { if (started === interaction) onActivation(); };
+    }
     document.addEventListener('click', event => {
         if (!event.target.closest?.(ROW)) clear();
     }, true);
@@ -168,5 +186,5 @@ export function createBookmarkSelection({ document, getContext }) {
         subtree: true, childList: true, attributes: true,
         attributeFilter: ['class', 'hidden', 'style', 'data-bookmark-id', 'data-tab-id', 'data-url', 'data-pinned-url', 'data-space-id', 'data-bookmark-tree-unavailable']
     });
-    return { register, clear, clearForRender, reconcile, freeze, validate, dragImage, clearDragImage, onActivation };
+    return { register, clear, reconcile, freeze, validate, dragImage, clearDragImage, onActivation, captureActivation };
 }

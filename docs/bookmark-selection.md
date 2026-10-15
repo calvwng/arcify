@@ -12,6 +12,9 @@ their folders. This does not import folder contents or move bookmarks.
 - An ordinary click still opens or activates the bookmark and clears the selected
   batch. That bookmark becomes the range anchor while its exact saved identity
   remains visible in the same Space/window view.
+- Internal refreshes retain visible selection for the same saved bookmark IDs,
+  parents and saved URLs in the same Space/window, including a closed bookmark
+  becoming live. A later drag captures the current rows and live bindings.
 - Escape or a background click clears selection. Switching Spaces, reloading the
   sidebar, or losing the source context resets it. Leaving focus clears a selected
   batch; a still-valid logical range anchor may remain until its context changes.
@@ -48,8 +51,10 @@ rejected. It must not silently move only the physical row being dragged.
 
 The selection freezes exact IDs and source context when dragging starts. A changed,
 hidden, deleted, moved or rebound source invalidates that frozen drag rather than
-silently shrinking the batch. The background writer checks the entire selection
-before starting, then rechecks each source as it processes the batch serially.
+silently shrinking the batch. A changed visible view or order, including replacement
+rows or unrelated visible additions, also requires a fresh drag; nothing replays
+automatically. The background writer checks the entire selection before starting,
+then rechecks each source as it processes the batch serially.
 
 Chrome operations are not a transaction. If a later operation fails, completed
 entries stay in Favorites and the remaining entries are not attempted. The status
