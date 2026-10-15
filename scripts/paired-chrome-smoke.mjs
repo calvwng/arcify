@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
+import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
+import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
 import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership, seedFocusedReloadSpacePins } from './paired-chrome-ordinary-favorites.mjs';
 import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
 import { exerciseSidebarAppearance } from './paired-chrome-sidebar-appearance.mjs';
@@ -21,7 +23,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
-import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry } from './paired-chrome-ui.mjs';
+import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry, attachCreatedFixtureTab } from './paired-chrome-ui.mjs';
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { exercisePersistentFavorites } from './paired-chrome-persistent-favorites.mjs';
@@ -83,7 +85,9 @@ const stepNames = [
     'Sidebar appearance persists compact fixed Favorites and usable Space headers through real options input',
     'Native sidebar management preserves offscreen-active scroll and focus while deliberate activation still reveals',
     'Today multi-selection saves an explicitly named folder without closing tabs and refreshes paired search',
-    'Ordinary Favorites close with one native Ctrl+W, remain global and retain witnessed reload identity'
+    'Ordinary Favorites close with one native Ctrl+W, remain global and retain witnessed reload identity',
+    'Space menus edit exact inactive names, colors, icons and folders with safe Delete cancellation',
+    'Tab menus preserve exact aliases and saved-pin identities through real editing, copy, mute, duplicate and removal'
 ];
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
@@ -240,23 +244,33 @@ async function pageForUrl(url) {
 async function newTabPage(url, windowId = fixture.windowA) {
     const before = new Set(browser.targets());
     const created = await arcifyOptions.evaluate(options => chrome.tabs.create(options), { windowId, url, active: true });
-    const target = await poll(async () => {
-        for (const candidate of browser.targets()) {
-            if (candidate.type() !== 'page' || before.has(candidate)) continue;
-            const matchesUrl = candidate.url() === url || (url === 'chrome://newtab/' && candidate.url() === `chrome-extension://${spotlightId}/newtab.html`);
-            if (!matchesUrl) continue;
-            try {
-                const page = await candidate.page();
-                // Every caller creates an extension page or its new-tab override.
-                // Read Chrome's real tab ID rather than guessing by page order.
-                if (await page.evaluate(async () => (await chrome.tabs.getCurrent())?.id) === created.id) return candidate;
-            } catch { /* Navigation can briefly replace the execution context. */ }
-        }
-        return null;
-    }, Boolean, `the exact newly created tab ${created.id} (${url})`);
-    report.tabTargets ||= [];
-    report.tabTargets.push({ chromeTabId: created.id, requestedUrl: url, observedTargetUrl: target.url() });
-    return { tab: created, page: await observePage(await target.page()) };
+    return attachCreatedFixtureTab(created, async () => {
+        const target = await poll(async () => {
+            for (const candidate of browser.targets()) {
+                if (candidate.type() !== 'page' || before.has(candidate)) continue;
+                const matchesUrl = candidate.url() === url || (url === 'chrome://newtab/' && candidate.url() === `chrome-extension://${spotlightId}/newtab.html`);
+                if (!matchesUrl) continue;
+                try {
+                    const page = await candidate.page();
+                    // Every caller creates an extension page or its new-tab override.
+                    // Read Chrome's real tab ID rather than guessing by page order.
+                    if (await page.evaluate(async () => (await chrome.tabs.getCurrent())?.id) === created.id) return candidate;
+                } catch { /* Navigation can briefly replace the execution context. */ }
+            }
+            return null;
+        }, Boolean, `the exact newly created tab ${created.id} (${url})`);
+        report.tabTargets ||= [];
+        report.tabTargets.push({ chromeTabId: created.id, requestedUrl: url, observedTargetUrl: target.url() });
+        return { tab: created, page: await observePage(await target.page()) };
+    }, id => arcifyOptions.evaluate(async id => {
+        const live = await chrome.tabs.query({});
+        if (live.some(tab => tab.id === id)) await chrome.tabs.remove(id);
+    }, id)).catch(error => {
+        report.tabAttachmentFailures ||= [];
+        report.tabAttachmentFailures.push({ tabId: created.id, requestedUrl: url, message: error.message,
+            ...(error.fixtureTabCleanup ? { cleanup: error.fixtureTabCleanup } : {}) });
+        throw error;
+    });
 }
 async function search(page, query) {
     return ui(page, 'Type Spotlight query', async () => {
@@ -687,6 +701,7 @@ try {
     await step(stepNames[2], async () => {
         const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two', '/today-selection-one': 'Today Selection One', '/today-selection-two': 'Today Selection Two', '/today-selection-four': 'Today Selection Four', '/today-selection-five': 'Today Selection Five', '/today-selection-six': 'Today Selection Six' };
         server = createServer((request, response) => {
+            if (serveTabMenuFixture(request, response)) return;
             if (serveOrdinaryFavoriteFixture(request, response)) return;
             if (serveFavoriteIconFixture(request, response)) return;
             const path = new URL(request.url, 'http://localhost').pathname;
@@ -1914,7 +1929,16 @@ try {
         snapshot,poll,fixture,arcifyId,spotlightId,search,
         record:async observation => { report.todaySelection ||= []; report.todaySelection.push(observation); await saveReport(); } }));
 
-    } // Full-only cases 3–31 and 33–35; preserve their original order.
+    // Menu fixtures own disposable data and finish before ordinary-Favorite
+    // restart receipts are captured or a full restart changes window identities.
+    await step(stepNames[37], () => exerciseSpaceContextBasics({ apiPage:arcifyOptions,newTabPage,ui,screenshot,
+        snapshot,poll,fixture,arcifyId,
+        record:async observation => { report.spaceContextMenus ||= []; report.spaceContextMenus.push(observation); await saveReport(); } }));
+
+    await step(stepNames[38], () => exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
+        snapshot,poll,fixture,arcifyId,spotlightId,search,
+        record:async observation => { report.tabMenus = observation; await saveReport(); } }));
+    } // Full-only cases 3–31, 33–35 and 37–38; preserve the original cases' order.
 
     await step(stepNames[36], async () => {
         ordinaryFixture = await exerciseOrdinaryFavorites({ browser,apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,

@@ -20,8 +20,8 @@ const metadata = spaces => spaces.map(({ spaceBookmarks, temporaryTabs, ...space
 // reads an authoritative snapshot, independently of this notification.
 export function registerSpotlightInvalidation(store) {
     let pending = empty(), queued = new Set(), timer = null, running = false, stopped = false, generation = 0;
-    function empty() { return { all: false, windows: new Set(), pins: new Set() }; }
-    const hasPending = () => pending.all || pending.windows.size || pending.pins.size;
+    function empty() { return { all: false, windows: new Set(), tabs: new Set() }; }
+    const hasPending = () => pending.all || pending.windows.size || pending.tabs.size;
     const schedule = () => {
         if (!stopped && !running && timer === null && (hasPending() || queued.size)) {
             // Fixed coalescing window: a continuous burst cannot postpone delivery.
@@ -53,7 +53,7 @@ export function registerSpotlightInvalidation(store) {
             for (const windowId of queued) if (!live.has(windowId)) queued.delete(windowId);
             for (const window of windows) {
                 const ids = new Set((window.tabs || []).map(tab => tab.id));
-                if (batch.all || batch.windows.has(window.id) || [...batch.pins].some(id => ids.has(id))) {
+                if (batch.all || batch.windows.has(window.id) || [...batch.tabs].some(id => ids.has(id))) {
                     queued.add(window.id);
                 }
             }
@@ -125,8 +125,18 @@ export function registerSpotlightInvalidation(store) {
         if (area === 'local' && changes.pinnedTabStatesById) {
             const before = changes.pinnedTabStatesById.oldValue || {}, after = changes.pinnedTabStatesById.newValue || {};
             for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
-                // Snapshot bookmark bindings depend on bookmarkId, not saved URLs.
-                if (String(before[key]?.bookmarkId) !== String(after[key]?.bookmarkId) && isWindowId(Number(key))) pending.pins.add(Number(key));
+                // Both bookmark identity and the pinned URL affect displayed titles.
+                if ((String(before[key]?.bookmarkId) !== String(after[key]?.bookmarkId)
+                    || before[key]?.pinnedUrl !== after[key]?.pinnedUrl) && isWindowId(Number(key))) pending.tabs.add(Number(key));
+            }
+        }
+        if (area === 'local' && changes.tabNameOverridesById) {
+            const before = changes.tabNameOverridesById.oldValue || {}, after = changes.tabNameOverridesById.newValue || {};
+            for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+                // originalDomain is bookkeeping; ordinary aliases follow the tab ID
+                // across navigation. Resolve its current window when the batch flushes.
+                const name = value => typeof value?.name === 'string' ? value.name : '';
+                if (name(before[key]) !== name(after[key]) && isWindowId(Number(key))) pending.tabs.add(Number(key));
             }
         }
         schedule();

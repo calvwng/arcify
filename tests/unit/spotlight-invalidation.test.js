@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { SpaceStore } from '../../space-store.js';
 import { getBridgeSnapshot, registerSpotlightBridge } from '../../spotlight-bridge.js';
 import { registerSpotlightInvalidation } from '../../spotlight-invalidation.js';
+import { runTabMenuAction } from '../../tab-menu-actions.js';
 import { registerBookmarkListeners } from '../../bookmark-events.js';
 import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY, responseFor } from '../../spotlight-bridge-protocol.js';
 
@@ -325,7 +326,43 @@ test('bridge registration installs sender and exact bookmark binding changes tar
     await chrome.storage.local.set({ pinnedTabStatesById: { 1: { bookmarkId: 'saved', pinnedUrl: 'https://pin.test/' } } });
     await f.tick(); assert.deepEqual(targets(f), [1]); f.sent.length = 0;
     await chrome.storage.local.set({ pinnedTabStatesById: { 1: { bookmarkId: 'saved', pinnedUrl: 'https://other.test/' } } });
-    await f.tick(); assert.deepEqual(targets(f), []);
+    await f.tick(); assert.deepEqual(targets(f), [1]);
+});
+
+test('alias additions, renames and removals invalidate only exact live tab windows', async t => {
+    const f = await fixture(t); await f.settleStartup();
+    f.tabs.find(tab => tab.id === 11).url = f.tabs.find(tab => tab.id === 1).url;
+    for (const overrides of [
+        { 1: { name: 'First alias', originalDomain: 'one.test' } },
+        { 1: { name: 'Renamed alias', originalDomain: 'one.test' } },
+        {}
+    ]) {
+        await chrome.storage.local.set({ tabNameOverridesById: overrides });
+        await f.tick(); await f.tick();
+        assert.deepEqual(targets(f), [1]); f.sent.length = 0;
+    }
+    await chrome.storage.local.set({ tabNameOverridesById: { 11: { name: 'Same URL in the other window' } } });
+    await f.tick(); await f.tick(); assert.deepEqual(targets(f), [2]);
+});
+
+test('alias bookkeeping, no-op writes, non-local storage and dead tab IDs stay quiet', async t => {
+    const f = await fixture(t); await f.settleStartup();
+    const before = { 1: { name: 'Visible alias', originalDomain: 'one.test' } };
+    const after = { 1: { name: 'Visible alias', originalDomain: 'different.test' }, 999: { name: 'Closed tab' } };
+    for (const [oldValue, newValue, area] of [[before, before, 'local'], [before, after, 'local'], [{}, after, 'sync'], [{}, after, 'session']]) {
+        await chrome.storage.onChanged.emit({ tabNameOverridesById: { oldValue, newValue } }, area);
+        await f.tick(); await f.tick(); assert.deepEqual(targets(f), []);
+    }
+});
+
+test('alias bursts resolve current windows after a tab moves and never disclose alias text', async t => {
+    const f = await fixture(t); await f.settleStartup();
+    await chrome.storage.local.set({ tabNameOverridesById: { 1: { name: 'Private title' } } });
+    await chrome.storage.local.set({ tabNameOverridesById: { 1: { name: 'Changed private title' } } });
+    f.tabs.find(tab => tab.id === 1).windowId = 2;
+    await f.tick(); await f.tick(); assert.deepEqual(targets(f), [2]);
+    assert.deepEqual(Object.keys(f.sent[0].message).sort(), ['command', 'requestId', 'type', 'version', 'windowId']);
+    await f.tick(10000); assert.equal(f.sent.length, 1);
 });
 
 test('existing relevant bookmark listener signals saved pin/title/order changes but ignores unrelated bookmarks', async t => {
@@ -363,4 +400,25 @@ test('auxiliary Favorite icon cache changes stay sidebar-local and do not invali
     await chrome.storage.local.set({ favoriteIconCache: { version: 1, entries: [] } });
     await f.tick(); await f.tick(); await f.tick();
     assert.deepEqual(targets(f), []);
+});
+
+
+test('combined Space metadata and exact Tab aliases retain scoped invalidation and strict snapshots', async t => {
+    const f = await fixture(t); await f.settleStartup();
+    chrome.tabs.get = async id => clone(f.tabs.find(tab => tab.id === id));
+    chrome.bookmarks.update = async (id, changes) => Object.assign(f.nodes[id], clone(changes));
+    await f.store.dispatch({ action: 'metadata', spaceId: 'a', changes: { icon: 'rocket' } });
+    await f.tick(); await f.tick(); assert.deepEqual(targets(f), [], 'Sidebar-local icons do not widen v1');
+    const target = { type: 'tabMenuAction', windowId: 1, spaceId: 'a', bookmarkFolderId: 'a', tabId: 1 };
+    const initial = await runTabMenuAction(f.store, { ...target, action: 'describe' });
+    await runTabMenuAction(f.store, { ...target, action: 'rename', value: 'Exact window alias', expected: initial.expected });
+    await f.tick(); await f.tick(); assert.deepEqual(targets(f), [1]); f.sent.length = 0;
+    await f.store.dispatch({ action: 'metadata', spaceId: 'a', changes: { name: 'Updated name', color: 'cyan' } });
+    await f.tick(); await f.tick(); assert.deepEqual(targets(f), [1, 2]);
+    const snapshot = await getBridgeSnapshot(f.store, 1);
+    assert.equal(snapshot.tabs.find(tab => tab.id === 1).title, 'Exact window alias');
+    assert.equal(snapshot.spaces[0].name, 'Updated name'); assert.equal(snapshot.spaces[0].color, 'cyan');
+    assert.equal(Object.hasOwn(snapshot.spaces[0], 'icon'), false);
+    assert.equal(f.local.spaceRegistry.a.icon, 'rocket'); assert.equal(f.store.active[1], 'a');
+    assert(f.sent.every(({ message }) => !JSON.stringify(message).includes('Exact window alias')));
 });

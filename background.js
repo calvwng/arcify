@@ -24,10 +24,12 @@ import { isProtectedFavorite } from './favorite-safety.js';
 import { registerBookmarkListeners } from './bookmark-events.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { registerTodayFolderMessages } from './today-folder-store.js';
+import { registerTabMenuMessages } from './tab-menu-actions.js';
 
 const spaceStore = new SpaceStore();
 spaceStore.install();
 registerTodayFolderMessages(spaceStore);
+registerTabMenuMessages(spaceStore);
 const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity() });
 favoriteStore.install();
 registerFavoriteMessages(favoriteStore);
@@ -66,6 +68,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 import { Utils } from './utils.js';
 import { Logger } from './logger.js';
 import { copyCurrentTabUrlWithFallback } from './url-copy.js';
+import { projectLiveTabTitles } from './tab-title-projection.js';
 
 const AUTO_ARCHIVE_ALARM_NAME = 'autoArchiveTabsAlarm';
 const TAB_ACTIVITY_STORAGE_KEY = 'tabLastActivity'; // Key to store timestamps
@@ -383,7 +386,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     } else if (message.action === 'searchTabs') {
         return handleAsyncMessage(async () => {
-            const tabs = await chrome.tabs.query({});
+            const tabs = await spaceStore.run(async () => projectLiveTabTitles(await chrome.tabs.query({}), spaceStore.spaces));
             const query = message.query?.toLowerCase() || '';
             const filteredTabs = tabs.filter(tab => {
                 if (!tab.title || !tab.url || isStartupLauncherTab(tab)) return false;
@@ -396,7 +399,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     } else if (message.action === 'getRecentTabs') {
         return handleAsyncMessage(async () => {
-            const tabs = await chrome.tabs.query({});
+            const tabs = await spaceStore.run(async () => projectLiveTabTitles(await chrome.tabs.query({}), spaceStore.spaces));
             const storage = await chrome.storage.local.get([TAB_ACTIVITY_STORAGE_KEY]);
             const activityData = storage[TAB_ACTIVITY_STORAGE_KEY] || {};
 

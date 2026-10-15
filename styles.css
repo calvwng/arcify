@@ -2352,3 +2352,35 @@ select:focus-visible,
         forced-color-adjust: none;
     }
 }
+
+/* Space basics: bounded, keyboard-accessible menus and editors. */
+.space-icon { display: inline-block; flex: 0 0 auto; margin-right: 5px; }
+.space-icon[hidden] { display: none; }
+.space-context-menu, .space-editor {
+    box-sizing: border-box;
+    color: #f4f4f5;
+    background: #27272a;
+    border: 1px solid #71717a;
+    border-radius: 10px;
+    box-shadow: 0 8px 30px #0006;
+    padding: 8px;
+    font-size: 13px;
+}
+.space-context-menu { position: fixed; z-index: 10020; width: 210px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; }
+.space-context-menu button, .space-editor button {
+    color: inherit; background: transparent; border: 1px solid transparent; border-radius: 6px;
+    padding: 8px; cursor: pointer; font: inherit; text-align: left;
+}
+.space-context-menu button { display: block; width: 100%; }
+.space-context-menu button:hover, .space-editor button:hover { background: #3f3f46; }
+.space-context-menu button:focus-visible, .space-editor :is(button, input):focus-visible { outline: 2px solid #93c5fd; outline-offset: -2px; }
+.space-editor-backdrop { position: fixed; inset: 0; z-index: 10021; background: #0007; display: flex; align-items: center; justify-content: center; padding: 12px; }
+.space-editor { width: 320px; max-width: 100%; max-height: calc(100vh - 24px); overflow: auto; padding: 14px; }
+.space-editor h2 { font-size: 15px; margin: 0 0 12px; overflow-wrap: anywhere; }
+.space-editor label { display: block; }
+.space-editor input { display: block; box-sizing: border-box; width: 100%; margin: 8px 0; padding: 8px; color: inherit; background: #18181b; border: 1px solid #71717a; border-radius: 5px; }
+.space-editor button:disabled { opacity: .6; cursor: wait; }
+.space-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.space-choice-grid button { border-color: var(--choice-color, #52525b); overflow-wrap: anywhere; }
+.space-choice-grid button[aria-pressed="true"] { background: #3f3f46; outline: 2px solid #93c5fd; outline-offset: -2px; }
+.space-editor-status { margin: 6px 0; color: #fca5a5; overflow-wrap: anywhere; }

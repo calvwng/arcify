@@ -1,5 +1,31 @@
 # Bridge validation record
 
+## Verified ordinary-Favorite and Today-selection checkpoint (2026-10-15)
+
+Arcify `536507988e6a9d2b9fdfd05d05ac965e9b82b362` with Spotlight
+`019b52718c84c84f785081537534b8902e47946a` passed all **37 full cases** and
+**5 focused lifecycle cases** in [paired run 38710340871](https://github.com/calvwng/arcify/actions/runs/38710340871).
+The two artifacts contain 117 and 17 screenshots respectively. Independent review
+re-ran raw-artifact validators: exact duplicate-pin order, saved sections, aliases,
+bindings, Space selection/membership and native group order survive both extension
+reloads. One XTEST Ctrl+W closes only the intended ordinary Favorite; an explicit
+click reopens one page. Same-profile graceful browser-process restarts retain saved
+records, discard unproven live associations and refuse equal-URL adoption.
+
+Both runs verify namespace, PID/network and seccomp sandboxing before and after
+restart. Full used installed Chrome 154.0.8037.97; focused used 155.0.8059.39.
+[Standard CI](https://github.com/calvwng/arcify/actions/runs/38710340949) and
+[legacy E2E](https://github.com/calvwng/arcify/actions/runs/38710340869) also passed.
+Local checks passed 1,920 unit tests with one unchanged baseline skip, production
+build and both mocked contracts. The full log retains two unspecified missing-resource
+console messages; neither affected the audited assertions.
+
+This checkpoint does not establish later menu or Split View features. Their
+expanded cases require a new exact-head result. Helium, physical keyboard hardware,
+existing user profiles/store-installed builds, arbitrary crashes and browser
+session-restore policies remain manual. No host security policy or Chrome sandbox
+setting was changed; Developer mode was enabled only in the disposable CI profile.
+
 ## Completed search/freshness baseline and logical-state follow-up
 
 The exact pair Arcify `3576654c238160e5b41d006d66ca8a456e75502b` / Spotlight
@@ -92,9 +118,11 @@ replace the full-suite result, and does not retry a failed case in the full job'
 mutated profile.
 
 The only accepted modes are `full` (the default when unset) and
-`favorite-lifecycle`; any other value fails. The full plan requires all **37**
-cases, preserving execution order 0–31, 33–36, then 32. The supplemental plan
-requires exactly **5** cases, in zero-based case-index order **0, 1, 2, 36, 32**:
+`favorite-lifecycle`; any other value fails. The full plan requires all **39**
+cases, preserving the original cases' order and inserting the two full-only menu
+cases before Favorite lifecycle receipts: 0–31, 33–35, 37–38, 36, then 32.
+The supplemental plan requires exactly **5** cases, in zero-based case-index order
+**0, 1, 2, 36, 32**:
 
 - Sandboxed Chrome startup, installation and exact extension identities
 - Unpaired rejection and real options-UI pairing
@@ -116,7 +144,7 @@ with stable zero-based `caseIndex` values and names, and `executedCaseIndices`.
 Full artifacts remain `paired-chrome-<run>-<attempt>`; supplemental artifacts are
 `paired-chrome-favorite-lifecycle-<run>-<attempt>` with a separate report/log path.
 A five-case success must always be described as supplemental lifecycle coverage,
-never a 37-case full-suite pass. This configuration is pending its first actual
+never a 39-case full-suite pass. This configuration is pending its first actual
 GitHub Actions run; local unit/build checks do not establish browser acceptance.
 
 The fixture uses Puppeteer's supported unpacked-extension API in an isolated

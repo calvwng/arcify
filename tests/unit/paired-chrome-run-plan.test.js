@@ -7,7 +7,7 @@ const smoke = readFileSync(new URL('../../scripts/paired-chrome-smoke.mjs', impo
 const workflow = readFileSync(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url), 'utf8');
 const namesBlock = smoke.match(/const stepNames = \[([\s\S]*?)\n\];/)[1];
 const names = [...namesBlock.matchAll(/^\s*'([^']*)',?$/gm)].map(match => match[1]);
-const fullOrder = [...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 36, 32];
+const fullOrder = [...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 37, 38, 36, 32];
 const lifecycleOrder = [0, 1, 2, 36, 32];
 const indices = report => report.expectedCases.map(item => item.caseIndex);
 const stepIndices = source => [...source.matchAll(/await step\(stepNames\[(\d+)\]/g)].map(match => Number(match[1]));
@@ -17,12 +17,12 @@ function passedReport(mode) {
     return report;
 }
 
-test('full is the default and retains all 37 cases in their actual existing execution order', () => {
+test('full is the default and requires all 39 cases with menus before unchanged Favorite lifecycle cases', () => {
     const report = createPairedChromeRunReport(names);
     assert.equal(report.runMode, 'full');
-    assert.equal(report.expectedCaseCount, 37);
+    assert.equal(report.expectedCaseCount, 39);
     assert.deepEqual(indices(report), fullOrder);
-    assert.deepEqual([...indices(report)].sort((a, b) => a - b), Array.from({ length: 37 }, (_, index) => index));
+    assert.deepEqual([...indices(report)].sort((a, b) => a - b), Array.from({ length: 39 }, (_, index) => index));
     assert.deepEqual(report, createPairedChromeRunReport(names, 'full'));
     assert.deepEqual(report, createPairedChromeRunReport(names, undefined));
     assert.deepEqual(report.executedCaseIndices, []);
@@ -81,7 +81,7 @@ for (const mode of ['full', 'favorite-lifecycle']) {
             report => report.executedCaseIndices.pop(),
             report => report.executedCaseIndices.push(32),
             report => report.executedCaseIndices.reverse(),
-            report => { report.expectedCaseCount = 37 + 5; },
+            report => { report.expectedCaseCount = 39 + 5; },
             report => report.expectedCases.pop(),
             report => { report.runMode = 'unknown'; }
         ];
@@ -94,7 +94,9 @@ for (const mode of ['full', 'favorite-lifecycle']) {
 
 test('an unselected full-suite case cannot run or appear as a passing lifecycle result', () => {
     const report = createPairedChromeRunReport(names, 'favorite-lifecycle');
-    assert.throws(() => beginPairedChromeCase(report, names[3]), /not selected/);
+    for (const caseIndex of [3, 37, 38]) {
+        assert.throws(() => beginPairedChromeCase(report, names[caseIndex]), /not selected/);
+    }
     assert.deepEqual(report.executedCaseIndices, []);
     const completed = passedReport('favorite-lifecycle');
     assert.equal(completed.checks.filter(check => check.status === 'passed').length, 5);
@@ -105,7 +107,7 @@ test('an unselected full-suite case cannot run or appear as a passing lifecycle 
 
 test('actual smoke orchestration preserves full order and gates only unrelated cases', () => {
     const start = smoke.indexOf("    if (report.runMode === 'full') {\n");
-    const end = smoke.indexOf('    } // Full-only cases 3–31 and 33–35; preserve their original order.');
+    const end = smoke.indexOf("    } // Full-only cases 3–31, 33–35 and 37–38; preserve the original cases' order.");
     assert(start > 0 && end > start);
     assert.deepEqual(stepIndices(smoke), fullOrder);
     assert.deepEqual(stepIndices(smoke.slice(0, start)), [0, 1, 2]);

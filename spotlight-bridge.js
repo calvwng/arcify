@@ -2,6 +2,7 @@ import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { ownerOf, tabIds } from './space-store.js';
 import { getSpaceBookmarkById, getSpaceBookmarkTree } from './space-bookmarks.js';
 import { Utils } from './utils.js';
+import { projectTabTitle } from './tab-title-projection.js';
 import { SIDEBAR_COMMAND_TYPE, createSidebarCommandHandler } from './sidebar-command.js';
 import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
 import { GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
@@ -24,7 +25,7 @@ async function readBridgeSnapshot(store, windowId) {
         state: store.favoriteStore.state, items: store.favoriteStore.items });
     const live = (await chrome.tabs.query({ windowId })).filter(tab => !isStartupLauncherTab(tab));
     const byId = new Map(live.map(tab => [tab.id, tab]));
-    const bindings = await Utils.getPinnedTabStates();
+    const [bindings, overrides] = await Promise.all([Utils.getPinnedTabStates(), Utils.getTabNameOverrides()]);
     const spaces = store.spaces.map(space => ({
         id: space.id, name: space.name, color: space.color, bookmarkFolderId: space.bookmarkFolderId,
         tabIds: tabIds(space).filter(id => byId.has(id)),
@@ -32,6 +33,7 @@ async function readBridgeSnapshot(store, windowId) {
         temporaryTabIds: space.temporaryTabs.filter(id => byId.has(id))
     }));
     const bookmarks = [];
+    const bookmarksByTab = new Map();
     const warnings = [];
     for (const space of store.spaces) {
         let tree;
@@ -42,8 +44,11 @@ async function readBridgeSnapshot(store, windowId) {
             continue;
         }
         const collect = node => {
-            if (node.url) bookmarks.push({ id: node.id, spaceId: space.id, title: node.title, url: node.url,
-                tabId: space.spaceBookmarks.find(id => byId.has(id) && String(bindings[id]?.bookmarkId) === String(node.id)) ?? null });
+            if (node.url) {
+                const boundIds = space.spaceBookmarks.filter(id => byId.has(id) && String(bindings[id]?.bookmarkId) === String(node.id));
+                for (const id of boundIds) bookmarksByTab.set(id, node);
+                bookmarks.push({ id: node.id, spaceId: space.id, title: node.title, url: node.url, tabId: boundIds[0] ?? null });
+            }
             for (const child of node.children || []) collect(child);
         };
         collect(tree);
@@ -52,7 +57,9 @@ async function readBridgeSnapshot(store, windowId) {
         ? store.active[windowId] : ownerOf(store.spaces, live.find(t => t.active)?.id)?.id || spaces[0]?.id || null,
     // Keep auxiliary local icon bytes out of v1: older peers reject extra keys.
     spaces, bookmarks, warnings, ...(favorites ? { favorites: favorites
-        .map(({ id, title, url, sourceBookmarkId, tabId }) => ({ id, title, url, sourceBookmarkId, tabId })) } : {}), tabs: live.map(tab => ({ id: tab.id, windowId, title: tab.title || '', url: tab.url || tab.pendingUrl || '',
+        .map(({ id, title, url, sourceBookmarkId, tabId }) => ({ id, title, url, sourceBookmarkId, tabId })) } : {}), tabs: live.map(tab => ({ id: tab.id, windowId, title: projectTabTitle(tab, {
+        overrides, binding: bindings[tab.id], bookmark: bookmarksByTab.get(tab.id), isSpacePin: Boolean(ownerOf(store.spaces, tab.id)?.spaceBookmarks.includes(tab.id))
+    }), url: tab.url || tab.pendingUrl || '',
         active: Boolean(tab.active), pinned: Boolean(tab.pinned), spaceId: ownerOf(store.spaces, tab.id)?.id || null })) };
 }
 

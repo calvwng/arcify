@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 // Case indices are stable identities in paired-chrome-smoke.mjs. Restart must
 // remain last: it intentionally invalidates the original browser-session IDs.
-const FULL_CASE_INDICES = Object.freeze([...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 36, 32]);
+const FULL_CASE_INDICES = Object.freeze([...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 37, 38, 36, 32]);
 const FAVORITE_LIFECYCLE_CASE_INDICES = Object.freeze([0, 1, 2, 36, 32]);
 
 function caseIndicesForMode(mode) {

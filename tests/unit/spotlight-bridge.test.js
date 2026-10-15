@@ -187,6 +187,56 @@ test('snapshot matches nested bookmarks by exact identity even after a pin navig
     assert(other.bookmarks.every(bookmark => bookmark.tabId === null));
 });
 
+test('snapshot projects ordinary aliases by exact tab ID and preserves the strict tab shape', async () => {
+    local.tabNameOverridesById = {
+        1: { name: 'First alias', originalDomain: 'same.test' },
+        2: { name: 'Second alias', originalDomain: 'same.test' },
+        11: { name: 'Other window alias', originalDomain: 'same.test' }
+    };
+    const store = await makeStore();
+    let snapshot = await getBridgeSnapshot(store, 1);
+    assert.deepEqual(snapshot.tabs.slice(0, 2).map(tab => tab.title), ['First alias', 'Second alias']);
+    assert.deepEqual(Object.keys(snapshot.tabs[0]).sort(), ['active', 'id', 'pinned', 'spaceId', 'title', 'url', 'windowId']);
+    assert.equal((await getBridgeSnapshot(store, 2)).tabs.find(tab => tab.id === 11).title, 'Other window alias');
+    getTab(1).title = 'New page title'; getTab(1).url = 'https://different.test/page';
+    snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(snapshot.tabs.find(tab => tab.id === 1).title, 'First alias');
+    delete local.tabNameOverridesById[1];
+    snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(snapshot.tabs.find(tab => tab.id === 1).title, 'New page title');
+    assert.equal(snapshot.tabs.find(tab => tab.id === 2).title, 'Second alias');
+    assert.deepEqual(mutations, []);
+});
+
+test('snapshot uses the exact saved bookmark title at its URL and the page title after navigation', async () => {
+    local.spaces[0].spaceBookmarks.push(1);
+    local.spaces[0].temporaryTabs = local.spaces[0].temporaryTabs.filter(id => id !== 1);
+    local.pinnedTabStatesById[1] = { bookmarkId: 'twin-2', pinnedUrl: DUPLICATE_URL };
+    local.tabNameOverridesById = {
+        1: { name: 'Stale alias for second pin' }, 2: { name: 'Ordinary same-URL alias' }, 4: { name: 'Stale alias for first pin' }
+    };
+    getTab(4).url = DUPLICATE_URL;
+    const store = await makeStore();
+    let snapshot = await getBridgeSnapshot(store, 1);
+    const title = id => snapshot.tabs.find(tab => tab.id === id).title;
+    assert.equal(title(1), 'Second favorite'); assert.equal(title(4), 'First favorite');
+    assert.equal(title(2), 'Ordinary same-URL alias');
+    getTab(4).url = `${DUPLICATE_URL}?view=expanded#section`;
+    snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(title(4), 'First favorite');
+    nodes.find(node => node.id === 'twin-1').title = 'Renamed saved bookmark';
+    snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(title(4), 'Renamed saved bookmark');
+    getTab(4).url = 'https://same.test/another-page'; getTab(4).title = 'Navigated page title';
+    snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(title(4), 'Navigated page title');
+    assert.equal(title(1), 'Second favorite');
+    getTab(4).url = DUPLICATE_URL; delete local.tabNameOverridesById[4];
+    snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(title(4), 'Renamed saved bookmark');
+    assert.deepEqual(mutations, []);
+});
+
 test('snapshot discovers newly synced bookmark spaces and preserves existing order and IDs', async () => {
     const store = await makeStore();
     local.spaceRegistry = { 'folder-later': { spaceUuid: 'durable-later', color: 'purple' } };

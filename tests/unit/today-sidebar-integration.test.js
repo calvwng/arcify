@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 import { applySpacePatch, SpaceStore } from '../../space-store.js';
 import { saveTodayTabsInNewFolder } from '../../today-folder-store.js';
+import { runTabMenuAction } from '../../tab-menu-actions.js';
 
 // The real sidebar, Chrome listeners, close buttons and refresh coordinator are
 // exercised together. Only Chrome persistence and DOM layout/focus are fakes.
@@ -56,10 +57,10 @@ const area = state => ({ async get(keys) {
     if (typeof keys === 'string') return { [keys]: structuredClone(state[keys]) };
     return structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
 }, async set(next) { Object.assign(state, structuredClone(next)); }, async remove(key) { delete state[key]; } });
-let beforeTree, beforeRemove;
+let beforeTree, beforeRemove, beforeGetTab, beforeTabMenuRequest;
 const mutations = [], saveRequests = [];
 let nextBookmarkId = 100;
-const store = new SpaceStore(); store.initialized = true; store.spaces = storedSpaces; store.active = session.activeSpaces; store.restoredRanks = new Map(); store.isGlobalTab = () => false;
+const store = new SpaceStore(); store.initialized = true; store.spaces = storedSpaces; store.active = session.activeSpaces; store.restoredRanks = new Map(); store.restoredMetadata = []; store.isGlobalTab = () => false;
 store.persist = async () => { storedSpaces = structuredClone(store.spaces); local.spaces = storedSpaces; await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); };
 Object.assign(globalThis, { window, document, Event: window.Event, Node: window.Node,
     localStorage: { getItem() { return null; }, setItem() {} },
@@ -77,6 +78,12 @@ globalThis.chrome = {
                 try { return { success: true, batch: await saveTodayTabsInNewFolder(store, message) }; }
                 catch (error) { return { success: false, error: error.message, batch: error.batch }; }
             }
+            if (message.type === 'tabMenuAction') {
+                await beforeTabMenuRequest?.(message);
+                store.spaces = structuredClone(storedSpaces);
+                try { return { success: true, ...await runTabMenuAction(store, message) }; }
+                catch (error) { return { success: false, error: error.message }; }
+            }
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: [] };
             if (message.type === 'sidebarTour') return { success: true, state: null };
             assert.equal(message.type, 'spaceStore');
@@ -91,8 +98,9 @@ globalThis.chrome = {
     windows: { async get(id) { return { id, type: 'normal', incognito: false }; }, getCurrent(_options, callback) { callback?.({ id: 10 }); return Promise.resolve({ id: 10 }); } },
     tabs: { ...Object.fromEntries(['onActivated', 'onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active))); },
-        async get(id) { return structuredClone(tabs.find(tab => tab.id === id)); },
+        async get(id) { await beforeGetTab?.(id); return structuredClone(tabs.find(tab => tab.id === id)); },
         async remove(id) { tabs.splice(tabs.findIndex(tab => tab.id === id), 1); await beforeRemove?.(id); await chrome.tabs.onRemoved.emit(id, { windowId: 10 }); },
+        async duplicate(id) { const next = { ...structuredClone(tabs.find(tab => tab.id === id)), id: 88, active: false }; tabs.push(next); return next; },
         async update(id, properties) { mutations.push(['tab-update', id, properties]); Object.assign(tabs.find(tab => tab.id === id), properties); return this.get(id); }
     },
     bookmarks: {
@@ -100,6 +108,7 @@ globalThis.chrome = {
         async get(id) { return structuredClone([...folders, ...bookmarks].filter(node => node.id === id)); },
         async search({ title }) { return structuredClone(folders.filter(node => node.title === title)); },
         async getChildren(id) { await beforeTree?.(); return structuredClone([...folders, ...bookmarks].filter(node => node.parentId === id).sort((a, b) => (a.index ?? Number(a.id.slice(1)) ?? 0) - (b.index ?? Number(b.id.slice(1)) ?? 0))); },
+        async update(id, values) { Object.assign(bookmarks.find(node => node.id === id), values); mutations.push(['bookmark-update', id, values]); return structuredClone(bookmarks.find(node => node.id === id)); },
         async remove(id) { bookmarks.splice(bookmarks.findIndex(node => node.id === id), 1); await onMessage.emit({ action: 'arcifyBookmarksChanged' }); }
     },
     tabGroups: { async query() { return []; } }
@@ -202,4 +211,146 @@ test('ordinary Today context commands stay available if its bookmark root become
     dialog(); event(document.getElementById('todayFolderCancel'), 'click'); await wait(50);
     assert.equal(mutations.length, before); assert.equal(saveRequests.length, 1);
     root.parentId = parent;
+});
+
+
+const menuItem = action => document.querySelector(`#tab-context-menu [data-action="${action}"]`);
+async function pinContext(id) { clear(); event(row(id), 'contextmenu', { pageX: 20, pageY: 20 }); await wait(30); }
+async function startEdit(action) { event(menuItem(action), 'click'); await wait(30); assert(document.getElementById('tabEditDialog')); }
+async function submitEdit(value) { const input = document.getElementById('tabEditValue'); input.value = value; event(input, 'input'); event(input.closest('form'), 'submit'); await wait(300); }
+
+test('real sidebar ordinary Rename cancels with no mutation, saves text safely and clears alias', async () => {
+    await context(6); await startEdit('rename');
+    const before = structuredClone(mutations); event(document.getElementById('tabEditCancel'), 'click'); await wait(30); assert.deepEqual(mutations, before);
+    await context(6); await startEdit('rename'); await submitEdit('<img src=x onerror=alert(1)>');
+    assert.equal(live(6).querySelector('.tab-title-display').textContent, '<img src=x onerror=alert(1)>');
+    assert.equal(live(6).querySelector('.tab-title-display img'), null); assert.equal(tabs.find(tab => tab.id === 6).title, 'New Today');
+    await context(6); await startEdit('rename'); await submitEdit(''); assert.equal(live(6).querySelector('.tab-title-display').textContent, 'New Today');
+});
+
+test('real sidebar closed pin Rename and URL editor preserve folder/order/title and do not open a page', async () => {
+    const beforeTabs = structuredClone(tabs), original = structuredClone(bookmarks.find(node => node.id === 'b10'));
+    await pinContext('b10'); assert.equal(menuItem('mute'), null); assert.equal(menuItem('duplicate'), null);
+    assert.match(document.getElementById('tab-context-menu').textContent, /Remove Pin/);
+    await startEdit('rename'); await submitEdit('Closed saved title');
+    await pinContext('b10'); await startEdit('editUrl'); await submitEdit('https://edited.test/path');
+    assert.deepEqual(bookmarks.find(node => node.id === 'b10'), { ...original, title: 'Closed saved title', url: 'https://edited.test/path' });
+    assert.equal(row('b10').querySelector('.tab-title-display').textContent, 'Closed saved title'); assert.equal(row('b10').dataset.url, 'https://edited.test/path');
+    assert.deepEqual(tabs, beforeTabs);
+});
+
+test('real sidebar saved live title stays coherent through URL navigation and title events', async () => {
+    await pinContext('b0'); await startEdit('rename'); await submitEdit('Exact saved title');
+    assert.equal(live(1).querySelector('.tab-title-display').textContent, 'Exact saved title');
+    const tab = tabs.find(item => item.id === 1); tab.title = 'New page title';
+    await chrome.tabs.onUpdated.emit(1, { title: tab.title }, structuredClone(tab)); await wait(30);
+    assert.equal(live(1).querySelector('.tab-title-display').textContent, 'Exact saved title');
+    tab.url = 'https://away.test/'; tab.title = 'Away page'; await chrome.tabs.onUpdated.emit(1, { url: tab.url, title: tab.title }, structuredClone(tab)); await wait(30);
+    assert.equal(live(1).querySelector('.tab-title-display').textContent, 'Away page');
+    await pinContext('b0'); await startEdit('editUrl'); await submitEdit('https://new-pin.test/');
+    assert.equal(tab.url, 'https://away.test/'); assert.equal(bookmarks.find(node => node.id === 'b0').title, 'Exact saved title');
+    assert.equal(live(1).dataset.pinnedUrl, 'https://new-pin.test/');
+});
+
+test('real sidebar multi-pin context hides singleton actions and preserves Today named-folder behavior', async () => {
+    clear(); event(row('b10'), 'click', { ctrlKey: true }); event(row('b11'), 'click', { ctrlKey: true });
+    event(row('b10'), 'contextmenu', { pageX: 20, pageY: 20 }); await wait(30);
+    assert.equal(menuItem('rename'), null); assert.equal(menuItem('copyLink'), null);
+    assert.match(document.getElementById('tab-context-menu').textContent, /Select one pin/);
+    await context(6); assert(menuItem('rename')); assert(menuItem('duplicate')); assert(document.getElementById('saveTodayTabsInNewFolder'));
+});
+
+test('real sidebar refuses save after exact saved bookmark moves while dialog is open', async () => {
+    await pinContext('b10'); await startEdit('editUrl');
+    const node = bookmarks.find(node => node.id === 'b10'), parent = node.parentId; node.parentId = 'elsewhere';
+    await submitEdit('https://must-not-save.test/'); assert.equal(node.url, 'https://edited.test/path');
+    assert.match(document.getElementById('favoritesDropNotice').textContent, /changed/); node.parentId = parent; await refresh();
+});
+
+
+test('real sidebar alias-only storage change repaints unchanged Space projection', async () => {
+    const before = structuredClone(storedSpaces);
+    local.tabNameOverridesById ||= {}; local.tabNameOverridesById[6] = { name: 'Other panel alias' };
+    await onChanged.emit({ tabNameOverridesById: { newValue: structuredClone(local.tabNameOverridesById) } }, 'local'); await wait(240);
+    assert.deepEqual(storedSpaces, before); assert.equal(live(6).querySelector('.tab-title-display').textContent, 'Other panel alias');
+    delete local.tabNameOverridesById[6]; await onChanged.emit({ tabNameOverridesById: { newValue: structuredClone(local.tabNameOverridesById) } }, 'local'); await wait(240);
+    assert.equal(live(6).querySelector('.tab-title-display').textContent, 'New Today');
+});
+
+test('real sidebar copies clicked row rather than active tab, exposes live mute, and duplicates ordinary identity', async () => {
+    const copied = []; Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { clipboard: { async writeText(value) { copied.push(value); } } } });
+    await context(6); event(menuItem('copyLink'), 'click'); await wait(30); assert.deepEqual(copied, ['https://new.test/']);
+    await pinContext('b10'); event(menuItem('copyLink'), 'click'); await wait(30); assert.deepEqual(copied, ['https://new.test/', 'https://edited.test/path']);
+    await context(6); event(menuItem('mute'), 'click'); await wait(300); assert(mutations.some(([kind, id, values]) => kind === 'tab-update' && id === 6 && values.muted === true));
+    await context(6); event(menuItem('duplicate'), 'click'); await wait(300);
+    assert(live(88)?.closest('[data-tab-type="temporary"]')); assert.equal(local.pinnedTabStatesById[88], undefined);
+    assert.equal(local.tabNameOverridesById[88], undefined); assert.equal(storedSpaces[0].temporaryTabs.indexOf(88), storedSpaces[0].temporaryTabs.indexOf(6) + 1);
+});
+
+
+test('real sidebar discards async Today/pin menus after a newer selection gesture', async () => {
+    clear(); document.getElementById('tab-context-menu')?.remove();
+    for (const [id, newer] of [[6, () => event(live(88), 'click', { ctrlKey: true })], [1, () => event(row('b10'), 'click', { ctrlKey: true })]]) {
+        let release; const waitForTab = new Promise(resolve => { release = resolve; });
+        beforeGetTab = async current => { if (current === id) await waitForTab; };
+        event(live(id), 'contextmenu', { pageX: 20, pageY: 20 }); await wait(20); newer(); beforeGetTab = null; release(); await wait(40);
+        assert.equal(document.getElementById('tab-context-menu'), null); clear();
+    }
+});
+
+test('real sidebar live double-click retains Rename, closed double-click adds no competing editor', async () => {
+    event(row('b10').querySelector('.tab-details'), 'dblclick'); await wait(20); assert.equal(document.getElementById('tabEditDialog'), null);
+    event(live(6).querySelector('.tab-details'), 'dblclick'); await wait(20); assert(document.getElementById('tabEditDialog'));
+    event(document.getElementById('tabEditValue'), 'keydown', { key: 'Escape' }); await wait(20); assert.equal(document.getElementById('tabEditDialog'), null);
+    await context(6); assert(document.getElementById('tab-context-menu')); event(document.body, 'keydown', { key: 'Escape' }); assert.equal(document.getElementById('tab-context-menu'), null);
+});
+
+test('Space and Tab context menus share one visible surface in either gesture order', async () => {
+    await context(6); assert(document.getElementById('tab-context-menu'));
+    const header = document.querySelector('.space.active .space-name');
+    event(header, 'keydown', { key: 'F10', shiftKey: true });
+    assert(document.querySelector('.space-context-menu'));
+    assert.equal(Boolean(document.getElementById('tab-context-menu')), false, 'Space keyboard menu dismisses the previous Tab menu');
+    await context(6);
+    assert(document.getElementById('tab-context-menu'));
+    assert.equal(Boolean(document.querySelector('.space-context-menu')), false, 'Tab menu dismisses the previous Space menu');
+    clear();
+});
+
+test('newer Space menu prevents an outstanding async Tab menu from reopening', async () => {
+    clear(); document.getElementById('tab-context-menu')?.remove();
+    let release; const waitForTab = new Promise(resolve => { release = resolve; });
+    beforeGetTab = async id => { if (id === 6) await waitForTab; };
+    try {
+        event(live(6), 'contextmenu', { pageX: 20, pageY: 20 }); await wait(20);
+        event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'), 'contextmenu');
+        assert(document.querySelector('.space-context-menu'));
+    } finally { beforeGetTab = null; release(); }
+    await wait(40);
+    assert.equal(Boolean(document.getElementById('tab-context-menu')), false, 'Delayed Tab result cannot override a later Space gesture');
+    assert(document.querySelector('.space-context-menu')); clear();
+});
+
+
+for (const delayed of [false, true]) test(`newer Space editor replaces ${delayed ? 'pending' : 'visible'} Tab editor without mutation`, async () => {
+    clear(); const before = structuredClone(mutations); let release;
+    const held = new Promise(resolve => { release = resolve; });
+    await context(6);
+    if (delayed) beforeTabMenuRequest = async message => { if (message.action === 'describe') await held; };
+    event(menuItem('rename'), 'click'); await wait(20);
+    if (!delayed) assert(document.getElementById('tabEditDialog'));
+    try {
+        event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'), 'contextmenu');
+        const rename = [...document.querySelectorAll('.space-context-menu [role="menuitem"]')].find(item => item.textContent === 'Rename');
+        event(rename, 'click');
+    } finally { beforeTabMenuRequest = null; release(); }
+    await wait(40);
+    assert.equal(Boolean(document.getElementById('tabEditDialog')), false);
+    assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);
+    assert.equal(document.querySelector('[role="dialog"] h2').textContent, 'Rename Alpha');
+    assert(document.querySelector('[role="dialog"]').contains(document.activeElement));
+    assert.deepEqual(mutations, before); clear();
+    // Completion of the abandoned editor releases the mutation gate for a later edit.
+    await context(6); await startEdit('rename');
+    event(document.getElementById('tabEditCancel'), 'click'); await wait(20);
 });

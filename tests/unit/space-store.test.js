@@ -490,3 +490,108 @@ test('invalid or stale relative moves reject without writes; source self-drop le
     await store.dispatch({ action: 'reorder', spaceId: 'a', anchorSpaceId: 'a', position: 'before' });
     assert.deepEqual(local.spaces, baseline.spaces);
 });
+
+test('queued Space basics preserve stable identity, order, ownership and active selection through metadata edits', async () => {
+    const folders = [ { id: 'a', title: 'Same name', parentId: 'root' }, { id: 'b', title: 'Same name', parentId: 'root' } ];
+    chrome.bookmarks.getChildren = async id => id === 'root' ? structuredClone(folders) : [];
+    chrome.bookmarks.get = async id => structuredClone(folders.filter(folder => folder.id === id));
+    chrome.bookmarks.update = async (id, attrs) => { mutations.push(['bookmark-update', id, attrs]); Object.assign(folders.find(folder => folder.id === id), attrs); };
+    session.activeSpaces = { 1: 'a', 2: 'a' };
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    const stale = structuredClone(store.spaces);
+    await store.dispatch({ action: 'metadata', spaceId: 'b', changes: { name: ' Renamed ', color: 'cyan', icon: 'rocket' } });
+    assert.equal(local.spaces[1].id, 'b'); assert.equal(local.spaces[1].name, 'Renamed');
+    assert.equal(local.spaces[1].color, 'cyan'); assert.equal(local.spaces[1].icon, 'rocket');
+    assert.deepEqual(local.spaces.map(space => space.id), ['a', 'b']);
+    assert.deepEqual(session.activeSpaces, { 1: 'a', 2: 'a' });
+    assert.deepEqual(local.spaces.map(space => space.temporaryTabs), [[1], [2]]);
+    assert.equal(local.spaceRegistry.b.spaceUuid, 'b'); assert.equal(local.spaceRegistry.b.icon, 'rocket');
+    assert.deepEqual(mutations, [['bookmark-update', 'b', { title: 'Renamed' }]]);
+    const after = structuredClone(stale); after[0].color = 'green';
+    await store.dispatch({ action: 'patch', before: stale, after });
+    assert.equal(local.spaces[1].icon, 'rocket'); assert.equal(local.spaces[1].name, 'Renamed');
+    const restarted = new SpaceStore(); await restarted.dispatch({ action: 'get' });
+    assert.equal(restarted.spaces[1].icon, 'rocket');
+    local.spaces = []; session.spaceSession = false; tabs = [];
+    const recovered = new SpaceStore(); await recovered.dispatch({ action: 'get' });
+    assert.equal(recovered.spaces[1].id, 'b'); assert.equal(recovered.spaces[1].icon, 'rocket'); assert.equal(recovered.spaces[1].color, 'cyan');
+    await recovered.dispatch({ action: 'metadata', spaceId: 'b', changes: { icon: null } });
+    local.spaces = []; session.spaceSession = false;
+    const reset = new SpaceStore(); await reset.dispatch({ action: 'get' });
+    assert.equal(reset.spaces[1].icon, undefined); assert.equal(local.spaceRegistry.b.icon, null);
+});
+
+test('Space metadata rejects unsupported IDs, values and vanished backing folders before writing', async () => {
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    chrome.bookmarks.get = async id => [{ id, title: id, parentId: 'root' }];
+    chrome.bookmarks.update = async (...args) => mutations.push(args);
+    for (const changes of [{ icon: '<img src=x>' }, { color: 'orange' }, { name: ' ' }, { name: 'a'.repeat(257) }, { bookmarkFolderId: 'other' }]) {
+        await assert.rejects(store.dispatch({ action: 'metadata', spaceId: 'b', changes }));
+    }
+    await assert.rejects(store.dispatch({ action: 'metadata', spaceId: 'deleted', changes: { icon: 'star' } }), /no longer exists/);
+    chrome.bookmarks.get = async () => [];
+    await assert.rejects(store.dispatch({ action: 'metadata', spaceId: 'b', changes: { icon: 'star' } }), /unavailable/);
+    assert.deepEqual(mutations, []); assert.equal(local.spaces[1].icon, undefined);
+});
+
+test('New Folder uses the exact inactive Space root through existing folder policy with sync both on and off', async () => {
+    chrome.bookmarks.get = async id => [{ id, title: 'Same name', parentId: 'root' }];
+    chrome.bookmarks.create = async data => { mutations.push(data); return { ...data, id: 'new-folder' }; };
+    session.activeSpaces = { 1: 'a' };
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    for (const syncTabGroups of [false, true]) {
+        sync.syncTabGroups = syncTabGroups;
+        await store.dispatch({ action: 'newFolder', spaceId: 'b', title: ' Reading ' });
+    }
+    assert.deepEqual(mutations.filter(item => item.parentId), [{ parentId: 'b', title: 'Reading' }, { parentId: 'b', title: 'Reading' }]);
+    assert.deepEqual(session.activeSpaces, { 1: 'a' });
+    await assert.rejects(store.dispatch({ action: 'newFolder', spaceId: 'removed', title: 'Reading' }), /no longer exists/);
+    await assert.rejects(store.dispatch({ action: 'newFolder', spaceId: 'b', title: ' ' }), /folder name/);
+});
+
+test('Space deletion removes only its backing subtree and closes owned tabs in every window while global Favorites survive', async () => {
+    tabs.push({ id: 3, windowId: 2, url: 'https://other-window.test/' }, { id: 4, windowId: 2, url: 'https://favorite.test/' });
+    local.spaces[1].temporaryTabs.push(3, 4);
+    local.persistentFavorites = [{ id: 'favorite', url: 'https://favorite.test/' }];
+    const removed = [], trees = [];
+    chrome.tabs.get = async id => structuredClone(tabs.find(tab => tab.id === id));
+    chrome.tabs.remove = async id => { removed.push(id); tabs = tabs.filter(tab => tab.id !== id); };
+    chrome.bookmarks.removeTree = async id => trees.push(id);
+    const store = new SpaceStore();
+    store.favoriteStore = { async initialize() {}, async reconcile() {}, noteSpaceExclusion() {}, ownsTab: tab => (typeof tab === 'number' ? tab : tab?.id) === 4 };
+    await store.dispatch({ action: 'delete', spaceId: 'b' });
+    assert.deepEqual(removed.sort(), [2, 3]); assert.deepEqual(trees, ['b']);
+    assert.deepEqual(tabs.map(tab => tab.id), [1, 4]);
+    assert.deepEqual(local.persistentFavorites, [{ id: 'favorite', url: 'https://favorite.test/' }]);
+});
+
+test('registry icon recovery never copies metadata from a different UUID and metadata writes reject that mismatch', async () => {
+    local.spaceRegistry = { b: { spaceUuid: 'different-space', bookmarkFolderId: 'b', icon: 'heart', color: 'pink' } };
+    chrome.bookmarks.getChildren = async id => id === 'root' ? [{ id: 'a', title: 'a' }, { id: 'b', title: 'b' }] : [];
+    chrome.bookmarks.get = async id => [{ id, title: id, parentId: 'root' }];
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    assert.equal(store.spaces[1].icon, undefined); assert.equal(store.spaces[1].color, 'blue');
+    await assert.rejects(store.dispatch({ action: 'metadata', spaceId: 'b', changes: { icon: 'rocket' } }), /identity has changed/);
+    assert.equal(local.spaceRegistry.b.icon, 'heart'); assert.equal(local.spaces[1].icon, undefined);
+});
+
+test('successful New Folder does not run unrelated persistence that could turn a committed create into a retry', async () => {
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    chrome.bookmarks.get = async id => [{ id, title: id, parentId: 'root' }];
+    const created = [];
+    chrome.bookmarks.create = async data => { created.push(data); return { ...data, id: 'new' }; };
+    store.persist = async () => { throw new Error('Unrelated Space storage unavailable'); };
+    const result = await store.dispatch({ action: 'newFolder', spaceId: 'b', title: 'Created once' });
+    assert.deepEqual(created, [{ parentId: 'b', title: 'Created once' }]);
+    assert.deepEqual(result.map(space => space.id), ['a', 'b']);
+});
+
+test('Space rename and folder creation retain the existing backing-root boundary after a folder is moved outside Arcify', async () => {
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    chrome.bookmarks.get = async id => [{ id, title: id, parentId: 'outside' }];
+    chrome.bookmarks.update = async (...args) => mutations.push(args);
+    chrome.bookmarks.create = async (...args) => mutations.push(args);
+    await assert.rejects(store.dispatch({ action: 'metadata', spaceId: 'b', changes: { name: 'Must not rename' } }), /no longer inside the Arcify/);
+    await assert.rejects(store.dispatch({ action: 'newFolder', spaceId: 'b', title: 'Must not create' }), /no longer inside the Arcify/);
+    assert.deepEqual(mutations, []);
+});

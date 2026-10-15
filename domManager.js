@@ -186,7 +186,12 @@ export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher) {
     updateSpaceSwitcher();
 }
 
-export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null, onAddToFavorites = null, todaySelection = null) {
+let activeTabContextMenuCleanup = null;
+
+export function closeTabContextMenu() { activeTabContextMenuCleanup?.(); }
+
+export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null, onAddToFavorites = null, todaySelection = null, tabActions = null) {
+    activeTabContextMenuCleanup?.();
     // Remove any existing context menus
     const existingMenu = document.getElementById('tab-context-menu');
     if (existingMenu) {
@@ -196,17 +201,38 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     const contextMenu = document.createElement('div');
     contextMenu.id = 'tab-context-menu';
     contextMenu.className = 'context-menu'; // Reuse general context menu styling
+    contextMenu.setAttribute('role', 'menu');
     contextMenu.style.position = 'fixed';
     contextMenu.style.left = `${x}px`;
     contextMenu.style.top = `${y}px`;
 
+    const multiple = Math.max(todaySelection?.count || 1, tabActions?.selectionCount || 1) > 1;
+    const addAction = (label, callback, action) => {
+        if (typeof callback !== 'function') return;
+        const item = document.createElement('div'); item.className = 'context-menu-item';
+        item.textContent = label; item.dataset.action = action; item.setAttribute('role', 'menuitem'); item.tabIndex = 0;
+        item.addEventListener('click', () => { closeMenu(); void callback(); }, { once: true });
+        item.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click(); } });
+        contextMenu.append(item);
+    };
+    if (multiple && !todaySelection) {
+        const hint = document.createElement('div'); hint.className = 'context-menu-item'; hint.setAttribute('aria-disabled', 'true');
+        hint.textContent = 'Select one pin to edit it. Drag selected pins to Favorites.'; contextMenu.append(hint);
+    }
+    if (!multiple && tabActions) {
+        addAction('Copy Link', tabActions.copyLink, 'copyLink');
+        addAction('Rename…', tabActions.rename, 'rename');
+        addAction('Edit Pinned URL…', tabActions.editUrl, 'editUrl');
+        addAction(tabActions.muted ? 'Unmute Tab' : 'Mute Tab', tabActions.mute, 'mute');
+        addAction('Duplicate Tab', tabActions.duplicate, 'duplicate');
+    }
     // --- Menu Items ---
     if (todaySelection) {
         const save = document.createElement('div');
         save.className = 'context-menu-item'; save.id = 'saveTodayTabsInNewFolder';
         save.textContent = `Save ${todaySelection.count} tab${todaySelection.count === 1 ? '' : 's'} in new pinned folder…`;
         save.setAttribute('role', 'menuitem'); save.tabIndex = 0;
-        const activate = () => { contextMenu.remove(); void todaySelection.save(); };
+        const activate = () => { closeMenu(); void todaySelection.save(); };
         save.addEventListener('click', activate, { once: true });
         save.addEventListener('keydown', event => {
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); save.click(); }
@@ -215,22 +241,23 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     }
 
     // Only show these options for actual tabs that are part of a space
-    if (!isBookmarkOnly && !(todaySelection?.count > 1)) {
+    if (!isBookmarkOnly && !multiple) {
         const addToFavoritesOption = document.createElement('div');
         addToFavoritesOption.className = 'context-menu-item';
         addToFavoritesOption.textContent = 'Add to Favorites';
         addToFavoritesOption.addEventListener('click', async () => {
             if (typeof onAddToFavorites === 'function') await onAddToFavorites();
-            contextMenu.remove();
+            closeMenu();
         });
         contextMenu.appendChild(addToFavoritesOption);
 
         const pinInSpaceOption = document.createElement('div');
         pinInSpaceOption.className = 'context-menu-item';
-        pinInSpaceOption.textContent = isPinned ? 'Unpin Tab' : 'Pin Tab';
+        pinInSpaceOption.textContent = isPinned ? 'Remove Pin' : 'Pin Tab';
         pinInSpaceOption.addEventListener('click', () => {
-            chrome.runtime.sendMessage({ command: 'toggleSpacePin', tabId: tab.id });
-            contextMenu.remove();
+            if (isPinned && tabActions?.removePin) void tabActions.removePin();
+            else chrome.runtime.sendMessage({ command: 'toggleSpacePin', tabId: tab.id });
+            closeMenu();
         });
         contextMenu.appendChild(pinInSpaceOption);
 
@@ -238,14 +265,14 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         if (isPinned && typeof onReplaceBookmarkUrlWithCurrent === 'function') {
             const replaceBookmarkUrlOption = document.createElement('div');
             replaceBookmarkUrlOption.className = 'context-menu-item';
-            replaceBookmarkUrlOption.textContent = 'Replace Bookmark URL with Current URL';
+            replaceBookmarkUrlOption.textContent = 'Use Current URL for Pin';
             replaceBookmarkUrlOption.addEventListener('click', async () => {
                 try {
                     await onReplaceBookmarkUrlWithCurrent(tab, tabElement);
                 } catch (e) {
                     Logger.warn('[ContextMenu] Failed to replace bookmark URL with current URL:', e);
                 } finally {
-                    contextMenu.remove();
+                    closeMenu();
                 }
             });
             contextMenu.appendChild(replaceBookmarkUrlOption);
@@ -273,7 +300,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
             submenuItem.textContent = space.name;
             submenuItem.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                contextMenu.remove(); // Close menu immediately for better UX
+                closeMenu(); // Close menu immediately for better UX
 
                 await moveTabToSpace(tab.id, space.id, false);
                 // Set the space as active, but prevent it from auto-activating a different tab
@@ -301,7 +328,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
             submenuItem.addEventListener('click', (e) => {
                 e.stopPropagation();
                 createSpaceFromInactive(folder.title, tab);
-                contextMenu.remove();
+                closeMenu();
             });
             submenu.appendChild(submenuItem);
         });
@@ -345,25 +372,26 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     }
 
     // Archive Tab (Only for active tabs)
-    if (!isBookmarkOnly && !(todaySelection?.count > 1)) {
+    if (!isBookmarkOnly && !multiple) {
         const archiveOption = document.createElement('div');
         archiveOption.className = 'context-menu-item';
         archiveOption.textContent = 'Archive Tab';
         archiveOption.addEventListener('click', async () => {
             await Utils.archiveTab(tab.id); // Use the utility function
-            contextMenu.remove();
+            closeMenu();
         });
         contextMenu.appendChild(archiveOption);
     }
 
     // Close Tab / Remove Bookmark
-    if (!(todaySelection?.count > 1)) {
+    if (!multiple) {
         const closeOption = document.createElement('div');
         closeOption.className = 'context-menu-item';
-        closeOption.textContent = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
+        closeOption.textContent = isBookmarkOnly ? 'Remove Pin' : isPinned ? 'Close Tab (Keep Pin)' : 'Close Tab';
         closeOption.addEventListener('click', () => {
-            closeTab(tabElement, tab, isPinned, isBookmarkOnly);
-            contextMenu.remove();
+            if (isBookmarkOnly && tabActions?.removePin) void tabActions.removePin();
+            else closeTab(tabElement, tab, isPinned, isBookmarkOnly);
+            closeMenu();
         });
         contextMenu.appendChild(closeOption);
     }
@@ -374,15 +402,17 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     // Adjust position to keep within viewport
     Utils.adjustMenuPosition(contextMenu, x, y);
 
-    // Close context menu when clicking outside
-    const closeContextMenu = (e) => {
-        if (!contextMenu.contains(e.target)) {
-            contextMenu.remove();
-            document.removeEventListener('click', closeContextMenu, { capture: true }); // Use capture phase
-        }
-    };
-    // Use capture phase to catch clicks before they bubble up
-    document.addEventListener('click', closeContextMenu, { capture: true });
+    function closeMenu() {
+        contextMenu.remove();
+        document.removeEventListener('click', closeContextMenu, true);
+        document.removeEventListener('keydown', closeOnEscape, true);
+        if (activeTabContextMenuCleanup === closeMenu) activeTabContextMenuCleanup = null;
+    }
+    function closeContextMenu(event) { if (!contextMenu.contains(event.target)) closeMenu(); }
+    function closeOnEscape(event) { if (event.key === 'Escape') { event.preventDefault(); closeMenu(); } }
+    activeTabContextMenuCleanup = closeMenu;
+    document.addEventListener('click', closeContextMenu, true);
+    document.addEventListener('keydown', closeOnEscape, true);
 }
 
 export async function showArchivedTabsPopup(activeSpaceId) {

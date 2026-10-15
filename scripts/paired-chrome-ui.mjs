@@ -171,3 +171,15 @@ export async function captureVisibleFailurePage(page, label, capture) {
         return { ...observation, status: 'capture_failed', error: error.message };
     }
 }
+
+// Keep the exact creation receipt until a new fixture tab has attached fully.
+// A failed target lookup/observation must not leave an untracked helper behind.
+export async function attachCreatedFixtureTab(created, attach, cleanup) {
+    if (!Number.isSafeInteger(created?.id) || created.id <= 0) throw new Error('Fixture tab creation did not return an exact tab ID.');
+    try { return await attach(created); }
+    catch (error) {
+        try { await cleanup(created.id); }
+        catch (cleanupError) { error.fixtureTabCleanup = { tabId: created.id, message: cleanupError.message }; }
+        throw error;
+    }
+}

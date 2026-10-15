@@ -4,10 +4,12 @@ import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
 import { isStartupLauncherTab } from '../../startup-launcher-tab.js';
 import { ownerOf } from '../../space-store.js';
+import { projectLiveTabTitles } from '../../tab-title-projection.js';
 
 const source = readFileSync(new URL('../../background.js', import.meta.url), 'utf8').replace(/^import .*;\s*$/gm, '');
 function fixture() {
     const messages = [], startups = [], archives = [], removed = [], alarms = [], actions = [], globals = new Set();
+    const local = { tabLastActivity: { 1: 1, 2: 1 }, tabNameOverridesById: {}, pinnedTabStatesById: {} };
     const tabs = [{ id: 1, url: 'chrome-extension://arcify/startup-launcher.html', title: 'Arcify launcher', active: false },
         { id: 2, url: 'https://browsing.test/', title: 'Browsing tab', active: false }];
     const event = { addListener() {} };
@@ -16,22 +18,23 @@ function fixture() {
             onStartup: { addListener: fn => startups.push(fn) }, onMessage: { addListener: fn => messages.push(fn) } },
         sidePanel: { setPanelBehavior: async () => {} }, commands: { onCommand: event },
         alarms: { onAlarm: event, create: async (...args) => alarms.push(args) },
-        storage: { onChanged: event, local: { get: async () => ({ tabLastActivity: { 1: 1, 2: 1 } }), set: async () => {} } },
+        storage: { onChanged: event, local: { get: async () => local, set: async () => {} } },
         tabs: { onActivated: event, onUpdated: event, onRemoved: event, query: async () => tabs,
             get: async id => tabs.find(tab => tab.id === id), remove: async id => removed.push(id) },
         bookmarks: { search: async () => [] }
     };
+    globalThis.chrome = chrome;
     let launcherRegistered = 0;
     const context = { chrome, console, registerTourMessages() {}, registerBookmarkListeners() {}, registerSpotlightBridge() {},
         registerStartupLauncher() { launcherRegistered++; },
-        isStartupLauncherTab: tab => isStartupLauncherTab(tab, chrome), ownerOf, isProtectedFavorite: () => false,
-        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {},
+        isStartupLauncherTab: tab => isStartupLauncherTab(tab, chrome), ownerOf, projectLiveTabTitles, isProtectedFavorite: () => false,
+        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTabMenuMessages() {},
         SpaceStore: class { spaces = [{ id: 'home', spaceBookmarks: [], temporaryTabs: [1, 2] }]; install() {} async run(fn) { return fn(); } isGlobalTab(tab) { return globals.has(tab.id); } async dispatch(message) { actions.push(message); return this.spaces; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: true, autoArchiveIdleMinutes: 10 }),
             getPinnedTabStates: async () => ({}), addArchivedTab: async tab => archives.push(tab) },
         Logger: { log() {}, error(error) { throw error; } } };
     runInNewContext(source, context);
-    return { context, messages, startups, archives, removed, alarms, launcherRegistered, actions, globals };
+    return { context, messages, startups, archives, removed, alarms, launcherRegistered, actions, globals, tabs, local };
 }
 
 test('startup launcher registration preserves existing auto-archive startup hook', async () => {
@@ -60,6 +63,34 @@ test('background tab search and recent-tabs results omit the launcher', async ()
         assert.equal(replies[0].success, true);
         assert.deepEqual(Array.from(replies[0].tabs, tab => tab.id), [2]);
     }
+});
+
+test('background live search matches and displays exact ordinary aliases across navigation and removal', async () => {
+    const app = fixture();
+    app.tabs.push({ ...app.tabs[1], id: 3, title: 'Duplicate URL page' });
+    app.local.tabNameOverridesById = { 2: { name: 'My named tab', originalDomain: 'browsing.test' }, 3: { name: 'Other twin' } };
+    const search = async query => {
+        const replies = [];
+        for (const listener of app.messages) listener({ action: 'searchTabs', query }, {}, reply => replies.push(reply));
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(replies.length, 1); assert.equal(replies[0].success, true);
+        return Array.from(replies[0].tabs, tab => ({ id: tab.id, title: tab.title }));
+    };
+    assert.deepEqual(await search('NAMED'), [{ id: 2, title: 'My named tab' }]);
+    assert.deepEqual(await search('twin'), [{ id: 3, title: 'Other twin' }]);
+    const recent = [];
+    for (const listener of app.messages) listener({ action: 'getRecentTabs' }, {}, reply => recent.push(reply));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(recent[0].success, true);
+    assert.deepEqual(Array.from(recent[0].tabs, tab => ({ id: tab.id, title: tab.title })), [
+        { id: 2, title: 'My named tab' }, { id: 3, title: 'Other twin' }
+    ]);
+    app.tabs[1].url = 'https://new-domain.test/'; app.tabs[1].title = 'New page title';
+    assert.deepEqual(await search('named'), [{ id: 2, title: 'My named tab' }]);
+    delete app.local.tabNameOverridesById[2];
+    assert.deepEqual(await search('named'), []);
+    assert.deepEqual(await search('new page'), [{ id: 2, title: 'New page title' }]);
+    assert.deepEqual(await search('twin'), [{ id: 3, title: 'Other twin' }]);
 });
 
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry } from '../../scripts/paired-chrome-ui.mjs';
+import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry, attachCreatedFixtureTab } from '../../scripts/paired-chrome-ui.mjs';
 
 function dragGeometryHarness(states = [{}]) {
     const calls = [], records = [], handles = [];
@@ -402,4 +402,30 @@ test('a driver detachment stack cannot authorize lookup when the observed target
     await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, {pause: h.pause}), value => value === error);
     assert.equal(h.calls.filter(item => item.includes('lookup')).length, 2);
     assert.equal(h.records.length, 0);
+});
+
+
+test('successful fixture tab attachment transfers the creation receipt without cleanup', async () => {
+    const receipt = { id: 900, windowId: 2 }, result = { tab: receipt, page: {} }, removed = [];
+    assert.equal(await attachCreatedFixtureTab(receipt, async received => { assert.equal(received, receipt); return result; }, async id => removed.push(id)), result);
+    assert.deepEqual(removed, []);
+});
+
+for (const stage of ['target discovery', 'page observation']) test(`failed fixture ${stage} cleans the exact created tab once`, async () => {
+    const error = new Error(stage), removed = [];
+    await assert.rejects(attachCreatedFixtureTab({ id: 900, windowId: 2 }, async () => { throw error; }, async id => removed.push(id)), actual => actual === error);
+    assert.deepEqual(removed, [900]);
+});
+
+test('fixture attachment preserves the original error and records an uncertain cleanup without retry', async () => {
+    const primary = new Error('Target missing'), removed = [];
+    await assert.rejects(attachCreatedFixtureTab({ id: 900 }, async () => { throw primary; }, async id => {
+        removed.push(id); throw new Error('Removal outcome unknown');
+    }), actual => actual === primary);
+    assert.deepEqual(removed, [900]); assert.deepEqual(primary.fixtureTabCleanup, { tabId: 900, message: 'Removal outcome unknown' });
+});
+
+test('missing fixture creation identity never guesses a tab to attach or clean', async () => {
+    for (const created of [null, {}, { id: 0 }, { id: '900' }]) await assert.rejects(attachCreatedFixtureTab(created,
+        () => assert.fail('No attachment without an exact receipt'), () => assert.fail('No cleanup without an exact receipt')), /exact tab ID/);
 });

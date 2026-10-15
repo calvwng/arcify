@@ -1,3 +1,5 @@
+import { createSpaceContextMenu, spaceDeleteMessage } from './space-context-menu.js';
+import { getSpaceIcon } from './space-icons.js';
 import { projectSpaceOrder } from './space-order.js';
 import { createSpaceSwitcher } from './space-switcher.js';
 import { resolveSidebarDrop, insertAtSidebarDrop } from './sidebar-drop-target.js';
@@ -37,6 +39,7 @@ import { captureSidebarViewport, createActiveTabReveal } from './sidebar-viewpor
 import { EditSessionRegistry } from './edit-sessions.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { getTabRowAction } from './tab-row-action.js';
+import { createTabMenuActions } from './tab-menu-ui.js';
 import { selectWindowSpaceTabs, reconcileWindowPinOrder, mergeVisibleOrder, mergeCapturedTemporaryOrder, canonicalOrderFromDisplay, saveBookmarkOperation } from './sidebar-tabs.js';
 import { ownerOf } from './space-store.js';
 import { canCreateFolder, createFolder } from './folder-policy.js';
@@ -50,6 +53,7 @@ import {
     activateTabInDOM,
     activateSpaceInDOM,
     showTabContextMenu,
+    closeTabContextMenu,
     showArchivedTabsPopup,
     setupQuickPinListener,
     getSpaceElement,
@@ -96,6 +100,7 @@ let isOpeningBookmark = false;
 let isDraggingTab = false;
 let isDraggingSpace = false;
 let pendingMutationCount = 0;
+let tabContextMenuRequest = 0;
 let currentWindow = null;
 let defaultSpaceName = 'Home';
 let showAllOpenTabsInCollapsedFolders = false; // default Arc behavior is false (active-only)
@@ -154,89 +159,24 @@ function scheduleBookmarkRefresh() {
     refreshCoordinator.invalidateBookmarks();
 }
 
-// Helper function to update bookmark for a tab
-async function updateBookmarkForTab(tab, bookmarkTitle) {
-    Logger.log("updating bookmark", tab, bookmarkTitle);
-    const binding = await Utils.getPinnedTabState(tab.id);
-    if (!binding?.bookmarkId) return;
-    const space = ownerOf(spaces, tab.id);
-    const bookmark = space && await getSpaceBookmarkById(space, binding.bookmarkId);
-    if (!bookmark) throw new Error('The favorite binding is no longer valid for this space.');
-    await chrome.bookmarks.update(bookmark.id, { title: bookmarkTitle });
-}
+const tabMenuActions = createTabMenuActions({ document,
+    getContext: () => ({ windowId: currentWindow?.id, spaceId: activeSpaceId }),
+    sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
+});
 
-
-async function replaceBookmarkUrlWithCurrentUrl(tab, tabElement) {
-    if (!tab?.id) return;
-
-    // Always prefer the live tab URL (the `tab` object captured by the UI can be stale).
-    let liveTab = null;
-    try {
-        liveTab = await chrome.tabs.get(tab.id);
-    } catch (e) {
-        // We'll fall back to dataset/tab url below.
+function actionsForTabRow(tabElement, { selectionCount = 1, muted = false } = {}) {
+    const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
+    if (!space || !tabElement.isConnected) throw new Error('This row changed. Reopen its menu.');
+    const target = { windowId: currentWindow.id, spaceId: space.id, bookmarkFolderId: space.bookmarkFolderId };
+    if (tabElement.dataset.tabId) target.tabId = Number(tabElement.dataset.tabId);
+    if (tabElement.dataset.bookmarkId) {
+        target.bookmarkId = tabElement.dataset.bookmarkId;
+        target.parentId = tabElement.parentElement?.closest('.folder')?.dataset.bookmarkId || space.bookmarkFolderId;
     }
-
-    const newUrl = liveTab?.url || tabElement?.dataset?.url || tab?.url || null;
-    if (!newUrl) {
-        console.warn('[Arcify] Replace bookmark URL failed: missing current tab URL', { tabId: tab.id });
-        return;
-    }
-    const newTitle = liveTab?.title || tab?.title || null;
-
-    const stored = await Utils.getPinnedTabState(tab.id);
-    const bookmarkId = tabElement?.dataset?.bookmarkId || stored?.bookmarkId;
-    const pinnedUrl = tabElement?.dataset?.pinnedUrl || stored?.pinnedUrl;
-
-    const resolvedBookmarkId = bookmarkId;
-
-    if (!resolvedBookmarkId) {
-        console.warn('[Arcify] Cannot replace bookmark URL: missing bookmarkId and unable to resolve.', {
-            tabId: tab.id,
-            pinnedUrl,
-            dataset: tabElement?.dataset
-        });
-        return;
-    }
-
-    try {
-        const space = ownerOf(spaces, tab.id);
-        const bookmark = space && await getSpaceBookmarkById(space, resolvedBookmarkId);
-        if (!bookmark) throw new Error('The favorite binding is no longer valid for this space.');
-        const updatePayload = { url: newUrl };
-        // Keep bookmark title in sync with the new pinned page for clarity.
-        if (newTitle) updatePayload.title = newTitle;
-        await chrome.bookmarks.update(bookmark.id, updatePayload);
-    } catch (e) {
-        console.error('[Arcify] chrome.bookmarks.update failed', { bookmarkId: resolvedBookmarkId, newUrl, error: e });
-        return;
-    }
-
-    await Utils.setPinnedTabState(tab.id, { bookmarkId: resolvedBookmarkId, pinnedUrl: newUrl });
-    if (newTitle) {
-        // Update override baseline (and pinned display) to the new URL/title.
-        await Utils.setTabNameOverride(tab.id, newUrl, newTitle);
-    }
-
-    if (tabElement) {
-        tabElement.dataset.pinnedUrl = newUrl;
-        tabElement.dataset.url = newUrl;
-        // Tab is now pinned to current URL; "back to pinned" should no longer be available.
-        const favicon = tabElement.querySelector('.tab-favicon') || tabElement.querySelector('img');
-        if (favicon) {
-            favicon.classList.remove('pinned-back');
-            favicon.title = '';
-            favicon.removeAttribute('aria-label');
-        }
-        const slash = tabElement.querySelector('.tab-url-changed-slash');
-        if (slash) slash.classList.remove('visible');
-
-        // Ensure the displayed title + domain subtitle reflect the new pinned URL immediately.
-        const titleDisplay = tabElement.querySelector('.tab-title-display');
-        if (titleDisplay && newTitle) titleDisplay.textContent = newTitle;
-        const domainDisplay = tabElement.querySelector('.tab-domain-display');
-        if (domainDisplay) domainDisplay.style.display = 'none';
-    }
+    return tabMenuActions(target, { selectionCount, muted });
 }
 
 // Function to apply color overrides from settings
@@ -526,6 +466,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         if ((areaName === 'local' && (changes.persistentFavorites || changes[FAVORITE_ICON_CACHE_KEY])) || (areaName === 'session' && changes.favoriteSession)) {
             if (currentWindow) updatePinnedFavicons();
         }
+        if (areaName === 'local' && (changes.tabNameOverridesById || changes.pinnedTabStatesById)) refreshCoordinator.invalidateActiveView();
         if (areaName === 'sync' && changes.syncTabGroups) {
             maxDragFolderDepth = changes.syncTabGroups.newValue ? 1 : 2;
             sidebarDropFeedback.refresh();
@@ -688,11 +629,11 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
         render = false;
         refreshCoordinator.invalidateSpaces();
     }
-    const projection = list => JSON.stringify(list.map(({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
-        ({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs })));
+    const projection = list => JSON.stringify(list.map(({ id, name, color, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
+        ({ id, name, color, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs })));
     let needsRender = projection(spaces) !== projection(next);
     const old = spaces;
-    const oldMetadata = new Map(old.map(s => [s.id, { name: s.name, color: s.color }]));
+    const oldMetadata = new Map(old.map(s => [s.id, { name: s.name, color: s.color, icon: s.icon }]));
     spaces = next.map(space => {
         const existing = old.find(s => s.id === space.id);
         return existing ? Object.assign(existing, structuredClone(space)) : structuredClone(space);
@@ -722,7 +663,7 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
             }
         });
         const previous = oldMetadata.get(space.id);
-        if (!previous || previous.name !== space.name || previous.color !== space.color) {
+        if (!previous || previous.name !== space.name || previous.color !== space.color || previous.icon !== space.icon) {
             const element = getSpaceElement(space.id);
             disposeEditorsInElement(element);
             element?.remove();
@@ -849,6 +790,10 @@ function createSpaceElement(space) {
     spaceContainer.dataset.spaceId = space.id;
     spaceContainer.style.display = space.id === activeSpaceId ? 'flex' : 'none';
     spaceContainer.dataset.spaceUuid = space.id;
+    const spaceIcon = spaceContainer.querySelector('.space-icon');
+    spaceIcon.textContent = getSpaceIcon(space.icon)?.glyph || '';
+    spaceIcon.hidden = !getSpaceIcon(space.icon);
+    spaceContainer.querySelector('.space-name').setAttribute('aria-keyshortcuts', 'Shift+F10');
 
     // Set space background color from extension settings
     // Get the computed value from :root to ensure overrides are applied
@@ -876,17 +821,8 @@ function createSpaceElement(space) {
     const colorSelect = spaceElement.getElementById('spaceColorSelect');
     colorSelect.value = space.color;
     colorSelect.addEventListener('change', async () => {
-        const newColor = colorSelect.value;
-        space.color = newColor;
-
-
-
-        // Update space background color
-        sidebarContainer.style.setProperty('--space-bg-color', `var(--chrome-${newColor}-color, rgba(255, 255, 255, 0.1))`);
-        sidebarContainer.style.setProperty('--space-bg-color-dark', `var(--chrome-${space.color}-color-dark, rgba(255, 255, 255, 0.1))`);
-
-        saveSpaces();
-        await updateSpaceSwitcher();
+        try { await mutateSpaceSetting('metadata', { spaceId: space.id, changes: { color: colorSelect.value } }); }
+        catch (error) { colorSelect.value = space.color; alert(error.message); }
     });
 
     // Handle color swatch clicks
@@ -922,12 +858,7 @@ function createSpaceElement(space) {
         const session = spaceEditSession || editorSessions.begin('space', space.id);
         try {
             await editorSessions.complete(session, async () => {
-                const oldFolder = await getSpaceBookmarkFolder(space);
-                await chrome.bookmarks.update(oldFolder.id, { title: nameInput.value });
-                await LocalStorage.updateSpaceRegistryEntry(oldFolder.id, { name: nameInput.value });
-                space.name = nameInput.value;
-                await saveSpaces();
-                await updateSpaceSwitcher();
+                await mutateSpaceSetting('metadata', { spaceId: space.id, changes: { name: nameInput.value } });
             });
         } catch (error) {
             nameInput.value = space.name;
@@ -1031,8 +962,8 @@ function createSpaceElement(space) {
     });
 
     deleteSpaceBtn.addEventListener('click', () => {
-        if (confirm(`Delete Space “${space.name}”? This deletes all saved bookmarks and folders in its backing bookmark subtree and closes its owned tabs across all windows. Shared saved Favorites survive. This cannot be undone in Arcify.`)) {
-            deleteSpace(space.id);
+        if (confirm(spaceDeleteMessage(space))) {
+            deleteSpace(space.id).catch(error => alert(error.message));
         }
     });
 
@@ -1076,6 +1007,44 @@ function createSpaceElement(space) {
         });
     }
 }
+
+// Metadata and root-folder changes use the same queue as delete/reorder. A
+// background update can refresh any window without activating the edited Space.
+async function mutateSpaceSetting(action, payload) {
+    pendingMutationCount++;
+    let saved;
+    try {
+        await pendingSpaceSaves;
+        saved = await spaceRequest(action, payload);
+    } finally {
+        pendingMutationCount--;
+        refreshCoordinator.invalidateSpaces();
+        if (action === 'newFolder') refreshCoordinator.invalidateBookmarks();
+    }
+    try {
+        await adoptStoredSpaces(saved);
+        // Paint before dialog dismissal restores header focus, which defers refresh.
+        if (action === 'newFolder' && payload.spaceId === activeSpaceId) await refreshActiveSpaceUI();
+        updateSpaceSwitcher();
+    } catch (error) {
+        if (action !== 'newFolder') throw error;
+        // Creation already committed; a rendering error must not offer Create again.
+        Logger.warn('Folder created; sidebar refresh deferred:', error);
+        document.getElementById('spaceOrderStatus').textContent = 'Folder created. Reopen the Space if it is not visible yet.';
+    }
+}
+
+const spaceContextMenu = createSpaceContextMenu({
+    document, roots: [spacesList, spaceSwitcher],
+    getSpace: id => spaces.find(space => space.id === id),
+    update: (spaceId, changes) => mutateSpaceSetting('metadata', { spaceId, changes }),
+    newFolder: (spaceId, title) => mutateSpaceSetting('newFolder', { spaceId, title }),
+    remove: deleteSpace,
+    // A newer Space gesture owns the menu, including over a pending Tab lookup.
+    onOpen: () => { tabContextMenuRequest++; closeTabContextMenu(); tabMenuActions.cancelEdit(); },
+    isBusy: () => isDraggingSpace,
+    report: message => { document.getElementById('spaceOrderStatus').textContent = message; }
+});
 
 const spaceSwitcherController = createSpaceSwitcher({
     container: spaceSwitcher,
@@ -1313,6 +1282,7 @@ async function createSpaceFromInactive(spaceName, tabToMove) {
             uuid: registryEntry?.spaceUuid ?? Utils.generateUUID(),
             name: spaceName,
             color: spaceColor,
+            ...(getSpaceIcon(registryEntry.icon) ? { icon: registryEntry.icon } : {}),
             spaceBookmarks: spaceBookmarks,
             temporaryTabs: [tabToMove.id],
             lastTab: tabToMove.id,
@@ -2283,6 +2253,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
                                 Logger.log('Creating UI element for active bookmark:', existingTab);
                                 representedPinnedTabIds.add(existingTab.id);
                                 existingTab.pinnedUrl = item.url;
+                                existingTab.bookmarkTitle = item.title;
                                 existingTab.bookmarkId = item.id;
                                 const tabElement = await createTabElement(existingTab, true);
                                 Logger.log('Appending tab element to container:', tabElement);
@@ -2514,6 +2485,8 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
         if (bookmarkIdForTab) tabElement.dataset.bookmarkId = bookmarkIdForTab;
     }
 
+    if (typeof tab.bookmarkTitle === 'string') tabElement.dataset.bookmarkTitle = tab.bookmarkTitle;
+
     // Capture modifier gestures before favicon navigation and row activation.
     if (isPinned && tabElement.dataset.bookmarkId) bookmarkSelection.register(tabElement);
     else if (!isPinned && !isBookmarkOnly) todaySelection.register(tabElement);
@@ -2609,7 +2582,10 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
         const pinnedUrl = (isPinned ? (tabElement.dataset.pinnedUrl || pinnedUrlForTab) : null);
         const isNavigatedAway = Boolean(isPinned && pinnedUrl && tab.url && Utils.getPinnedUrlKey(tab.url) !== Utils.getPinnedUrlKey(pinnedUrl));
 
-        if (override && !isNavigatedAway) {
+        if (isPinned && !isNavigatedAway && typeof tab.bookmarkTitle === 'string') {
+            displayTitle = tab.bookmarkTitle;
+            titleInput.value = tab.bookmarkTitle;
+        } else if (override && !isNavigatedAway) {
             displayTitle = override.name;
             titleInput.value = override.name; // Set input value to override name
         }
@@ -2642,71 +2618,15 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
         titleInput.style.display = 'none';
     };
 
-    // --- Event Listeners for Editing (Only for actual tabs) ---
-    if (!isBookmarkOnly) {
-        let tabEditSession = null;
-        tabDetails.addEventListener('dblclick', (e) => {
-            // Prevent dblclick on favicon or close button from triggering rename
-            if (e.target === favicon || e.target === actionButton) return;
-
-            titleDisplay.style.display = 'none';
-            domainDisplay.style.display = 'none'; // Hide domain while editing
-            titleInput.style.display = 'inline-block'; // Or 'block'
-            if (!tabEditSession) tabEditSession = editorSessions.begin('tab', tab.id);
-            titleInput.select(); // Select text for easy replacement
-            titleInput.focus(); // Focus the input
-        });
-
-        const saveOrCancelEdit = async (save) => {
-            const session = tabEditSession;
-            if (!session) return;
-            const newName = titleInput.value.trim();
-            try {
-                await editorSessions.complete(session, async () => {
-                    if (save) {
-                    // Fetch the latest tab info in case the title changed naturally
-                    const currentTabInfo = await chrome.tabs.get(tab.id);
-                    const originalTitle = currentTabInfo.title;
-                    const activeSpace = spaces.find(s => s.id === activeSpaceId);
-
-                    if (newName && newName !== originalTitle) {
-                        await Utils.setTabNameOverride(tab.id, tab.url, newName);
-                        if (isPinned) {
-                            await updateBookmarkForTab(tab, newName);
-                        }
-                    } else {
-                        // If name is empty or same as original, remove override
-                        await Utils.removeTabNameOverride(tab.id);
-                        if (isPinned) {
-                            await updateBookmarkForTab(tab, originalTitle);
-                        }
-                    }
-                    }
-                    const potentiallyUpdatedTab = await chrome.tabs.get(tab.id);
-                    tab.title = potentiallyUpdatedTab.title;
-                    tab.url = potentiallyUpdatedTab.url;
-                    await updateDisplay();
-                });
-            } catch (error) {
-                Logger.error("Error getting tab info or saving override:", error);
-                alert(error.message);
-            } finally {
-                if (tabEditSession === session) tabEditSession = null;
-            }
-        };
-
-        titleInput.addEventListener('blur', () => saveOrCancelEdit(true));
-        titleInput.addEventListener('keydown', async (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault(); // Prevent potential form submission if wrapped
-                await saveOrCancelEdit(true);
-                titleInput.blur(); // Explicitly blur to hide input
-            } else if (e.key === 'Escape') {
-                await saveOrCancelEdit(false); // Cancel reverts input visually via updateDisplay
-                titleInput.blur(); // Explicitly blur to hide input
-            }
-        });
-    }
+    // Live double-click uses the same editor as Rename in the menu. Closed
+    // pins use the menu: double-click would first activate/open their row.
+    tabDetails.addEventListener('dblclick', event => {
+        if (isBookmarkOnly || event.target === favicon || event.target === actionButton || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        event.preventDefault(); event.stopPropagation();
+        bookmarkSelection.clear(); todaySelection.clear();
+        try { void actionsForTabRow(tabElement).rename(); }
+        catch (error) { showFavoritesStatus(error.message); }
+    });
 
     // --- Initial Display ---
     await updateDisplay(); // Call initially to set the correct title/domain
@@ -2893,10 +2813,16 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
 
     // --- Context Menu ---
     tabElement.addEventListener('contextmenu', async (e) => {
+        const menuRequest = ++tabContextMenuRequest;
+        tabMenuActions.cancelEdit();
+        spaceContextMenu.close(false);
+        closeTabContextMenu();
         e.preventDefault();
         e.stopPropagation();
         const todaySnapshot = !isPinned && !isBookmarkOnly ? todaySelection.freeze(tabElement) : null;
+        const pinSnapshot = isPinned && tabElement.dataset.bookmarkId ? bookmarkSelection.freeze(tabElement) : null;
         if (isPinned || isBookmarkOnly) todaySelection.clear();
+        if (pinSnapshot?.error) { showFavoritesStatus(pinSnapshot.error); return; }
         if (todaySnapshot?.error) { showFavoritesStatus(todaySnapshot.error); return; }
         // Opening a context menu (including a later cancelled name dialog) must
         // never create the Arcify root as an incidental side effect.
@@ -2912,6 +2838,13 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             allBookmarkSpaceFolders = [];
         }
         if (todaySnapshot && !todaySelection.validate(todaySnapshot)) return;
+        let actions;
+        try {
+            let muted = false;
+            if (!isBookmarkOnly) muted = Boolean((await chrome.tabs.get(tab.id)).mutedInfo?.muted);
+            actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || 1, muted });
+        } catch (error) { showFavoritesStatus(error.message); return; }
+        if (menuRequest !== tabContextMenuRequest || todaySnapshot && !todaySelection.validate(todaySnapshot) || pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
         showTabContextMenu(
             e.pageX,
             e.pageY,
@@ -2925,7 +2858,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             setActiveSpace,
             allBookmarkSpaceFolders,
             createSpaceFromInactive,
-            replaceBookmarkUrlWithCurrentUrl,
+            actions.useCurrentUrl,
             async () => {
                 try {
                     if (tabElement.dataset.bookmarkId) {
@@ -2939,7 +2872,8 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
                     await updatePinnedFavicons();
                 } catch (error) { showFavoritesStatus(error.message); }
             },
-            todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot) } : null
+            todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot) } : null,
+            actions
         );
     });
 
@@ -2993,6 +2927,7 @@ async function createNewSpace() {
             uuid: registryEntry?.spaceUuid ?? Utils.generateUUID(),
             name: spaceName,
             color: spaceColor,
+            ...(getSpaceIcon(registryEntry.icon) ? { icon: registryEntry.icon } : {}),
             spaceBookmarks: [],
             temporaryTabs: []
         };
@@ -3125,7 +3060,9 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                     const isNavigatedAway = Boolean(pinnedUrl && tab.url && Utils.getPinnedUrlKey(tab.url) !== Utils.getPinnedUrlKey(pinnedUrl));
 
                     // Only force override title when we're still on the pinned URL.
-                    if (override && !isNavigatedAway) {
+                    if (tabElement.dataset.bookmarkId && !isNavigatedAway && tabElement.dataset.bookmarkTitle !== undefined) {
+                        displayTitle = tabElement.dataset.bookmarkTitle;
+                    } else if (override && !isNavigatedAway) {
                         displayTitle = override.name;
                     }
                     titleDisplay.textContent = displayTitle;
@@ -3147,7 +3084,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                         domainDisplay.style.display = 'none';
                     }
                     // Update input value only if not focused (might overwrite user typing)
-                    titleInput.value = (override && !isNavigatedAway) ? override.name : tab.title;
+                    titleInput.value = displayTitle;
                 }
             }
             let faviconElement = tabElement.querySelector('.tab-favicon');

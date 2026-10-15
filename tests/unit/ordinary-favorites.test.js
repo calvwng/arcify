@@ -2,6 +2,8 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FavoriteStore, FAVORITES_KEY, FAVORITE_SESSION_KEY } from '../../favorite-store.js';
 import { SpaceStore, ownerOf } from '../../space-store.js';
+import { runTabMenuAction } from '../../tab-menu-actions.js';
+import { getBridgeSnapshot } from '../../spotlight-bridge.js';
 import { isProtectedFavorite } from '../../favorite-safety.js';
 
 // Real shared worker queue, both stores and group projector. Only browser APIs
@@ -362,3 +364,48 @@ for (const pending of [false, true]) for (const revokeAt of ['final lookup', 'ta
             revokeAt === 'tab activation' ? [['update', tabId, { active: true }]] : []);
     });
 }
+
+
+test('Space metadata and exact Tab edits preserve real ordinary-Favorite ownership and saved identity', async () => {
+    chrome.bookmarks.update = async (id, changes) => {
+        const node = nodes.find(node => node.id === id); Object.assign(node, changes);
+        effects.push(['bookmark-update', id, clone(changes)]); return clone(node);
+    };
+    const s = stores({ install: true }); await s.spaces.dispatch({ action: 'get' });
+    await s.spaces.dispatch({ action: 'assign', spaceId: 'a', tabId: 2 });
+    const target = tabId => ({ type: 'tabMenuAction', windowId: 1, spaceId: 'a', bookmarkFolderId: 'a', tabId });
+    const stale = await runTabMenuAction(s.spaces, { ...target(1), action: 'describe' });
+    await s.favorites.dispatch(req('addTab', { tabId: 1 }));
+    const fromPin = await s.favorites.dispatch(req('addBookmark', { spaceId: 'a', bookmarkFolderId: 'a', bookmarkId: 'bookmark', parentId: 'a' }));
+    await s.idle();
+    const savedFavorites = clone(local[FAVORITES_KEY]), savedOwnership = clone(session[FAVORITE_SESSION_KEY]);
+    const today = await runTabMenuAction(s.spaces, { ...target(2), action: 'describe' });
+    await Promise.all([
+        s.spaces.dispatch({ action: 'metadata', spaceId: 'a', changes: { name: 'Edited Space', color: 'cyan', icon: 'rocket' } }),
+        runTabMenuAction(s.spaces, { ...target(2), action: 'rename', expected: today.expected, value: 'Today alias' })
+    ]);
+    await s.spaces.dispatch({ action: 'newFolder', spaceId: 'a', title: 'New saved folder' });
+    const pin = { type: 'tabMenuAction', windowId: 1, spaceId: 'a', bookmarkFolderId: 'a', bookmarkId: 'bookmark', parentId: 'a' };
+    for (const [action, value] of [['rename', 'Exact saved name'], ['editUrl', 'https://edited.test/']]) {
+        const current = await runTabMenuAction(s.spaces, { ...pin, action: 'describe' });
+        await runTabMenuAction(s.spaces, { ...pin, action, value, expected: current.expected });
+    }
+    for (const action of ['rename', 'copyLink', 'duplicate', 'mute']) {
+        await assert.rejects(runTabMenuAction(s.spaces, { ...target(1), action, expected: stale.expected,
+            value: action === 'mute' ? true : 'Must not edit Favorite' }), /changed/);
+    }
+    assertGlobal(s, 1); assertGlobal(s, fromPin.tab.id);
+    assert.equal(tab(1).pinned, false); assert.equal(tab(fromPin.tab.id).pinned, false); assert.equal(tab(2).title, 'Twin');
+    assert.deepEqual(local[FAVORITES_KEY], savedFavorites); assert.deepEqual(session[FAVORITE_SESSION_KEY], savedOwnership);
+    assert.equal(local.spaceRegistry.a.spaceUuid, 'a'); assert.equal(local.spaceRegistry.a.icon, 'rocket');
+    assert.equal(nodes.find(node => node.id === 'a').title, 'Edited Space');
+    assert.equal(nodes.find(node => node.title === 'New saved folder').parentId, 'a');
+    assert.deepEqual(nodes.find(node => node.id === 'bookmark'), { id: 'bookmark', parentId: 'a', title: 'Exact saved name', url: 'https://edited.test/' });
+    assert.equal(nodes.find(node => node.id === 'twin').url, 'https://same.test/');
+    assert.equal(local.tabNameOverridesById[2].name, 'Today alias');
+    const snapshot = await getBridgeSnapshot(s.spaces, 1);
+    assert.equal(snapshot.tabs.find(tab => tab.id === 1).spaceId, null);
+    assert.equal(snapshot.tabs.find(tab => tab.id === 2).title, 'Today alias');
+    assert.equal(snapshot.spaces.find(space => space.id === 'a').name, 'Edited Space');
+    assert.equal(Object.hasOwn(snapshot.spaces.find(space => space.id === 'a'), 'icon'), false);
+});

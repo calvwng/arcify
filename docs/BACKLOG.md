@@ -49,3 +49,23 @@ tabs; this item does not change that behavior.
 
 Background: [Saved Favorites](favorites-drop.md), including
 [native keyboard-close confirmation](favorites-drop.md#native-keyboard-close-confirmation).
+
+## Deferred Space menu features
+
+**Status: deferred; not implemented.** The approved basics are documented in
+[Space context menu](space-context-menu.md). Revisit these only after a new decision
+on scope:
+
+- **Export Space to Bookmarks:** decide copy versus move semantics and whether
+  Today tabs are included before implementation. Existing saved bookmarks already
+  live under the Space's backing bookmark subtree; avoid accidental duplication or
+  destructive moves, and define nested-folder handling.
+- **Live Folders:** requires explicit integrations, authentication and a defined
+  refresh/data-ownership policy. Basic saved bookmark folders remain unchanged.
+- **True Profiles:** a Chromium extension alone cannot create or switch browser
+  profiles or isolate cookies, sessions and extensions per Space. Do not label
+  ordinary Space groupings as Profiles; any native/browser-supported integration
+  needs separate design and approval.
+- **Richer themes:** gradients, wallpaper, contrast tuning and additional theme
+  settings are deferred. The approved Theme Color action uses the existing eight
+  colors only.

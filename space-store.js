@@ -1,3 +1,7 @@
+import { normalizeSpaceIcon } from './space-icons.js';
+import { SPACE_COLORS } from './space-colors.js';
+import { createFolder } from './folder-policy.js';
+import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { moveSpace } from './space-order.js';
 import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
 import { isPracticeUrl } from './tour-practice.js';
@@ -63,7 +67,8 @@ export class SpaceStore {
         folder ||= await LocalStorage.getOrCreateSpaceFolder(name);
         const entry = await LocalStorage.getOrCreateSpaceRegistryEntry(folder.id, { name, color });
         return { id: entry.spaceUuid, spaceUuid: entry.spaceUuid, uuid: entry.spaceUuid,
-            bookmarkFolderId: folder.id, name, color: entry.color || color, spaceBookmarks: [], temporaryTabs: [] };
+            bookmarkFolderId: folder.id, name, color: entry.color || color,
+            ...(normalizeSpaceIcon(entry.icon) ? { icon: normalizeSpaceIcon(entry.icon) } : {}), spaceBookmarks: [], temporaryTabs: [] };
     }
     async initialize() {
         if (this.initialized) return;
@@ -184,6 +189,11 @@ export class SpaceStore {
                 else { this.spaces.push(await this.makeSpace(folder.title, 'grey', folder)); continue; }
             }
             space.name = folder.title;
+            const entry = await LocalStorage.getOrCreateSpaceRegistryEntry(folder.id, {
+                spaceUuid: space.id, name: space.name, color: space.color, icon: space.icon
+            });
+            // Only recover metadata belonging to this stable Space identity.
+            if (entry.spaceUuid === space.id && space.icon === undefined && normalizeSpaceIcon(entry.icon)) space.icon = normalizeSpaceIcon(entry.icon);
         }
         return before !== JSON.stringify(this.spaces);
     }
@@ -342,6 +352,34 @@ export class SpaceStore {
                 this.spaces = applySpacePatch(this.spaces, message.before, message.after);
                 if (!this.spaces.length) this.spaces.push(await this.makeSpace(this.defaultSpaceName));
                 break;
+            case 'metadata': {
+                const space = this.spaces.find(space => space.id === message.spaceId);
+                if (!space) throw new Error('This Space no longer exists.');
+                const attrs = message.changes || {};
+                if (Object.keys(attrs).some(key => !['name', 'color', 'icon'].includes(key))) throw new Error('Unsupported Space setting.');
+                if (attrs.name !== undefined && (typeof attrs.name !== 'string' || !attrs.name.trim() || attrs.name.trim().length > 256)) throw new Error('Enter a Space name between 1 and 256 characters.');
+                if (attrs.color !== undefined && !SPACE_COLORS.includes(attrs.color)) throw new Error('Choose one of the eight Space colors.');
+                if (attrs.icon !== undefined && attrs.icon !== null && normalizeSpaceIcon(attrs.icon) !== attrs.icon) throw new Error('Choose an icon from the Space icon picker.');
+                const folder = await getSpaceBookmarkFolder(space);
+                const entry = await LocalStorage.getOrCreateSpaceRegistryEntry(folder.id, { spaceUuid: space.id, name: space.name, color: space.color, icon: space.icon });
+                if (entry.spaceUuid !== space.id) throw new Error('This Space bookmark identity has changed. Refresh and try again.');
+                const changes = { ...attrs, ...(attrs.name !== undefined ? { name: attrs.name.trim() } : {}) };
+                if (changes.name !== undefined) await chrome.bookmarks.update(folder.id, { title: changes.name });
+                await LocalStorage.updateSpaceRegistryEntry(folder.id, changes);
+                Object.assign(space, changes);
+                break;
+            }
+            case 'newFolder': {
+                const space = this.spaces.find(space => space.id === message.spaceId);
+                if (!space) throw new Error('This Space no longer exists.');
+                if (typeof message.title !== 'string' || !message.title.trim() || message.title.trim().length > 256) throw new Error('Enter a folder name between 1 and 256 characters.');
+                const folder = await getSpaceBookmarkFolder(space);
+                await createFolder(folder.id, folder.id, message.title.trim());
+                // The bookmark API is the commit. This action changes no Space
+                // state; a later ancillary persist failure must not invite a
+                // retry that creates a second folder. Bookmark events refresh UIs.
+                return clone(this.spaces);
+            }
             case 'reorder':
                 this.spaces = moveSpace(this.spaces, message);
                 break;

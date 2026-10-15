@@ -1,3 +1,5 @@
+import { getSpaceIcon } from './space-icons.js';
+
 const CHIP = 'button[data-space-id]';
 const BEFORE = 'space-drop-before';
 const AFTER = 'space-drop-after';
@@ -46,13 +48,19 @@ export function createSpaceSwitcher({ container, getSpaces, getActiveSpaceId, ac
         for (const space of getSpaces()) {
             const button = document.createElement('button');
             button.type = 'button';
-            button.textContent = space.name;
+            const icon = getSpaceIcon(space.icon);
+            if (icon) {
+                const mark = document.createElement('span');
+                mark.className = 'space-icon'; mark.setAttribute('aria-hidden', 'true'); mark.textContent = icon.glyph;
+                button.appendChild(mark);
+            }
+            const name = document.createElement('span'); name.textContent = space.name; button.appendChild(name);
             button.dataset.spaceId = space.id;
             button.draggable = true;
             button.classList.toggle('active', space.id === getActiveSpaceId());
             button.setAttribute('aria-label', `Switch to space ${space.name}`);
-            button.setAttribute('aria-keyshortcuts', 'Alt+Shift+ArrowLeft Alt+Shift+ArrowRight');
-            button.title = 'Drag to reorder. Keyboard: Alt+Shift+Left or Right.';
+            button.setAttribute('aria-keyshortcuts', 'Alt+Shift+ArrowLeft Alt+Shift+ArrowRight Shift+F10');
+            button.title = 'Drag to reorder. Keyboard: Alt+Shift+Left or Right. Right-click or Shift+F10 for Space options.';
             container.appendChild(button);
             if (space.id === focusedId) button.focus();
         }
@@ -152,7 +160,7 @@ export function createSpaceSwitcher({ container, getSpaces, getActiveSpaceId, ac
     }
     container.addEventListener('click', event => {
         const button = chip(event.target);
-        if (!button || draggedId || (event.detail !== 0 && Date.now() < suppressClickUntil)) return;
+        if (!button || event.button > 0 || draggedId || (event.detail !== 0 && Date.now() < suppressClickUntil)) return;
         Promise.resolve(activate(button.dataset.spaceId)).catch(error => report(error.message));
     });
     container.addEventListener('dragstart', event => {

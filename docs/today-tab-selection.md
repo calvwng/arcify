@@ -92,3 +92,8 @@ manually selected web-search row. The saved-folder screenshot requires an expand
 folder with all four exact live rows visible. Focused fixture tests guard this
 ordering and reject stale results, lost selection, and collapsed/hidden evidence;
 only the real Chrome run can establish browser acceptance.
+
+The exact Arcify `5365079` / Spotlight `019b527` checkpoint passed this native
+scenario, including the visible expanded folder, exact four live identities and
+unchanged mounted search selection. See [the dated full/focused results](bridge-validation.md#verified-ordinary-favorite-and-today-selection-checkpoint-2026-10-15).
+This evidence does not pre-approve later context-menu features.

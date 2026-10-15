@@ -13,6 +13,7 @@
  */
 
 import { Logger } from './logger.js';
+import { normalizeSpaceIcon } from './space-icons.js';
 
 const LocalStorage = {
     // Durable space IDs anchored to bookmark folders. SpaceStore owns live membership;
@@ -31,21 +32,23 @@ const LocalStorage = {
         await chrome.storage.local.set({ spaceRegistry: registry || {} });
     },
     // Get the durable entry for a space's bookmark folder, creating it (with a fresh
-    // spaceUuid) on first sight. On creation the passed name/color seed the entry.
+    // spaceUuid) on first sight, or preserving the existing Space UUID during recovery.
+    // On creation the passed name/color/icon seed the entry.
     getOrCreateSpaceRegistryEntry: async function (bookmarkFolderId, attrs = {}) {
         if (!bookmarkFolderId) return null;
         return this._serializeRegistryOp(async () => {
             const registry = await this.getSpaceRegistry();
             let entry = registry[bookmarkFolderId];
             if (!entry) {
-                const spaceUuid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+                const spaceUuid = attrs.spaceUuid || ((typeof crypto !== 'undefined' && crypto.randomUUID)
                     ? crypto.randomUUID()
-                    : `space-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+                    : `space-${Date.now()}-${Math.random().toString(36).slice(2)}`);
                 entry = {
                     spaceUuid,
                     bookmarkFolderId,
                     name: attrs.name ?? null,
                     color: attrs.color ?? null,
+                    ...(normalizeSpaceIcon(attrs.icon) ? { icon: normalizeSpaceIcon(attrs.icon) } : {}),
                     order: attrs.order ?? 0,
                 };
                 registry[bookmarkFolderId] = entry;
@@ -64,7 +67,7 @@ const LocalStorage = {
             }
         });
     },
-    // Update a registry entry's mutable attributes (name/color/order) so the durable record
+    // Update a registry entry's mutable attributes (name/color/icon/order) so the durable record
     // tracks the user's renames/recolors. No-op if the entry doesn't exist yet.
     updateSpaceRegistryEntry: async function (bookmarkFolderId, attrs = {}) {
         if (!bookmarkFolderId) return;
@@ -75,6 +78,7 @@ const LocalStorage = {
             if (attrs.name !== undefined) entry.name = attrs.name;
             if (attrs.color !== undefined) entry.color = attrs.color;
             if (attrs.order !== undefined) entry.order = attrs.order;
+            if (attrs.icon !== undefined) entry.icon = normalizeSpaceIcon(attrs.icon);
             await this.saveSpaceRegistry(registry);
         });
     },

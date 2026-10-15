@@ -119,32 +119,31 @@ const Utils = {
         await chrome.storage.local.set({ tabNameOverridesById: overrides }); // Changed key
     },
 
-    // Set or update a single override using tabId
-    setTabNameOverride: async function (tabId, url, name) { // Added tabId, kept url for domain
-        if (!tabId || !url || !name) return; // Basic validation
-
-        const overrides = await this.getTabNameOverrides();
-        try {
-            // Still store originalDomain in case we need it later, derived from the URL at time of setting
-            const originalDomain = new URL(url).hostname;
-            overrides[tabId] = { name: name, originalDomain: originalDomain }; // Use tabId as key
-            await this.saveTabNameOverrides(overrides);
-            Logger.log(`Override set for tab ${tabId}: ${name}`);
-        } catch (e) {
-            Logger.error("Error setting override - invalid URL?", url, e);
-        }
+    _tabNameChain: Promise.resolve(),
+    _serializeTabNameOp: function (operation) {
+        const locked = () => globalThis.navigator?.locks?.request
+            ? globalThis.navigator.locks.request('arcify-tab-names', operation) : operation();
+        const run = this._tabNameChain.then(locked, locked);
+        this._tabNameChain = run.then(() => {}, () => {});
+        return run;
     },
-
-    // Remove an override using tabId
-    removeTabNameOverride: async function (tabId) { // Changed parameter to tabId
-        if (!tabId) return;
-
-        const overrides = await this.getTabNameOverrides();
-        if (overrides[tabId]) { // Check using tabId
-            delete overrides[tabId]; // Delete using tabId
+    setTabNameOverride: async function (tabId, url, name) {
+        if (!tabId || !url || !name) return;
+        const originalDomain = new URL(url).hostname;
+        return this._serializeTabNameOp(async () => {
+            const overrides = await this.getTabNameOverrides();
+            overrides[tabId] = { name, originalDomain };
             await this.saveTabNameOverrides(overrides);
-            Logger.log(`Override removed for tab ${tabId}`);
-        }
+        });
+    },
+    removeTabNameOverride: async function (tabId) {
+        if (!tabId) return;
+        return this._serializeTabNameOp(async () => {
+            const overrides = await this.getTabNameOverrides();
+            if (!overrides[tabId]) return;
+            delete overrides[tabId];
+            await this.saveTabNameOverrides(overrides);
+        });
     },
 
     // --- Pinned (Space Bookmark) Tab State ---

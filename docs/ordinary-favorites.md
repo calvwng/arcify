@@ -2,7 +2,15 @@
 
 The default remains native-pinned Favorite tabs. Settings → “Open Favorites as ordinary tabs” opts future opens and explicit adoptions into unpinned live pages with global Favorite ownership. The preference is prospective in either direction: opening an already bound Favorite does not change its pin state, and toggling the preference never changes existing live instances.
 
-An ordinary Favorite remains available across Spaces. Space switching retains its existing focus behavior; activating a Favorite does not select a different Space. Each normal window may have its own exact instance of a saved Favorite. Equal URLs remain separate Favorite identities. Closing the page keeps the saved link. Reopening uses the current preference and saved URL. The ordinary option avoids the native-pinned close behavior; physical Ctrl+W acceptance must be verified separately in the approved disposable-browser harness.
+An ordinary Favorite remains available across Spaces. Space switching retains its existing focus behavior; activating a Favorite does not select a different Space. Each normal window may have its own exact instance of a saved Favorite. Equal URLs remain separate Favorite identities. Closing the page keeps the saved link. Reopening uses the current preference and saved URL. The ordinary option avoids the native-pinned close behavior. The disposable Chrome harness verifies one native XTEST Ctrl+W; physical keyboard hardware and Helium acceptance remain separate manual checks.
+
+## Updating the pair
+
+Update both builds, reload Spotlight first and then Arcify, and refresh existing
+Spotlight pages/overlays. Confirm both peers show Connected before enabling the
+ordinary-tab option. The first upgrade cannot recover an association an older
+build never journaled. Saved links remain, but unproven live pages are not matched
+by URL. Ordinary live pages use normal-width browser tabs rather than native pins.
 
 ## Ownership and transactions
 
@@ -31,5 +39,7 @@ The required [native Ctrl+W CI scenario](../tests/NATIVE_CTRL_W_CI.md) uses one
 XTEST chord in the disposable GitHub display, with exact foreground Chrome
 identity and independent native tab/target destruction checks. It also checks
 cross-Space reuse with group sync off/on, both extension reloads and the full
-browser-restart boundary. This candidate's real-browser outcome is pending;
-physical keyboard hardware and Helium acceptance remain manual.
+browser-restart boundary. The exact `5365079` / Spotlight `019b527` checkpoint
+passed all 37 full and 5 focused cases; see [the dated evidence](bridge-validation.md#verified-ordinary-favorite-and-today-selection-checkpoint-2026-10-15).
+Later changes require their own exact-head run. Physical keyboard hardware and
+Helium acceptance remain manual.
