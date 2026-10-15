@@ -81,3 +81,14 @@ unselected drag, private/global sources, whole-batch stale preflight, concurrent
 folder edits, close/move/navigation during creation and binding, and partial or
 unknown results. Build and unit results are reported separately from Chrome CI;
 these tests do not claim native pointer, geometry or OS modifier validation.
+
+The paired Chrome fixture keeps a typed Spotlight query mounted while saving four
+of six Today tabs (including equal-URL tabs). It checks the exact authoritative
+bookmark bindings and a real paired invalidation before returning to Spotlight.
+Hidden search pages deliberately defer rendering until a genuine tab return; the
+fixture foregrounds that same document, without typing or reloading, then requires
+four bookmark results, two remaining open-tab results, and the unchanged query and
+manually selected web-search row. The saved-folder screenshot requires an expanded
+folder with all four exact live rows visible. Focused fixture tests guard this
+ordering and reject stale results, lost selection, and collapsed/hidden evidence;
+only the real Chrome run can establish browser acceptance.

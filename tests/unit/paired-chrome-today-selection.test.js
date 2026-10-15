@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertTodaySelection, assertTodaySaveCancelled, assertTodayFolderSaved } from '../../scripts/paired-chrome-today-selection.mjs';
+import { assertTodaySelection, assertTodaySaveCancelled, assertTodayFolderSaved, readSavedTodaySearch, assertTodayFolderRendered, watchTodayInvalidation } from '../../scripts/paired-chrome-today-selection.mjs';
 
 function sample() {
     const tabs = [11,12,13].map((id,index) => ({ id, windowId:7, url:`https://example.test/${index === 2 ? 1 : index}`, title:`Title ${id}`, pinned:false, incognito:false, active:index===0 }));
@@ -39,3 +39,64 @@ test('cancel proof requires unchanged tabs, bookmarks, spaces, bindings and Favo
 function selected(){return{ids:[11,12],count:2,bookmarkIds:[],rows:[11,12].map(id=>({id,selected:'true',visible:true}))};}
 test('Today selection requires ordered visible accessible rows and no mixed bookmark selection',()=>assertTodaySelection(selected(),[11,12]));
 for(const [name,change] of Object.entries({wrongOrder:s=>s.ids.reverse(),wrongCount:s=>s.count=1,mixed:s=>s.bookmarkIds=['book'],hidden:s=>s.rows[0].visible=false,missingAria:s=>s.rows[0].selected=null,missingRow:s=>s.rows.pop()}))test(`Today selection rejects ${name}`,()=>{const s=selected();change(s);assert.throws(()=>assertTodaySelection(s,[11,12]));});
+
+
+function mountedSearchHarness({ stale = false, query = 'Today Selection', selected = true } = {}) {
+    let visible = false;
+    const calls = [];
+    const selectedBefore = [{ type:'search-query',title:'Search for "Today Selection"' }];
+    const rows = saved => [{ ...selectedBefore[0],selected }, ...Array.from({length:6},(_,index) => ({
+        type:saved && index < 4 ? 'bookmark' : 'open-tab',title:`Today Selection ${index}`,selected:false }))];
+    const page = {
+        async evaluate() { calls.push('read results'); return rows(visible && !stale); },
+        async $eval(selector, read) { assert.equal(selector,'[data-testid="spotlight-input"]'); calls.push('read query'); return read({value:query}); }
+    };
+    return {page, calls, selectedBefore,
+        async ui(actualPage, label, action) { assert.equal(actualPage,page); calls.push('return to existing tab'); visible=true; return action(); },
+        async poll(read, accept) { const observed=await read(); assert(accept(observed),'Cannot refresh an intentionally hidden surface.'); return observed; }
+    };
+}
+test('Today evidence returns to the mounted Spotlight page before polling deferred results, without search/input/reload',async()=>{
+    const h=mountedSearchHarness();
+    const rows=await readSavedTodaySearch(h);
+    assert.deepEqual(h.calls,['return to existing tab','read results','read query']);
+    assert.equal(rows.filter(row=>row.type==='bookmark').length,4);
+    assert.equal(rows.filter(row=>row.type==='open-tab').length,2);
+});
+for(const [name,options] of Object.entries({stale:{stale:true},queryChanged:{query:'changed'},selectionLost:{selected:false}})) {
+    test(`Today evidence rejects ${name} after return instead of issuing a replacement search`,async()=>{
+        const h=mountedSearchHarness(options);
+        await assert.rejects(readSavedTodaySearch(h));
+        assert.equal(h.calls[0],'return to existing tab');
+        assert.equal(h.calls.filter(call=>call==='return to existing tab').length,1);
+    });
+}
+
+
+const renderedRequest={title:'Saved Today',tabIds:[11,12,13,14],bookmarkIds:['a','b','c','d'],remaining:[15,16]};
+const renderedFolder=()=>({title:renderedRequest.title,expanded:true,tabIds:[11,12,13,14],bookmarkIds:['a','b','c','d'],remaining:[15,16],visible:[true,true,true,true]});
+test('Today screenshot proof requires expanded, visible exact saved rows and remaining Today tabs',()=>assertTodayFolderRendered(renderedFolder(),renderedRequest));
+for(const [name,change] of Object.entries({collapsed:s=>s.expanded=false,hidden:s=>s.visible[0]=false,missing:s=>s.visible.pop(),wrongBinding:s=>s.bookmarkIds.reverse(),wrongOrder:s=>s.tabIds.reverse(),wrongTitle:s=>s.title='Wrong',remainingSaved:s=>s.remaining.push(11)}))
+    test(`Today screenshot proof rejects ${name}`,()=>{const state=renderedFolder();change(state);assert.throws(()=>assertTodayFolderRendered(state,renderedRequest));});
+
+test('Today invalidation observer is passive and accepts only the paired window from the real worker',()=>{
+    const oldChrome=globalThis.chrome,oldDocument=globalThis.document;
+    let receive;
+    globalThis.chrome={runtime:{id:'spotlight',getURL:path=>`chrome-extension://spotlight/${path}`,onMessage:{addListener:listener=>{receive=listener;}}}};
+    globalThis.document={visibilityState:'hidden'};
+    try {
+        const original=watchTodayInvalidation({windowId:7,peerId:'arcify'});
+        const message={action:'spotlightArcifyResultsChanged',windowId:7,peerId:'arcify'};
+        for(const sender of [{id:'wrong'},{id:'spotlight',tab:{}},{id:'spotlight',url:'https://wrong.test'},{id:'spotlight',origin:'https://wrong.test'}])receive(message,sender);
+        receive({...message,windowId:8},{id:'spotlight'});receive({...message,peerId:'wrong'},{id:'spotlight'});
+        assert.equal(globalThis.__pairedTodaySearch.changes.length,0);
+        receive(message,{id:'spotlight',url:'chrome-extension://spotlight/background.js'});
+        assert.equal(globalThis.__pairedTodaySearch.changes.length,1);
+        assert.equal(globalThis.__pairedTodaySearch.changes[0].visibility,'hidden');
+        assert.equal(globalThis.__pairedTodaySearch.documentTimeOrigin,original.documentTimeOrigin);
+    } finally {
+        if(oldChrome===undefined)delete globalThis.chrome;else globalThis.chrome=oldChrome;
+        if(oldDocument===undefined)delete globalThis.document;else globalThis.document=oldDocument;
+        delete globalThis.__pairedTodaySearch;
+    }
+});

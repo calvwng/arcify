@@ -1,6 +1,7 @@
 /** Real Today-selection evidence helpers. Importing this module never launches a browser. */
 import assert from 'node:assert/strict';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
+import { selectResultWithKeyboard } from './paired-chrome-ui.mjs';
 
 const flatten = nodes => nodes.flatMap(node => [node, ...flatten(node.children || [])]);
 const tabIdentity = ({ id, windowId, url, pendingUrl, pinned, incognito, active }) => ({ id, windowId, url, pendingUrl: pendingUrl || null, pinned, incognito, active });
@@ -74,6 +75,48 @@ export function readTodaySelection() {
             visible:Boolean(row.getClientRects().length && getComputedStyle(row).visibility !== 'hidden') })) };
 }
 
+/** Observe the same mounted query; never issue a search or reload to refresh it. */
+export async function readSavedTodaySearch({ page, ui, poll, selectedBefore, query = 'Today Selection' }) {
+    // Hidden pages queue invalidations by design. A genuine tab return resumes
+    // the existing surface; do not synthesize an event or request fresh results.
+    return ui(page, 'Return to the existing Today search without typing or reloading', async () => {
+        const matches = rows => rows.filter(row => row.title?.startsWith(query));
+        const rows = await poll(() => page.evaluate(readSpotlightRows), rows =>
+            matches(rows).filter(row => row.type === 'bookmark').length === 4 &&
+            matches(rows).filter(row => row.type === 'open-tab').length === 2,
+        'paired search refresh after Today folder creation without typing');
+        assert.equal(await page.$eval('[data-testid="spotlight-input"]', node => node.value), query);
+        assert.deepEqual(rows.filter(row => row.selected).map(({type,title}) => ({type,title})), selectedBefore,
+            'Returning to Spotlight preserves the manually selected result.');
+        return rows;
+    });
+}
+
+/** Passive evidence only: do not send a message or manufacture invalidation. */
+export function watchTodayInvalidation({ windowId, peerId }) {
+    const observation = { documentTimeOrigin:performance.timeOrigin, changes:[] };
+    globalThis.__pairedTodaySearch = observation;
+    chrome.runtime.onMessage.addListener((message,sender) => {
+        if (message?.action !== 'spotlightArcifyResultsChanged' || message.windowId !== windowId || message.peerId !== peerId ||
+            sender?.id !== chrome.runtime.id || sender.tab ||
+            (sender.url && sender.url !== chrome.runtime.getURL('background.js')) ||
+            (sender.origin && sender.origin !== `chrome-extension://${chrome.runtime.id}`)) return;
+        observation.changes.push({ ...message, visibility:document.visibilityState, at:Date.now() });
+    });
+    return { documentTimeOrigin:observation.documentTimeOrigin, visibility:document.visibilityState };
+}
+
+export function assertTodayFolderRendered(state, { title, tabIds, bookmarkIds, remaining }) {
+    assert.equal(state.title,title);
+    assert.equal(state.expanded,true,'Capture the expanded folder, not hidden DOM descendants.');
+    assert.deepEqual(state.tabIds,tabIds);
+    assert.deepEqual(state.bookmarkIds,bookmarkIds);
+    assert.deepEqual(state.remaining,remaining);
+    assert.equal(state.visible.length,tabIds.length);
+    assert(state.visible.every(Boolean),'Every saved live row must be visible in the expanded folder.');
+    return state;
+}
+
 export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screenshot, snapshot, poll, fixture, arcifyId, spotlightId, search, record = async () => {} }) {
     const initial = await snapshot(), space = initial.spaces.find(item => item.id === initial.activeSpaceId);
     assert(space?.bookmarkFolderId);
@@ -122,7 +165,15 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
         spotlight=await newTabPage(`chrome-extension://${spotlightId}/newtab.html`);
         await search(spotlight.page,'Today Selection');
         const matches=rows=>rows.filter(row=>row.title?.startsWith('Today Selection'));
-        const spotlightBefore=await poll(()=>spotlight.page.evaluate(readSpotlightRows),rows=>matches(rows).filter(row=>row.type==='open-tab').length===6,'six distinct live Today search results');
+        await poll(()=>spotlight.page.evaluate(readSpotlightRows),rows=>matches(rows).filter(row=>row.type==='open-tab').length===6,'six distinct live Today search results');
+        await ui(spotlight.page,'Explicitly select web search before saving Today tabs',async()=>{
+            const input=await spotlight.page.$('[data-testid="spotlight-input"]');
+            try { await selectResultWithKeyboard(input,()=>spotlight.page.evaluate(readSpotlightRows),row=>row.type==='search-query'); }
+            finally { await input.dispose(); }
+        });
+        const spotlightBefore=await spotlight.page.evaluate(readSpotlightRows);
+        const selectedBefore=spotlightBefore.filter(row=>row.selected).map(({type,title})=>({type,title}));
+        assert.equal(selectedBefore.length,1);
         sidebar=await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`);
         await sidebar.page.waitForFunction(ids=>ids.every(id=>document.querySelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`)),{polling:50},seed);
         const visible=await sidebar.page.evaluate(ids=>[...document.querySelectorAll('.space.active [data-tab-type="temporary"] .tab[data-tab-id]')].map(row=>Number(row.dataset.tabId)).filter(id=>ids.includes(id)),seed);
@@ -146,6 +197,7 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
         await click(seed[0],['Control']); await click(seed[3],['Shift']); await selected(seed.slice(0,4));
         await menu(seed[1]); await prompt();
         const beforeSave=await read(), title='Today Four Saved Together';
+        const searchSurface=await spotlight.page.evaluate(watchTodayInvalidation,{windowId:fixture.windowA,peerId:arcifyId});
         await ui(sidebar.page,'Name and create the selected tabs folder',async()=>{
             await sidebar.page.type('#todayFolderName',title);
             assert.equal(await sidebar.page.$eval('#todayFolderName',node=>node.value),title);
@@ -158,21 +210,38 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
             return folder?.children?.length===4 && seed.slice(0,4).every(id=>data.spaces.find(s=>s.id===space.id)?.spaceBookmarks.includes(id));
         },'all four exact Today tabs saved and bound');
         const proof=assertTodayFolderSaved(beforeSave,afterSave,{selectedIds:seed.slice(0,4),title,folderId,spaceId:space.id,windowId:fixture.windowA});
+        const folderSelector=`.space.active .folder[data-bookmark-id="${folderId}"]`;
+        await ui(sidebar.page,'Expand the newly saved Today folder for visible evidence',async()=>{
+            await sidebar.page.waitForSelector(folderSelector);
+            if(await sidebar.page.$eval(folderSelector,node=>node.classList.contains('collapsed')))
+                await sidebar.page.click(`${folderSelector} > .folder-header .folder-toggle`);
+        });
         const rendered=await poll(()=>sidebar.page.evaluate(({folderId,ids})=>{
             const folder=document.querySelector(`.space.active .folder[data-bookmark-id="${folderId}"]`);
-            return {title:folder?.querySelector('.folder-name')?.textContent || folder?.querySelector('.folder-title')?.textContent,
-                tabIds:folder?[...folder.querySelectorAll('.tab[data-tab-id]')].map(row=>Number(row.dataset.tabId)):[],
+            const rows=folder?[...folder.querySelectorAll('.tab[data-tab-id]')]:[];
+            return {title:folder?.querySelector('.folder-title')?.textContent,
+                expanded:folder?.getAttribute('aria-expanded')==='true',
+                tabIds:rows.map(row=>Number(row.dataset.tabId)),bookmarkIds:rows.map(row=>row.dataset.bookmarkId),
+                visible:rows.map(row=>Boolean(row.getClientRects().length && getComputedStyle(row).visibility==='visible')),
                 remaining:ids.filter(id=>document.querySelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`))};
-        },{folderId,ids:seed}),state=>JSON.stringify(state.tabIds)===JSON.stringify(seed.slice(0,4))&&JSON.stringify(state.remaining)===JSON.stringify(seed.slice(4)),'saved folder rendered with exact live rows');
+        },{folderId,ids:seed}),state=>{
+            try { assertTodayFolderRendered(state,{title,tabIds:seed.slice(0,4),bookmarkIds:proof.bookmarkIds,remaining:seed.slice(4)});return true; }
+            catch { return false; }
+        },'expanded saved folder with four visible exact live rows');
         await ui(sidebar.page,'Capture named folder and remaining Today tabs',()=>screenshot(sidebar.page,'today-selection-saved-folder-keeps-live-identities'));
-        // No new search or refresh: the already-mounted paired results must
-        // reflect newly saved exact pins while preserving the query.
-        const spotlightAfter=await poll(()=>spotlight.page.evaluate(readSpotlightRows),rows=>matches(rows).filter(row=>row.type==='bookmark').length===4 && matches(rows).filter(row=>row.type==='open-tab').length===2,'paired search refresh after Today folder creation without typing');
-        assert.equal(await spotlight.page.$eval('[data-testid="spotlight-input"]',node=>node.value),'Today Selection');
+        // Require an actual paired invalidation before returning, so focus recovery
+        // cannot conceal missing delivery. No extra search or refresh is dispatched.
+        const invalidation=await poll(()=>spotlight.page.evaluate(()=>({
+            documentTimeOrigin:performance.timeOrigin,changes:globalThis.__pairedTodaySearch?.changes || []
+        })),state=>state.changes.length>0,'paired Today-save invalidation delivered to the existing search');
+        assert.equal(invalidation.documentTimeOrigin,searchSurface.documentTimeOrigin);
         const fresh=await snapshot();
         for(let index=0;index<proof.bookmarkIds.length;index++)assert.equal(fresh.bookmarks.find(item=>item.id===proof.bookmarkIds[index])?.tabId,seed[index]);
+        await record({phase:'today-folder-saved-before-search-return',proof,rendered,searchSurface,invalidation,snapshot:fresh});
+        const spotlightAfter=await readSavedTodaySearch({page:spotlight.page,ui,poll,selectedBefore});
+        assert.equal(await spotlight.page.evaluate(()=>performance.timeOrigin),searchSurface.documentTimeOrigin,'The original search document must survive.');
         await ui(spotlight.page,'Capture refreshed saved Today results',()=>screenshot(spotlight.page,'spotlight-fresh-saved-today-folder-results'));
-        const evidence={seed,range,toggled,rightClick,beforeCancel,afterCancel,proof,rendered,spotlightBefore,spotlightAfter,snapshot:fresh,realModifierMouse:true,nativePanel:false};
+        const evidence={seed,range,toggled,rightClick,beforeCancel,afterCancel,proof,rendered,searchSurface,invalidation,spotlightBefore,spotlightAfter,snapshot:fresh,realModifierMouse:true,nativePanel:false};
         await record({phase:'today-selection-complete',...evidence}); return evidence;
     } catch(error){primaryError=error;await record({phase:'today-selection-failed',error:{message:error.message,stack:error.stack},seed,folderId}).catch(()=>{});throw error;}
     finally {
