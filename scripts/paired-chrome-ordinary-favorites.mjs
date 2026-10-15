@@ -240,7 +240,68 @@ export function assertReloadGroupContinuity(before, after, { ids, fixtureReload 
     assert.deepEqual(semanticGroups(after, helpers.after, helpers.current.ownIds), semanticGroups(before, helpers.before, helpers.prior.ownIds), 'Reload must preserve native group membership, window, order, title, color and collapse');
 }
 
-export function assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision = true, fixtureReload } = {}) {
+/** Supplemental setup uses exact saved bookmark operations, never URL adoption. */
+export async function seedFocusedReloadSpacePins({ fixture, snapshot, bridge }) {
+    const before = await snapshot(fixture.windowA), spaceId = fixture.spaces.work;
+    assert.deepEqual(before.spaces.find(space => space.id === spaceId)?.pinnedTabIds, [],
+        'Supplemental setup requires a fresh Space with no open saved pins');
+    // Reverse bookmark creation order so identity and section order are explicit.
+    const bookmarks = [fixture.bookmarks.two, fixture.bookmarks.one].map(id => {
+        const matches = before.bookmarks.filter(bookmark => bookmark.id === id);
+        assert.equal(matches.length, 1); const bookmark = matches[0];
+        assert.equal(bookmark.spaceId, spaceId); assert.equal(bookmark.tabId, null);
+        assert(bookmark.title); return bookmark;
+    });
+    assert.notEqual(bookmarks[0].id, bookmarks[1].id);
+    assert.equal(bookmarks[0].url, bookmarks[1].url);
+    assert.notEqual(bookmarks[0].title, bookmarks[1].title);
+    const pins = [];
+    for (const [order, bookmark] of bookmarks.entries()) {
+        const opened = await bridge('openBookmark', { windowId: fixture.windowA, spaceId, bookmarkId: bookmark.id });
+        assert(Number.isSafeInteger(opened.tabId));
+        pins.push({ tabId: opened.tabId, bookmarkId: bookmark.id, url: bookmark.url, title: bookmark.title, order });
+    }
+    assert.notEqual(pins[0].tabId, pins[1].tabId, 'Equal URLs must create distinct exact saved-pin instances');
+    await bridge('activateSpace', { windowId: fixture.windowA, spaceId: before.activeSpaceId });
+    return { windowId: fixture.windowA, spaceId, pins };
+}
+
+/** Independent native-storage evidence must retain each seeded ID's metadata. */
+export function assertFocusedReloadSpacePins(state, setup) {
+    const { windowId, spaceId, pins } = setup;
+    assert.equal(pins.length, 2); assert.equal(new Set(pins.map(pin => pin.tabId)).size, 2);
+    assert.equal(new Set(pins.map(pin => pin.bookmarkId)).size, 2);
+    assert.equal(new Set(pins.map(pin => pin.title)).size, 2);
+    assert.equal(pins[0].url, pins[1].url);
+    const exactIds = pins.map(pin => pin.tabId);
+    assert.deepEqual(state.groupState.spaces.find(space => space.id === spaceId)?.spaceBookmarks, exactIds,
+        'Both exact seeded Space pins must retain their saved section and order');
+    assert.deepEqual(state.snapshot.spaces.find(space => space.id === spaceId)?.pinnedTabIds, exactIds);
+    assert(state.spacePinMetadata, 'Raw Space pin metadata observations are required');
+    for (const [order, pin] of pins.entries()) {
+        assert.equal(pin.order, order); assert(pin.title);
+        const native = state.tabs.filter(tab => tab.id === pin.tabId);
+        assert.equal(native.length, 1); assert.equal(native[0].windowId, windowId);
+        assert.equal(native[0].url, pin.url); assert.equal(native[0].pinned, false); assert.equal(native[0].incognito, false);
+        assert.equal(native[0].status, 'complete');
+        assert.notEqual(native[0].title, pin.title, 'Seeded aliases must differ from the real shared page title');
+        const bookmark = state.snapshot.bookmarks.filter(bookmark => bookmark.id === pin.bookmarkId);
+        assert.deepEqual(bookmark, [{ id: pin.bookmarkId, spaceId, title: pin.title, url: pin.url, tabId: pin.tabId }]);
+        const pinnedState = { bookmarkId: pin.bookmarkId, pinnedUrl: pin.url };
+        const nameOverride = { name: pin.title, originalDomain: new URL(pin.url).hostname };
+        assert.deepEqual(state.spacePinMetadata.pinnedTabStatesById[pin.tabId], pinnedState,
+            'Seeded pin metadata must stay with its exact native tab and source bookmark');
+        assert.deepEqual(state.spacePinMetadata.tabNameOverridesById[pin.tabId], nameOverride,
+            'Seeded saved alias must stay with its exact native tab');
+        const records = state.spacePinMetadata.spaceTabSnapshot.filter(record => record.tabId === pin.tabId);
+        assert.equal(records.length, 1, 'Regular persistence must checkpoint each exact seeded pin once');
+        const { tabId, spaceId: savedSpaceId, section, order: savedOrder, url, pinnedState: savedPin, nameOverride: savedName } = records[0];
+        assert.deepEqual({ tabId, spaceId: savedSpaceId, section, order: savedOrder, url, pinnedState: savedPin, nameOverride: savedName },
+            { tabId: pin.tabId, spaceId, section: 'spaceBookmarks', order, url: pin.url, pinnedState, nameOverride });
+    }
+}
+
+export function assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision = true, fixtureReload, spacePinSetup } = {}) {
     const previous = assertCommittedFavoriteWitness(before, ids), current = assertCommittedFavoriteWitness(after, ids);
     assert.equal(current.epoch, previous.epoch, 'Same-browser extension reload must retain the proven session epoch');
     assert.equal(current.generation, previous.generation, 'Reload must not alter pairing identity');
@@ -251,6 +312,10 @@ export function assertSameBrowserFavoriteContinuity(before, after, ids, { requir
     const exactWebIdentities = tabs => identities(web(tabs)).map(({ groupId, ...identity }) => identity);
     assert.deepEqual(exactWebIdentities(after.tabs), exactWebIdentities(before.tabs), 'Reload cannot adopt, duplicate, close or alter existing web tabs');
     assertReloadGroupContinuity(before, after, fixtureReload ? { ids, fixtureReload } : {});
+    if (spacePinSetup) {
+        assertFocusedReloadSpacePins(before, spacePinSetup);
+        assertFocusedReloadSpacePins(after, spacePinSetup);
+    }
 }
 
 /**
@@ -261,7 +326,7 @@ export function assertSameBrowserFavoriteContinuity(before, after, ids, { requir
  */
 export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApiPage, newTabPage, pageForUrl,
     ui, screenshot, snapshot, poll, fixture, arcifyId, spotlightId, search, reloadArcify, reloadSpotlight,
-    record = async () => {}, nativeInput = { readExpectedXvfbPid, probeNativeCloseTarget, sendOneNativeClose } }) {
+    prepareReloadSpacePins, record = async () => {}, nativeInput = { readExpectedXvfbPid, probeNativeCloseTarget, sendOneNativeClose } }) {
     assert.equal(typeof reloadArcify, 'function', 'Strict main-owned Arcify reload proof is required');
     assert.equal(typeof reloadSpotlight, 'function', 'Strict main-owned Spotlight reload proof is required');
     const nonce = randomBytes(16).toString('hex'), windowId = fixture.windowA;
@@ -303,8 +368,9 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
     };
     const read = async (favoriteId, includeWitness = false) => {
         const projected = await get(), snap = await snapshot(windowId);
-        const values = await apiPage.evaluate(async ({ sourceIds, includeWitness }) => {
-            const local = await chrome.storage.local.get(['persistentFavorites', 'favoriteIconCache', 'favoriteContinuity', ...(includeWitness ? ['spaces'] : [])]);
+        const values = await apiPage.evaluate(async ({ sourceIds, includeWitness, includeSpacePins }) => {
+            const local = await chrome.storage.local.get(['persistentFavorites', 'favoriteIconCache', 'favoriteContinuity', ...(includeWitness ? ['spaces'] : []),
+                ...(includeSpacePins ? ['pinnedTabStatesById', 'tabNameOverridesById', 'spaceTabSnapshot'] : [])]);
             const session = await chrome.storage.session.get(['favoriteSession', 'favoriteContinuityReceipt', ...(includeWitness ? ['activeSpaces'] : [])]);
             const sources = await Promise.all(sourceIds.map(async id => {
                 const [node] = await chrome.bookmarks.get(id);
@@ -312,9 +378,11 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
             }));
             return { durable: local.persistentFavorites, iconCache: local.favoriteIconCache ?? null, continuity: local.favoriteContinuity,
                 session: session.favoriteSession, receipt: session.favoriteContinuityReceipt, tabs: await chrome.tabs.query({}), sources,
+                ...(includeSpacePins ? { spacePinMetadata: { pinnedTabStatesById: local.pinnedTabStatesById || {},
+                    tabNameOverridesById: local.tabNameOverridesById || {}, spaceTabSnapshot: local.spaceTabSnapshot || [] } } : {}),
                 ...(includeWitness ? { groupState: { spaces: local.spaces, groups: await chrome.tabGroups.query({}), windows: await chrome.windows.getAll({}),
                     syncTabGroups: (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups ?? false, activeSpaces: session.activeSpaces || {} } } : {}) };
-        }, { sourceIds: sources.map(source => source.id), includeWitness });
+        }, { sourceIds: sources.map(source => source.id), includeWitness, includeSpacePins: includeWitness && Boolean(evidence.spacePinSetup) });
         return { ...values, favorites: projected.favorites, snapshot: snap,
             ...(includeWitness ? { fixturePages: await observeFixturePages(values.tabs) } : {}),
             ...(favoriteId ? { render: await sidebar.page.evaluate(readOrdinaryFavoriteRender, favoriteId) } : {}),
@@ -480,6 +548,12 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
         evidence.search = { rows, favoriteId: favorite.id, tabId: reopenedTab.id, before: searchBefore.snapshot, after: searchAfter.snapshot };
         await checkpoint('paired-spotlight-reuses-same-global-reference');
 
+        if (prepareReloadSpacePins) {
+            evidence.spacePinSetup = await prepareReloadSpacePins();
+            evidence.spacePinPreconditions = await poll(() => read(favorite.id, true),
+                accepts(value => assertFocusedReloadSpacePins(value, evidence.spacePinSetup)), 'both exact duplicate-URL Space pins and checkpointed aliases');
+            await checkpoint('seeded-exact-duplicate-space-pins');
+        }
         const ids = { arcifyId, spotlightId };
         for (const [name, reload] of [['arcify', reloadArcify], ['spotlight', reloadSpotlight]]) {
             const reloadEvidence = { name };
@@ -524,7 +598,7 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
             // Persist both raw observations before any semantic continuity check,
             // so a failed assertion remains independently diagnosable.
             await checkpoint('observed-same-browser-reload', { name });
-            assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision: name === 'arcify', fixtureReload });
+            assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision: name === 'arcify', fixtureReload, spacePinSetup: evidence.spacePinSetup });
             const retained = await icon(favorite.id, false, retainedBefore.cacheEntry.faviconDataUrl);
             assert.deepEqual(retained.record, retainedBefore.record); assert.deepEqual(retained.cacheEntry, retainedBefore.cacheEntry);
             reloadEvidence.retained = retained;

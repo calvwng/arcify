@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { serveOrdinaryFavoriteFixture, assertOrdinaryFavoriteState, assertOnlyNativeFavoriteClosed,
     assertOrdinaryFavoriteReopened, assertCommittedFavoriteWitness, assertSameBrowserFavoriteContinuity, assertReloadGroupContinuity,
-    readOrdinaryFavoriteRender, observedOwnershipFingerprint, summarizeFavoriteOwnership } from '../../scripts/paired-chrome-ordinary-favorites.mjs';
+    readOrdinaryFavoriteRender, observedOwnershipFingerprint, summarizeFavoriteOwnership,
+    seedFocusedReloadSpacePins, assertFocusedReloadSpacePins } from '../../scripts/paired-chrome-ordinary-favorites.mjs';
 
 const arcifyId = 'a'.repeat(32), spotlightId = 'b'.repeat(32), nonce = 'c'.repeat(32);
 const source = { id: 'source-1', parentId: 'folder-1', index: 0, title: 'Ordinary Favorite', url: `http://127.0.0.1/favorite-ordinary/${nonce}` };
@@ -207,6 +208,98 @@ function renumberGroups(value) {
     }
     return witness(value, 6);
 }
+
+const focusedPinSetup = () => ({ windowId: 10, spaceId: 'work', pins: [
+    { tabId: 42, bookmarkId: 'twin-two', title: 'Pair Twin Two', url: 'https://same.test/', order: 0 },
+    { tabId: 41, bookmarkId: 'twin-one', title: 'Pair Twin One', url: 'https://same.test/', order: 1 }
+] });
+function focusedPinState() {
+    const value = groupedReloadState(), setup = focusedPinSetup(), pinIds = setup.pins.map(pin => pin.tabId);
+    value.groupState.spaces[0].spaceBookmarks = pinIds; value.groupState.spaces[0].temporaryTabs = [];
+    Object.assign(value.snapshot.spaces[0], { tabIds: pinIds, pinnedTabIds: pinIds, temporaryTabIds: [] });
+    value.snapshot.bookmarks = [];
+    value.spacePinMetadata = { pinnedTabStatesById: {}, tabNameOverridesById: {}, spaceTabSnapshot: [] };
+    for (const pin of setup.pins) {
+        Object.assign(value.tabs.find(tab => tab.id === pin.tabId), { index: pin.order + 1, title: 'Pair Shared URL', status: 'complete' });
+        value.snapshot.bookmarks.push({ id: pin.bookmarkId, spaceId: setup.spaceId, title: pin.title, url: pin.url, tabId: pin.tabId });
+        const pinnedState = { bookmarkId: pin.bookmarkId, pinnedUrl: pin.url };
+        const nameOverride = { name: pin.title, originalDomain: 'same.test' };
+        value.spacePinMetadata.pinnedTabStatesById[pin.tabId] = pinnedState;
+        value.spacePinMetadata.tabNameOverridesById[pin.tabId] = nameOverride;
+        value.spacePinMetadata.spaceTabSnapshot.push({ tabId: pin.tabId, spaceId: setup.spaceId, section: 'spaceBookmarks',
+            order: pin.order, url: pin.url, pinnedState: structuredClone(pinnedState), nameOverride: structuredClone(nameOverride), tabIndex: pin.order + 1, windowKey: 'native-window-key' });
+    }
+    return value;
+}
+
+test('focused setup opens both exact saved duplicate bookmarks in declared order using existing bridge operations', async () => {
+    const setup = focusedPinSetup(), calls = [];
+    const result = await seedFocusedReloadSpacePins({
+        fixture: { windowA: 10, spaces: { work: 'work' }, bookmarks: { one: 'twin-one', two: 'twin-two' } },
+        snapshot: async windowId => {
+            assert.equal(windowId, 10);
+            return { activeSpaceId: 'personal', spaces: [{ id: 'work', pinnedTabIds: [] }],
+                bookmarks: setup.pins.map(pin => ({ id: pin.bookmarkId, spaceId: 'work', title: pin.title, url: pin.url, tabId: null })) };
+        },
+        bridge: async (command, payload) => { calls.push([command, payload]); return { tabId: setup.pins[calls.length - 1]?.tabId }; }
+    });
+    assert.deepEqual(result, setup);
+    assert.deepEqual(calls, [
+        ['openBookmark', { windowId: 10, spaceId: 'work', bookmarkId: 'twin-two' }],
+        ['openBookmark', { windowId: 10, spaceId: 'work', bookmarkId: 'twin-one' }],
+        ['activateSpace', { windowId: 10, spaceId: 'personal' }]
+    ]);
+});
+
+for (const name of ['arcify', 'spotlight']) test(`focused duplicate Space pins enter the strict ${name} reload assertion`, () => {
+    const before = focusedPinState(), after = renumberGroups(structuredClone(before));
+    assertFocusedReloadSpacePins(before, focusedPinSetup());
+    assertSameBrowserFavoriteContinuity(before, after, ids, { requireNewRevision: name === 'arcify', spacePinSetup: focusedPinSetup() });
+    delete after.spacePinMetadata;
+    assert.throws(() => assertSameBrowserFavoriteContinuity(before, after, ids,
+        { requireNewRevision: name === 'arcify', spacePinSetup: focusedPinSetup() }), /metadata observations/);
+});
+
+for (const [label, mutate] of [
+    ['empty pinned section', value => { value.groupState.spaces[0].spaceBookmarks = []; }],
+    ['reordered exact pins', value => { value.groupState.spaces[0].spaceBookmarks.reverse(); }],
+    ['missing published pin', value => { value.snapshot.spaces[0].pinnedTabIds = [42]; }],
+    ['swapped duplicate bookmark bindings', value => { value.snapshot.bookmarks.reverse().forEach((bookmark, index) => { bookmark.tabId = [42, 41][index]; }); }],
+    ['swapped raw saved bookmark IDs', value => { value.spacePinMetadata.pinnedTabStatesById[42].bookmarkId = 'twin-one'; value.spacePinMetadata.pinnedTabStatesById[41].bookmarkId = 'twin-two'; }],
+    ['changed raw saved URL', value => { value.spacePinMetadata.pinnedTabStatesById[42].pinnedUrl += '?changed'; }],
+    ['swapped raw aliases', value => { value.spacePinMetadata.tabNameOverridesById[42].name = 'Pair Twin One'; value.spacePinMetadata.tabNameOverridesById[41].name = 'Pair Twin Two'; }],
+    ['empty raw alias', value => { value.spacePinMetadata.tabNameOverridesById[42].name = ''; }],
+    ['changed alias domain', value => { value.spacePinMetadata.tabNameOverridesById[42].originalDomain = 'other.test'; }],
+    ['missing persisted pin', value => { value.spacePinMetadata.spaceTabSnapshot.pop(); }],
+    ['duplicated persisted pin', value => { value.spacePinMetadata.spaceTabSnapshot.push(structuredClone(value.spacePinMetadata.spaceTabSnapshot[0])); }],
+    ['wrong persisted section', value => { value.spacePinMetadata.spaceTabSnapshot[0].section = 'temporaryTabs'; }],
+    ['wrong persisted order', value => { value.spacePinMetadata.spaceTabSnapshot[0].order = 1; }],
+    ['wrong persisted bookmark', value => { value.spacePinMetadata.spaceTabSnapshot[0].pinnedState.bookmarkId = 'twin-one'; }],
+    ['wrong persisted alias', value => { value.spacePinMetadata.spaceTabSnapshot[0].nameOverride.name = 'Pair Twin One'; }]
+]) test(`focused reload rejects ${label} through the existing continuity gate`, () => {
+    const before = focusedPinState(), after = renumberGroups(structuredClone(before)); mutate(after);
+    assert.throws(() => assertSameBrowserFavoriteContinuity(before, after, ids, { spacePinSetup: focusedPinSetup() }));
+});
+
+test('focused pin preconditions are required before reload and cannot be made vacuous', () => {
+    const before = focusedPinState(), after = renumberGroups(structuredClone(before));
+    before.spacePinMetadata.tabNameOverridesById = {};
+    assert.throws(() => assertSameBrowserFavoriteContinuity(before, after, ids, { spacePinSetup: focusedPinSetup() }));
+    const setup = focusedPinSetup(); setup.pins = [];
+    assert.throws(() => assertFocusedReloadSpacePins(focusedPinState(), setup));
+});
+
+test('only supplemental setup seeds exact Space pins and both reloads retain the shared strict gate', () => {
+    const smoke = readFileSync(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url), 'utf8');
+    const source = readFileSync(new URL('../../scripts/paired-chrome-ordinary-favorites.mjs', import.meta.url), 'utf8');
+    assert.match(smoke, /prepareReloadSpacePins:report\.runMode === 'favorite-lifecycle' \? \(\) => seedFocusedReloadSpacePins\(\{ fixture,snapshot,bridge \}\) : undefined/);
+    const seed = source.indexOf('evidence.spacePinSetup = await prepareReloadSpacePins()');
+    const precondition = source.indexOf('accepts(value => assertFocusedReloadSpacePins(value, evidence.spacePinSetup))');
+    const loop = source.indexOf("for (const [name, reload] of [['arcify', reloadArcify], ['spotlight', reloadSpotlight]])");
+    assert(seed > 0 && precondition > seed && loop > precondition);
+    assert.match(source.slice(loop), /assertSameBrowserFavoriteContinuity\(before, after, ids, \{ requireNewRevision: name === 'arcify', fixtureReload, spacePinSetup: evidence\.spacePinSetup \}\)/);
+    assert.match(source, /includeSpacePins: includeWitness && Boolean\(evidence\.spacePinSetup\)/);
+});
 
 test('same-browser reload allows only numeric projection renumbering with exact all-window semantic groups', () => {
     const before = groupedReloadState(), after = renumberGroups(structuredClone(before));

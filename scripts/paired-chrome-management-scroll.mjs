@@ -1,5 +1,6 @@
 /** Native SIDE_PANEL management-scroll regression. Never launches Chrome on import. */
 import assert from 'node:assert/strict';
+import { readNativeSidebarRender } from './paired-chrome-sidebar.mjs';
 
 export function readManagementScroll({ anchorId, activeTabId, targetId }) {
     const box = node => { if (!node) return null; const { x, y, width, height } = node.getBoundingClientRect(); return { x, y, width, height }; };
@@ -57,7 +58,6 @@ export function removeBookmarkRecord(nodes, id) {
 }
 
 export async function exerciseManagementScroll({ apiPage, nativeSidebar, ui, snapshot, screenshot, poll, fixture, record = async () => {} }) {
-    const initial = await snapshot(), space = initial.spaces.find(item => item.id === initial.activeSpaceId);
     const originalInvert = await apiPage.$eval('#invertTabOrder', node => node.checked);
     const bookmarks = [], tabIds = []; let native, primaryError;
     const restoreOrdering = async () => {
@@ -68,11 +68,21 @@ export async function exerciseManagementScroll({ apiPage, nativeSidebar, ui, sna
     try {
         if (originalInvert) await ui(apiPage, 'Use normal order for native management scroll fixture', () => apiPage.click('label.toggle-label[for="invertTabOrder"]'));
         await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), value => value.invertTabOrder === false, 'normal management bookmark ordering');
+        // Creating/focusing the Spotlight helper can change the active tab and
+        // logical Space. Establish the native host before choosing its fixture.
+        native = await nativeSidebar();
+        const page = native.page, initial = await snapshot();
+        assert.equal(initial.windowId, fixture.windowA, 'Seed only the native panel source window.');
+        const space = initial.spaces.find(item => item.id === initial.activeSpaceId);
+        assert(space?.bookmarkFolderId, 'The native panel needs an authoritative bookmark Space.');
+        const rendered = await page.evaluate(readNativeSidebarRender);
+        assert.deepEqual(rendered.selectedSpaces, [space.id], 'The native selected Space must match the authoritative window snapshot.');
+        assert.deepEqual(rendered.visibleSpaces, [space.id], 'The native visible Space must match the authoritative window snapshot.');
+        await record({ phase: 'native-fixture-space', windowId: initial.windowId, spaceId: space.id, bookmarkFolderId: space.bookmarkFolderId, rendered });
         for (let index = 0; index < 40; index++) bookmarks.push(await apiPage.evaluate(options => chrome.bookmarks.create(options), {
             parentId: space.bookmarkFolderId, title: `Native Scroll ${String(index + 1).padStart(2, '0')}`, url: `${fixture.base}/native-scroll-${index}`
         }));
-        native = await nativeSidebar();
-        const page = native.page, row = id => `.space.active [data-tab-type="pinned"] .tab[data-bookmark-id="${id}"]`;
+        const row = id => `.space.active [data-tab-type="pinned"] .tab[data-bookmark-id="${id}"]`;
         await page.waitForSelector(row(bookmarks.at(-1).id));
         const originalPanel = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
         // A native action never uses bringToFront(), setViewport() or a helper

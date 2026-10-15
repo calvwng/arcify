@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
-import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership } from './paired-chrome-ordinary-favorites.mjs';
+import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership, seedFocusedReloadSpacePins } from './paired-chrome-ordinary-favorites.mjs';
 import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
 import { exerciseSidebarAppearance } from './paired-chrome-sidebar-appearance.mjs';
 import { exerciseBookmarkMultiSelection, assertNativeDragSourceStable } from './paired-chrome-bookmark-selection.mjs';
@@ -1919,6 +1919,7 @@ try {
     await step(stepNames[36], async () => {
         ordinaryFixture = await exerciseOrdinaryFavorites({ browser,apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,
             newTabPage,pageForUrl,ui,screenshot,snapshot,poll,fixture,arcifyId,spotlightId,search,
+            prepareReloadSpacePins:report.runMode === 'favorite-lifecycle' ? () => seedFocusedReloadSpacePins({ fixture,snapshot,bridge }) : undefined,
             reloadArcify:()=>reloadPairedExtension('arcify'),reloadSpotlight:()=>reloadPairedExtension('spotlight'),
             record:async evidence => { report.ordinaryFavorites = evidence; await saveReport(); } });
         return ordinaryFixture;
