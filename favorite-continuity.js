@@ -68,7 +68,7 @@ export function validContinuityState(state) {
 // Single writer: FavoriteStore invokes these methods while holding SpaceStore's
 // queue. This is a local exact-ID mirror, never a URL-based restore mechanism.
 export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitnessRequest } = {}) {
-    let current = null, selection = null, recoveredSelection = null, selectionDirty = false;
+    let current = null, selection = null, recoveredSelection = null, selectionDirty = false, provenIdentity = null;
     const config = async () => {
         const values = await api.storage.local.get([PEER_KEY, PAIRING_GENERATION_KEY]);
         return { peerId: isExtensionId(values[PEER_KEY]) ? values[PEER_KEY] : null, generation: values[PAIRING_GENERATION_KEY] };
@@ -182,7 +182,7 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         return active;
     }
     async function load({ session, items }) {
-        current = null; selection = null; recoveredSelection = null; selectionDirty = false;
+        current = null; selection = null; recoveredSelection = null; selectionDirty = false; provenIdentity = null;
         const pairing = await config();
         const own = await api.storage.session.get([CONTINUITY_SESSION_KEY, 'spaceSession', 'activeSpaces']);
         const receipt = own[CONTINUITY_SESSION_KEY];
@@ -253,6 +253,7 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         if (own.spaceSession && selection?.windows.some(entry => own.activeSpaces?.[entry.windowId] !== entry.spaceId)) selection = null;
         // Missing/invalid proof starts a new epoch from empty/current session,
         // never seeds the unproven durable candidate into a fresh Spotlight.
+        const proven = current ? { epoch: current.epoch, generation: current.generation } : null;
         if (!current) current = newCurrent(await ensureGeneration(await config()));
         try { await save({ state, items }, recovery); }
         catch (error) {
@@ -263,7 +264,13 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         // Publish context only after the conditional recovery acknowledgement
         // and final committed own-session receipt both succeeded.
         recoveredSelection = copy(selection);
+        if (proven && proven.epoch === current.epoch && proven.generation === current.generation) provenIdentity = proven;
         return state;
     }
-    return { load, save, refresh, checkpointSelection, recoverSelection };
+    async function browserIdentity({ recovered = false } = {}) {
+        if (!current || !validReceipt(current) || !same(current, await config())) return null;
+        if (recovered && (provenIdentity?.epoch !== current.epoch || provenIdentity?.generation !== current.generation)) return null;
+        return { epoch: current.epoch, generation: current.generation };
+    }
+    return { load, save, refresh, checkpointSelection, recoverSelection, browserIdentity };
 }

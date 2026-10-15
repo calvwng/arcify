@@ -414,3 +414,207 @@ for (const active of [{ 1: 'a' }, {}]) test(`own selection ${JSON.stringify(acti
     clearSession(); const third = pairedStores(); await third.spaces.dispatch({ action: 'get' });
     assert.deepEqual(third.spaces.active, {});
 });
+
+for (const syncGroups of [false, true]) test(`witnessed reload preserves duplicate-URL bookmark membership despite destroyed extension view, group sync ${syncGroups}`, async () => {
+    sync.syncTabGroups = syncGroups;
+    tabs = [
+        { id: 3, windowId: 1, title: 'Sidebar', url: chrome.runtime.getURL('sidebar.html'), pinned: false, groupId: -1, index: 0 },
+        { id: 1, windowId: 1, title: 'Twin one', url: 'https://same.test/', pinned: false, groupId: -1, index: 1 },
+        { id: 2, windowId: 1, title: 'Twin two', url: 'https://same.test/', pinned: false, groupId: -1, index: 2 },
+        { id: 4, windowId: 1, title: 'Personal', url: 'https://personal.test/', pinned: false, groupId: -1, index: 3 }
+    ];
+    local.spaces = [{ ...space('a'), spaceBookmarks: [1, 2] }, space('b', [4])];
+    local.pinnedTabStatesById = { 1: { bookmarkId: 'bookmark', pinnedUrl: 'https://same.test/' }, 2: { bookmarkId: 'twin', pinnedUrl: 'https://same.test/' } };
+    local.tabNameOverridesById = { 1: 'Distinct twin one', 2: 'Distinct twin two' };
+    const first = pairedStores(); await first.favorites.dispatch(req('open', { favoriteId: 'f' }));
+    await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    const before = { spaces: clone(local.spaces), metadata: clone(local.pinnedTabStatesById), names: clone(local.tabNameOverridesById), snapshot: clone(local.spaceTabSnapshot), windows: clone(local.spaceWindowSnapshot), selected: clone(session.activeSpaces), epoch: local[CONTINUITY_LOCAL_KEY].epoch };
+    tabs = tabs.filter(native => native.id !== 3); tabs.forEach((native, index) => { native.index = index; });
+    tab(1).url = 'https://navigated.test/one'; tab(2).url = 'https://navigated.test/two';
+    clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    const after = { spaces: clone(local.spaces), metadata: clone(local.pinnedTabStatesById), names: clone(local.tabNameOverridesById), pending: clone(second.spaces.restoreQueue), selected: clone(session.activeSpaces), epoch: local[CONTINUITY_LOCAL_KEY].epoch };
+    assertGlobal(second, 100); assert.equal(after.epoch, before.epoch);
+    assert.deepEqual(second.spaces.spaces.find(value => value.id === 'a').spaceBookmarks, [1, 2], 'Exact live duplicate bookmarks must retain their original section');
+    assert.deepEqual(after.metadata, before.metadata);
+    assert.deepEqual(after.names, before.names);
+});
+
+const seedExactSpaceReplay = async () => {
+    tab(1).url = tab(2).url = 'https://same.test/';
+    local.spaces = [{ ...space('a'), spaceBookmarks: [2, 1] }, space('b')];
+    local.pinnedTabStatesById = { 1: { bookmarkId: 'bookmark', pinnedUrl: 'https://same.test/' }, 2: { bookmarkId: 'twin', pinnedUrl: 'https://same.test/' } };
+    local.tabNameOverridesById = { 1: 'First alias', 2: 'Second alias' };
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    tab(1).url = 'https://changed.test/one'; tab(2).url = 'https://changed.test/two';
+    return first;
+};
+
+for (const condition of ['missing-stamp', 'wrong-epoch', 'wrong-generation', 'count-too-large', 'count-shrunk', 'hash', 'reordered-prefix', 'edited-metadata', 'edited-section', 'offline', 'missing-peer', 'revoked', 'full-restart']) {
+    test(`exact Space replay refuses ${condition} while normal browser restore remains separate`, async () => {
+        await seedExactSpaceReplay();
+        const stamp = local.spaceContinuityStamp;
+        if (condition === 'missing-stamp') delete local.spaceContinuityStamp;
+        if (condition === 'wrong-epoch') stamp.epoch = crypto.randomUUID();
+        if (condition === 'wrong-generation') stamp.generation = crypto.randomUUID();
+        if (condition === 'count-too-large') stamp.liveCount = local.spaceTabSnapshot.length + 1;
+        if (condition === 'count-shrunk') stamp.liveCount--;
+        if (condition === 'hash') stamp.fingerprint = '0'.repeat(64);
+        if (condition === 'reordered-prefix') local.spaceTabSnapshot.reverse();
+        if (condition === 'edited-metadata') local.spaceTabSnapshot[0].nameOverride = 'stale writer';
+        if (condition === 'edited-section') local.spaceTabSnapshot[0].section = 'temporaryTabs';
+        if (condition === 'offline') offline = true;
+        if (condition === 'missing-peer' || condition === 'full-restart') receipt = null;
+        if (condition === 'revoked') await configureFavoriteContinuityPeer(chrome, PEER);
+        clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+        assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, []);
+        assert.deepEqual(local.pinnedTabStatesById, {}); assert.deepEqual(local.tabNameOverridesById, {});
+    });
+}
+
+test('same-session replay preserves current section sequence rather than stale restoredRanks', async () => {
+    const first = await seedExactSpaceReplay();
+    first.spaces.restoredRanks = new Map([[1, 0], [2, 1]]);
+    await first.spaces.run(() => first.spaces.persist());
+    assert.deepEqual(local.spaceTabSnapshot.map(record => record.tabId), [2, 1]);
+    assert.deepEqual(local.spaceTabSnapshot.map(record => record.order), [1, 0]);
+    clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, [2, 1]);
+});
+
+test('pending suffix IDs never override a proven live prefix or acquire exact metadata', async () => {
+    const first = await seedExactSpaceReplay();
+    const pending = { tabId: 1, spaceId: 'b', section: 'spaceBookmarks', order: 0, url: 'https://old-pending.test/', windowKey: crypto.randomUUID(),
+        pinnedState: { bookmarkId: 'old-bookmark', pinnedUrl: 'https://old-pending.test/' }, nameOverride: 'Old pending alias' };
+    first.spaces.restoreQueue.push(pending);
+    await first.spaces.run(() => first.spaces.persist());
+    assert.equal(local.spaceContinuityStamp.liveCount, 2); assert.equal(local.spaceTabSnapshot.length, 3);
+    clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, [2, 1]);
+    assert.equal(local.pinnedTabStatesById[1].bookmarkId, 'bookmark');
+    assert.equal(second.spaces.snapshotByTab.get(1).nameOverride, 'First alias');
+    assert.deepEqual(second.spaces.restoreQueue, [pending]);
+});
+
+for (const condition of ['closed', 'private-tab', 'private-window', 'popup-window', 'native-pinned', 'moved-normal-window']) {
+    test(`exact Space replay handles ${condition} without resurrecting discarded live prefix`, async () => {
+        await seedExactSpaceReplay();
+        if (condition === 'closed') tabs = tabs.filter(tab => tab.id !== 1);
+        if (condition === 'private-tab') tab(1).incognito = true;
+        if (condition === 'private-window') tab(1).windowId = 4;
+        if (condition === 'popup-window') tab(1).windowId = 3;
+        if (condition === 'native-pinned') tab(1).pinned = true;
+        if (condition === 'moved-normal-window') tab(1).windowId = 2;
+        clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+        assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, condition === 'moved-normal-window' ? [2, 1] : [2]);
+        assert.equal(Boolean(local.pinnedTabStatesById[1]), condition === 'moved-normal-window');
+        assert(!second.spaces.restoreQueue.some(record => record.tabId === 1), 'Discarded current records cannot become pending URL restores');
+        if (condition === 'closed') assert(!second.spaces.snapshotByTab.has(1));
+    });
+}
+
+test('fresh witness enrollment interrupted before Space reset cannot authenticate old-browser IDs', async () => {
+    await seedExactSpaceReplay(); const oldStamp = clone(local.spaceContinuityStamp);
+    clearSession(); receipt = null;
+    const middle = pairedStores(); await middle.favorites.initialize();
+    assert.notEqual(local[CONTINUITY_LOCAL_KEY].epoch, oldStamp.epoch);
+    assert.equal(await middle.favorites.ownershipPersistence.browserIdentity({ recovered: true }), null);
+    assert.deepEqual(local.spaceContinuityStamp, oldStamp);
+    clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, []);
+    assert.deepEqual(local.pinnedTabStatesById, {}); assert.deepEqual(local.tabNameOverridesById, {});
+});
+
+test('failed atomic Space snapshot/stamp write cannot stamp old data with a fresh browser epoch', async () => {
+    await seedExactSpaceReplay(); const oldStamp = clone(local.spaceContinuityStamp), oldSnapshot = clone(local.spaceTabSnapshot);
+    clearSession(); receipt = null;
+    hooks.localSet = values => { if (values.spaces && values.spaceContinuityStamp) throw new Error('snapshot write failed'); };
+    const middle = pairedStores(); await assert.rejects(middle.spaces.dispatch({ action: 'get' }), /snapshot write failed/);
+    assert.deepEqual(local.spaceContinuityStamp, oldStamp); assert.deepEqual(local.spaceTabSnapshot, oldSnapshot);
+    hooks.localSet = null; clearSession();
+    const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, []);
+});
+
+test('pairing revoked between completed Favorite recovery and Space replay invalidates cached epoch proof', async () => {
+    await seedExactSpaceReplay(); clearSession(); const second = pairedStores(); await second.favorites.initialize();
+    assert(await second.favorites.ownershipPersistence.browserIdentity({ recovered: true }));
+    await configureFavoriteContinuityPeer(chrome, PEER);
+    await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, []);
+    assert.deepEqual(local.pinnedTabStatesById, {});
+});
+
+test('global Favorite ownership excludes an otherwise valid stale exact Space prefix', async () => {
+    const first = await seedExactSpaceReplay();
+    const snapshot = clone(local.spaceTabSnapshot), stamp = clone(local.spaceContinuityStamp);
+    await first.favorites.dispatch(req('addTab', { tabId: 1 }));
+    local.spaceTabSnapshot = snapshot; local.spaceContinuityStamp = stamp;
+    clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assertGlobal(second, 1); assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, [2]);
+    assert.equal(local.pinnedTabStatesById[1], undefined);
+});
+
+for (const boundary of ['provisional-session', 'conditional-revoke', 'ack-persistence', 'final-session']) {
+    test(`interrupted ${boundary} recovery cannot publish exact Space metadata`, async () => {
+        await seedExactSpaceReplay(); clearSession();
+        hooks.sessionSet = values => {
+            const own = values[CONTINUITY_SESSION_KEY];
+            if (own && (boundary === 'provisional-session' && own.phase === 'recovering' || boundary === 'final-session' && !own.phase)) throw new Error('recovery interrupted');
+        };
+        hooks.localSet = values => {
+            if (boundary === 'ack-persistence' && values[CONTINUITY_LOCAL_KEY]?.peerGeneration) throw new Error('recovery interrupted');
+        };
+        hooks.witness = (command, value) => {
+            if (boundary === 'conditional-revoke' && command === 'write' && value.expectedPeerGeneration) { peerGeneration = crypto.randomUUID(); receipt = null; }
+        };
+        const middle = pairedStores();
+        if (boundary === 'conditional-revoke') await middle.spaces.dispatch({ action: 'get' });
+        else {
+            await assert.rejects(middle.spaces.dispatch({ action: 'get' }), /recovery interrupted/);
+            assert.equal(session.spaceSession, undefined); assert.equal(middle.spaces.initialized, false);
+        }
+        hooks.sessionSet = null; hooks.localSet = null; hooks.witness = null;
+        const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+        assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, []);
+        assert.deepEqual(local.pinnedTabStatesById, {});
+    });
+}
+
+test('Space replay window uncertainty preserves snapshot and metadata until retry', async () => {
+    await seedExactSpaceReplay(); clearSession(); const second = pairedStores(); await second.favorites.initialize();
+    const previous = clone(local);
+    hooks.window = () => { throw new Error('window read uncertain'); };
+    await assert.rejects(second.spaces.dispatch({ action: 'get' }), /window read uncertain/);
+    assert.equal(second.spaces.initialized, false);
+    assert.deepEqual(local.spaceTabSnapshot, previous.spaceTabSnapshot);
+    assert.deepEqual(local.spaceContinuityStamp, previous.spaceContinuityStamp);
+    assert.deepEqual(local.pinnedTabStatesById, previous.pinnedTabStatesById);
+    hooks.window = null; await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, [2, 1]);
+});
+
+for (const change of ['move', 'revoke']) test(`Space replay revalidates ${change} during awaited window inspection`, async () => {
+    await seedExactSpaceReplay(); clearSession(); const second = pairedStores(); await second.favorites.initialize();
+    let once = false;
+    hooks.window = async () => {
+        if (once) return; once = true;
+        if (change === 'move') tab(1).windowId = 2;
+        else await configureFavoriteContinuityPeer(chrome, PEER);
+    };
+    if (change === 'move') {
+        const before = clone(local);
+        await assert.rejects(second.spaces.dispatch({ action: 'get' }), { code: 'SPACE_REPLAY_CHANGED' });
+        assert.equal(second.spaces.initialized, false);
+        assert.deepEqual(local.spaceTabSnapshot, before.spaceTabSnapshot);
+        assert.deepEqual(local.pinnedTabStatesById, before.pinnedTabStatesById);
+        hooks.window = null;
+        await second.spaces.dispatch({ action: 'get' });
+        assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, [2, 1]);
+        assert.equal(local.pinnedTabStatesById[1].bookmarkId, 'bookmark');
+        assert.equal(local.tabNameOverridesById[1], 'First alias');
+    } else {
+        await second.spaces.dispatch({ action: 'get' });
+        assert.deepEqual(second.spaces.spaces.find(space => space.id === 'a').spaceBookmarks, []);
+        assert.equal(local.pinnedTabStatesById[1], undefined);
+    }
+});

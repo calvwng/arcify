@@ -6,6 +6,7 @@ import { Utils } from './utils.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { LocalStorage } from './localstorage.js';
 import { captureWindowTabs, matchRestoreRecord } from './space-restore.js';
+import { SPACE_CONTINUITY_KEY, createSpaceContinuityStamp, readSpaceContinuitySnapshot } from './space-continuity.js';
 
 const sections = ['spaceBookmarks', 'temporaryTabs'];
 export const tabIds = space => sections.flatMap(key => space?.[key] || []);
@@ -67,7 +68,7 @@ export class SpaceStore {
     async initialize() {
         if (this.initialized) return;
         if (this.favoriteStore) { await this.favoriteStore.initialize(); await this.favoriteStore.reconcile({ updateSpaces: false }); }
-        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs']);
+        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', SPACE_CONTINUITY_KEY]);
         const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'spaceRecoveryCandidates']);
         this.spaces = data.spaces || [];
         this.snapshotByTab = new Map((data.spaceTabSnapshot || []).filter(t => t.tabId).map(t => [t.tabId, t]));
@@ -106,13 +107,20 @@ export class SpaceStore {
             if (data.archivedTabs) await chrome.storage.local.set({ archivedTabs: data.archivedTabs.map(t => ({ ...t, spaceId: idMap.get(t.spaceId) || t.spaceId })) });
             this.restoreQueue = [];
         } else if (!session.spaceSession) {
-            // Chrome tab IDs are session-local. Never accept an old ID after restart.
+            // Exact replay requires both a proven browser epoch and a snapshot
+            // written in that epoch. The pending suffix never supplies ID proof.
+            const replay = await this.readSameSessionSnapshot(data);
             this.snapshotByTab.clear();
-            this.restoreQueue = data.spaceTabSnapshot || [];
+            this.restoreQueue = replay ? replay.pending : data.spaceTabSnapshot || [];
             this.spaces.forEach(s => { s.spaceBookmarks = []; s.temporaryTabs = []; delete s.lastTab; });
             this.active = {};
             this.restoredRanks.clear();
             await chrome.storage.local.set({ pinnedTabStatesById: {}, tabNameOverridesById: {} });
+            for (const record of replay?.live || []) {
+                const space = this.spaces.find(space => space.id === record.spaceId);
+                space[record.section].push(record.tabId);
+                this.restoredMetadata.push(record);
+            }
         } else {
             this.restoreQueue = session.spaceRestoreQueue || [];
         }
@@ -129,7 +137,37 @@ export class SpaceStore {
         for (const space of this.spaces) for (const key of sections) space[key] = (space[key] || []).filter(id => valid.has(id));
         for (const tab of live) this.track(tab);
         this.initialized = true;
-        await this.persist();
+        try { await this.persist(); }
+        catch (error) { this.initialized = false; throw error; }
+    }
+    async readSameSessionSnapshot(data) {
+        const continuity = this.favoriteStore?.ownershipPersistence;
+        const identity = await continuity?.browserIdentity?.({ recovered: true });
+        const replay = await readSpaceContinuitySnapshot(identity, data[SPACE_CONTINUITY_KEY], data.spaceTabSnapshot);
+        if (!replay) return null;
+        const tabs = new Map((await chrome.tabs.query({})).map(tab => [tab.id, tab])), windows = new Map();
+        const eligible = tab => tab && !tab.pinned && !tab.incognito && !this.isGlobalTab(tab) && !isStartupLauncherTab(tab);
+        for (const record of replay.live) {
+            const tab = tabs.get(record.tabId);
+            if (eligible(tab) && !windows.has(tab.windowId)) windows.set(tab.windowId, await chrome.windows.get(tab.windowId));
+        }
+        // Native changes can happen while awaited window reads run. Recheck the
+        // exact survivors; an observed normal-window move keeps ordinary Space
+        // ownership. A move during validation is uncertainty, not permission
+        // to downgrade a saved pin to a temporary tab. Retry before any writes.
+        const latest = new Map((await chrome.tabs.query({})).map(tab => [tab.id, tab]));
+        if (replay.live.some(record => eligible(latest.get(record.tabId))
+            && latest.get(record.tabId).windowId !== tabs.get(record.tabId)?.windowId)) {
+            throw Object.assign(new Error('A tab moved during Space recovery. Retry when its window is stable.'), { code: 'SPACE_REPLAY_CHANGED' });
+        }
+        replay.live = replay.live.filter(record => {
+            const tab = latest.get(record.tabId), window = windows.get(tab?.windowId);
+            return this.spaces.some(space => space.id === record.spaceId) && eligible(tab)
+                && tab.windowId === tabs.get(record.tabId)?.windowId && window?.id === tab.windowId
+                && window.type === 'normal' && !window.incognito;
+        });
+        const finalIdentity = await continuity.browserIdentity({ recovered: true });
+        return finalIdentity?.epoch === identity.epoch && finalIdentity.generation === identity.generation ? replay : null;
     }
     // Bookmark folders are durable space definitions regardless of Chrome group sync.
     // Run on every worker startup and sidebar read, including version-2 installations.
@@ -266,7 +304,9 @@ export class SpaceStore {
             if (!windowSnapshot.some(w => w.key === key)) windowSnapshot.push({ key, tabs: captureWindowTabs([...tabs.values()].filter(t => t.windowId === windowId && !this.isGlobalTab(t) && !isStartupLauncherTab(t))) });
         }
         this.savedWindows = windowSnapshot;
-        await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot: [...snapshot, ...this.restoreQueue], spaceWindowSnapshot: windowSnapshot });
+        const identity = await this.favoriteStore?.ownershipPersistence?.browserIdentity?.();
+        const stamp = await createSpaceContinuityStamp(identity, snapshot);
+        await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot: [...snapshot, ...this.restoreQueue], spaceWindowSnapshot: windowSnapshot, [SPACE_CONTINUITY_KEY]: stamp });
         const spaceSessionUpdate = { spaceSession: true, activeSpaces: this.active, spaceRestoreQueue: this.restoreQueue, restoredTabRanks: [...this.restoredRanks], spaceWindowKeys: [...this.windowKeys], spaceRestoreWindowKeys: [...this.restoreWindowKeys], spaceRecoveryCandidates: [...new Set([...this.recoveryCandidates, ...this.provisional])] };
         const favorites = this.favoriteStore;
         if (favorites?.ownershipPersistence?.checkpointSelection) {

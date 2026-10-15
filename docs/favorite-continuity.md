@@ -143,6 +143,41 @@ Loss of both extension sessions or a full browser restart never restores this
 selection context. Existing full-restart Space membership restoration is unchanged.
 Native group IDs remain ephemeral projections, not Space identity or proof.
 
+## Exact Space membership during a witnessed reload
+
+Arcify also writes a compact local `spaceContinuityStamp` alongside its existing
+Space snapshot: `{ version: 1, epoch, generation, liveCount, fingerprint }`. The
+stamp and `spaces`, `spaceTabSnapshot`, and `spaceWindowSnapshot` share one atomic
+local write. The digest covers the epoch/generation, live-prefix length, and that
+prefix's existing records, including section, sequence and per-tab metadata. It
+adds no membership copy, new Spotlight payload, or new witness write cadence.
+
+After a surviving own receipt or a finalized witnessed recovery proves the same
+browser epoch, an absent Space session may replay the stamped live prefix by
+exact tab ID. Current Space section order, bookmark identity, saved pinned URL
+and aliases survive even if live URLs navigated or extension UI destruction
+changed native tab indices. Replay checks current normal, non-private windows
+and excludes closed, native-pinned, startup-helper and global Favorite tabs.
+Ordinary moves between normal windows keep the existing global Space membership
+policy. A move during validation aborts before any Space/metadata writes so a
+stable retry preserves the original section and metadata. Native changes and
+pairing revocation are rechecked before replay.
+
+Only the prefix was live in the stamped epoch. Unresolved records in the suffix
+stay on the existing URL-based browser-restore path; their numeric IDs never
+supply exact replay proof. Discarded prefix records are not added to that queue.
+Prefix sequence is preserved without sorting by potentially older restore ranks.
+Missing stamps, wrong epochs/generations, invalid counts/digests, or older writers
+changing prefix content cause exact replay to be refused. Favorite ownership and
+selected-Space proofs remain independently validated.
+
+Fresh witness enrollment alone is not recovery proof. If a full browser restart
+is interrupted after Favorite enrollment but before Space initialization, the
+old Space stamp cannot match the new browser epoch. Failed atomic snapshot writes
+cannot mark old data as current. Transient validation failures block initialization
+without clearing the candidate. A full browser restart still uses the existing
+Space restoration behavior; this path never makes old numeric IDs authoritative.
+
 ## Supported lifecycle and explicit limits
 
 | Event | Result |

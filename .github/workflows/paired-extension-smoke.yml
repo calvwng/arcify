@@ -79,6 +79,7 @@ on:
       - 'tests/unit/favorites-drop*.test.js'
       - 'startup-*.js'
       - 'space-store.js'
+      - 'space-continuity.js'
       - 'space-order.js'
       - 'space-switcher.js'
       - 'tests/unit/space-switcher.test.js'
