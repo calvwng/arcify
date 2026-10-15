@@ -76,7 +76,21 @@ size. The updater now stages and SHA256/metadata-checks that exact cache file be
 both plans and installation. `--no-download`, the empty repository inputs, Chrome-only
 plan, and every existing provenance/security guard remain in force. Pure tests
 verify staging, stale-cache rejection and tampered-copy rejection without executing
-apt; another exact-head CI run is still required for live installation evidence.
+apt. The later live installation result below verifies that corrected archive path.
+
+### Verified official-package installation and namespace sandbox
+
+[Head 279d112](https://github.com/calvwng/arcify/actions/runs/38728520703/job/116400220718)
+passed the official HTTPS updater and installed Chrome `155.0.8059.79-1` from the
+validated cached archive. Its subsequent real Chrome `155.0.8059.79` process passed
+the installed-package checks and reported Namespace, PID/network namespaces and
+Seccomp-BPF sandboxing. The vendor package refreshed its existing root-owned key
+file from mode `0777` to `0644`; no manual permission repair, new trust/source or
+AppArmor policy change was made. SHA256 remains a received-byte/change-detection
+receipt, not independent repository-signature authentication. That run later
+failed the keyboard End case, so it proves installation and sandboxing, not a
+complete native Split pass. The full native fixture still requires an exact-head
+CI pass, including its final incompatible-group rejection case.
 
 ### Preserved signed-source failure history
 
@@ -110,6 +124,12 @@ original pages remaining open after unsplit, exact pair continuity during Space
 switches, explicit group-sync deferral without coercing split members, real grouping and
 collapse of a separately seeded unaffected Space in the same window, and
 rejected incompatible-group drops without ordinary reorder fallthrough.
+The incompatible-group setup explicitly creates the group in the sidebar's native
+window, rather than the API caller's default window. Before any selection or drag,
+it records raw before/after state and requires both original pages to remain
+ordinary unsplit Today tabs in the same exact Space/window, with distinct native
+groups and unchanged documents/inputs. The rejection itself must still preserve
+all native tab state and canonical Today membership/order.
 
 Do not run the browser fixture locally. Pure checks are safe:
 

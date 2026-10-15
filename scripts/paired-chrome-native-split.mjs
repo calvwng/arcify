@@ -145,6 +145,36 @@ export function assertNativeSplitRejected(before,after) {
     assert.equal(after.activeSpaceId,before.activeSpaceId);
 }
 
+/** Fixture seeding only: the API page can live in a different browser window. */
+export function createNativeSplitFixtureGroup({tabId,windowId}) {
+    return chrome.tabs.group({tabIds:[tabId],createProperties:{windowId}});
+}
+
+export function assertNativeSplitIncompatibleSetup(before,after,{sourceId,targetId,windowId,spaceId,groupId}) {
+    assert.notEqual(sourceId,targetId);
+    assertNativeSplitPagesPreserved(before,after);
+    assert.deepEqual(after.spaces,before.spaces,'Native group seeding cannot reassign or reorder canonical Today tabs.');
+    assert.equal(before.activeSpaceId,spaceId);assert.equal(after.activeSpaceId,spaceId);
+    const source=exactTab(after,sourceId),target=exactTab(after,targetId);
+    for(const tab of [source,target]){
+        assert.equal(tab.windowId,windowId,'Both incompatible Today rows must remain in the exact sidebar window.');
+        assert.equal(tab.pinned,false);assert.equal(tab.incognito,false);assert.equal(tab.splitViewId,-1);
+        assert(after.pageStates[tab.id],'Both incompatible rows need their original live document/input evidence.');
+        assert.deepEqual(after.spaces.filter(space=>space.temporaryTabs.includes(tab.id)).map(space=>space.id),[spaceId]);
+        assert(after.spaces.every(space=>!space.spaceBookmarks.includes(tab.id)));
+    }
+    assert(Number.isSafeInteger(groupId)&&groupId>=0,'Fixture seeding must return a real native group ID.');
+    assert.equal(target.groupId,groupId);assert.notEqual(source.groupId,target.groupId);
+    const groups=after.groups.filter(group=>group.id===groupId);assert.equal(groups.length,1);
+    assert.equal(groups[0].windowId,windowId,'The new native group must be in the exact sidebar window.');
+    assert.deepEqual(after.tabs.filter(tab=>tab.groupId===groupId).map(tab=>tab.id),[targetId]);
+    for(const tab of before.tabs){
+        const next=exactTab(after,tab.id);assert.equal(next.splitViewId,tab.splitViewId);
+        if(tab.id!==targetId)assert.equal(next.groupId,tab.groupId,'Fixture seeding cannot regroup unrelated tabs.');
+    }
+    return {sourceId,targetId,windowId,spaceId,groupId};
+}
+
 export function assertSplitTargetFeedback(state,{sourceId,targetId,allowed}) {
     assert.equal(state.sourceId,sourceId);assert.equal(state.targetId,targetId);
     assert.equal(state.visible,true,'The Split View destination must be visibly painted during real drag.');
@@ -315,12 +345,18 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
 
         // Mismatched native groups are a real incompatible destination; selecting
         // the Split View button may not silently turn into an ordinary reorder.
-        await apiPage.evaluate(id=>chrome.tabs.group({tabIds:[id]}),seed[4]);
+        // Chrome's default is the API caller's window, not this sidebar's window:
+        // https://developer.chrome.com/docs/extensions/reference/api/tabs#method-group
+        const beforeGrouping=await read();
+        const groupId=await apiPage.evaluate(createNativeSplitFixtureGroup,{tabId:seed[4],windowId});
+        const groupRequest={sourceId:seed[0],targetId:seed[4],windowId,spaceId,groupId},afterGrouping=await read();
+        await checkpoint('native-split-incompatible-group-setup',{request:groupRequest,before:beforeGrouping,after:afterGrouping});
+        assertNativeSplitIncompatibleSetup(beforeGrouping,afterGrouping,groupRequest);
         await select([seed[0],seed[4]]);await menu(seed[0]);
         await sidebar.page.waitForFunction(()=>/same native tab group/.test(document.getElementById('tab-context-menu')?.textContent||''),{polling:50});
         assert.equal(await sidebar.page.$('#tab-context-menu [data-action="createSplitView"]'),null);
         await clear();
-        const rejectedBefore=await ui(sidebar.page,'Capture incompatible native group baseline',read);assert.notEqual(exactTab(rejectedBefore,seed[0]).groupId,exactTab(rejectedBefore,seed[4]).groupId);
+        const rejectedBefore=await ui(sidebar.page,'Capture incompatible native group baseline',read);assertNativeSplitIncompatibleSetup(beforeGrouping,rejectedBefore,groupRequest);
         await drag(seed[0],seed[4],{allowed:false});await sidebar.page.waitForFunction(()=>!document.getElementById('spacesList')?.classList.contains('today-split-dragging'),{polling:50});
         const rejectedAfter=await read();assertNativeSplitRejected(rejectedBefore,rejectedAfter);await checkpoint('native-split-incompatible-drop-rejected',{before:rejectedBefore,after:rejectedAfter});
         return evidence;

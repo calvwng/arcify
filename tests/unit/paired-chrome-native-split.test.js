@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {parseHTML} from 'linkedom';
-import {assertNativeSplitCapability,assertNativeSplitPagesPreserved,assertNativeSplitPair,assertUnaffectedSpaceProjection,assertNativeSplitCreated,assertNativeSplitDragTrace,assertNativeSplitEnded,assertNativeSplitRejected,assertSplitTargetFeedback,serveNativeSplitFixture,readNativeSplitMenuAction,assertNativeSplitMenuAction,assertNativeSplitKeyboardTrace,readNativeSplitSidebarState} from '../../scripts/paired-chrome-native-split.mjs';
+import {assertNativeSplitCapability,assertNativeSplitPagesPreserved,assertNativeSplitPair,assertUnaffectedSpaceProjection,assertNativeSplitCreated,assertNativeSplitDragTrace,assertNativeSplitEnded,assertNativeSplitRejected,createNativeSplitFixtureGroup,assertNativeSplitIncompatibleSetup,assertSplitTargetFeedback,serveNativeSplitFixture,readNativeSplitMenuAction,assertNativeSplitMenuAction,assertNativeSplitKeyboardTrace,readNativeSplitSidebarState} from '../../scripts/paired-chrome-native-split.mjs';
 import {validateNativeSplitCapture} from '../../scripts/paired-chrome-native-split-capture.mjs';
 const capability=()=>({createSplit:'function',unsplit:'function',none:-1,major:155});
 test('positive native capability requires both real methods and installed 155+',()=>assertNativeSplitCapability(capability()));
@@ -17,6 +17,47 @@ test('split and unsplit preserve exact native IDs, URLs, documents, inputs and s
 for(const[name,mutate]of Object.entries({closed:s=>s.tabs.pop(),duplicate:s=>s.tabs.push({...s.tabs[0],id:99}),navigate:s=>s.tabs[0].url='other',pendingNavigation:s=>s.tabs[0].pendingUrl='other',movedWindow:s=>s.tabs[0].windowId=8,reloaded:s=>s.pageStates[11].documentId='new',lostInput:s=>s.pageStates[11].value='',bookmarks:s=>s.bookmarks=[],bindings:s=>s.bindings[11]={bookmarkId:'pin'},favorites:s=>s.favorites=[{id:'new'}]}))test(`page continuity rejects ${name}`,()=>{const before=state(),after=structuredClone(before);mutate(after);assert.throws(()=>assertNativeSplitPagesPreserved(before,after));});
 for(const[name,mutate]of Object.entries({stillSplit:s=>s.tabs[0].splitViewId=21,unrelatedTwinSplit:s=>{s.tabs[2].splitViewId=77;s.tabs[3].splitViewId=77;},activeSpaceChanged:s=>s.activeSpaceId='other',reordered:s=>s.tabs[0].index=9,regrouped:s=>s.tabs[0].groupId=5,canonicalReorder:s=>s.spaces[0].temporaryTabs.reverse(),canonicalLost:s=>s.spaces[0].temporaryTabs.pop()}))test(`unsplit proof rejects ${name}`,()=>{const before=state(),after=structuredClone(before);for(const tab of after.tabs)tab.splitViewId=-1;mutate(after);assert.throws(()=>assertNativeSplitEnded(before,after,request));});
 test('rejected incompatible drop must not fall through to reorder or activation',()=>{const before=state();assertNativeSplitRejected(before,structuredClone(before));for(const mutate of [s=>s.tabs[0].index=3,s=>s.tabs[0].active=false,s=>s.spaces[0].temporaryTabs.reverse(),s=>s.activeSpaceId='other']){const after=structuredClone(before);mutate(after);assert.throws(()=>assertNativeSplitRejected(before,after));}});
+const incompatibleRequest={sourceId:11,targetId:13,windowId:7,spaceId:'work',groupId:55};
+function incompatibleSample(){
+    const before=state();for(const tab of before.tabs)tab.splitViewId=-1;
+    before.pageStates[13]={documentId:'blocked',value:'blocked input',topLevel:true,frames:0};before.groups=[];
+    const after=structuredClone(before);after.tabs[2].groupId=55;after.groups=[{id:55,windowId:7}];return {before,after};
+}
+test('incompatible-group seeding explicitly uses the sidebar window even when the API caller differs',async()=>{
+    const previous=globalThis.chrome,calls=[],callerWindowId=99;
+    globalThis.chrome={tabs:{group:async options=>{calls.push(options);return 55;}}};
+    try{
+        assert.equal(await createNativeSplitFixtureGroup({tabId:13,windowId:7}),55);
+        assert.deepEqual(calls,[{tabIds:[13],createProperties:{windowId:7}}]);
+        assert.notEqual(calls[0].createProperties.windowId,callerWindowId);
+    }finally{if(previous===undefined)delete globalThis.chrome;else globalThis.chrome=previous;}
+});
+test('incompatible-group precondition proves same Space/window and distinct real native groups',()=>{
+    const {before,after}=incompatibleSample();assert.deepEqual(assertNativeSplitIncompatibleSetup(before,after,incompatibleRequest),incompatibleRequest);
+});
+for(const[name,mutate]of Object.entries({
+    wrongTargetWindow:s=>s.after.tabs[2].windowId=99,wrongSourceWindow:s=>s.after.tabs[0].windowId=99,wrongGroupWindow:s=>s.after.groups[0].windowId=99,
+    wrongSpace:s=>{s.after.spaces[0].temporaryTabs=[11,12,14];s.after.spaces.push({id:'other',temporaryTabs:[13],spaceBookmarks:[]});},
+    duplicateOwner:s=>{for(const state of [s.before,s.after])state.spaces.push({id:'other',temporaryTabs:[13],spaceBookmarks:[]});},
+    alsoSaved:s=>{for(const state of [s.before,s.after])state.spaces[0].spaceBookmarks=[13];},
+    activeSpaceChanged:s=>s.after.activeSpaceId='other',wrongActiveSpace:s=>{s.before.activeSpaceId='other';s.after.activeSpaceId='other';},
+    targetSplit:s=>s.after.tabs[2].splitViewId=21,sourceSplit:s=>s.after.tabs[0].splitViewId=21,
+    pinned:s=>{s.before.tabs[2].pinned=true;s.after.tabs[2].pinned=true;},incognito:s=>{s.before.tabs[2].incognito=true;s.after.tabs[2].incognito=true;},
+    matchingGroup:s=>s.after.tabs[0].groupId=55,wrongGroup:s=>s.after.tabs[2].groupId=56,missingGroup:s=>s.after.groups=[],duplicateGroup:s=>s.after.groups.push({...s.after.groups[0]}),
+    thirdMember:s=>s.after.tabs[3].groupId=55,unrelatedGroup:s=>s.after.tabs[3].groupId=56,unrelatedSplit:s=>s.after.tabs[3].splitViewId=88,
+    reloaded:s=>s.after.pageStates[13].documentId='new',lostInput:s=>s.after.pageStates[13].value='',missingDocument:s=>{delete s.before.pageStates[13];delete s.after.pageStates[13];},
+    canonicalReorder:s=>s.after.spaces[0].temporaryTabs.reverse()
+}))test(`incompatible-group precondition rejects ${name}`,()=>{const sample=incompatibleSample();mutate(sample);assert.throws(()=>assertNativeSplitIncompatibleSetup(sample.before,sample.after,incompatibleRequest));});
+test('incompatible-group precondition rejects duplicate identity and missing or mismatched group receipt',()=>{
+    const {before,after}=incompatibleSample();for(const change of [{targetId:11},{groupId:-1},{groupId:56},{groupId:undefined}])assert.throws(()=>assertNativeSplitIncompatibleSetup(before,after,{...incompatibleRequest,...change}));
+});
+test('incompatible fixture records raw setup and rejects a window mismatch before selection or drag',()=>{
+    const source=readFileSync(new URL('../../scripts/paired-chrome-native-split.mjs',import.meta.url),'utf8');
+    assert.match(source,/apiPage\.evaluate\(createNativeSplitFixtureGroup,\{tabId:seed\[4\],windowId\}\)/);
+    assert.match(source,/native-split-incompatible-group-setup'[\s\S]*?assertNativeSplitIncompatibleSetup\(beforeGrouping,afterGrouping,groupRequest\);\s*await select\(\[seed\[0\],seed\[4\]\]\)/);
+    assert.match(source,/assertNativeSplitIncompatibleSetup\(beforeGrouping,rejectedBefore,groupRequest\);\s*await drag\(seed\[0\],seed\[4\],\{allowed:false\}\)/);
+    assert.match(source,/assertNativeSplitRejected\(rejectedBefore,rejectedAfter\)/);
+});
 const feedback=()=>({sourceId:11,targetId:12,visible:true,draggable:true,action:'createSplitView',allowed:true,rect:{x:20,y:40,width:80,height:30},viewport:{width:400,height:600}});
 test('explicit drag target proof checks visible native action and allowed/rejected state',()=>assertSplitTargetFeedback(feedback(),{sourceId:11,targetId:12,allowed:true}));
 for(const[name,mutate]of Object.entries({wrongSource:s=>s.sourceId=13,wrongTarget:s=>s.targetId=13,hidden:s=>s.visible=false,notDraggable:s=>s.draggable=false,wrongAction:s=>s.action='reorder',wrongState:s=>s.allowed=false,offscreen:s=>s.rect.x=500,empty:s=>s.rect.height=0}))test(`explicit split target proof rejects ${name}`,()=>{const s=feedback();mutate(s);assert.throws(()=>assertSplitTargetFeedback(s,{sourceId:11,targetId:12,allowed:true}));});
