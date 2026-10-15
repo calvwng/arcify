@@ -12,6 +12,7 @@ import { exerciseBookmarkMultiSelection, assertNativeDragSourceStable } from './
  * reason to change runner policy or disable Chrome security.
  */
 import assert from 'node:assert/strict';
+import { createPairedChromeRunReport, beginPairedChromeCase, assertPairedChromeRunPassed } from './paired-chrome-run-plan.mjs';
 import { createServer } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -44,7 +45,6 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
 const PINNED_SPOTLIGHT = '019b52718c84c84f785081537534b8902e47946a';
-const OUTPUT = resolve(ROOT, 'test-results/paired-chrome');
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',
@@ -85,13 +85,14 @@ const stepNames = [
     'Ordinary Favorites close with one native Ctrl+W, remain global and retain witnessed reload identity'
 ];
 const report = {
+    ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
     verification: 'Real Chrome with both production extension builds; no mocked Chrome APIs or transport.',
     environment: { githubActions: true, chromeMode: 'headed Chrome under Xvfb virtual display', runnerOS: process.env.RUNNER_OS, node: process.version,
         workflowSha: process.env.GITHUB_SHA, requestedArcifyHead: process.env.ARCIFY_TEST_HEAD,
         pullRequestHead: process.env.ARCIFY_PR_HEAD || null, githubRunId: process.env.GITHUB_RUN_ID,
         imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, runnerUid: process.getuid?.() },
-    checks: stepNames.map(name => ({ name, status: 'not_run' })), screenshots: [], diagnostics: [], targetLifecycle: [],
+    screenshots: [], diagnostics: [], targetLifecycle: [],
     limits: [
         'Workspace rendering regressions use sidebar.html in a regular tab. Dedicated command checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking/focus and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
@@ -105,6 +106,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
+const OUTPUT = resolve(ROOT, report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -183,8 +185,7 @@ async function observePage(page) {
     return page;
 }
 async function step(name, operation, { windowIsolation = true } = {}) {
-    const check = report.checks.find(item => item.name === name);
-    assert(check, `Unknown check: ${name}`);
+    const check = beginPairedChromeCase(report, name);
     check.status = 'running'; check.startedAt = new Date().toISOString();
     await saveReport();
     try {
@@ -198,7 +199,8 @@ async function step(name, operation, { windowIsolation = true } = {}) {
         if (!windowIsolation) check.windowIsolationLimit = 'Final full-process restart deliberately invalidates prior browser-session window/tab IDs; preservation is checked against fresh postrestart identities.';
         assertNoTargetCrashes(report.targetLifecycle);
         assertNoPageErrors(report.diagnostics);
-        check.status = detail?.skipped ? 'skipped' : 'passed';
+        assert(!detail?.skipped, 'A selected paired-Chrome case must pass without skipping its assertions.');
+        check.status = 'passed';
         console.log(`${check.status.toUpperCase()}: ${name}`);
     } catch (error) {
         check.status = 'failed'; check.error = { message: error.message, stack: error.stack };
@@ -742,6 +744,9 @@ try {
         fixture.windowBBaseline = await windowBState();
         return { windowA: a.windowId, windowB: b.windowId, spaceOrder: a.spaces.map(space => space.id), duplicateBookmarkIds: fixture.bookmarks };
     });
+    // Supplemental lifecycle runs share setup, but never depend on unrelated
+    // full-suite cases or retry a failed case in an already-mutated profile.
+    if (report.runMode === 'full') {
     await step(stepNames[3], async () => {
         // Keep the real sidebar document mounted while Spotlight changes spaces.
         // Checking snapshots alone misses a stale visible space and selected chip.
@@ -1878,6 +1883,8 @@ try {
         snapshot,poll,fixture,arcifyId,spotlightId,search,
         record:async observation => { report.todaySelection ||= []; report.todaySelection.push(observation); await saveReport(); } }));
 
+    } // Full-only cases 3–31 and 33–35; preserve their original order.
+
     await step(stepNames[36], async () => {
         ordinaryFixture = await exerciseOrdinaryFavorites({ browser,apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,
             newTabPage,pageForUrl,ui,screenshot,snapshot,poll,fixture,arcifyId,spotlightId,search,
@@ -1902,7 +1909,8 @@ try {
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');
     assertNoTargetCrashes(report.targetLifecycle);
     assertNoPageErrors(report.diagnostics);
-    report.status = report.checks.some(check => check.status === 'skipped') ? 'passed_with_skips' : 'passed';
+    assertPairedChromeRunPassed(report);
+    report.status = 'passed';
 } catch (error) {
     report.status = 'failed'; report.failure = { message: error.message, stack: error.stack };
     console.error(error.stack || error);
@@ -1925,5 +1933,5 @@ try {
     if (server) await new Promise(resolve => server.close(resolve));
     if (profile) await rm(profile, { recursive: true, force: true }).catch(error => report.diagnostics.push({ type: 'profile-cleanup', message: error.message }));
     await saveReport();
-    console.log(`Evidence: ${OUTPUT}/report.json (${report.status}); ${report.screenshots.length} screenshots.`);
+    console.log(`Evidence: ${OUTPUT}/report.json (${report.runMode}: ${report.status}); ${report.summary.passed}/${report.expectedCaseCount} expected cases passed; ${report.screenshots.length} screenshots.`);
 }

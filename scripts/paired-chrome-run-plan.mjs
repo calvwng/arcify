@@ -1,0 +1,52 @@
+/** Pure run selection/report guards. Importing this module never launches Chrome. */
+import assert from 'node:assert/strict';
+
+// Case indices are stable identities in paired-chrome-smoke.mjs. Restart must
+// remain last: it intentionally invalidates the original browser-session IDs.
+const FULL_CASE_INDICES = Object.freeze([...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 36, 32]);
+const FAVORITE_LIFECYCLE_CASE_INDICES = Object.freeze([0, 1, 2, 36, 32]);
+
+function caseIndicesForMode(mode) {
+    assert(mode === 'full' || mode === 'favorite-lifecycle',
+        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full or favorite-lifecycle.`);
+    return mode === 'full' ? FULL_CASE_INDICES : FAVORITE_LIFECYCLE_CASE_INDICES;
+}
+
+export function createPairedChromeRunReport(caseNames, mode = 'full') {
+    const indices = caseIndicesForMode(mode);
+    assert(Array.isArray(caseNames) && caseNames.length === FULL_CASE_INDICES.length,
+        'Every paired-Chrome case must be included in the explicit full run plan.');
+    assert(caseNames.every(name => typeof name === 'string' && name.trim()), 'Every case requires a name.');
+    assert.equal(new Set(caseNames).size, caseNames.length, 'Case names must be unique.');
+    const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseNames[caseIndex] }));
+    return {
+        runMode: mode,
+        scope: mode === 'full' ? 'Full paired-extension suite.' :
+            'Supplemental fresh-profile Favorite lifecycle coverage; this is not a full-suite result.',
+        expectedCaseCount: indices.length,
+        expectedCases,
+        executedCaseIndices: [],
+        checks: expectedCases.map(item => ({ ...item, status: 'not_run' }))
+    };
+}
+
+export function beginPairedChromeCase(report, name) {
+    const check = report.checks.find(item => item.name === name);
+    assert(check, `Case is not selected for ${report.runMode}: ${name}`);
+    assert.equal(check.status, 'not_run', 'A selected case must run exactly once, without same-profile retries.');
+    const expected = caseIndicesForMode(report.runMode)[report.executedCaseIndices.length];
+    assert.equal(check.caseIndex, expected, 'Selected cases must run in the declared order.');
+    report.executedCaseIndices.push(check.caseIndex);
+    return check;
+}
+
+export function assertPairedChromeRunPassed(report) {
+    const indices = caseIndicesForMode(report.runMode);
+    assert.equal(report.expectedCaseCount, indices.length, 'The declared count must match the selected run mode.');
+    assert.deepEqual(report.expectedCases.map(item => item.caseIndex), indices, 'The report must declare every selected case in order.');
+    assert.deepEqual(report.checks.map(({ caseIndex, name }) => ({ caseIndex, name })), report.expectedCases,
+        'The report must contain exactly the selected cases, with no omitted or extra results.');
+    assert.deepEqual(report.executedCaseIndices, indices, 'Every selected case must have run exactly once in order.');
+    assert(report.checks.every(check => check.status === 'passed'),
+        `All ${indices.length} selected ${report.runMode} cases must pass; skipped, failed or incomplete checks cannot pass the run.`);
+}

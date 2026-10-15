@@ -34,7 +34,7 @@ Arcify stores:
 
 - `storage.session.favoriteSession`: authoritative current ownership/attempts.
 - `storage.session.favoriteContinuityReceipt`: version/schema, random epoch,
-  ownership revision, paired ID/generation and a digest of that exact state.
+  checkpoint revision, paired ID/generation and a digest of that exact ownership state.
 - `storage.local.favoriteContinuity`: a local-only, versioned exact mirror and
   saved-ID/URL/provenance identities, plus the acknowledged peer generation.
   It is not synced, exported, or used to guess browser identity.
@@ -53,7 +53,7 @@ peer generation, epoch, writer generation and previous revision.
 
 ## Single writer and commit order
 
-FavoriteStore calls the adapter only under SpaceStore's queue. Ownership loads
+FavoriteStore and SpaceStore call the adapter only under SpaceStore's queue. Ownership loads
 before any Space restoration/adoption. A surviving own session with a matching
 receipt digest is preferred; legacy pinned-only session state can start a new
 compatible epoch. A mismatched own receipt is not repaired from the durable mirror.
@@ -108,6 +108,40 @@ uses a fresh epoch and empty/currently proven session state only.
 Authenticated bridge reads refresh the witness from a verified **surviving own
 session**. This reestablishes continuity after Spotlight-only reload or an explicit
 pairing change, without authorizing an old durable candidate.
+
+## Selected Space continuity
+
+The same Arcify-owned journal can optionally carry `selection: { version: 1,
+windows: [{ windowId, spaceId, tabId }] }` and `selectionFingerprint`. Each row
+records a selected stable Space ID and an exact surviving browser-tab anchor in
+its normal, non-private window. The anchor need not belong to that Space: a
+selected Space may be empty while a global Favorite is the active browser tab.
+Extension UI tabs, including pending navigations to them, cannot serve as anchors.
+No selection data is sent to Spotlight or added to saved Favorite records.
+
+The optional selection digest covers the selection plus its epoch, pairing
+writer generation, checkpoint revision and Favorite ownership fingerprint.
+Favorite v2 ownership validation is unchanged. Missing or invalid selection
+context drops only selection recovery. Older v2 writers can still read ownership;
+if they advance a receipt without understanding its optional context, the stale
+selection digest no longer matches the new revision and is refused.
+
+Selection changes checkpoint even when Favorite bindings do not change. While
+holding the shared queue, SpaceStore uses the same invalidation-first writer to
+atomically persist its Space session fields and the new receipt before group
+projection. Failed checkpoints force SpaceStore to reload its authoritative own
+session before a subsequent read. An offline selection change cannot revive the
+older witnessed selection after extension reload.
+
+A surviving own `spaceSession` always wins, including an empty `activeSpaces`.
+Otherwise, context becomes available only after the same conditional witness
+commit and final own-receipt write used for Favorite recovery. Before installing
+it, Arcify rechecks the exact anchor/window and current Space definitions. Missing,
+moved or private anchors, non-normal windows, and deleted/unknown Spaces are
+refused. API lookup uncertainty blocks initialization instead of guessing.
+Loss of both extension sessions or a full browser restart never restores this
+selection context. Existing full-restart Space membership restoration is unchanged.
+Native group IDs remain ephemeral projections, not Space identity or proof.
 
 ## Supported lifecycle and explicit limits
 

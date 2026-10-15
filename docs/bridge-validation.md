@@ -81,6 +81,44 @@ Arcify PR head and the pinned Spotlight companion revision, then runs
 the actual source revisions, Chrome version, extension IDs, and tested cases.
 The peer pin must be updated deliberately when a paired source change is tested.
 
+### Full suite and supplemental Favorite lifecycle job
+
+The existing `paired-chrome` job keeps its default full run and original command.
+A separate `favorite-lifecycle` job sets
+`ARCIFY_PAIRED_RUN_MODE=favorite-lifecycle` and starts its own GitHub-hosted runner
+and fresh disposable profile. Both jobs contribute failures to the workflow;
+neither depends on, cancels, or suppresses the other. The supplemental job cannot
+replace the full-suite result, and does not retry a failed case in the full job's
+mutated profile.
+
+The only accepted modes are `full` (the default when unset) and
+`favorite-lifecycle`; any other value fails. The full plan requires all **37**
+cases, preserving execution order 0–31, 33–36, then 32. The supplemental plan
+requires exactly **5** cases, in zero-based case-index order **0, 1, 2, 36, 32**:
+
+- Sandboxed Chrome startup, installation and exact extension identities
+- Unpaired rejection and real options-UI pairing
+- Local bookmark/tab fixtures and window-scoped snapshots
+- The unchanged ordinary-Favorite native Ctrl+W, reopen, global ownership,
+  Spotlight switch and witnessed extension-reload assertions
+- The unchanged graceful same-profile browser restart, including refusal to
+  recover the prior ordinary-Favorite association without a current-session witness
+
+Both modes use the same exact reviewed Spotlight SHA, namespace-sandbox checks,
+Developer-mode UI bootstrap, read-only workflow permissions and production builds.
+The focused run executes no reduced variant of the two lifecycle cases. It leaves
+unrelated full-only cases outside its declared scope rather than marking them as
+passing or skipped. Every selected case must pass exactly once in order; skipped,
+failed, missing or extra results cannot produce a successful report.
+
+Each JSON report declares `runMode`, `expectedCaseCount`, the exact `expectedCases`
+with stable zero-based `caseIndex` values and names, and `executedCaseIndices`.
+Full artifacts remain `paired-chrome-<run>-<attempt>`; supplemental artifacts are
+`paired-chrome-favorite-lifecycle-<run>-<attempt>` with a separate report/log path.
+A five-case success must always be described as supplemental lifecycle coverage,
+never a 37-case full-suite pass. This configuration is pending its first actual
+GitHub Actions run; local unit/build checks do not establish browser acceptance.
+
 The fixture uses Puppeteer's supported unpacked-extension API in an isolated
 temporary profile with the browser sandbox and web security intact. It does not
 reuse the legacy E2E helper's security-disabling flags. A sandbox or extension

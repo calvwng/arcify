@@ -122,6 +122,9 @@ export class SpaceStore {
         if (!this.spaces.length) {
             this.spaces.push(await this.makeSpace(this.defaultSpaceName));
         }
+        if (!session.spaceSession && this.favoriteStore?.ownershipPersistence?.recoverSelection) {
+            this.active = await this.favoriteStore.ownershipPersistence.recoverSelection(this.spaces);
+        }
         const valid = new Set(live.map(t => t.id));
         for (const space of this.spaces) for (const key of sections) space[key] = (space[key] || []).filter(id => valid.has(id));
         for (const tab of live) this.track(tab);
@@ -264,7 +267,19 @@ export class SpaceStore {
         }
         this.savedWindows = windowSnapshot;
         await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot: [...snapshot, ...this.restoreQueue], spaceWindowSnapshot: windowSnapshot });
-        await chrome.storage.session.set({ spaceSession: true, activeSpaces: this.active, spaceRestoreQueue: this.restoreQueue, restoredTabRanks: [...this.restoredRanks], spaceWindowKeys: [...this.windowKeys], spaceRestoreWindowKeys: [...this.restoreWindowKeys], spaceRecoveryCandidates: [...new Set([...this.recoveryCandidates, ...this.provisional])] });
+        const spaceSessionUpdate = { spaceSession: true, activeSpaces: this.active, spaceRestoreQueue: this.restoreQueue, restoredTabRanks: [...this.restoredRanks], spaceWindowKeys: [...this.windowKeys], spaceRestoreWindowKeys: [...this.restoreWindowKeys], spaceRecoveryCandidates: [...new Set([...this.recoveryCandidates, ...this.provisional])] };
+        const favorites = this.favoriteStore;
+        if (favorites?.ownershipPersistence?.checkpointSelection) {
+            try {
+                await favorites.ownershipPersistence.checkpointSelection({ state: favorites.state, items: favorites.items,
+                    spaces: this.spaces, activeSpaces: this.active, spaceSessionUpdate });
+            } catch (error) {
+                // A rejected checkpoint must reload its authoritative session
+                // before a later read can expose the uncommitted selection.
+                this.initialized = false;
+                throw error;
+            }
+        } else await chrome.storage.session.set(spaceSessionUpdate);
         try { await syncSpaceGroups(this.spaces, this.active, [...tabs.values()].filter(tab => this.isGlobalTab(tab)).map(tab => tab.id)); }
         catch (error) { console.warn('Tab group sync deferred:', error); }
     }

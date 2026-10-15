@@ -19,6 +19,21 @@ export const encodeFavoriteContinuityState = value => JSON.stringify(value, (_ke
 const digest = async value => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(encodeFavoriteContinuityState(value)))))
     .map(byte => byte.toString(16).padStart(2, '0')).join('');
 const receiptFields = value => ({ epoch: value.epoch, writerGeneration: value.generation, revision: value.revision });
+// Optional, Arcify-local context. Including the receipt identity makes an older
+// v2 writer advancing its revision invalidate unknown context rather than
+// silently re-attest stale selection. Favorite ownership keeps its v2 digest.
+const selectionIdentity = value => ({ epoch: value.epoch, generation: value.generation,
+    revision: value.revision, fingerprint: value.fingerprint, selection: value.selection });
+const validSelection = value => value?.version === 1 && !Array.isArray(value)
+    && Object.keys(value).every(key => ['version', 'windows'].includes(key))
+    && Array.isArray(value.windows) && value.windows.length <= 20000
+    && value.windows.every(entry => entry && !Array.isArray(entry)
+        && Object.keys(entry).every(key => ['windowId', 'spaceId', 'tabId'].includes(key))
+        && isWindowId(entry.windowId) && id(entry.spaceId) && isWindowId(entry.tabId))
+    && new Set(value.windows.map(entry => entry.windowId)).size === value.windows.length
+    && new Set(value.windows.map(entry => entry.tabId)).size === value.windows.length;
+const selectionFrom = async receipt => validSelection(receipt?.selection)
+    && receipt.selectionFingerprint === await digest(selectionIdentity(receipt)) ? copy(receipt.selection) : null;
 
 // Settings and revocation are one atomic local write. It remains effective even
 // while Spotlight is offline, and never depends on an onChanged callback running.
@@ -53,7 +68,7 @@ export function validContinuityState(state) {
 // Single writer: FavoriteStore invokes these methods while holding SpaceStore's
 // queue. This is a local exact-ID mirror, never a URL-based restore mechanism.
 export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitnessRequest } = {}) {
-    let current = null;
+    let current = null, selection = null, recoveredSelection = null, selectionDirty = false;
     const config = async () => {
         const values = await api.storage.local.get([PEER_KEY, PAIRING_GENERATION_KEY]);
         return { peerId: isExtensionId(values[PEER_KEY]) ? values[PEER_KEY] : null, generation: values[PAIRING_GENERATION_KEY] };
@@ -72,17 +87,22 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
     const checkPairing = async pairing => {
         if (!same(pairing, await config())) throw new Error('Favorite pairing changed. Try again.');
     };
-    async function save({ state, items }, recovery = null) {
+    async function save({ state, items, spaceSessionUpdate, selectedContext = selection }, recovery = null) {
         if (!validContinuityState(state)) throw new Error('Invalid exact Favorite continuity state.');
         const pairing = await ensureGeneration(await config());
         if (!current || !same(current, pairing) || current.revision >= Number.MAX_SAFE_INTEGER) current = newCurrent(pairing);
         const next = { ...current, revision: current.revision + 1, fingerprint: await digest(state) };
+        delete next.selection; delete next.selectionFingerprint;
+        if (selectedContext) {
+            next.selection = copy(selectedContext);
+            next.selectionFingerprint = await digest(selectionIdentity(next));
+        }
         // Invalidate BEFORE writing session state or reporting a detach/remove.
         // A failure here forbids the caller's subsequent native mutation.
         await api.storage.local.set({ [CONTINUITY_LOCAL_KEY]: { version: 1, phase: 'invalid' } });
         await checkPairing(pairing);
-        await api.storage.session.set({ [SESSION_KEY]: copy(state), [CONTINUITY_SESSION_KEY]: { ...copy(next), ...(recovery ? { phase: 'recovering' } : {}) } });
-        current = next;
+        await api.storage.session.set({ ...spaceSessionUpdate, [SESSION_KEY]: copy(state), [CONTINUITY_SESSION_KEY]: { ...copy(next), ...(recovery ? { phase: 'recovering' } : {}) } });
+        current = next; selection = copy(selectedContext);
         const journal = { ...next, phase: 'committed', items: items.map(identity), state: copy(state), peerGeneration: null };
         await checkPairing(pairing);
         if (!recovery) await api.storage.local.set({ [CONTINUITY_LOCAL_KEY]: journal });
@@ -120,10 +140,52 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         if (!witness?.matched || mirror?.phase !== 'committed' || mirror.epoch !== current.epoch
             || mirror.revision !== current.revision || mirror.peerGeneration !== witness.peerGeneration) await save({ state, items });
     }
+    // No queue entry here: both stores already hold SpaceStore.run(). Include
+    // Space session state in the receipt write so no torn selection can be
+    // acknowledged with an older recoverable journal.
+    async function checkpointSelection({ state, items, spaces, activeSpaces, spaceSessionUpdate }) {
+        const live = await api.tabs.query({});
+        const windows = [];
+        for (const [key, spaceId] of Object.entries(activeSpaces)) {
+            const windowId = Number(key);
+            if (!isWindowId(windowId) || !spaces.some(space => space.id === spaceId)) continue;
+            const candidates = live.filter(tab => tab.windowId === windowId && selectionAnchor(tab));
+            const anchor = candidates.find(tab => tab.active) || candidates[0];
+            if (!anchor) continue;
+            const window = await api.windows.get(windowId);
+            if (window?.id === windowId && window.type === 'normal' && !window.incognito)
+                windows.push({ windowId, spaceId, tabId: anchor.id });
+        }
+        const nextSelection = { version: 1, windows: windows.sort((a, b) => a.windowId - b.windowId) };
+        if (!selectionDirty && encodeFavoriteContinuityState(selection) === encodeFavoriteContinuityState(nextSelection)
+            && current && same(current, await config())) {
+            await api.storage.session.set(spaceSessionUpdate);
+            return;
+        }
+        selectionDirty = true;
+        await save({ state, items, spaceSessionUpdate, selectedContext: nextSelection });
+        selectionDirty = false;
+    }
+    const selectionAnchor = tab => tab && !tab.incognito && !isStartupLauncherTab(tab, api)
+        && ![tab.url, tab.pendingUrl].some(url => /^(chrome|moz)-extension:/.test(url || ''));
+    async function recoverSelection(spaces) {
+        const active = {};
+        if (!recoveredSelection) return active;
+        const live = new Map((await api.tabs.query({})).map(tab => [tab.id, tab]));
+        for (const entry of recoveredSelection.windows) {
+            const tab = live.get(entry.tabId);
+            if (!spaces.some(space => space.id === entry.spaceId) || !selectionAnchor(tab) || tab.windowId !== entry.windowId) continue;
+            const window = await api.windows.get(entry.windowId);
+            if (window?.id === entry.windowId && window.type === 'normal' && !window.incognito) active[entry.windowId] = entry.spaceId;
+        }
+        recoveredSelection = null;
+        return active;
+    }
     async function load({ session, items }) {
-        current = null;
+        current = null; selection = null; recoveredSelection = null; selectionDirty = false;
         const pairing = await config();
-        const { [CONTINUITY_SESSION_KEY]: receipt } = await api.storage.session.get(CONTINUITY_SESSION_KEY);
+        const own = await api.storage.session.get([CONTINUITY_SESSION_KEY, 'spaceSession', 'activeSpaces']);
+        const receipt = own[CONTINUITY_SESSION_KEY];
         const { [CONTINUITY_LOCAL_KEY]: journal } = await api.storage.local.get(CONTINUITY_LOCAL_KEY);
         let state = empty(), recovery = null;
         if (session !== null && session !== undefined) {
@@ -132,7 +194,10 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
             const legacy = !receipt && !session.bindings?.some(value => value.mode) && !session.attempts?.some(value => value.mode);
             if (validContinuityState(session) && (legacy || validReceipt(receipt) && receipt.fingerprint === await digest(session))) {
                 state = copy(session);
-                if (validReceipt(receipt) && same(receipt, pairing)) current = copy(receipt);
+                if (validReceipt(receipt) && same(receipt, pairing)) {
+                    current = copy(receipt);
+                    selection = await selectionFrom(receipt);
+                }
             }
         } else if (journal?.phase === 'committed' && validReceipt(journal) && same(journal, pairing)
             && isExtensionId(pairing.peerId) && isToken(journal.peerGeneration) && validContinuityState(journal.state)
@@ -165,21 +230,40 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
                     for (const entry of journal.state.bindings) if (await exact(entry)) state.bindings.push(copy(entry));
                     for (const entry of journal.state.attempts) if (await exact(entry)) state.attempts.push(copy(entry));
                     await checkPairing(pairing);
+                    selection = await selectionFrom(journal);
+                    if (selection) {
+                        const selected = [];
+                        for (const entry of selection.windows) {
+                            const tab = live.get(entry.tabId);
+                            if (!selectionAnchor(tab) || tab.windowId !== entry.windowId) continue;
+                            if (!windows.has(entry.windowId)) windows.set(entry.windowId, await api.windows.get(entry.windowId));
+                            const window = windows.get(entry.windowId);
+                            if (window?.id === entry.windowId && window.type === 'normal' && !window.incognito) selected.push(entry);
+                        }
+                        selection.windows = selected;
+                    }
                     recovery = { peerGeneration: journal.peerGeneration, revision: journal.revision };
                     current = { ...journal }; delete current.state; delete current.items; delete current.phase; delete current.peerGeneration;
                 }
             }
         }
+        // Own Space intent wins even if initialization is interrupted before
+        // SpaceStore can checkpoint it. Never re-attest an older context in that
+        // gap, including when the authoritative selection was explicitly empty.
+        if (own.spaceSession && selection?.windows.some(entry => own.activeSpaces?.[entry.windowId] !== entry.spaceId)) selection = null;
         // Missing/invalid proof starts a new epoch from empty/current session,
         // never seeds the unproven durable candidate into a fresh Spotlight.
         if (!current) current = newCurrent(await ensureGeneration(await config()));
         try { await save({ state, items }, recovery); }
         catch (error) {
             if (!recovery || !['STALE_RECEIPT', 'UNAUTHORIZED', 'UNAVAILABLE', 'TIMEOUT', 'INVALID_RESPONSE', 'UNSUPPORTED'].includes(error.code)) throw error;
-            current = null; state = empty();
+            current = null; state = empty(); selection = null;
             await save({ state, items });
         }
+        // Publish context only after the conditional recovery acknowledgement
+        // and final committed own-session receipt both succeeded.
+        recoveredSelection = copy(selection);
         return state;
     }
-    return { load, save, refresh };
+    return { load, save, refresh, checkpointSelection, recoverSelection };
 }

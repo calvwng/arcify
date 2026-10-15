@@ -75,6 +75,7 @@ beforeEach(() => {
 const continuity = () => createFavoriteContinuity({ api: chrome, sendRequest: async (peer, command, value) => {
     witnessCalls.push({ peer, command, value: clone(value) });
     if (offline) throw Object.assign(new Error('Unavailable'), { code: 'UNAVAILABLE' });
+    await hooks.witness?.(command, value);
     const matched = receipt?.epoch === value.epoch && receipt?.writerGeneration === value.writerGeneration
         && receipt?.revision === value.revision && receipt?.peerGeneration === peerGeneration;
     if (command === 'write') {
@@ -193,4 +194,223 @@ test('legacy peer mode race after bridge snapshot is rejected by actual Favorite
     assert.equal(result.ok, false); assert.equal(result.error.code, 'UNSUPPORTED_FEATURE');
     assert.equal(effects.filter(effect => effect[0] === 'create').length, 0);
     assert.equal(first.favorites.state.attempts.length, 0);
+});
+
+for (const syncGroups of [false, true]) for (const restart of ['worker', 'extension']) {
+    test(`selected Space and native collapse survive ${restart} restart with active global Favorite, group sync ${syncGroups}`, async () => {
+        sync.syncTabGroups = syncGroups;
+        const first = pairedStores(); await first.favorites.dispatch(req('open', { favoriteId: 'f' }));
+        await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+        const beforeGroups = clone(groups).map(({ title, collapsed }) => ({ title, collapsed }));
+        const beforeRevision = local[CONTINUITY_LOCAL_KEY].revision;
+        assert.equal(tab(100).active, true); assert.equal(first.spaces.active[1], 'b');
+        if (restart === 'extension') clearSession(); else offline = true;
+        const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+        assert.equal(second.spaces.active[1], 'b');
+        assert.equal(session.activeSpaces[1], 'b'); assertGlobal(second, 100);
+        if (syncGroups) {
+            const projected = Object.values(session.spaceGroupProjection);
+            assert.deepEqual(groups.filter(group => projected.includes(group.id)).map(({ title, collapsed }) => ({ title, collapsed })), beforeGroups);
+        }
+        assert(local[CONTINUITY_LOCAL_KEY].revision > beforeRevision);
+    });
+}
+
+for (const syncGroups of [false, true]) test(`selection-only checkpoints preserve empty Space and independent windows, group sync ${syncGroups}`, async () => {
+    sync.syncTabGroups = syncGroups;
+    local.spaces.push(space('empty')); nodes.push({ id: 'empty', parentId: 'root', title: 'empty' });
+    tabs.push({ id: 3, windowId: 2, title: 'Other', url: 'https://other.test/', pinned: false, groupId: -1, index: 0 });
+    local.spaces[1].temporaryTabs.push(3);
+    const first = pairedStores(); await first.favorites.dispatch(req('open', { favoriteId: 'f' }));
+    const ownership = clone(session[FAVORITE_SESSION_KEY]);
+    const before = local[CONTINUITY_LOCAL_KEY].revision;
+    await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'empty' });
+    await first.spaces.dispatch({ action: 'activate', windowId: 2, spaceId: 'a' });
+    assert.deepEqual(session[FAVORITE_SESSION_KEY], ownership);
+    assert(local[CONTINUITY_LOCAL_KEY].revision >= before + 2);
+    assert.deepEqual(local[CONTINUITY_LOCAL_KEY].selection.windows.map(({ windowId, spaceId }) => ({ windowId, spaceId })),
+        [{ windowId: 1, spaceId: 'empty' }, { windowId: 2, spaceId: 'a' }]);
+    clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.active, { 1: 'empty', 2: 'a' });
+    assert.deepEqual(second.spaces.spaces.find(space => space.id === 'empty').temporaryTabs, []);
+    if (syncGroups) {
+        assert.equal(groups.find(group => group.id === session.spaceGroupProjection['a:1']).collapsed, true);
+        assert.equal(groups.find(group => group.id === session.spaceGroupProjection['b:1']).collapsed, true);
+        assert.equal(groups.find(group => group.id === session.spaceGroupProjection['b:2']).collapsed, true);
+    }
+    assert(witnessCalls.every(call => !JSON.stringify(call.value).includes('spaceId') && !JSON.stringify(call.value).includes('https:')));
+});
+
+for (const active of [{ 1: 'a' }, {}]) test(`own Space session selection ${JSON.stringify(active)} wins over older witnessed selection`, async () => {
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    session.activeSpaces = clone(active); offline = true;
+    const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.active, active); assert.deepEqual(session.activeSpaces, active);
+});
+
+for (const condition of ['invalid-journal', 'offline', 'missing-peer', 'wrong-epoch', 'wrong-revision', 'peer-reloaded', 'revoked', 'full-restart']) {
+    test(`selected Space fails closed with ${condition} despite surviving/reused numeric IDs`, async () => {
+        const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+        const epoch = local[CONTINUITY_LOCAL_KEY].epoch;
+        if (condition === 'invalid-journal') local[CONTINUITY_LOCAL_KEY].phase = 'invalid';
+        if (condition === 'offline') offline = true;
+        if (condition === 'wrong-epoch') receipt.epoch = crypto.randomUUID();
+        if (condition === 'wrong-revision') receipt.revision++;
+        if (condition === 'peer-reloaded') peerGeneration = crypto.randomUUID();
+        if (condition === 'missing-peer' || condition === 'full-restart') receipt = null;
+        if (condition === 'revoked') await configureFavoriteContinuityPeer(chrome, PEER);
+        clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+        assert.deepEqual(second.spaces.active, {}); assert.notEqual(local[CONTINUITY_LOCAL_KEY].epoch, epoch);
+    });
+}
+
+for (const condition of ['digest', 'shape', 'old-revision', 'old-epoch', 'old-fingerprint', 'missing-context', 'missing-digest']) {
+    test(`invalid selection ${condition} does not weaken valid Favorite v2 ownership`, async () => {
+        const first = pairedStores(); await first.favorites.dispatch(req('open', { favoriteId: 'f' }));
+        await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+        const journal = local[CONTINUITY_LOCAL_KEY];
+        if (condition === 'digest') journal.selectionFingerprint = '0'.repeat(64);
+        if (condition === 'shape') journal.selection.windows[0].unexpected = true;
+        if (condition === 'old-revision') { journal.revision++; receipt.revision++; }
+        if (condition === 'old-epoch') { journal.epoch = receipt.epoch = crypto.randomUUID(); }
+        if (condition === 'old-fingerprint') {
+            journal.state.attempts.push({ ...journal.state.bindings[0], url: local[FAVORITES_KEY][0].url, kind: 'adopt' });
+            const { encodeFavoriteContinuityState } = await import('../../favorite-continuity.js');
+            journal.fingerprint = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(encodeFavoriteContinuityState(journal.state)))).toString('hex');
+        }
+        if (condition === 'missing-context') delete journal.selection;
+        if (condition === 'missing-digest') delete journal.selectionFingerprint;
+        clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+        assertGlobal(second, 100); assert.deepEqual(second.spaces.active, {});
+    });
+}
+
+for (const condition of ['deleted-space', 'unknown-space', 'moved-anchor', 'missing-anchor', 'private-tab', 'private-window', 'popup-window']) {
+    test(`selected Space rejects ${condition} without URL or group inference`, async () => {
+        const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+        const anchor = local[CONTINUITY_LOCAL_KEY].selection.windows[0].tabId;
+        if (condition === 'deleted-space') { local.spaces = local.spaces.filter(space => space.id !== 'b'); nodes = nodes.filter(node => node.id !== 'b'); }
+        if (condition === 'unknown-space') local.spaces[1].id = 'replacement';
+        if (condition === 'moved-anchor') tab(anchor).windowId = 2;
+        if (condition === 'missing-anchor') tabs = tabs.filter(tab => tab.id !== anchor);
+        if (condition === 'private-tab') tab(anchor).incognito = true;
+        if (condition === 'private-window' || condition === 'popup-window') {
+            const oldGet = chrome.windows.get;
+            chrome.windows.get = async id => ({ ...await oldGet(id), ...(condition === 'private-window' ? { incognito: true } : { type: 'popup' }) });
+        }
+        clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+        assert.deepEqual(second.spaces.active, {});
+    });
+}
+
+for (const boundary of ['invalidate', 'session', 'commit', 'ack']) test(`selection-only ${boundary} failure preserves atomic session and never replays old context`, async () => {
+    sync.syncTabGroups = true;
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'get' });
+    const previousGroups = clone(groups), previous = clone(local[CONTINUITY_LOCAL_KEY]); let commits = 0;
+    hooks.localSet = values => {
+        const journal = values[CONTINUITY_LOCAL_KEY];
+        if (journal?.phase === 'invalid' && boundary === 'invalidate') throw new Error('checkpoint failed');
+        if (journal?.phase === 'committed') {
+            commits++;
+            if (boundary === 'commit' && commits === 1 || boundary === 'ack' && commits === 2) throw new Error('checkpoint failed');
+        }
+    };
+    hooks.sessionSet = values => {
+        if (values[CONTINUITY_SESSION_KEY] && boundary === 'session') throw new Error('checkpoint failed');
+        if (values.activeSpaces) assert.equal(local[CONTINUITY_LOCAL_KEY].phase, 'invalid');
+    };
+    await assert.rejects(first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' }), /checkpoint failed/);
+    assert.deepEqual(groups, previousGroups); assert.equal(first.spaces.initialized, false);
+    assert.equal(session.activeSpaces[1], ['invalidate', 'session'].includes(boundary) ? 'a' : 'b');
+    hooks.localSet = null; hooks.sessionSet = null;
+    if (boundary === 'invalidate') assert.deepEqual(local[CONTINUITY_LOCAL_KEY], previous);
+    clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.equal(second.spaces.active[1], boundary === 'invalidate' ? 'a' : undefined);
+});
+
+for (const condition of ['revoke-before-ack', 'move-during-ack', 'delete-during-ack', 'private-during-ack']) {
+    test(`selection recovery rejects ${condition} before publishing an authoritative Space session`, async () => {
+        const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+        const anchor = local[CONTINUITY_LOCAL_KEY].selection.windows[0].tabId;
+        hooks.witness = (command, value) => {
+            if (command !== 'write' || !value.expectedPeerGeneration) return;
+            assert.equal(session.spaceSession, undefined); assert.equal(session.activeSpaces, undefined);
+            if (condition === 'revoke-before-ack') { peerGeneration = crypto.randomUUID(); receipt = null; }
+            if (condition === 'move-during-ack') tab(anchor).windowId = 2;
+            if (condition === 'delete-during-ack') tabs = tabs.filter(tab => tab.id !== anchor);
+            if (condition === 'private-during-ack') tab(anchor).incognito = true;
+        };
+        clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+        assert.deepEqual(second.spaces.active, {}); assert.deepEqual(session.activeSpaces, {});
+    });
+}
+
+test('interrupted final recovery receipt never promotes provisional selection to a Space session', async () => {
+    const first = pairedStores(); await first.favorites.dispatch(req('open', { favoriteId: 'f' }));
+    await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    clearSession();
+    hooks.sessionSet = values => { if (values[CONTINUITY_SESSION_KEY] && !values[CONTINUITY_SESSION_KEY].phase) throw new Error('final receipt failed'); };
+    const second = pairedStores(); await assert.rejects(second.spaces.dispatch({ action: 'get' }), /final receipt failed/);
+    assert.equal(session[CONTINUITY_SESSION_KEY].phase, 'recovering');
+    assert.equal(session.spaceSession, undefined); assert.equal(session.activeSpaces, undefined); assert.equal(second.spaces.initialized, false);
+    hooks.sessionSet = null;
+    const third = pairedStores(); await third.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(third.spaces.active, {}); assert.equal(third.spaces.isGlobalTab(100), false);
+});
+
+for (const newer of ['queued-activate', 'native-onActivated']) test(`newer ${newer} during witness read wins and checkpoints the latest intent`, async () => {
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    clearSession(); let second, queued, fired = false;
+    hooks.witness = command => {
+        if (command !== 'read' || fired) return; fired = true;
+        if (newer === 'queued-activate') queued = second.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'a' });
+        else { for (const native of tabs) native.active = native.id === 1; chrome.tabs.onActivated.emit({ windowId: 1, tabId: 1 }); }
+    };
+    second = stores({ install: true, ownershipPersistence: continuity() });
+    await second.idle(); await queued;
+    assert.equal(fired, true); assert.equal(second.spaces.active[1], 'a'); assert.equal(session.activeSpaces[1], 'a');
+    assert.equal(local[CONTINUITY_LOCAL_KEY].selection.windows[0].spaceId, 'a');
+});
+
+test('selection window lookup uncertainty preserves candidate and blocks initialization until retry', async () => {
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    const previous = clone(local[CONTINUITY_LOCAL_KEY]); clearSession();
+    hooks.window = () => { throw new Error('window unavailable'); };
+    const second = pairedStores(); await assert.rejects(second.spaces.dispatch({ action: 'get' }), /window unavailable/);
+    assert.deepEqual(local[CONTINUITY_LOCAL_KEY], previous); assert.equal(session.spaceSession, undefined);
+    hooks.window = null; await second.spaces.dispatch({ action: 'get' }); assert.equal(second.spaces.active[1], 'b');
+});
+
+test('browser tab navigating to extension UI is not used as a reload selection anchor', async () => {
+    tab(1).active = true; tab(1).pendingUrl = chrome.runtime.getURL('options.html');
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    assert.equal(local[CONTINUITY_LOCAL_KEY].selection.windows[0].tabId, 2);
+    tab(2).pendingUrl = chrome.runtime.getURL('sidebar.html');
+    clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.active, {});
+});
+
+test('offline selection change cannot revive the older witnessed selection on extension reload', async () => {
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'a' });
+    offline = true; await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    assert.equal(session.activeSpaces[1], 'b'); assert.equal(local[CONTINUITY_LOCAL_KEY].peerGeneration, null);
+    offline = false; clearSession(); const second = pairedStores(); await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(second.spaces.active, {});
+});
+
+test('rejected checkpoint reloads authoritative old selection before a subsequent same-worker read', async () => {
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'a' });
+    hooks.localSet = value => { if (value[CONTINUITY_LOCAL_KEY]?.phase === 'invalid') throw new Error('checkpoint failed'); };
+    await assert.rejects(first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' }), /checkpoint failed/);
+    hooks.localSet = null; await first.spaces.dispatch({ action: 'get' });
+    assert.equal(first.spaces.active[1], 'a'); assert.equal(local[CONTINUITY_LOCAL_KEY].selection.windows[0].spaceId, 'a');
+});
+
+for (const active of [{ 1: 'a' }, {}]) test(`own selection ${JSON.stringify(active)} is authoritative before interrupted Space initialization too`, async () => {
+    const first = pairedStores(); await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    session.activeSpaces = clone(active);
+    const second = pairedStores();
+    await second.favorites.initialize(); // Crash before SpaceStore can checkpoint its own session.
+    clearSession(); const third = pairedStores(); await third.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(third.spaces.active, {});
 });
