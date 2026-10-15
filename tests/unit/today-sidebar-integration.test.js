@@ -59,8 +59,9 @@ const area = state => ({ async get(keys) {
     if (typeof keys === 'string') return { [keys]: structuredClone(state[keys]) };
     return structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
 }, async set(next) { Object.assign(state, structuredClone(next)); }, async remove(key) { delete state[key]; } });
-let beforeTree, beforeRemove, beforeGetTab, beforeTabMenuRequest;
-const mutations = [], saveRequests = [], splitRequests = [], nativeSplitCalls = [];
+let beforeTree, beforeRemove, beforeGetTab, beforeTabMenuRequest, beforeTodayMoveRequest;
+const mutations = [], saveRequests = [], splitRequests = [], nativeSplitCalls = [], todayMoveRequests = [];
+const settings = { invertTabOrder: false };
 let nextBookmarkId = 100;
 const store = new SpaceStore(); store.initialized = true; store.spaces = storedSpaces; store.active = session.activeSpaces; store.restoredRanks = new Map(); store.restoredMetadata = []; store.isGlobalTab = () => false;
 store.persist = async () => { storedSpaces = structuredClone(store.spaces); local.spaces = storedSpaces; await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); };
@@ -76,6 +77,10 @@ Object.assign(globalThis, { window, document, Event: window.Event, Node: window.
 globalThis.chrome = {
     runtime: { onMessage, getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'moveTodayTabsToSpace') {
+                todayMoveRequests.push(structuredClone(message));
+                return beforeTodayMoveRequest?.(message);
+            }
             if (message.type === 'saveTodayTabsInNewFolder') {
                 saveRequests.push(structuredClone(message)); store.spaces = structuredClone(storedSpaces);
                 try { return { success: true, batch: await saveTodayTabsInNewFolder(store, message) }; }
@@ -102,7 +107,7 @@ globalThis.chrome = {
             if (message.action === 'activate') session.activeSpaces[message.windowId] = message.spaceId;
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
-    storage: { onChanged, local: area(local), sync: area({ invertTabOrder: false }), session: area(session) },
+    storage: { onChanged, local: area(local), sync: area(settings), session: area(session) },
     windows: { async get(id) { return { id, type: 'normal', incognito: false }; }, getCurrent(_options, callback) { callback?.({ id: 10 }); return Promise.resolve({ id: 10 }); } },
     tabs: { ...Object.fromEntries(['onActivated', 'onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active))); },
@@ -711,4 +716,90 @@ test('choosing an editor ends the menu lifecycle without closing the new tab or 
         assert.equal(document.getElementById(id), null);
     }
     assert.deepEqual(mutations, before);
+});
+
+const moveTarget = () => document.querySelector('[data-action="moveTodayToDestination"][data-space-id="move-dest"]');
+const publishSpaces = async () => {
+    local.spaces = structuredClone(storedSpaces);
+    await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); await wait(260);
+};
+const openMovePicker = async id => { await context(id); event(menuItem('moveTodayTabsToSpace'), 'click'); assert(moveTarget()); };
+
+test('real sidebar destination picker holds exact rows, and every dismissal releases queued rendering without focus theft', async () => {
+    const other = { id: 'move-dest', name: '<img> Destination', color: 'green', bookmarkFolderId: 'move-folder', spaceBookmarks: [], temporaryTabs: [] };
+    storedSpaces.push(other); folders.push({ id: other.bookmarkFolderId, parentId: 'root', title: other.name });
+    for (const id of [301, 302]) {
+        tabs.push({ id, windowId: 10, index: tabs.length, active: false, pinned: false, incognito: false, groupId: -1, splitViewId: -1, title: `Move ${id}`, url: 'https://same-move.test/' });
+        storedSpaces[0].temporaryTabs.push(id);
+    }
+    await publishSpaces();
+    const before = structuredClone(mutations);
+    for (const id of [301, 302]) tabs.find(tab => tab.id === id).splitViewId = 901;
+    await refresh();
+    event(live(301), 'click', { ctrlKey: true }); event(live(302), 'click', { ctrlKey: true }); await context(301);
+    assert.equal(menuItem('moveTodayTabsToSpace'), null, 'End native Split View before moving its members');
+    clear(); for (const id of [301, 302]) tabs.find(tab => tab.id === id).splitViewId = -1;
+    await refresh();
+    for (const exit of ['Escape', 'outside', 'superseding', 'removed', 'blur', 'hidden', 'pagehide']) {
+        clear(); event(live(302), 'click', { ctrlKey: true }); event(live(301), 'click', { ctrlKey: true });
+        await openMovePicker(301);
+        const original = live(301), stale = moveTarget();
+        assert.deepEqual([...document.querySelectorAll('[data-action="moveTodayToDestination"]')].map(node => node.dataset.spaceId), ['move-dest']);
+        assert.equal(stale.querySelector('img'), null);
+        await chrome.tabs.onUpdated.emit(301, { splitViewId: -1 }, structuredClone(tabs.find(tab => tab.id === 301)));
+        await wait(160); assert.equal(live(301), original);
+        if (exit === 'Escape') clear();
+        if (exit === 'outside') event(document.body, 'click');
+        if (exit === 'superseding') {
+            event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'), 'keydown', { key: 'F10', shiftKey: true });
+        }
+        if (exit === 'removed') document.getElementById('tab-context-menu').remove();
+        if (['blur', 'hidden', 'pagehide'].includes(exit)) leaveSidebar(exit);
+        await wait(260); assert.notEqual(live(301), original, `${exit} releases the picker refresh gate`);
+        if (['blur', 'hidden', 'pagehide'].includes(exit)) assert.equal(document.activeElement, document.getElementById('newTabBtn'));
+        event(stale, 'click'); await wait(10); assert.equal(todayMoveRequests.length, 0);
+        clear();
+    }
+    assert.deepEqual(mutations, before);
+});
+
+test('real sidebar single/multi picker dispatches visible order once and adopts the acknowledged projection without switching or activating', async () => {
+    const beforeNative = structuredClone(tabs), beforeBookmarks = structuredClone(bookmarks), beforeMutations = structuredClone(mutations);
+    beforeTodayMoveRequest = async message => {
+        const source = storedSpaces.find(space => space.id === message.spaceId), target = storedSpaces.find(space => space.id === message.destinationSpaceId);
+        const ids = message.entries.map(entry => entry.tabId);
+        source.temporaryTabs = source.temporaryTabs.filter(id => !ids.includes(id));
+        target.temporaryTabs = message.inverted ? [...ids].reverse().concat(target.temporaryTabs) : target.temporaryTabs.concat(ids);
+        local.spaces = structuredClone(storedSpaces);
+        await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local');
+        return { success: true, batch: { total: ids.length, completed: ids, remaining: [], uncertain: false, destinationSpaceId: target.id } };
+    };
+    try {
+        for (const inverted of [false, true]) for (const ids of [[301], [302, 301]]) {
+            clear(); settings.invertTabOrder = inverted;
+            const source = storedSpaces.find(space => space.id === 'alpha'), target = storedSpaces.find(space => space.id === 'move-dest');
+            source.temporaryTabs = source.temporaryTabs.filter(id => ![301, 302].includes(id)).concat([301, 302]); target.temporaryTabs = [];
+            await publishSpaces(); await refresh();
+            for (const id of ids) event(live(id), 'click', { ctrlKey: true });
+            const expected = [...content().querySelectorAll('.today-selected')].map(row => Number(row.dataset.tabId));
+            await openMovePicker(ids[0]);
+            const choice = moveTarget(), count = todayMoveRequests.length;
+            event(choice, 'keydown', { key: 'Enter' }); event(choice, 'click'); await wait(340);
+            assert.equal(todayMoveRequests.length, count + 1);
+            const request = todayMoveRequests.at(-1);
+            assert.deepEqual(request.entries.map(entry => entry.tabId), expected); assert.equal(request.inverted, inverted);
+            assert.equal(request.destinationBookmarkFolderId, 'move-folder');
+            assert.equal(document.querySelector('.space.active').dataset.spaceId, 'alpha'); assert.equal(session.activeSpaces[10], 'alpha');
+            for (const id of ids) assert.equal(live(id), null);
+            assert.deepEqual(tabs, beforeNative); assert.deepEqual(bookmarks, beforeBookmarks); assert.deepEqual(mutations, beforeMutations);
+            assert.match(document.getElementById('favoritesDropNotice').textContent, /still in the current Space/);
+        }
+    } finally { beforeTodayMoveRequest = null; settings.invertTabOrder = false; }
+});
+
+test('real sidebar rejects stale Today row instead of falling back to legacy move', async () => {
+    clear(); const target = live(6); target.hidden = true;
+    try { await context(6); assert.equal(document.getElementById('tab-context-menu'), null); }
+    finally { target.hidden = false; clear(); }
+    assert.match(document.getElementById('favoritesDropNotice').textContent, /Today row changed/);
 });

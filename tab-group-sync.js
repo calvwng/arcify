@@ -49,7 +49,8 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}, globalTabIds = 
                 const peers = nativeSplits.filter(peer => peer.splitViewId === tab.splitViewId);
                 return peers.length === 2 && peers.every(peer => ids.includes(peer.id));
             });
-        return { missing, blocked, metadataSafe,
+        return { missing, blocked, metadataSafe, activeMember: members.some(tab => tab.active),
+            activeGroupMember: targetMembers.some(tab => tab.active),
             stillGrouped: members.every(tab => tab.groupId === groupId),
             moveIndex: targetMembers.length ? Math.min(...targetMembers.map(tab => tab.index)) : null };
     };
@@ -71,16 +72,32 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}, globalTabIds = 
                 if (liveGroup) next[key] = liveGroup.id;
             };
             if (groupId === undefined || ordered.some(t => t.groupId !== groupId)) {
-                const state = await inspectPartition(windowId, ids, groupId);
+                let state = await inspectPartition(windowId, ids, groupId);
                 if (state.missing || state.blocked) { if (state.blocked) defer(); continue; }
+                // Adding an active tab to a collapsed destination can make Chrome
+                // activate another tab. Expand first, and revalidate after the await.
+                // Logical Space selection remains independent of native activity.
+                if (groupId !== undefined && state.activeMember) {
+                    const currentGroup = (await chrome.tabGroups.query({ windowId })).find(group => group.id === groupId);
+                    if (!currentGroup) continue;
+                    if (currentGroup.collapsed) {
+                        await chrome.tabGroups.update(groupId, { collapsed: false });
+                        liveGroup.collapsed = false;
+                    }
+                    state = await inspectPartition(windowId, ids, groupId);
+                    if (state.missing || state.blocked) { if (state.blocked) defer(); continue; }
+                }
                 groupId = await chrome.tabs.group({ tabIds: ids, ...(groupId === undefined ? { createProperties: { windowId } } : { groupId }) });
             }
             next[key] = groupId;
             if (!windowGroups.has(windowId)) windowGroups.set(windowId, []);
             windowGroups.get(windowId).push(groupId);
-            const collapsed = Boolean(activeSpaces[windowId] && activeSpaces[windowId] !== space.id);
+            const state = await inspectPartition(windowId, ids, groupId);
+            // Never collapse a native active tab, including an inherited unowned
+            // member. A moved active tab may belong to a non-current logical Space.
+            const collapsed = Boolean(activeSpaces[windowId] && activeSpaces[windowId] !== space.id &&
+                !state.activeMember && !state.activeGroupMember);
             if (!liveGroup || liveGroup.title !== space.name || liveGroup.color !== space.color || liveGroup.collapsed !== collapsed) {
-                const state = await inspectPartition(windowId, ids, groupId);
                 if (state.missing || state.blocked && !state.metadataSafe) { if (state.blocked) defer(); continue; }
                 await chrome.tabGroups.update(groupId, { title: space.name, color: space.color, collapsed });
             }

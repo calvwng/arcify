@@ -30,3 +30,24 @@ export async function readSpaceContinuitySnapshot(identity, stamp, snapshot) {
         || new Set(live.map(record => record.tabId)).size !== live.length) return null;
     return { live: structuredClone(live), pending: structuredClone(snapshot.slice(stamp.liveCount)) };
 }
+
+const validRanks = ranks => Array.isArray(ranks) && ranks.every(entry => Array.isArray(entry) && entry.length === 2 &&
+    Number.isSafeInteger(entry[0]) && entry[0] > 0 && Number.isSafeInteger(entry[1]) && entry[1] >= 0) &&
+    new Set(ranks.map(([id]) => id)).size === ranks.length;
+
+// Ordering hints checkpoint with the canonical local write. A failed later
+// session write must not restore stale source ranks after a membership move.
+// Binding to the full snapshot prevents an older writer's changed snapshot from
+// accidentally making an obsolete optional checkpoint authoritative.
+export async function createSpaceRankCheckpoint(ranks, snapshot) {
+    if (!validRanks(ranks) || !Array.isArray(snapshot)) throw new Error('Invalid Space rank checkpoint.');
+    return { version: 1, ranks: structuredClone(ranks), fingerprint: await digest({ snapshot, ranks }) };
+}
+
+export async function readSpaceRankCheckpoint(checkpoint, snapshot) {
+    if (!checkpoint || Array.isArray(checkpoint) || checkpoint.version !== 1 ||
+        Object.keys(checkpoint).some(key => !['version', 'ranks', 'fingerprint'].includes(key)) ||
+        !validRanks(checkpoint.ranks) || !Array.isArray(snapshot) || typeof checkpoint.fingerprint !== 'string' ||
+        checkpoint.fingerprint !== await digest({ snapshot, ranks: checkpoint.ranks })) return null;
+    return structuredClone(checkpoint.ranks);
+}

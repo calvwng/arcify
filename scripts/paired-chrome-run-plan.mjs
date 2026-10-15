@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 // Case indices are stable identities in paired-chrome-smoke.mjs. Restart must
 // remain last: it intentionally invalidates the original browser-session IDs.
-const FULL_CASE_INDICES = Object.freeze([...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 37, 38, 36, 32]);
+const FULL_CASE_INDICES = Object.freeze([...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 37, 38, 40, 41, 36, 32]);
 const FAVORITE_LIFECYCLE_CASE_INDICES = Object.freeze([0, 1, 2, 36, 32]);
 // Supplemental positive capability coverage never removes full/lifecycle cases.
 export const NATIVE_SPLIT_CASE_NAME = 'Today real drag and keyboard create native Split View pairs without replacing pages';
@@ -17,10 +17,11 @@ function caseIndicesForMode(mode) {
 
 export function createPairedChromeRunReport(caseNames, mode = 'full') {
     const indices = caseIndicesForMode(mode);
-    assert(Array.isArray(caseNames) && caseNames.length === FULL_CASE_INDICES.length,
-        'Every paired-Chrome case must be included in the explicit full run plan.');
+    assert(Array.isArray(caseNames) && caseNames.length === FULL_CASE_INDICES.length + 1,
+        'Every paired-Chrome case must be included in the explicit full/native run plans.');
     assert(caseNames.every(name => typeof name === 'string' && name.trim()), 'Every case requires a name.');
     assert.equal(new Set(caseNames).size, caseNames.length, 'Case names must be unique.');
+    assert.equal(caseNames[39], NATIVE_SPLIT_CASE_NAME, 'Native case 39 must retain its stable identity.');
     const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseIndex === 39 ? NATIVE_SPLIT_CASE_NAME : caseNames[caseIndex] }));
     return {
         runMode: mode,

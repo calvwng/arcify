@@ -119,6 +119,26 @@ h3 {
     background-color: var(--tab-hover-bg, rgba(0, 0, 0, 0.05));
 }
 
+.context-menu.today-move-picker {
+    width: 260px;
+    min-width: 0;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+}
+
+.today-move-picker .context-menu-item, .today-move-hint {
+    overflow-wrap: anywhere;
+}
+
+.today-move-hint { padding: 8px 12px; font-size: 12px; line-height: 1.4; }
+
+.today-move-picker [role="menuitem"]:focus-visible,
+[data-action="moveTodayTabsToSpace"]:focus-visible {
+    outline: 2px solid var(--accent-color, #4d8dff);
+    outline-offset: -2px;
+}
+
 .context-menu-separator {
     height: 1px;
     background-color: var(--sidebar-border-color, #eee);

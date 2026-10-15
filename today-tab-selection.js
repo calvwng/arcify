@@ -51,8 +51,8 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
         }
         status.hidden = !selected.size; status.dataset.count = String(selected.size);
         status.textContent = selected.size > MAX_TODAY_SELECTION
-            ? `${selected.size} Today tabs selected. Select at most ${MAX_TODAY_SELECTION} for one new folder.`
-            : selected.size ? `${selected.size} Today tab${selected.size === 1 ? '' : 's'} selected. Right-click to save in a new pinned folder. Escape clears selection.` : '';
+            ? `${selected.size} Today tabs selected. Select at most ${MAX_TODAY_SELECTION} for one action.`
+            : selected.size ? `${selected.size} Today tab${selected.size === 1 ? '' : 's'} selected. Right-click to move to another Space or save in a new pinned folder. Escape clears selection.` : '';
     }
     function clear({ keepAnchor = false } = {}) {
         interaction++;
@@ -124,7 +124,7 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
         if (!entry) { clear(); return null; }
         onGesture(); interaction++;
         if (!selected.has(entry.tabId)) { selected = new Map([[entry.tabId, entry]]); anchor = entry; revision++; paint(); }
-        if (selected.size > MAX_TODAY_SELECTION) return { error: `Select at most ${MAX_TODAY_SELECTION} Today tabs. Nothing was saved.` };
+        if (selected.size > MAX_TODAY_SELECTION) return { error: `Select at most ${MAX_TODAY_SELECTION} Today tabs. No action was taken.` };
         return Object.freeze({ ...scope, revision,
             visibleEntries: Object.freeze(entries.map(item => Object.freeze({ ...item }))),
             entries: Object.freeze(entries.filter(item => selected.has(item.tabId)).map(item => Object.freeze({ ...item }))) });

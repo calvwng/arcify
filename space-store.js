@@ -11,7 +11,7 @@ import { Utils } from './utils.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { LocalStorage } from './localstorage.js';
 import { captureWindowTabs, matchRestoreRecord } from './space-restore.js';
-import { SPACE_CONTINUITY_KEY, createSpaceContinuityStamp, readSpaceContinuitySnapshot } from './space-continuity.js';
+import { SPACE_CONTINUITY_KEY, createSpaceContinuityStamp, readSpaceContinuitySnapshot, createSpaceRankCheckpoint, readSpaceRankCheckpoint } from './space-continuity.js';
 
 const sections = ['spaceBookmarks', 'temporaryTabs'];
 export const tabIds = space => sections.flatMap(key => space?.[key] || []);
@@ -74,7 +74,7 @@ export class SpaceStore {
     async initialize() {
         if (this.initialized) return;
         if (this.favoriteStore) { await this.favoriteStore.initialize(); await this.favoriteStore.reconcile({ updateSpaces: false }); }
-        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', SPACE_CONTINUITY_KEY]);
+        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', 'spaceRankCheckpoint', SPACE_CONTINUITY_KEY]);
         const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'spaceRecoveryCandidates']);
         this.spaces = data.spaces || [];
         this.snapshotByTab = new Map((data.spaceTabSnapshot || []).filter(t => t.tabId).map(t => [t.tabId, t]));
@@ -84,7 +84,11 @@ export class SpaceStore {
         this.windowKeys = new Map(session.spaceSession ? session.spaceWindowKeys || [] : []);
         this.restoreWindowKeys = new Map(session.spaceSession ? session.spaceRestoreWindowKeys || [] : []);
         this.restoredMetadata = [];
-        this.restoredRanks = new Map(session.restoredTabRanks || []);
+        // Use the local ordering checkpoint only in a live browser session and
+        // only when it matches the exact durable snapshot. Legacy/older writers
+        // retain the existing session-only fallback; cold recovery clears ranks.
+        const rankCheckpoint = session.spaceSession ? await readSpaceRankCheckpoint(data.spaceRankCheckpoint, data.spaceTabSnapshot) : null;
+        this.restoredRanks = new Map(rankCheckpoint ?? session.restoredTabRanks ?? []);
         this.active = session.activeSpaces || {};
         this.defaultSpaceName = (await chrome.storage.sync.get('defaultSpaceName')).defaultSpaceName || 'Home';
         const live = await chrome.tabs.query({});
@@ -276,7 +280,7 @@ export class SpaceStore {
             space[key].splice(insertAt, 0, tab.id);
         }
     }
-    async persist({ skipGroupSync = false } = {}) {
+    async persist({ skipGroupSync = false, beforeWrite = null } = {}) {
         const tabs = new Map((await chrome.tabs.query({})).map(t => [t.id, t]));
         this.liveTabs = tabs;
         const liveWindows = new Set([...tabs.values()].map(t => t.windowId));
@@ -331,7 +335,10 @@ export class SpaceStore {
         this.savedWindows = windowSnapshot;
         const identity = await this.favoriteStore?.ownershipPersistence?.browserIdentity?.();
         const stamp = await createSpaceContinuityStamp(identity, snapshot);
-        await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot: [...snapshot, ...this.restoreQueue], spaceWindowSnapshot: windowSnapshot, [SPACE_CONTINUITY_KEY]: stamp });
+        const spaceTabSnapshot = [...snapshot, ...this.restoreQueue];
+        const spaceRankCheckpoint = await createSpaceRankCheckpoint([...this.restoredRanks], spaceTabSnapshot);
+        if (beforeWrite) await beforeWrite();
+        await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot, spaceRankCheckpoint, spaceWindowSnapshot: windowSnapshot, [SPACE_CONTINUITY_KEY]: stamp });
         const spaceSessionUpdate = { spaceSession: true, activeSpaces: this.active, spaceRestoreQueue: this.restoreQueue, restoredTabRanks: [...this.restoredRanks], spaceWindowKeys: [...this.windowKeys], spaceRestoreWindowKeys: [...this.restoreWindowKeys], spaceRecoveryCandidates: [...new Set([...this.recoveryCandidates, ...this.provisional])] };
         const favorites = this.favoriteStore;
         if (favorites?.ownershipPersistence?.checkpointSelection) {

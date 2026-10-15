@@ -117,10 +117,12 @@ neither depends on, cancels, or suppresses the other. The supplemental job canno
 replace the full-suite result, and does not retry a failed case in the full job's
 mutated profile.
 
-The only accepted modes are `full` (the default when unset) and
-`favorite-lifecycle`; any other value fails. The full plan requires all **39**
-cases, preserving the original cases' order and inserting the two full-only menu
-cases before Favorite lifecycle receipts: 0–31, 33–35, 37–38, 36, then 32.
+The accepted modes are `full` (the default when unset), `favorite-lifecycle`, and
+the [supplemental native-Split mode](../tests/NATIVE_SPLIT_CI.md); any other value
+fails. The full plan requires all **41** cases, preserving the original cases'
+order and adding two Move-to-Space cases before Favorite lifecycle receipts:
+0–31, 33–35, 37–38, 40–41, 36, then 32. Case 39 remains the distinct native-Split
+case; the full suite never substitutes its four-case supplemental job.
 The supplemental plan requires exactly **5** cases, in zero-based case-index order
 **0, 1, 2, 36, 32**:
 
@@ -144,8 +146,16 @@ with stable zero-based `caseIndex` values and names, and `executedCaseIndices`.
 Full artifacts remain `paired-chrome-<run>-<attempt>`; supplemental artifacts are
 `paired-chrome-favorite-lifecycle-<run>-<attempt>` with a separate report/log path.
 A five-case success must always be described as supplemental lifecycle coverage,
-never a 39-case full-suite pass. This configuration is pending its first actual
-GitHub Actions run; local unit/build checks do not establish browser acceptance.
+never a 41-case full-suite pass. Each changed head requires its own complete
+GitHub Actions result; local unit/build checks do not establish browser acceptance.
+
+The two Move cases use the actual native Arcify side panel, real context-menu
+input, and passive native activation/window-event observations. They require exact
+single and multiple Today IDs, duplicate-URL identity, visible-bottom order,
+unchanged current Space and content documents, group sync off/on, paired search
+invalidation, stale-target rejection, and witnessed extension-reload persistence.
+The native-Split job separately rejects Move for actual split members. These
+assertions are mandatory; their presence alone is not a passing Chrome result.
 
 The fixture uses Puppeteer's supported unpacked-extension API in an isolated
 temporary profile with the browser sandbox and web security intact. It does not

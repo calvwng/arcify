@@ -32,7 +32,7 @@ function fixture() {
     const context = { chrome, console, createNativeSplitWriteGuard, enqueueBookmarkOperation, registerTourMessages() {}, registerBookmarkListeners() {}, registerSpotlightBridge() {},
         registerStartupLauncher() { launcherRegistered++; },
         isStartupLauncherTab: tab => isStartupLauncherTab(tab, chrome), ownerOf, projectLiveTabTitles, isProtectedFavorite: () => false,
-        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {},
+        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTodayMoveMessages() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {},
         SpaceStore: class { spaces = [{ id: 'home', spaceBookmarks: [], temporaryTabs: [1, 2] }]; install() {} async run(fn) { return fn(); } isGlobalTab(tab) { return globals.has(tab.id); } async dispatch(message) { actions.push(message); return this.spaces; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: true, autoArchiveIdleMinutes: 10 }),
             getPinnedTabStates: async () => ({}), addArchivedTab: async tab => archives.push(tab) },

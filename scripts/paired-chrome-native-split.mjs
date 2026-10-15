@@ -1,4 +1,5 @@
 /** CI-only native Split View proof. Importing this module never launches Chrome. */
+import { assertTodayMoveRejected } from './paired-chrome-today-move.mjs';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { locateFreshDragGeometry } from './paired-chrome-ui.mjs';
@@ -219,7 +220,7 @@ export function assertNativeSplitMenuAction(state,name) {
     assert.equal(state.blocked,false,'Menu action and its ancestors must not be disabled, inert or hidden.');
 }
 
-/** No product action is dispatched by evaluate: only fixture seeding and passive reads. */
+/** Positive actions use trusted input; evaluate is limited to seeding, passive reads and explicit rejection probes. */
 export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageForUrl,ui,screenshot,captureNativeWindow,snapshot,poll,fixture,arcifyId,record=async()=>{}}) {
     assert.equal(process.env.GITHUB_ACTIONS,'true');assert.equal(process.env.CI,'true');assert.notEqual(process.getuid?.(),0);
     for(const fn of [newTabPage,pageForUrl,ui,screenshot,captureNativeWindow,snapshot,poll])assert.equal(typeof fn,'function');
@@ -313,6 +314,22 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         // Switching Spaces and group sync are real user paths, with an existing
         // pair identity required throughout. No createSplit reissue is allowed.
         const other=initial.spaces.find(item=>item.id!==spaceId);assert(other);
+        // A real native split must never leak into the new ordinary Today Move path.
+        await select(request.tabIds); await menu(seed[0]);
+        await sidebar.page.waitForSelector('#tab-context-menu [data-action="endSplitView"]',{visible:true});
+        assert.equal(await sidebar.page.$('#tab-context-menu [data-action="moveTodayTabsToSpace"]'),null,'Native Split View selection cannot offer ordinary Today Move.');
+        await clear();
+        const beforeMoveRejection=await read();
+        // Negative safety probe only: every successful Move case uses genuine menu input.
+        const rejectedMoveRequest={
+            type:'moveTodayTabsToSpace',windowId,spaceId,bookmarkFolderId:space.bookmarkFolderId,
+            destinationSpaceId:other.id,destinationBookmarkFolderId:other.bookmarkFolderId,inverted:false,
+            entries:request.tabIds.map(tabId=>({tabId,url:exactTab(beforeMoveRejection,tabId).url}))
+        };
+        const rejectedMove=await sidebar.page.evaluate(message=>chrome.runtime.sendMessage(message),rejectedMoveRequest);
+        assertTodayMoveRejected(rejectedMove,rejectedMoveRequest);
+        const afterMoveRejection=await read();assertNativeSplitRejected(beforeMoveRejection,afterMoveRejection);
+        await checkpoint('native-split-today-move-rejected',{before:beforeMoveRejection,after:afterMoveRejection,reply:rejectedMove});
         for(const targetSpace of [other.id,spaceId]){await ui(sidebar.page,'Switch Space without breaking native pair',()=>sidebar.page.click(`#spaceSwitcher button[data-space-id="${targetSpace}"]`));await poll(()=>snapshot(windowId),state=>state.activeSpaceId===targetSpace,'requested Space activation');assertNativeSplitPair(await read(),pair);}
         for(const enabled of [true,false]){await option('syncTabGroups',enabled);const state=await poll(read,state=>{try{return assertNativeSplitPair(state,pair).groupId===pair.groupId;}catch{return false;}},'native pair survives group-sync transition without regrouping split members');assertNativeSplitPagesPreserved(before,state);
             const deferred=await poll(()=>apiPage.evaluate(()=>chrome.storage.session.get('spaceGroupSplitDeferrals')),data=>enabled?data.spaceGroupSplitDeferrals?.some(item=>item.windowId===windowId&&item.spaceId===spaceId&&item.reason==='native-split'):!data.spaceGroupSplitDeferrals?.some(item=>item.windowId===windowId&&item.spaceId===spaceId),'explicit native split group-layout deferral');

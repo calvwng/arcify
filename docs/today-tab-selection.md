@@ -1,4 +1,4 @@
-# Select Today tabs and save a named pinned folder
+# Select Today tabs, move Spaces, or save a pinned folder
 
 Ctrl-click (Windows/Linux) or Cmd-click (macOS) toggles individual Today tabs.
 Shift-click selects a visible range; Ctrl/Cmd+Shift-click adds a range. Modifier
@@ -23,8 +23,9 @@ drag behavior remain unchanged.
 3. Enter the folder name and choose **Create folder**.
 
 Right-clicking an unselected row replaces the batch with that singleton. A batch
-context menu offers only the batch save command, so singular Close, Move, Pin and
-Add to Favorites commands cannot be mistaken for batch actions. A singleton keeps
+context menu offers supported selection actions (save, move, and eligible Split
+View actions), so singular Close, Pin and Add to Favorites commands cannot be
+mistaken for batch actions. A singleton keeps
 its ordinary context commands. Folder names are trimmed, must not be blank, and
 are limited to 256 characters. Cancel, Escape and backdrop dismissal create nothing
 and send no save request.
@@ -40,6 +41,47 @@ Another window's tabs and shared Favorites are not adopted into the folder.
 Batch dragging Today tabs is not part of this command. Dragging a selected row in
 a batch is refused with guidance to use the context menu. Dragging an unselected
 row clears that batch and preserves the ordinary singleton drag behavior.
+
+## Move the selection to another Space
+
+1. Select one or up to 100 ordinary Today tabs, then right-click a selected row.
+   A focused Today row also opens its menu with Shift+F10 or the Context Menu key.
+2. Choose **Move to Space…**, then choose an existing destination Space.
+
+The destination picker excludes the current Space and unbacked/ambiguous Space
+identities. It does not create or restore a Space. Names are display labels; the
+request identifies the existing destination and its exact backing bookmark folder.
+Arrow keys, Home and End navigate the picker; Enter or Space chooses an item.
+Back or ArrowLeft returns to the original menu. Escape, outside gestures, switching
+menus, leaving the sidebar, and hiding the page dismiss it without moving tabs.
+
+The selected live IDs move into the destination's Today section in their displayed
+order, at its visible bottom, including when tab order is inverted. The logical
+current Space stays selected. Native tab IDs, URLs, active page, browser window and
+focus stay unchanged. Moving the active page can therefore leave that same page
+visible while its Today row belongs to another Space. No saved pins or shared
+Favorites are relocated, and the New Tab behavior is unchanged.
+
+With native group sync enabled, the destination group stays expanded if it contains
+the active page. This keeps that page visible without switching the logical Space.
+With sync disabled, the operation changes Arcify membership without native grouping
+or tab-strip reordering.
+
+The menu freezes the complete visible source projection. A changed selection,
+window, Space, root, inversion, URL, row identity or visible order requires reopening
+the menu. Both destination identity and source selection are revalidated before a
+single request; the serialized background writer rechecks authoritative live state.
+Deleted/stale destinations and unsupported sources, including native Split View
+members, are rejected. No activation fallback is attempted.
+
+Partial results report the confirmed completed count and instruct you to inspect both
+Spaces. A missing, malformed, contradictory or uncertain result is never presented
+as a successful batch. An unknown transport result is not automatically retried.
+An attempted operation refreshes the sidebar from authoritative storage, and a
+refresh failure is reported alongside the operation result.
+
+See [the Move contract and recovery details](today-space-move.md) for exact-ID
+validation, atomic ordering checkpoints, failure receipts and native group behavior.
 
 ## Freshness, supported sources and partial saves
 
@@ -81,6 +123,13 @@ unselected drag, private/global sources, whole-batch stale preflight, concurrent
 folder edits, close/move/navigation during creation and binding, and partial or
 unknown results. Build and unit results are reported separately from Chrome CI;
 these tests do not claim native pointer, geometry or OS modifier validation.
+
+Move UI coverage also exercises the production context menu and sidebar against a
+DOM: single/multiple selection, both order settings, same-URL identities, exact
+request serialization, source/destination freshness, Back/keyboard navigation,
+once-only dispatch, partial/unknown receipts, and refresh-gate release across
+Escape/outside/blur/hidden/pagehide/removal/superseding exits. The sidebar projection
+test uses a fake writer response; backend and Chrome results are separate evidence.
 
 The paired Chrome fixture keeps a typed Spotlight query mounted while saving four
 of six Today tabs (including equal-URL tabs). It checks the exact authoritative

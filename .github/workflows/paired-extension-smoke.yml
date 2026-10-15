@@ -23,6 +23,8 @@ on:
       - 'scripts/paired-chrome-sidebar-appearance.mjs'
       - 'scripts/paired-chrome-management-scroll.mjs'
       - 'scripts/paired-chrome-today-selection.mjs'
+      - 'scripts/paired-chrome-today-move.mjs'
+      - 'tests/unit/paired-chrome-today-move.test.js'
       - 'scripts/paired-chrome-today-folder-diagnostics.mjs'
       - 'scripts/paired-chrome-space-context.mjs'
       - 'scripts/paired-chrome-tab-menu.mjs'

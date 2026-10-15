@@ -9,6 +9,7 @@ import { createFavoritesDragSource, createSavedBookmarkFavoriteDrop, releaseComp
 import { createBookmarkSelection } from './bookmark-selection.js';
 import { createTodayTabSelection } from './today-tab-selection.js';
 import { createTodayFolderAction } from './today-folder-ui.js';
+import { createTodaySpaceMoveAction } from './today-space-move-ui.js';
 import { createTodaySplitUI } from './today-split-ui.js';
 import { assertNotNativeSplit } from './native-split-safety.js';
 import { createSavedFavoritesUI } from './saved-favorites-ui.js';
@@ -125,6 +126,12 @@ const bookmarkSelection = createBookmarkSelection({ document, getContext: favori
 const todaySelection = createTodayTabSelection({ document, getContext: favoritesContext, onGesture: () => bookmarkSelection.clear() });
 const saveTodaySelection = createTodayFolderAction({ document, selection: todaySelection, showStatus: showFavoritesStatus,
     sendRequest: message => chrome.runtime.sendMessage(message),
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
+});
+const moveTodaySelection = createTodaySpaceMoveAction({ selection: todaySelection, getContext: favoritesContext,
+    sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
     begin: () => { pendingMutationCount++; },
     end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
     refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
@@ -2879,8 +2886,13 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
         let attached = false;
         try {
             const todaySnapshot = !isPinned && !isBookmarkOnly ? todaySelection.freeze(tabElement) : null;
+            if (!isPinned && !isBookmarkOnly && !todaySnapshot) {
+                showFavoritesStatus('The Today row changed. Reopen its menu. Nothing was moved.'); return;
+            }
             const pinSnapshot = isPinned && tabElement.dataset.bookmarkId ? bookmarkSelection.freeze(tabElement) : null;
             const splitActions = todaySnapshot ? todaySplit.actionsFor(tabElement, todaySnapshot) : null;
+            const moveActions = todaySnapshot && !todaySnapshot.error &&
+                !todaySnapshot.entries.some(entry => todaySplit.isSplitRow(entry.element)) ? moveTodaySelection(todaySnapshot) : null;
             if (isPinned || isBookmarkOnly) todaySelection.clear();
             if (pinSnapshot?.error) { showFavoritesStatus(pinSnapshot.error); return; }
             if (todaySnapshot?.error) { showFavoritesStatus(todaySnapshot.error); return; }
@@ -2933,10 +2945,10 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
                         await updatePinnedFavicons();
                     } catch (error) { showFavoritesStatus(error.message); }
                 },
-                todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot) } : null,
+                todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot), move: moveActions } : null,
                 { ...actions, report: showFavoritesStatus },
                 splitActions ? { ...splitActions, keyboard,
-                    ...(splitActions.create || splitActions.end ? { beginInteraction: () => {
+                    ...(splitActions.create || splitActions.end || moveActions?.destinations.length ? { beginInteraction: () => {
                         const session = editorSessions.begin('tab', tab.id);
                         return () => { void editorSessions.complete(session); };
                     } } : {})

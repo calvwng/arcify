@@ -2,6 +2,7 @@
 import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
+import { exerciseTodayMove, serveTodayMoveFixture } from './paired-chrome-today-move.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
 import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
@@ -89,7 +90,10 @@ const stepNames = [
     'Today multi-selection saves an explicitly named folder without closing tabs and refreshes paired search',
     'Ordinary Favorites close with one native Ctrl+W, remain global and retain witnessed reload identity',
     'Space menus edit exact inactive names, colors, icons and folders with safe Delete cancellation',
-    'Tab menus preserve exact aliases and saved-pin identities through real editing, copy, mute, duplicate and removal'
+    'Tab menus preserve exact aliases and saved-pin identities through real editing, copy, mute, duplicate and removal',
+    'Today real drag and keyboard create native Split View pairs without replacing pages',
+    'Today Move preserves exact single and multiple native tabs with group sync off',
+    'Today Move preserves active native tabs and inverted order with group sync on'
 ];
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
@@ -401,15 +405,28 @@ async function nativePanelState() {
         events: globalThis.__pairedSidebarEvents || []
     }));
 }
+async function resolveNativeSidebarTarget() {
+    return poll(async () => {
+        const candidates = browser.targets().filter(target => target.url() === `chrome-extension://${arcifyId}/sidebar.html`);
+        const matching = [];
+        for (const target of candidates) {
+            const page = await target.asPage();
+            const hosting = await page.evaluate(async () => ({ tab: await chrome.tabs.getCurrent() || null, windowId: (await chrome.windows.getCurrent()).id }));
+            if (hosting.tab === null && hosting.windowId === fixture.windowA) matching.push({ target, page, hosting });
+        }
+        assert(matching.length <= 1, 'Native sidebar renderer must be unique for the verified source window.');
+        return matching[0] || null;
+    }, Boolean, 'unique native sidebar renderer with no ordinary tab and exact source window');
+}
+
 async function captureNativeSidebar(afterEvent, label) {
     const state = await poll(nativePanelState, state => state.events.slice(afterEvent).some(event => event.type === 'opened' && event.windowId === fixture.windowA), 'a native sidePanel.onOpened event');
     const populated = await poll(nativePanelState, state => state.contexts.some(context => context.contextType === 'SIDE_PANEL' && context.documentUrl === `chrome-extension://${arcifyId}/sidebar.html`), 'a native SIDE_PANEL context');
     const context = assertNativeSidebarEvidence(populated.contexts, populated.events, { extensionId: arcifyId, windowId: fixture.windowA, afterEvent });
     const ordinary = await arcifyOptions.evaluate(() => chrome.tabs.query({}));
     assert(!ordinary.some(tab => tab.url === `chrome-extension://${arcifyId}/sidebar.html`), 'No ordinary sidebar tab may substitute for native rendering evidence.');
-    const target = await browser.waitForTarget(target => target.url() === `chrome-extension://${arcifyId}/sidebar.html`);
-    const page = await observePage(await target.asPage());
-    const hosting = await page.evaluate(async () => ({ tab: await chrome.tabs.getCurrent() || null, windowId: (await chrome.windows.getCurrent()).id }));
+    const { target, page: nativePage, hosting } = await resolveNativeSidebarTarget();
+    const page = await observePage(nativePage);
     assert.equal(hosting.tab, null, 'The selected rendering target must not be a normal tab.');
     assert.equal(hosting.windowId, fixture.windowA, 'The native rendering target must belong to the source window.');
     // Native mounting and active-space rendering are asynchronous. Wait only by
@@ -439,6 +456,35 @@ async function sidebarEnter(page, label) {
     const input = await sidebarInput(page);
     try { await ui(page, label, async () => { await input.asElement().focus(); await input.asElement().press('Enter'); }); }
     finally { await input.dispose(); }
+}
+
+// Open through the real authenticated Spotlight command, then identify its native renderer.
+async function nativeTodayMoveSidebar() {
+    await arcifyOptions.evaluate(() => {
+        globalThis.__pairedSidebarEvents = [];
+        chrome.sidePanel.onOpened.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'opened', ...info }));
+        chrome.sidePanel.onClosed.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'closed', ...info }));
+    });
+    const helper = await newTabPage('chrome://newtab/');
+    try {
+        await waitSidebarCommand(helper.page);
+        await search(helper.page, 'Open Arcify sidebar');
+        await helper.page.waitForSelector(`${sidebarSelector}.selected`);
+        const eventCount = (await nativePanelState()).events.length;
+        await sidebarEnter(helper.page, 'Open genuine native panel for Today Move');
+        await waitSidebarSuccess(helper.page);
+        const evidence = await captureNativeSidebar(eventCount, 'today-move-native-panel-host-proof');
+        const { page } = await resolveNativeSidebarTarget();
+        return { page: await observePage(page), evidence,
+            close: async () => {
+                await closeNativeSidebar();
+                await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+            } };
+    } catch (error) {
+        if ((await nativePanelState()).contexts.length) await closeNativeSidebar().catch(cleanup => { error.cleanupError = cleanup.message; });
+        await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id).catch(cleanup => { error.cleanupError = cleanup.message; });
+        throw error;
+    }
 }
 
 // Retain the same raw-target, original-view, registry and fresh-identity proof
@@ -706,6 +752,7 @@ try {
         server = createServer((request, response) => {
             if (serveNativeSplitFixture(request, response)) return;
             if (serveTabMenuFixture(request, response)) return;
+            if (serveTodayMoveFixture(request, response)) return;
             if (serveOrdinaryFavoriteFixture(request, response)) return;
             if (serveFavoriteIconFixture(request, response)) return;
             const path = new URL(request.url, 'http://localhost').pathname;
@@ -1961,7 +2008,13 @@ try {
     await step(stepNames[38], () => exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
         snapshot,poll,fixture,arcifyId,spotlightId,search,
         record:async observation => { report.tabMenus = observation; await saveReport(); } }));
-    } // Full-only cases 3–31, 33–35 and 37–38; preserve the original cases' order.
+    await step(stepNames[40], () => exerciseTodayMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,
+        snapshot,poll,fixture,arcifyId,spotlightId,search,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
+        record:async observation => { report.todayMoveSyncOff = observation; await saveReport(); } }));
+    await step(stepNames[41], () => exerciseTodayMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,
+        snapshot,poll,fixture,arcifyId,spotlightId,search,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
+        record:async observation => { report.todayMoveSyncOn = observation; await saveReport(); } }));
+    } // Full-only cases 3–31, 33–35, 37–38 and 40–41; preserve the original cases' order.
 
     if (report.runMode === 'native-split') {
         await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
