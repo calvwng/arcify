@@ -12,14 +12,17 @@ function fixture() {
     container.getBoundingClientRect = () => ({ left: 10, right: 290, top: 10, bottom: 160, width: 280, height: 150 });
     container.scrollTop = 0; container.scrollLeft = 0; container.scrollHeight = 150; container.clientHeight = 150;
     container.scrollWidth = 280; container.clientWidth = 280;
+    let columns = 3, tileWidth = 80, tileHeight = 48;
     let offsetX = 0, offsetY = 0, frame = null, nextFrame = 0, cancelled = 0, cleared = 0, abandoned = 0;
     window.requestAnimationFrame = callback => { frame = callback; return ++nextFrame; };
     window.cancelAnimationFrame = () => { frame = null; cancelled++; };
     const nodes = ['a', 'b', 'c', 'd', 'e'].map((id, index) => {
         const node = document.createElement('div'); node.className = 'pinned-favicon saved-favorite'; node.dataset.favoriteId = id;
         node.title = `Favorite ${id}\nClosed · click to open`;
-        const left = 10 + index % 3 * 88, top = 10 + Math.floor(index / 3) * 56;
-        node.getBoundingClientRect = () => ({ left: left - offsetX, right: left + 80 - offsetX, top: top - offsetY, bottom: top + 48 - offsetY, width: 80, height: 48 });
+        node.getBoundingClientRect = () => {
+            const left = 10 + index % columns * (tileWidth + 8), top = 10 + Math.floor(index / columns) * (tileHeight + 8);
+            return { left: left - offsetX, right: left + tileWidth - offsetX, top: top - offsetY, bottom: top + tileHeight - offsetY, width: tileWidth, height: tileHeight };
+        };
         container.append(node); return node;
     });
     let source = { kind: 'saved', favoriteId: 'a', element: nodes[0] };
@@ -34,6 +37,7 @@ function fixture() {
         update: (...args) => feedback.update(point(...args)),
         tick(time = 16) { assert(frame); const callback = frame; frame = null; callback(time); }, setSource(value) { source = value; },
         offset(x, y) { offsetX = x; offsetY = y; },
+        reflow(count, size) { columns = count; tileWidth = tileHeight = size; },
         counts: () => ({ cancelled, cleared, abandoned, frame: Boolean(frame) }) };
 }
 
@@ -109,4 +113,23 @@ test('Favorites anchor follows existing theme, contrast and hit-testing contract
     const anchor = css.match(/\.favorites-drop-anchor \{([^}]+)\}/)[1];
     assert.match(anchor, /position: fixed/); assert.match(anchor, /pointer-events: none/); assert.match(anchor, /--sidebar-drop-color/); assert.doesNotMatch(anchor, /transition|animation/);
     assert.match(css, /\.favorites-drop-anchor\[hidden\] \{ display: none; \}/); assert.match(css, /\.favorites-drop-anchor \{\s*background: Highlight;[^}]*forced-color-adjust: none/);
+});
+
+
+test('compact fixed-grid resize refreshes a stationary drag marker and its exact destination', () => {
+    const f = fixture();
+    f.setSource({ kind: 'bookmark', bookmarkId: 'new', element: f.document.body });
+    f.reflow(4, 44);
+    f.document.elementFromPoint = () => f.container;
+    const pointer = { target: f.container, clientX: 200, clientY: 84 };
+    let destination = f.feedback.update(pointer);
+    assert.equal(destination.beforeId, null); assert.equal(destination.reference, f.nodes[4]);
+    assert.equal(f.line.dataset.anchorId, 'e'); assert.equal(f.line.dataset.placement, 'after');
+    assert.equal(f.line.style.left, '58px'); assert.equal(f.line.style.top, '64px'); assert.equal(f.line.style.height, '40px');
+    f.reflow(2, 52); f.event('resize', f.window);
+    assert.equal(f.line.dataset.beforeId, 'e'); assert.equal(f.line.dataset.anchorId, 'd');
+    assert.equal(f.line.style.left, '126px'); assert.equal(f.line.style.top, '72px'); assert.equal(f.line.style.height, '48px');
+    destination = f.feedback.drop(pointer);
+    assert.equal(destination.beforeId, 'e'); assert.equal(destination.reference, f.nodes[3]); assert.equal(destination.placement, 'after');
+    assert.equal(f.line.hidden, true); f.feedback.dispose();
 });

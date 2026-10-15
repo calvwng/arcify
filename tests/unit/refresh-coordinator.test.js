@@ -230,3 +230,17 @@ test('adopted metadata retains render work after a superseding read even when th
     assert.equal(coordinator.hasWork(), false);
     assert.equal(coordinator.handledSpacesGeneration, 2);
 });
+
+test('render distinguishes explicit active-view navigation from incidental bookmark and membership changes', async () => {
+    const reasons = [];
+    const coordinator = new RefreshCoordinator({
+        readSpaces: async () => [], adoptSpaces: async () => true,
+        render: async ({ activeViewChanged }) => reasons.push(activeViewChanged),
+        schedule: immediate, cancel
+    });
+    coordinator.invalidateBookmarks(); await flush();
+    coordinator.invalidateSpaces(); await flush();
+    coordinator.invalidateActiveView(); coordinator.invalidateBookmarks(); await flush();
+    coordinator.invalidateBookmarks(); await flush();
+    assert.deepEqual(reasons, [false, false, true, false]);
+});

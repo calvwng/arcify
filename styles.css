@@ -1770,12 +1770,37 @@ h3 {
     border-color: #eee;
 }
 
-.favorites-drop-status:not(:empty) {
+.favorites-drop-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
     margin: 0 12px 8px;
+}
+.favorites-drop-notice[hidden], .favorites-drop-dismiss[hidden] { display: none; }
+.favorites-drop-status {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
     font-size: 12px;
     line-height: 1.4;
     color: var(--text-secondary);
 }
+.favorites-drop-dismiss {
+    flex: 0 0 24px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+}
+.favorites-drop-dismiss:hover { background: var(--hover-bg, rgba(127, 127, 127, 0.15)); }
+.favorites-drop-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
 .pinned-placeholder-container {
     padding: 8px 16px;
@@ -2189,6 +2214,82 @@ select:focus-visible,
 .favorite-closed { background-color: rgba(255, 255, 255, .1); border: 1px dashed rgba(80, 80, 80, .45); box-sizing: border-box; }
 .native-favorite { border: 1px dotted rgba(80, 80, 80, .35); box-sizing: border-box; }
 .pinned-favicon:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+/* Opt-in fixed tracks keep incomplete rows the same size as full rows. Never
+   use auto-fit/minmax(..., 1fr): that stretches a short last row or sparse grid. */
+:root[data-favorites-layout="compact"] .pinned-favicons {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, var(--favorite-tile-size, 44px));
+    gap: 8px;
+    justify-content: start;
+}
+:root[data-favorites-layout="compact"] .pinned-favicon {
+    width: var(--favorite-tile-size, 44px);
+    height: var(--favorite-tile-size, 44px);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    gap: 0;
+    transition: background-color .2s, box-shadow .2s;
+}
+:root[data-favorites-layout="compact"] .pinned-favicon img {
+    width: var(--favorite-icon-size, 16px);
+    height: var(--favorite-icon-size, 16px);
+}
+:root[data-favorites-layout="compact"] .favorite-state { display: none; }
+:root[data-favorites-layout="compact"] .pinned-placeholder-container { grid-column: 1 / -1; }
+
+/* Keep names shrinkable at narrow sidebar widths, without replacing the input
+   or shrinking the controls. Custom sizing is independent of Favorites. */
+:root[data-space-header-custom="true"] .space-name-container { min-width: 0; }
+:root[data-space-header-custom="true"] .space-name { min-width: 0; width: 100%; }
+:root[data-space-header-custom="true"] .space-header > :is(.sidebar-button, .space-options-container) { flex-shrink: 0; }
+:root[data-space-header-custom="true"] .space-header {
+    min-height: var(--space-header-control-size);
+    flex-shrink: 0;
+}
+:root[data-space-header-custom="true"] .space-name {
+    font-size: var(--space-header-font-size);
+    line-height: 1.25;
+    min-height: var(--space-header-control-size);
+}
+:root[data-space-header-custom="true"] .space-header :is(.sidebar-button, .space-options) {
+    width: var(--space-header-control-size);
+    height: var(--space-header-control-size);
+    padding: 0;
+}
+:root[data-space-header-custom="true"] .space-header .svg-icon {
+    width: var(--space-header-icon-size);
+    height: var(--space-header-icon-size);
+    margin: 0;
+}
+:root[data-space-header-compact="true"] .space-name { font-weight: 500; }
+/* Hover-only chevrons must also become visible and usable from the keyboard. */
+:root[data-space-header-custom="true"] .space-name-container:focus-within .space-toggle-chevron {
+    opacity: .7 !important;
+    pointer-events: auto;
+    width: 24px;
+    min-width: 24px;
+    min-height: 24px;
+    margin-right: 8px;
+    padding: 4px;
+}
+:root[data-space-header-custom="true"] .space-name-container:hover .space-toggle-chevron { min-width: 24px; min-height: 24px; }
+:root[data-space-header-custom="true"] .space-name:focus-visible { outline: 2px solid var(--chrome-blue-color, #8bb3f3); outline-offset: -2px; }
+
+.appearance-range-control { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.appearance-range-control input { min-width: 0; width: 100%; min-height: 28px; }
+.appearance-range-control output { min-width: 44px; font-variant-numeric: tabular-nums; }
+.appearance-reset {
+    padding: 8px 12px;
+    border: 1px solid var(--options-border-color, #8886);
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+.appearance-reset:disabled { opacity: .5; cursor: default; }
+#sidebarAppearanceStatus { margin-top: 8px; }
 .native-favorites-notice { font-size: 11px; line-height: 1.4; margin: -10px 0 0; opacity: .8; }
 .context-menu button.context-menu-item { display: block; width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .context-menu button.context-menu-item:hover, .context-menu button.context-menu-item:focus-visible { background: #eee; }

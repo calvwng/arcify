@@ -109,3 +109,13 @@ and container restrictions were not treated as extension APIs or Arc parity.
 - [Zen Essentials routing](https://github.com/zen-browser/desktop/blob/f3dbe29d6a94353f13168bfd29e74bf622edf218/src/zen/tabs/ZenPinnedTabManager.mjs)
 - [Zen license](https://github.com/zen-browser/desktop/blob/f3dbe29d6a94353f13168bfd29e74bf622edf218/LICENSE)
 - [Firefox selection handlers](https://github.com/mozilla/gecko-dev/blob/master/browser/components/tabbrowser/content/tab.js)
+
+## Dismiss a result message
+
+Use **Dismiss Favorites message** (the × button beside the result) to reclaim the
+space below Favorites. It is a normal keyboard-focusable button: Tab to it and
+press Enter or Space. Dismissing affects only this sidebar's message; it does not
+remove Favorites, change your selected bookmarks, or retry an operation. A new
+operation displays its new result, even when its wording matches the dismissed
+one. Pending operations and drag previews cannot be dismissed. Canceling a drag
+restores any undismissed prior result, including a warning or partial failure.

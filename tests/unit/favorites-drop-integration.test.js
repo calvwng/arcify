@@ -176,6 +176,8 @@ async function drop(source, target, y) {
 
 const favorites = () => document.getElementById('pinnedFavicons');
 const status = () => document.getElementById('favoritesDropStatus').textContent;
+const notice = () => document.getElementById('favoritesDropNotice');
+const dismissStatus = () => document.getElementById('favoritesDropDismiss');
 const target = () => favorites().querySelector('.placeholder-title');
 
 async function resetFavorites() {
@@ -188,6 +190,59 @@ async function resetFavorites() {
 
 test('startup pin race retains exact native binding even when initial all-tabs snapshot was nonnative', () => {
     assert.equal(bindingAfterStartupPinRace.bookmarkId, 'a');
+});
+
+test('actual result dismissal preserves selection and browser state; a fresh result resurfaces', async () => {
+    await resetFavorites();await drop(row('closed'),target(),25);
+    assert.equal(notice().hidden,false);assert.equal(dismissStatus().hidden,false);
+    const click = (element,props={}) => {
+        const event=new window.Event('click',{bubbles:true,cancelable:true});Object.assign(event,{button:0,...props});element.dispatchEvent(event);
+    };
+    click(row('a'),{ctrlKey:true});click(row('c'),{ctrlKey:true});
+    const selected=()=>[...document.querySelectorAll('.bookmark-selected')].map(element=>element.dataset.bookmarkId);
+    assert.deepEqual(selected(),['a','c']);
+    const before=structuredClone({tabs,tree,storedSpaces,local,session,effects,writes});
+    click(dismissStatus());
+    assert.equal(notice().hidden,true);assert.equal(status(),'');assert.deepEqual(selected(),['a','c']);
+    assert.deepEqual({tabs,tree,storedSpaces,local,session,effects,writes},before);
+    // A new explicitly initiated operation is allowed to show its own result.
+    document.dispatchEvent(Object.assign(new window.Event('keydown',{bubbles:true}),{key:'Escape'}));
+    await drop(row('closed'),favorites().querySelector('.saved-favorite'),25);
+    assert.equal(notice().hidden,false);assert.equal(dismissStatus().hidden,false);assert.match(status(),/Added to Favorites/);
+    assert.equal(effects.filter(([kind])=>kind==='create').length,1);
+});
+
+test('actual canceled hover restores an undismissed result instead of silently erasing it', async () => {
+    await resetFavorites();await drop(row('closed'),target(),25);
+    const message=status(), before=structuredClone({tabs,tree,local,session,effects});
+    const source=row('c');drag(source,'dragstart');drag(favorites().querySelector('.saved-favorite'),'dragover',25);
+    assert.equal(dismissStatus().hidden,true);assert.match(status(),/Opens a pinned tab/);
+    drag(source,'dragend');await wait(60);
+    assert.equal(status(),message);assert.equal(dismissStatus().hidden,false);
+    assert.deepEqual({tabs,tree,local,session,effects},before);
+});
+
+test('failed batch stays pending through delayed recovery refresh and its final dismissal stays dismissed', { timeout: 5000 }, async t => {
+    await resetFavorites();
+    document.dispatchEvent(Object.assign(new window.Event('keydown',{bubbles:true}),{key:'Escape'}));
+    for (const id of ['a','c']) {
+        const event=new window.Event('click',{bubbles:true,cancelable:true});Object.assign(event,{button:0,ctrlKey:true});row(id).dispatchEvent(event);
+    }
+    let releaseRefresh, enteredRefresh;
+    t.after(() => { hooks.afterFavoriteDispatch=null; releaseRefresh?.(); });
+    const entered=new Promise(resolve=>{enteredRefresh=resolve;});
+    hooks.create=async()=>{throw new Error('Fixture create failed');};
+    hooks.afterFavoriteDispatch=async message=>{
+        if(message.action==='get') {enteredRefresh();await new Promise(resolve=>{releaseRefresh=resolve;});}
+    };
+    const source=row('c');drag(source,'dragstart');drag(target(),'dragover',25);drag(target(),'drop',25);drag(source,'dragend');
+    await entered;
+    assert.equal(favorites().getAttribute('aria-busy'),'true');assert.equal(dismissStatus().hidden,true);
+    dismissStatus().click();assert.equal(notice().hidden,false);assert.match(status(),/Adding/);
+    hooks.afterFavoriteDispatch=null;releaseRefresh();await wait(200);
+    assert.equal(favorites().getAttribute('aria-busy'),'false');assert.equal(dismissStatus().hidden,false);assert.match(status(),/Fixture create failed/);
+    dismissStatus().click();assert.equal(notice().hidden,true);await wait(200);assert.equal(notice().hidden,true);
+    assert.equal(status(),'');
 });
 
 for (const id of ['c', 'closed']) test(`actual sidebar opens closed ${id} as one inactive native Favorite and retains exact source`, async () => {

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
+import { exerciseSidebarAppearance } from './paired-chrome-sidebar-appearance.mjs';
 import { exerciseBookmarkMultiSelection, assertNativeDragSourceStable } from './paired-chrome-bookmark-selection.mjs';
 /**
  * GitHub-hosted, real-Chrome paired-extension fixture. No mocked Chrome APIs.
@@ -73,7 +75,9 @@ const stepNames = [
     'Spotlight finds closed Favorites and preserves saved identity through live closure',
     'Saved Favorites real-mouse destination markers match durable reordering without tab or bookmark changes',
     'Visible bookmark multi-selection batches exact Favorites without altering source bookmarks',
-    'Full same-profile browser restart preserves saved Favorites without guessing restored bindings'
+    'Full same-profile browser restart preserves saved Favorites without guessing restored bindings',
+    'Sidebar appearance persists compact fixed Favorites and usable Space headers through real options input',
+    'Native sidebar management preserves offscreen-active scroll and focus while deliberate activation still reveals'
 ];
 const report = {
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -1815,6 +1819,39 @@ try {
     await step(stepNames[31], () => exerciseBookmarkMultiSelection({ apiPage:arcifyOptions,newTabPage,ui,screenshot,
         screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
         record:async observation => { report.bookmarkMultiSelection ||= []; report.bookmarkMultiSelection.push(observation); await saveReport(); } }));
+
+    await step(stepNames[33], () => exerciseSidebarAppearance({ apiPage:arcifyOptions,newTabPage,ui,screenshot,
+        screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
+        record:async observation => { report.sidebarAppearance ||= []; report.sidebarAppearance.push(observation); await saveReport(); } }));
+
+    await step(stepNames[34], () => exerciseManagementScroll({ apiPage:arcifyOptions,ui,screenshot,snapshot,poll,fixture,
+        record:async observation => { report.managementScroll ||= []; report.managementScroll.push(observation); await saveReport(); },
+        nativeSidebar:async () => {
+            // Options reload in the appearance case intentionally replaces the old
+            // observation document. Register fresh passive native-host evidence.
+            await arcifyOptions.evaluate(() => {
+                globalThis.__pairedSidebarEvents = [];
+                chrome.sidePanel.onOpened.addListener(info => globalThis.__pairedSidebarEvents.push({ type:'opened', ...info }));
+                chrome.sidePanel.onClosed.addListener(info => globalThis.__pairedSidebarEvents.push({ type:'closed', ...info }));
+            });
+            const helper = await newTabPage('chrome://newtab/');
+            try {
+                await waitSidebarCommand(helper.page);
+                await search(helper.page, 'Open Arcify sidebar');
+                await helper.page.waitForSelector(`${sidebarSelector}.selected`);
+                const eventCount = (await nativePanelState()).events.length;
+                await sidebarEnter(helper.page, 'Open native panel for genuine management scroll regression');
+                await waitSidebarSuccess(helper.page);
+                const evidence = await captureNativeSidebar(eventCount, 'native-panel-management-scroll-host-proof');
+                const target = await browser.waitForTarget(target => target.url() === `chrome-extension://${arcifyId}/sidebar.html`);
+                return { page:await observePage(await target.asPage()), evidence,
+                    close:async () => { await closeNativeSidebar(); await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id); } };
+            } catch (error) {
+                if ((await nativePanelState()).contexts.length) await closeNativeSidebar().catch(cleanup => { error.cleanupError = cleanup.message; });
+                await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id).catch(cleanup => { error.cleanupError = cleanup.message; });
+                throw error;
+            }
+        } }));
 
     await step(stepNames[32], async () => {
         const restarted = await exerciseFavoritesBrowserRestart({browser,launchOptions,

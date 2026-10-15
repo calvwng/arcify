@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { getTabRowAction } from '../../tab-row-action.js';
 import { removeSpacePin } from '../../space-bookmarks.js';
+import { captureSidebarViewport } from '../../sidebar-viewport.js';
 
 for (const [isPinned, isBookmarkOnly, expected] of [
     [true, false, { className: 'tab-close', glyph: '−', label: 'Close Tab (keep pin)' }],
@@ -27,7 +28,7 @@ const sidebarSource = await readFile(new URL('../../sidebar.js', import.meta.url
 const start = sidebarSource.indexOf('async function closeTab(');
 const end = sidebarSource.indexOf('async function createTabElement(', start);
 assert(start >= 0 && end > start, 'Production closeTab handler must be available for effect tests');
-const makeCloseTab = new Function('Logger', 'spaces', 'removeSpacePin', 'chrome', 'updatePinnedSectionPlaceholders', `${sidebarSource.slice(start, end)}\nreturn closeTab;`);
+const makeCloseTab = new Function('Logger', 'spaces', 'removeSpacePin', 'chrome', 'updatePinnedSectionPlaceholders', 'captureSidebarViewport', `${sidebarSource.slice(start, end)}\nreturn closeTab;`);
 
 function fixture(bookmarkId = 'bound', spaceId = 'space-a') {
     const nodes = [
@@ -51,8 +52,8 @@ function fixture(bookmarkId = 'bound', spaceId = 'space-a') {
             async remove(id) { effects.removedBookmarks.push(id); const index = nodes.findIndex(node => node.id === id); if (index >= 0) nodes.splice(index, 1); }
         }
     };
-    const row = { dataset: { bookmarkId }, closest(selector) { assert.equal(selector, '.space'); return { dataset: { spaceId } }; }, remove() { effects.removedRows++; } };
-    const close = makeCloseTab({ log() {} }, spaces, removeSpacePin, chrome, () => { effects.placeholderRefreshes++; });
+    const row = { dataset: { bookmarkId }, closest(selector) { if (selector === '.space-content') return null; assert.equal(selector, '.space'); return { dataset: { spaceId } }; }, remove() { effects.removedRows++; } };
+    const close = makeCloseTab({ log() {} }, spaces, removeSpacePin, chrome, () => { effects.placeholderRefreshes++; }, captureSidebarViewport);
     return { nodes, effects, row, close };
 }
 

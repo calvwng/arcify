@@ -1,4 +1,5 @@
 import './spotlight-bridge-options.js';
+import './sidebar-appearance-options.js';
 /**
  * Options - Extension settings and preferences UI
  * 

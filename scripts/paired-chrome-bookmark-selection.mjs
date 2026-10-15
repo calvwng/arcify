@@ -1,5 +1,6 @@
 /** Real modifiers/native drag proof for sidebar bookmark batches. Never launches Chrome on import. */
 import assert from 'node:assert/strict';
+import { exerciseFavoritesResultDismissal, readFavoritesNotice, assertFavoritesResultVisible } from './paired-chrome-sidebar-appearance.mjs';
 import { readFavoritesDropMarker, assertFavoritesDropMarker, favoriteDragInputClient } from './paired-chrome-favorites-marker.mjs';
 import { readMarkerScreenshotPixels, assertMarkerScreenshotPixels } from './paired-chrome-space-marker.mjs';
 import { clickFreshResult } from './paired-chrome-ui.mjs';
@@ -470,10 +471,15 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         assert(!firstMixed.favorites.some(item => item.sourceBookmarkId === skipped.id));
         assert(!firstMixed.tabs.some(tab => tab.url === skipped.url), 'Unsupported extension page must never be opened.');
         await screenshot(page, 'mixed-batch-seven-completed-one-named-skip-sources-preserved');
+        await click(row(mixedIds[0]), ['Control']); await click(row(mixedIds[1]), ['Control']); await selection(mixedIds.slice(0, 2));
+        const mouseDismissal = await exerciseFavoritesResultDismissal({ page, ui, read, screenshot, record });
         await ui(page, 'Reset selection before repeat mixed batch', () => page.keyboard.press('Escape'));
         await click(row(mixedIds[0]), ['Control']); await click(row(mixedIds.at(-1)), ['Shift']); await selection(mixedIds);
         await drag({ sourceId: mixedIds[3], beforeId: anchor, expectedIds: mixedIds, skipped,
             label: 'repeated-mixed-batch-reuses-seven-exact-instances' });
+        assertFavoritesResultVisible(await page.evaluate(readFavoritesNotice));
+        await click(row(mixedIds[0]), ['Control']); await click(row(mixedIds[1]), ['Control']); await selection(mixedIds.slice(0, 2));
+        const enterDismissal = await exerciseFavoritesResultDismissal({ page, ui, read, screenshot, record, key: 'Enter' });
         const mixedRepeatProof = assertBatchFavoriteResult(firstMixed, await read(), { bookmarkIds: supportedIds, beforeId: anchor, newCount: 0 });
         await record({ phase: 'mixed-url-batch-proof', selectedIds: mixedIds, skipped: { id: skipped.id, title: skipped.title, scheme: 'chrome-extension:' }, mixedProof, mixedRepeatProof });
         await ui(page, 'Reset selection before all-unsupported batch', () => page.keyboard.press('Escape'));
@@ -485,9 +491,12 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         assert.deepEqual(await read(), beforeUnsupported, 'All-unsupported selection must not reorder Favorites, open tabs, change Spaces or mutate bookmarks.');
         await screenshot(page, 'all-unsupported-drop-names-both-skips-and-keeps-existing-state');
         await record({ phase: 'all-unsupported-batch-proof', selectedIds: unsupportedIds, unchanged: true });
+        assertFavoritesResultVisible(await page.evaluate(readFavoritesNotice));
+        await click(row(unsupportedIds[0]), ['Control']); await click(row(unsupportedIds[1]), ['Control']); await selection(unsupportedIds);
+        const spaceDismissal = await exerciseFavoritesResultDismissal({ page, ui, read, screenshot, record, key: 'Space' });
 
 
-        return { source: seed, chosen, firstProof, repeatProof, mixedProof, mixedRepeatProof, observations, inputTrace, modifierInput: 'real Control/Shift on Linux',
+        return { source: seed, chosen, firstProof, repeatProof, mixedProof, mixedRepeatProof, resultDismissals: [mouseDismissal, enterDismissal, spaceDismissal], observations, inputTrace, modifierInput: 'real Control/Shift on Linux',
             realMouseDrag: true, nativePinnedTabsVerified: true, sourcePreserved: true,
             limits: ['Cmd modifier covered by DOM tests, not Linux physical input.', 'Native side-panel layout and OS drag-image appearance remain manual.', 'Partial API-failure injection is unit coverage; real browser case covers deletion during a frozen drag.'] };
     } catch (error) {

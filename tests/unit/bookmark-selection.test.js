@@ -50,6 +50,15 @@ test('Ctrl/Cmd toggles exact bookmark IDs without activating rows or conflating 
     f.click('a', { metaKey: true }); assert.deepEqual(f.ids(), ['d']);
 });
 
+test('dismiss Favorites message preserves exact selected bookmark IDs and range anchor', () => {
+    const f = fixture();
+    const notice = f.document.createElement('div');notice.id='favoritesDropNotice';
+    const dismiss = f.document.createElement('button');dismiss.id='favoritesDropDismiss';notice.append(dismiss);f.document.body.append(notice);
+    f.click('a',{ctrlKey:true});f.click('b',{ctrlKey:true});
+    f.event(dismiss,'click');assert.deepEqual(f.ids(),['a','b']);
+    f.click('d',{shiftKey:true});assert.deepEqual(f.ids(),['b','c','projected','d']);
+});
+
 test('Shift ranges span visible open folder boundaries; hidden descendants/folders are excluded and projections included', () => {
     const f = fixture(); f.click('a', { ctrlKey: true }); f.click('d', { shiftKey: true });
     assert.deepEqual(f.ids(), ['a', 'b', 'c', 'projected', 'd']);

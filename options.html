@@ -93,6 +93,43 @@
             </div>
         </section>
 
+        <section class="options-section" aria-labelledby="sidebarAppearanceHeading">
+            <h2 id="sidebarAppearanceHeading" class="options-section-title">Sidebar appearance</h2>
+            <p class="options-description">Saved on this Chrome profile. Changes appear in every open Arcify sidebar.</p>
+            <div class="options-setting-item options-setting-field">
+                <div class="options-setting-copy">
+                    <label for="favoritesLayout" class="options-label">Favorites layout</label>
+                    <p id="favoritesLayoutDescription" class="options-description">Standard keeps the current expanding buttons and state labels. Compact uses fixed-size, icon-only tiles. Names and open/closed states remain in tooltips and accessible labels.</p>
+                </div>
+                <select id="favoritesLayout" class="options-input" aria-describedby="favoritesLayoutDescription" disabled>
+                    <option value="standard">Standard</option>
+                    <option value="compact">Compact icons</option>
+                </select>
+            </div>
+            <div class="options-setting-item options-setting-field">
+                <div class="options-setting-copy">
+                    <label for="favoriteTileSize" class="options-label">Compact Favorite size</label>
+                    <p id="favoriteTileSizeDescription" class="options-description">36–64 px square tiles. At 44 px, four fit in a 224 px sidebar. Rows keep their tile size even when partly filled.</p>
+                </div>
+                <div class="appearance-range-control">
+                    <input type="range" id="favoriteTileSize" min="36" max="64" step="1" value="44" aria-describedby="favoriteTileSizeDescription" disabled>
+                    <output id="favoriteTileSizeValue" for="favoriteTileSize">44 px</output>
+                </div>
+            </div>
+            <div class="options-setting-item options-setting-field">
+                <div class="options-setting-copy">
+                    <label for="spaceHeaderSize" class="options-label">Space header size</label>
+                    <p id="spaceHeaderSizeDescription" class="options-description">12–20 px name text with matching header controls. Choose 12 px for a smaller, subdued header, or keep the standard 16 px.</p>
+                </div>
+                <div class="appearance-range-control">
+                    <input type="range" id="spaceHeaderSize" min="12" max="20" step="1" value="16" aria-describedby="spaceHeaderSizeDescription" disabled>
+                    <output id="spaceHeaderSizeValue" for="spaceHeaderSize">16 px</output>
+                </div>
+            </div>
+            <button type="button" id="resetSidebarAppearance" class="appearance-reset" disabled>Reset sidebar appearance</button>
+            <p id="sidebarAppearanceStatus" class="options-description" role="status" aria-live="polite">Standard layout is the default.</p>
+        </section>
+
         <section class="options-section" aria-labelledby="archiveHeading">
             <h2 id="archiveHeading" class="options-section-title">Auto-archiving</h2>
             <div class="options-setting-item options-setting-toggle">

@@ -86,7 +86,8 @@ export class RefreshCoordinator {
             if (!isCurrent()) return;
             if (this.renderDirty || generation > this.handledBookmarkGeneration ||
                 activeViewGeneration > this.handledActiveViewGeneration) {
-                const renderCompleted = await this.render({ isCurrent });
+                const renderCompleted = await this.render({ isCurrent,
+                    activeViewChanged: activeViewGeneration > this.handledActiveViewGeneration });
                 if (renderCompleted === false || !isCurrent()) return;
             }
             this.renderDirty = false;

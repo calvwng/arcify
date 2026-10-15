@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { resolveFavoritesDrop } from '../../favorites-drop-target.js';
 
-function fixture({ saved = ['a', 'b', 'c', 'd', 'e'], native = ['11', '12'], columns = 3 } = {}) {
+function fixture({ saved = ['a', 'b', 'c', 'd', 'e'], native = ['11', '12'], columns = 3, width = 80, height = 48 } = {}) {
     const { document } = parseHTML('<body><div id="favorites"><div class="pinned-placeholder-container"></div></div><div class="source"></div></body>');
     const container = document.querySelector('#favorites');
     const nodes = new Map();
     [...saved, ...native].forEach((id, index) => {
         const node = document.createElement('div'); node.className = `pinned-favicon ${saved.includes(id) ? 'saved' : 'native'}-favorite`;
         node.dataset[saved.includes(id) ? 'favoriteId' : 'tabId'] = id;
-        const left = 10 + index % columns * 88, top = 10 + Math.floor(index / columns) * 56;
-        node.getBoundingClientRect = () => ({ left, right: left + 80, top, bottom: top + 48, width: 80, height: 48 });
+        const left = 10 + index % columns * (width + 8), top = 10 + Math.floor(index / columns) * (height + 8);
+        node.getBoundingClientRect = () => ({ left, right: left + width, top, bottom: top + height, width, height });
         container.append(node); nodes.set(id, node);
     });
     const favorites = saved.map(id => ({ id, sourceBookmarkId: `bookmark-${id}`, tabId: id === 'c' ? 31 : null }));
@@ -151,4 +151,25 @@ test('selected unsupported source keeps its existing Favorite as the exact previ
     assert.equal(before.beforeId, 'c'); assert.equal(before.reference, f.nodes.get('c')); assert.equal(before.placement, 'before');
     const after = f.resolve(source, f.point('c', 'after'));
     assert.equal(after.beforeId, 'e'); assert.equal(after.reference, f.nodes.get('c')); assert.equal(after.placement, 'after');
+});
+
+
+for (const size of [36, 44, 52, 64]) test(`fixed ${size}px tiles retain exact wrap-row and partial-row destinations`, () => {
+    for (const columns of [2, 4, 6]) {
+        const ids = Array.from({ length: columns + 2 }, (_, index) => `saved-${index}`);
+        const f = fixture({ saved: ids, native: [], columns, width: size, height: size });
+        const lastFull = f.nodes.get(ids[columns - 1]), firstPartial = f.nodes.get(ids[columns]);
+        const secondPartial = f.nodes.get(ids[columns + 1]);
+        const fullRect = lastFull.getBoundingClientRect(), firstRect = firstPartial.getBoundingClientRect();
+        const lastRect = secondPartial.getBoundingClientRect();
+        const at = (x, y) => f.resolve(f.external, { target: f.container, clientX: x, clientY: y });
+        const rowEnd = at(fullRect.right + 3, fullRect.top + size / 2);
+        assert.equal(rowEnd.beforeId, ids[columns]); assert.equal(rowEnd.reference, lastFull); assert.equal(rowEnd.placement, 'after');
+        const rowStart = at(firstRect.left, firstRect.top + size / 2);
+        assert.equal(rowStart.beforeId, ids[columns]); assert.equal(rowStart.reference, firstPartial); assert.equal(rowStart.placement, 'before');
+        const partialEnd = at(lastRect.right + size * 2, lastRect.top + size / 2);
+        assert.equal(partialEnd.beforeId, null); assert.equal(partialEnd.reference, secondPartial); assert.equal(partialEnd.placement, 'after');
+        assert.equal(at(fullRect.right, fullRect.bottom + 3).beforeId, ids[columns], 'gap nearest full row uses its horizontal slot');
+        assert.equal(at(firstRect.left, firstRect.top - 3).beforeId, ids[columns], 'gap nearest partial row targets its start');
+    }
 });

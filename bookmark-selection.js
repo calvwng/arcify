@@ -173,6 +173,8 @@ export function createBookmarkSelection({ document, getContext }) {
         return () => { if (started === interaction) onActivation(); };
     }
     document.addEventListener('click', event => {
+        // Dismissing a result is UI housekeeping, not a new selection gesture.
+        if (event.target.closest?.('#favoritesDropNotice')) return;
         if (!event.target.closest?.(ROW)) clear();
     }, true);
     document.addEventListener('keydown', event => { if (event.key === 'Escape') clear(); }, true);
