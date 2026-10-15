@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { exerciseBookmarkMultiSelection } from './paired-chrome-bookmark-selection.mjs';
+import { exerciseBookmarkMultiSelection, assertNativeDragSourceStable } from './paired-chrome-bookmark-selection.mjs';
 /**
  * GitHub-hosted, real-Chrome paired-extension fixture. No mocked Chrome APIs.
  * Do not invoke locally. Syntax checks (node --check) do not launch a browser.
@@ -1440,6 +1440,11 @@ try {
             window.__pairedDragEvents = [];
             for (const type of ['pointerdown','mousedown','dragstart','dragenter','dragover','dragleave','drop','dragend','mouseup']) {
                 document.addEventListener(type,event => {
+                    if (type === 'dragstart') {
+                        window.__pairedActualDragStartCount = (window.__pairedActualDragStartCount || 0) + 1;
+                        window.__pairedActualDragSource = { element: event.target,
+                            trusted: event.isTrusted, rect: event.target.getBoundingClientRect().toJSON() };
+                    }
                     const item = {type,at:performance.now(),tag:event.target?.tagName,classes:event.target?.className,
                         id:event.target?.closest?.('[data-bookmark-id]')?.dataset.bookmarkId,x:event.clientX,y:event.clientY,
                         prevented:event.defaultPrevented,types:[...(event.dataTransfer?.types || [])]};
@@ -1460,7 +1465,10 @@ try {
                 assert(from && to && from.height > 0 && to.height > 0);
                 if (placement === 'before') assert(from.y > to.y,'The before-drop must move a later visual row, not assert an existing no-op.');
                 diagnostic.sourceRect = from; diagnostic.targetRect = to;
-                diagnostic.before = await page.evaluate(() => ({events:window.__pairedDragEvents,dragging:document.querySelector('.dragging')?.outerHTML}));
+                diagnostic.before = await page.evaluate(() => {
+                    window.__pairedActualDragSource = null; window.__pairedActualDragStartCount = 0;
+                    return {events:window.__pairedDragEvents,dragging:document.querySelector('.dragging')?.outerHTML};
+                });
                 const x = Math.min(from.x+40,from.x+from.width/2),y = from.y+from.height/2;
                 const tx = Math.min(to.x+40,to.x+to.width/2),ty = placement === 'inside' ? to.y+to.height/2 : to.y+2;
                 diagnostic.hitPoints = await page.evaluate(({x,y,tx,ty}) => ({
@@ -1470,14 +1478,15 @@ try {
                 diagnostic.targetConnected = await target.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),targetSelector);
                 await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
                 await page.mouse.move(x+12,y,{steps:5});
-                diagnostic.afterDragStart = await source.evaluate(element => {
+                diagnostic.afterDragStart = await page.evaluate(selector => {
+                    const actual = window.__pairedActualDragSource, element = actual?.element;
                     const badge = document.getElementById('bookmarkSelectionStatus');
-                    return {connected:element.isConnected,rect:element.getBoundingClientRect().toJSON(),
+                    return {startCount:window.__pairedActualDragStartCount,trusted:actual?.trusted,selectorMatches:element === document.querySelector(selector),
+                        connected:element?.isConnected,rect:element?.getBoundingClientRect().toJSON(),startRect:actual?.rect,
                         badge:{visible:!badge.hidden,position:getComputedStyle(badge).position,pointerEvents:getComputedStyle(badge).pointerEvents}};
-                });
-                assert(diagnostic.afterDragStart.connected,'Native dragstart must retain the source row.');
-                assert(Math.abs(diagnostic.afterDragStart.rect.y-from.y) < 1,'Selection feedback must not move the native drag source.');
-                assert(Math.abs(diagnostic.afterDragStart.rect.height-from.height) < 1,'Selection feedback must not resize the native drag source.');
+                },sourceSelector);
+                diagnostic.lookupHandleStillConnected = await source.evaluate(element => element.isConnected);
+                assertNativeDragSourceStable(diagnostic.afterDragStart);
                 await page.mouse.move(tx,ty,{steps:20});
                 await page.waitForFunction(({placement,targetSelector}) => {
                     if (placement === 'inside') return document.querySelector(targetSelector)?.classList.contains('sidebar-drop-inside');

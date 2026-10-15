@@ -4,6 +4,17 @@ import { readFavoritesDropMarker, assertFavoritesDropMarker, favoriteDragInputCl
 import { readMarkerScreenshotPixels, assertMarkerScreenshotPixels } from './paired-chrome-space-marker.mjs';
 import { clickFreshResult } from './paired-chrome-ui.mjs';
 
+export function assertNativeDragSourceStable(observation) {
+    assert.equal(observation.startCount, 1, 'Exactly one native dragstart must precede this observation.');
+    assert.equal(observation.trusted, true, 'Geometry must belong to the actual native dragstart.');
+    assert.equal(observation.selectorMatches, true, 'Native dragstart must originate on the exact intended source.');
+    assert.equal(observation.connected, true, 'The actual native drag source must remain connected.');
+    for (const field of ['y', 'height']) {
+        assert(Number.isFinite(observation.startRect?.[field]) && Number.isFinite(observation.rect?.[field]));
+        assert(Math.abs(observation.rect[field] - observation.startRect[field]) < 1, 'Selection feedback must not move or resize the native drag source.');
+    }
+}
+
 export async function clickBookmarkFixtureRow(page, selector, modifiers, record = async () => {}) {
     for (const key of modifiers) await page.keyboard.down(key);
     try {

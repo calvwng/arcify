@@ -1,7 +1,7 @@
 // Evidence-validator tests only; importing these modules never launches Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 const selection = () => ({ ids: ['a','b','d'], count: 3, text: '3 bookmarks selected', rows: ['a','b','d'].map(id => ({ id, ariaSelected: 'true', visible: true })) });
 test('selection requires exact visible order, announced count and accessible state', () => {
     assertBookmarkSelection(selection(), ['a','b','d']);
@@ -104,3 +104,14 @@ test('bookmark fixture never retries an uncertain delivered click and releases i
     await assert.rejects(() => clickBookmarkFixtureRow(page, '#exact', ['Shift']), /timed out/);
     assert.equal(attempts, 1); assert.deepEqual(calls, ['down:Shift', 'up:Shift']);
 });
+
+
+const nativeGeometry = () => ({ startCount: 1, trusted: true, selectorMatches: true, connected: true, startRect: { y: 40, height: 36 }, rect: { y: 40, height: 36 } });
+test('native drag geometry is tied to the exact trusted event source', () => assertNativeDragSourceStable(nativeGeometry()));
+for (const [label, mutate] of Object.entries({
+    absentStart: value => value.startCount = 0, replayedStart: value => value.startCount = 2,
+    synthetic: value => value.trusted = false, wrongSource: value => value.selectorMatches = false,
+    removedSource: value => value.connected = false, shifted: value => value.rect.y += 16,
+    resized: value => value.rect.height += 2, missingStart: value => delete value.startRect,
+    missingRect: value => delete value.rect
+})) test(`native drag geometry rejects ${label}`, () => { const value = nativeGeometry(); mutate(value); assert.throws(() => assertNativeDragSourceStable(value)); });
