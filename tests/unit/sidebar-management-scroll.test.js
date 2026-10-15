@@ -23,12 +23,16 @@ Object.defineProperty(window.HTMLSelectElement.prototype, 'value', {
     set(value) { for (const option of this.querySelectorAll('option')) option.toggleAttribute('selected', option.value === value); }
 });
 function contentRows(content) { return [...(content?.querySelectorAll('.tab') || [])]; }
+const scrollWrites = [];
 Object.defineProperties(window.HTMLElement.prototype, {
     scrollHeight: { get() { return contentRows(this).length * 30; } },
     clientHeight: { get() { return 210; } },
     scrollTop: {
         get() { return Math.min(this._scrollTop || 0, Math.max(0, this.scrollHeight - this.clientHeight)); },
-        set(value) { this._scrollTop = Math.max(0, Math.min(value, Math.max(0, this.scrollHeight - this.clientHeight))); }
+        set(value) {
+            this._scrollTop = Math.max(0, Math.min(value, Math.max(0, this.scrollHeight - this.clientHeight)));
+            if (this.matches('.space.active .space-content')) scrollWrites.push(this._scrollTop);
+        }
     }
 });
 window.HTMLElement.prototype.getBoundingClientRect = function () {
@@ -48,10 +52,22 @@ const folders = [{ id: 'root', title: 'Arcify' }, { id: 'p', title: 'Alpha', par
 const local = { spaces: storedSpaces, tabGroupImportDismissed: true,
     pinnedTabStatesById: { 1: { bookmarkId: 'b0', pinnedUrl: tabs[0].url }, 2: { bookmarkId: 'b30', pinnedUrl: tabs[1].url } } };
 const session = { activeSpaces: { 10: 'alpha' } };
-const area = state => ({ async get(keys) {
+const area = (state, areaName) => ({ async get(keys) {
     if (typeof keys === 'string') return { [keys]: structuredClone(state[keys]) };
     return structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
-}, async set(next) { Object.assign(state, structuredClone(next)); }, async remove(key) { delete state[key]; } });
+}, async set(next) {
+    const changes = {};
+    for (const [key, value] of Object.entries(next)) {
+        if (JSON.stringify(state[key]) === JSON.stringify(value)) continue;
+        changes[key] = { oldValue: structuredClone(state[key]), newValue: structuredClone(value) };
+        state[key] = structuredClone(value);
+    }
+    if (Object.keys(changes).length) await onChanged.emit(changes, areaName);
+}, async remove(key) {
+    if (!(key in state)) return;
+    const oldValue = structuredClone(state[key]); delete state[key];
+    await onChanged.emit({ [key]: { oldValue } }, areaName);
+} });
 let beforeTree, beforeRemove;
 Object.assign(globalThis, { window, document, Event: window.Event, Node: window.Node,
     localStorage: { getItem() { return null; }, setItem() {} },
@@ -74,7 +90,7 @@ globalThis.chrome = {
             if (message.action === 'activate') session.activeSpaces[message.windowId] = message.spaceId;
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
-    storage: { onChanged, local: area(local), sync: area({ invertTabOrder: false }), session: area(session) },
+    storage: { onChanged, local: area(local, 'local'), sync: area({ invertTabOrder: false }, 'sync'), session: area(session, 'session') },
     windows: { getCurrent(_options, callback) { callback?.({ id: 10 }); return Promise.resolve({ id: 10 }); } },
     tabs: { ...Object.fromEntries(['onActivated', 'onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active))); },
@@ -113,15 +129,48 @@ async function activate(id) {
 }
 await wait(240);
 
+test('alias storage updates repaint the exact tab title without revealing the active tab', async () => {
+    content().scrollTop = 840;
+    row('b30').querySelector('.tab-close').focus({ preventScroll: true });
+    const traceStart = scrollWrites.length;
+    await chrome.storage.local.set({ tabNameOverridesById: { 3: { name: 'Renamed Today', originalDomain: 'temporary.test' } } });
+    await wait(240);
+    assert.equal(live(3).querySelector('.tab-title-display').textContent, 'Renamed Today');
+    assert.equal(tabs.find(tab => tab.id === 3).title, 'Temporary', 'A displayed alias must not overwrite the browser title');
+    await chrome.storage.local.remove('tabNameOverridesById');
+    await wait(240);
+    assert.equal(live(3).querySelector('.tab-title-display').textContent, 'Temporary');
+    assert(scrollWrites.slice(traceStart).every(top => top === 840), 'Alias addition/removal is not navigation');
+    assert.equal(document.activeElement, row('b30').querySelector('.tab-close'));
+});
+
+test('binding storage updates repaint exact bookmark identity without revealing the active tab', async () => {
+    content().scrollTop = 840;
+    row('b30').querySelector('.tab-close').focus({ preventScroll: true });
+    const traceStart = scrollWrites.length, original = structuredClone(local.pinnedTabStatesById);
+    await chrome.storage.local.set({ pinnedTabStatesById: { ...original, 2: { bookmarkId: 'b29', pinnedUrl: bookmarks[29].url } } });
+    await wait(240);
+    assert.equal(row('b29').dataset.tabId, '2');
+    assert.equal(row('b30').classList.contains('bookmark-only'), true);
+    await chrome.storage.local.set({ pinnedTabStatesById: original });
+    await wait(240);
+    assert.equal(row('b30').dataset.tabId, '2');
+    assert.equal(row('b29').classList.contains('bookmark-only'), true);
+    assert(scrollWrites.slice(traceStart).every(top => top === 840), 'Binding changes are not navigation');
+    assert.equal(document.activeElement, row('b30').querySelector('.tab-close'));
+});
+
 test('closing an inactive live bookmark preserves viewport, binding and focused close control across refresh', async () => {
     content().scrollTop = 840;
     const anchorTop = row('b28').getBoundingClientRect().top;
+    const traceStart = scrollWrites.length;
     close(row('b30'));
     await wait(240);
     await refresh();
     assert.equal(tabs.some(tab => tab.id === 2), false);
     assert.equal(bookmarks.some(node => node.id === 'b30'), true, 'Closing its live instance must retain the saved bookmark');
     assert.equal(row('b30').classList.contains('bookmark-only'), true);
+    assert(scrollWrites.slice(traceStart).every(top => top === 840), 'Binding cleanup must never transiently reveal the offscreen active tab');
     assert.equal(row('b28').getBoundingClientRect().top, anchorTop);
     assert.equal(content().scrollTop, 840);
     assert(document.activeElement === row('b30').querySelector('.tab-close, .tab-remove'), 'Expected focus to stay on the management control');

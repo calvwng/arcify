@@ -466,7 +466,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         if ((areaName === 'local' && (changes.persistentFavorites || changes[FAVORITE_ICON_CACHE_KEY])) || (areaName === 'session' && changes.favoriteSession)) {
             if (currentWindow) updatePinnedFavicons();
         }
-        if (areaName === 'local' && (changes.tabNameOverridesById || changes.pinnedTabStatesById)) refreshCoordinator.invalidateActiveView();
+        // Alias/binding updates also arrive during inactive-tab cleanup. Repaint
+        // their rows without the reveal intent reserved for Space navigation.
+        if (areaName === 'local' && (changes.tabNameOverridesById || changes.pinnedTabStatesById)) refreshCoordinator.invalidateBookmarks();
         if (areaName === 'sync' && changes.syncTabGroups) {
             maxDragFolderDepth = changes.syncTabGroups.newValue ? 1 : 2;
             sidebarDropFeedback.refresh();
