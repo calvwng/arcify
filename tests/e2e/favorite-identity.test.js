@@ -16,7 +16,7 @@ async function toggle(id) {
     await page.waitForSelector('.context-menu-item');
     await page.evaluate(() => {
         const item = [...document.querySelectorAll('.context-menu-item')]
-            .find(el => /^(Pin Tab|Unpin Tab)$/.test(el.textContent));
+            .find(el => /^(Pin Tab|Remove Pin)$/.test(el.textContent));
         if (!item) throw new Error('Pin action missing');
         item.click();
     });

@@ -33,7 +33,7 @@ import { snapshotChromeLaunchOptions } from './paired-chrome-browser-restart.mjs
 import { exerciseFavoritesBrowserRestart } from './paired-chrome-favorites-restart.mjs';
 import { exerciseFavoriteSearch } from './paired-chrome-favorite-search.mjs';
 import { assertSavedBookmarkFavorite } from './paired-chrome-favorites.mjs';
-import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels } from './paired-chrome-space-marker.mjs';
+import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels, installSpaceDragObservation, readSpaceDragObservation, recordSpaceDragObservation } from './paired-chrome-space-marker.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { installColdSetupObserver, readColdSetupObserver, stopColdSetupObserver, waitForColdSetupQuiescence } from './paired-chrome-cold-setup.mjs';
@@ -1800,6 +1800,8 @@ try {
         };
         try {
             await page.waitForSelector(chip(movedId)); await page.waitForSelector(chip(anchorId));
+            await page.evaluate(installSpaceDragObservation);
+            report.spaceDragObservation = { sourceSpaceId:movedId, anchorSpaceId:anchorId, actions:[] };
             const markerEvidence = [];
             const dragSpace = async (sourceId,targetId,placement,label) => ui(page,label,async () => {
                 const source = await page.$(chip(sourceId)),target = await page.$(chip(targetId));
@@ -1828,6 +1830,7 @@ try {
                     const hover = {marker,paint,screenshot:captured.filename,afterCapture};
                     markerEvidence.push(hover);
                     await page.mouse.up(); mouseDown = false;
+                    await recordSpaceDragObservation({report,label,read:()=>page.evaluate(readSpaceDragObservation),save:saveReport});
                     await page.waitForFunction(() => document.querySelector('.space-drop-anchor')?.hidden === true,{polling:50});
                     return hover;
                 } finally {
@@ -1841,6 +1844,7 @@ try {
             await page.reload({waitUntil:'domcontentloaded'});
             await page.waitForSelector(chip(movedId));
             const reloaded = await assertState(expected);
+            await page.evaluate(installSpaceDragObservation);
             await screenshot(page,'space-order-persists-after-sidebar-reload');
             for (let i = 1; i < originalOrder.length; i++) {
                 const next = [...originalOrder.slice(0,i),movedId,...originalOrder.slice(i,-1)];
@@ -1874,6 +1878,9 @@ try {
             return {sidebarTabId:sidebar.tab.id,originalOrder,reorderedOrder:expected,hover,reordered,reloaded,restored,
                 markerEvidence,afterHover,afterReordered,
                 originalBookmarkFolders,finalBookmarkFolders:await readBookmarkFolders(),realMouseDrag:true,realKeyboard:true,bookmarkFoldersMoved:false,nativePanel:false};
+        } catch (error) {
+            await recordSpaceDragObservation({report,failure:true,read:()=>page.evaluate(readSpaceDragObservation),save:saveReport});
+            throw error;
         } finally { await arcifyOptions.evaluate(id => chrome.tabs.remove(id),sidebar.tab.id); }
     });
 

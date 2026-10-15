@@ -85,3 +85,63 @@ export function assertMarkerScreenshotPixels(pixels, marker) {
     assert(contrasting / pixels.samples.length >= 0.8, 'Actual line pixels must visibly contrast with the surrounding strip.');
     return { samples: pixels.samples.length, colorMatches: matches, contrasting, expectedColor: expected };
 }
+
+// Passive CI diagnostics. This never cancels events, focuses a page, moves a
+// pointer, or reads a drag payload. Capture observes events even when a product
+// handler stops propagation. Retained event references are sampled only when the
+// runner explicitly reads the trace after dispatch, not from a capture microtask.
+export function installSpaceDragObservation() {
+    const key = '__arcifyPairedSpaceDragObservation';
+    window[key]?.dispose?.();
+    const state = { events: [], eventRefs: [], truncated: 0 };
+    const describe = target => ({ tag: target?.tagName || null,
+        id: target?.id || null, classes: typeof target?.className === 'string' ? target.className : null,
+        spaceId: target?.closest?.('#spaceSwitcher button[data-space-id]')?.dataset.spaceId || null });
+    const observe = event => {
+        const item = { type: event.type, at: performance.now(), trusted: event.isTrusted,
+            target: describe(event.target), relatedTarget: describe(event.relatedTarget),
+            x: Number.isFinite(event.clientX) ? event.clientX : null,
+            y: Number.isFinite(event.clientY) ? event.clientY : null,
+            defaultPrevented: event.defaultPrevented,
+            dropEffect: event.dataTransfer?.dropEffect ?? null,
+            effectAllowed: event.dataTransfer?.effectAllowed ?? null,
+            types: event.dataTransfer ? Array.from(event.dataTransfer.types) : [],
+            visibility: document.visibilityState, hasFocus: document.hasFocus(),
+            activeElement: describe(document.activeElement) };
+        if (state.events.length < 512) { state.events.push(item); state.eventRefs.push(event); } else state.truncated++;
+    };
+    const types = ['dragstart', 'dragenter', 'dragover', 'dragleave', 'drop', 'dragend', 'focus', 'blur'];
+    for (const type of types) window.addEventListener(type, observe, true);
+    state.dispose = () => { for (const type of types) window.removeEventListener(type, observe, true); };
+    window[key] = state;
+}
+
+export function readSpaceDragObservation() {
+    const state = window.__arcifyPairedSpaceDragObservation;
+    const bounds = element => {
+        const { x, y, width, height } = element.getBoundingClientRect();
+        return { x, y, width, height };
+    };
+    const marker = document.querySelector('.space-drop-anchor');
+    return { events: (state?.events || []).map((item,index) => ({ ...item,
+            readDefaultPrevented:state.eventRefs[index].defaultPrevented,
+            readDropEffect:state.eventRefs[index].dataTransfer?.dropEffect ?? null })), truncated: state?.truncated || 0,
+        visibility: document.visibilityState, hasFocus: document.hasFocus(),
+        activeElement: { tag: document.activeElement?.tagName, id: document.activeElement?.id,
+            spaceId: document.activeElement?.closest?.('#spaceSwitcher button[data-space-id]')?.dataset.spaceId || null },
+        status: document.getElementById('spaceOrderStatus')?.textContent || '',
+        chips: [...document.querySelectorAll('#spaceSwitcher button[data-space-id]')].map(button => ({
+            id: button.dataset.spaceId, classes: button.className, connected: button.isConnected, rect: bounds(button) })),
+        marker: marker ? { hidden: marker.hidden, ...marker.dataset, rect: bounds(marker) } : null };
+}
+
+export async function recordSpaceDragObservation({ report, read, save, label, failure = false }) {
+    try {
+        const observation = await read();
+        report.spaceDragObservation ||= { actions: [] };
+        if (failure) report.spaceDragObservation.beforeCleanup = observation;
+        else report.spaceDragObservation.actions.push({ label, afterRelease: observation });
+    } catch (error) { report.diagnostics.push({ type:'space-drag-observation-error', message:error.message }); }
+    try { await save(); }
+    catch (error) { report.diagnostics.push({ type:'space-drag-report-write-error', message:error.message }); }
+}
