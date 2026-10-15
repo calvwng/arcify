@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
-import { assertTodayMoved, assertTodayMoveUnchanged, assertTodayMoveRejected, assertTodayMoveTrace, assertTodayMoveReload,
+import { assertTodayMoved, assertTodayMoveUnchanged, assertTodayMoveRejected, assertTodayMoveTrace, assertTodayMoveReload, assertTodayMoveHelperClosed, waitForTodayMoveHelperCleanup, todayMoveReloadVerdict,
     installTodayMoveTrace, installTodayMoveNativeTrace, assertTodayMoveNativeQuiet, readTodayMovePage, serveTodayMoveFixture, todayMoveDestination } from '../../scripts/paired-chrome-today-move.mjs';
 
 function sample({ groupSync = false, inverted = false } = {}) {
@@ -15,7 +15,7 @@ function sample({ groupSync = false, inverted = false } = {}) {
         activeSpaces: { 7: 'source', 8: 'other' }, activeSpaceId: 'source',
         windows: [{ id: 7, type: 'normal', incognito: false, focused: true, state: 'normal' }, { id: 8, type: 'normal', incognito: false, focused: false, state: 'normal' }],
         pageStates: { 11: { documentId: 'first', value: 'kept-11', timeOrigin: 123 }, 12: { documentId: 'equal-url-but-distinct-document', value: 'kept-12', timeOrigin: 456 } }, groups: [], projection: {} };
-    const project = state => ({ activeSpaceId: state.activeSpaceId, spaces: state.spaces.map(space => ({ id: space.id, temporaryTabIds: [...space.temporaryTabs] })),
+    const project = state => ({ windowId: 7, activeSpaceId: state.activeSpaceId, spaces: state.spaces.map(space => ({ id: space.id, tabIds: [...space.spaceBookmarks, ...space.temporaryTabs], pinnedTabIds: [...space.spaceBookmarks], temporaryTabIds: [...space.temporaryTabs] })),
         tabs: state.tabs.map(tab => ({ ...tab, spaceId: state.spaces.find(space => [...space.temporaryTabs, ...space.spaceBookmarks].includes(tab.id))?.id })) });
     before.snapshot = project(before);
     const after = structuredClone(before), tabIds = inverted ? [12, 11] : [11, 12];
@@ -105,6 +105,38 @@ test('passive lifecycle guard rejects transient activation, replacement and wind
     finally { if (prior === undefined) delete globalThis.chrome; else globalThis.chrome = prior; delete globalThis.__todayMoveNativeTrace; }
 });
 
+test('helper cleanup readiness requires native, canonical and authenticated snapshot convergence without exemptions', () => {
+    const state = sample().after, receipt = { tabId: 100, windowId: 7 };
+    assert.equal(assertTodayMoveHelperClosed(state, receipt), state);
+    for (const change of [s => s.tabs.push({ id: 100 }), s => s.spaces[0].temporaryTabs.push(100), s => s.spaces[1].spaceBookmarks.push(100),
+        s => s.snapshot.tabs.push({ id: 100 }), ...['tabIds', 'pinnedTabIds', 'temporaryTabIds'].map(key => s => s.snapshot.spaces[1][key].push(100))]) {
+        const stale = structuredClone(state); change(stale); const untouched = structuredClone(stale);
+        assert.throws(() => assertTodayMoveHelperClosed(stale, receipt)); assert.deepEqual(stale, untouched, 'Readiness may not filter stale membership.');
+    }
+    for (const bad of [null, {}, { tabId: 100, windowId: 8 }, { tabId: '100', windowId: 7 }]) assert.throws(() => assertTodayMoveHelperClosed(state, bad));
+});
+
+test('native-only helper removal cannot authorize reload; the exact settled readback can', async () => {
+    const settled = sample().after, receipt = { tabId: 100, windowId: 7 };
+    const stale = structuredClone(settled); stale.spaces[0].temporaryTabs.push(receipt.tabId);
+    const reads = [structuredClone(stale), structuredClone(stale), settled];
+    const pristine = structuredClone(reads); let calls = 0, reloads = 0;
+    const poll = async (read, accept) => { for (let index = 0; index < 3; index++) { const state = await read(); if (accept(state)) return state; } throw new Error('No settled helper baseline'); };
+    const before = await waitForTodayMoveHelperCleanup({ closedHelper: receipt, poll, read: async () => reads[calls++] });
+    reloads++; assert.equal(calls, 3); assert.equal(before, settled); assert.equal(reloads, 1); assert.deepEqual(reads, pristine);
+    reloads = 0;
+    await assert.rejects(async () => { await waitForTodayMoveHelperCleanup({ closedHelper: receipt, poll, read: async () => stale }); reloads++; }, /No settled helper baseline/);
+    assert.equal(reloads, 0, 'An unsettled baseline cannot reach the reload action.');
+});
+
+test('reload diagnostics retain the failing complete comparison instead of swallowing the assertion', () => {
+    const before = sample().after, after = structuredClone(before); before.spaces[0].temporaryTabs.push(100);
+    const verdict = todayMoveReloadVerdict(before, after, [11, 12]);
+    assert.equal(verdict.passed, false); assert.match(verdict.assertion.message, /Reload must retain spaces/);
+    assert.deepEqual(verdict.assertion.expected, before.spaces); assert.deepEqual(verdict.assertion.actual, after.spaces);
+    assert.deepEqual(todayMoveReloadVerdict(after, after, [11, 12]), { passed: true });
+});
+
 test('reload requires identical moved IDs, pages, selection and canonical membership', () => {
     const { after: before } = sample(); const after = structuredClone(before);
     // Native group IDs and indices may be rebuilt, without guessing URL-based ownership.
@@ -153,6 +185,11 @@ test('new full cases retain existing stable IDs and real native host, paired ref
     assert.match(helper, /page.click\(todayRow\(id\), \{ button: 'right' \}\)/); assert.match(helper, /clickBookmarkFixtureRow\(native.page/);
     assert.match(helper, /assertTodayMoveNativeQuiet\(nativeEvents\)/);
     assert.match(helper, /assertTodayMoveTrace\(trace/); assert.match(helper, /watchTodayInvalidation/); assert.match(helper, /readSpotlightRows/);
+    assert.match(helper, /const closedHelper = await native.close\(\)/);
+    const baseline = helper.indexOf('const beforeReload = await waitForTodayMoveHelperCleanup');
+    assert(baseline > 0 && baseline < helper.indexOf('const reloaded = await reloadArcify'));
+    assert.match(helper, /before-witnessed-extension-reload/); assert.match(helper, /evidence.reload.lastObservation = \{ state, verdict \}/);
+    assert.match(setup, /return \{ tabId: helper.tab.id, windowId: helper.tab.windowId \}/);
     assert.match(helper, /await reloadArcify\(\)/); assert.match(helper, /assertTodayMoveReload\(beforeReload/);
     assert.doesNotMatch(helper, /dispatchEvent|\.click\(\)\s*;|puppeteer\.launch|no-sandbox|disable-web-security|emulateFocus|setViewport/);
     for (const path of ['scripts/paired-chrome-today-move.mjs', 'tests/unit/paired-chrome-today-move.test.js']) assert(workflow.includes(`- '${path}'`));

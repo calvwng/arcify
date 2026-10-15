@@ -123,6 +123,32 @@ export function readTodayMovePage() {
         value: document.querySelector('#move-input')?.value, topLevel: window === window.top, frameCount: document.querySelectorAll('iframe,frame').length };
 }
 
+export function assertTodayMoveHelperClosed(state, closedHelper) {
+    assert(Number.isSafeInteger(closedHelper?.tabId) && closedHelper.tabId > 0, 'Cleanup needs the exact created helper tab receipt.');
+    assert.equal(closedHelper.windowId, state.snapshot.windowId, 'Cleanup receipt must identify the fixture window.');
+    const id = closedHelper.tabId;
+    assert(!state.tabs.some(tab => tab.id === id), 'Native helper removal must complete before the reload baseline.');
+    for (const space of state.spaces) for (const section of ['spaceBookmarks', 'temporaryTabs'])
+        assert(!space[section].includes(id), 'Canonical helper removal must settle before the reload baseline.');
+    assert(!state.snapshot.tabs.some(tab => tab.id === id), 'Authenticated snapshot must no longer contain the closed helper.');
+    for (const space of state.snapshot.spaces) for (const section of ['tabIds', 'pinnedTabIds', 'temporaryTabIds'])
+        assert(!space[section].includes(id), 'Authenticated snapshot membership must no longer contain the closed helper.');
+    return state;
+}
+
+/** Wait only for read-back convergence. Never filter, edit or replay cleanup. */
+export async function waitForTodayMoveHelperCleanup({ read, poll, closedHelper }) {
+    return poll(read, state => {
+        try { assertTodayMoveHelperClosed(state, closedHelper); return true; } catch { return false; }
+    }, 'exact closed native helper absent from native tabs, canonical Spaces and authenticated snapshot before reload');
+}
+
+export function todayMoveReloadVerdict(before, after, ids) {
+    try { assertTodayMoveReload(before, after, ids); return { passed: true }; }
+    catch (error) { return { passed: false, assertion: { message: error.message, operator: error.operator,
+        expected: error.expected, actual: error.actual } }; }
+}
+
 export function assertTodayMoveReload(before, after, ids) {
     for (const key of ['spaces', 'bookmarks', 'bindings', 'aliases', 'favorites', 'activeSpaceId', 'pageStates']) assert.deepEqual(after[key], before[key], `Reload must retain ${key}.`);
     assertReloadWindowSelection({ ...before, groupState: { windows: before.windows, activeSpaces: before.activeSpaces } },
@@ -296,11 +322,22 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
         await checkpoint('render-and-paired-search', { sourceRendered, destinationRendered, searchBefore, searchAfter, searchSurface, invalidation });
         await input('Keep an existing source content tab active before closing the helper', () => native.page.click(todayRow(seed[4])));
         await poll(read, state => state.tabs.find(tab => tab.id === seed[4])?.active && state.activeSpaceId === source.id, 'source content remains active before helper cleanup');
-        await native.close(); native = null;
-        const beforeReload = await read();
+        const closedHelper = await native.close(); native = null;
+        const beforeReload = await waitForTodayMoveHelperCleanup({ read, poll, closedHelper });
+        evidence.reload = { closedHelper, before: beforeReload, attempts: 0, lastObservation: null, lastAssertionFailure: null };
+        await checkpoint('before-witnessed-extension-reload', { closedHelper, before: beforeReload });
         const reloaded = await reloadArcify(); apiPage = reloaded.arcifyOptions;
+        evidence.reload.lifecycle = reloaded.evidence;
         const retained = seed.filter(id => id !== seed[3]);
-        const afterReload = await poll(read, state => { try { assertTodayMoveReload(beforeReload, state, retained); return true; } catch { return false; } }, 'same native moved identities and canonical memberships survive witnessed extension reload');
+        const observed = await poll(async () => {
+            const state = await read(), verdict = todayMoveReloadVerdict(beforeReload, state, retained);
+            evidence.reload.attempts++;
+            evidence.reload.lastObservation = { state, verdict };
+            if (!verdict.passed) evidence.reload.lastAssertionFailure = verdict.assertion;
+            await record(structuredClone(evidence));
+            return { state, verdict };
+        }, value => value.verdict.passed, 'same native moved identities and canonical memberships survive witnessed extension reload');
+        const afterReload = observed.state;
         assertTodayMoveReload(beforeReload, afterReload, retained);
         native = await nativeSidebar();
         const reloadedSource = await render(source.id, [seed[4]]);

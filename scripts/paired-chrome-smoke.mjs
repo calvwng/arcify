@@ -479,6 +479,7 @@ async function nativeTodayMoveSidebar() {
             close: async () => {
                 await closeNativeSidebar();
                 await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+                return { tabId: helper.tab.id, windowId: helper.tab.windowId };
             } };
     } catch (error) {
         if ((await nativePanelState()).contexts.length) await closeNativeSidebar().catch(cleanup => { error.cleanupError = cleanup.message; });
