@@ -1,7 +1,7 @@
 // Evidence-validator tests only; importing these modules never launches Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 const selection = () => ({ ids: ['a','b','d'], count: 3, text: '3 bookmarks selected', rows: ['a','b','d'].map(id => ({ id, ariaSelected: 'true', visible: true })) });
 test('selection requires exact visible order, announced count and accessible state', () => {
     assertBookmarkSelection(selection(), ['a','b','d']);
@@ -85,4 +85,22 @@ test('Favorite cleanup stops on an explicit rejection and does not replay', asyn
     let calls = 0; globalThis.chrome = { tabs: { getCurrent: async () => ({ windowId: 10 }) }, runtime: { sendMessage: async () => { calls++; return { success: false, error: 'denied' }; } } };
     try { await assert.rejects(() => cleanupBookmarkFavoritesInSourceWindow({ windowId: 10, ids: ['a'] }), /denied/); assert.equal(calls, 1); }
     finally { delete globalThis.chrome; }
+});
+
+
+test('bookmark fixture reacquires only a proven detached-before-input row with modifiers retained', async () => {
+    const calls = [], observations = []; let attempts = 0;
+    const detached = Error('Node is detached from document'); detached.stack = 'Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (api.js:1)\n    at CdpElementHandle.scrollIntoViewIfNeeded (api.js:2)';
+    const page = { keyboard: { down: async key => calls.push(`down:${key}`), up: async key => calls.push(`up:${key}`) },
+        waitForSelector: async selector => { assert.equal(selector, '#exact'); const attempt = ++attempts; return { click: async () => { calls.push(`click:${attempt}`); if (attempt === 1) throw detached; }, dispose: async () => {} }; } };
+    await clickBookmarkFixtureRow(page, '#exact', ['Control', 'Shift'], async value => observations.push(value));
+    assert.deepEqual(calls, ['down:Control', 'down:Shift', 'click:1', 'click:2', 'up:Shift', 'up:Control']);
+    assert.deepEqual(observations.map(item => item.status), ['detached-before-input', 'clicked']);
+});
+test('bookmark fixture never retries an uncertain delivered click and releases its modifier', async () => {
+    let attempts = 0; const calls = [];
+    const page = { keyboard: { down: async key => calls.push(`down:${key}`), up: async key => calls.push(`up:${key}`) },
+        waitForSelector: async () => { attempts++; return { click: async () => { throw Error('Input.dispatchMouseEvent timed out'); }, dispose: async () => {} }; } };
+    await assert.rejects(() => clickBookmarkFixtureRow(page, '#exact', ['Shift']), /timed out/);
+    assert.equal(attempts, 1); assert.deepEqual(calls, ['down:Shift', 'up:Shift']);
 });

@@ -2,6 +2,17 @@
 import assert from 'node:assert/strict';
 import { readFavoritesDropMarker, assertFavoritesDropMarker, favoriteDragInputClient } from './paired-chrome-favorites-marker.mjs';
 import { readMarkerScreenshotPixels, assertMarkerScreenshotPixels } from './paired-chrome-space-marker.mjs';
+import { clickFreshResult } from './paired-chrome-ui.mjs';
+
+export async function clickBookmarkFixtureRow(page, selector, modifiers, record = async () => {}) {
+    for (const key of modifiers) await page.keyboard.down(key);
+    try {
+        // The existing bounded helper reacquires only a proven pre-input
+        // assertConnectedElement failure, never an uncertain delivered click.
+        await clickFreshResult(timeout => page.waitForSelector(selector, { visible: true, timeout }),
+            observation => record({ phase: 'bookmark-click', selector, ...observation }));
+    } finally { for (const key of [...modifiers].reverse()) await page.keyboard.up(key); }
+}
 
 export function installBookmarkDragTrace() {
     globalThis.__pairedBatchDragEvents = [];
@@ -154,10 +165,8 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         await poll(() => page.evaluate(readBookmarkSelection), state => JSON.stringify(state.ids) === JSON.stringify(expected), 'exact visible bookmark selection');
         return assertBookmarkSelection(await page.evaluate(readBookmarkSelection), expected);
     };
-    const click = (selector, modifiers = []) => ui(page, `Bookmark input ${modifiers.join('+') || 'plain'} ${selector}`, async () => {
-        for (const key of modifiers) await page.keyboard.down(key);
-        try { await page.click(selector); } finally { for (const key of [...modifiers].reverse()) await page.keyboard.up(key); }
-    });
+    const click = (selector, modifiers = []) => ui(page, `Bookmark input ${modifiers.join('+') || 'plain'} ${selector}`,
+        () => clickBookmarkFixtureRow(page, selector, modifiers, record));
     const setExpanded = async (id, expanded) => {
         await page.waitForSelector(folder(id));
         if (await page.$eval(folder(id), node => node.classList.contains('collapsed')) === expanded) await click(`${folder(id)} > .folder-header`);
