@@ -1,7 +1,7 @@
 // Evidence-validator tests only; importing these modules never launches Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace, installBookmarkDragTrace, readBookmarkDragState, prepareBookmarkSidebar } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace, installBookmarkDragTrace, readBookmarkDragState, prepareBookmarkSidebar, moveInsideBookmarkDropTarget } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 const selection = () => ({ ids: ['a','b','d'], count: 3, text: '3 bookmarks selected', rows: ['a','b','d'].map(id => ({ id, ariaSelected: 'true', visible: true })) });
 test('selection requires exact visible order, announced count and accessible state', () => {
     assertBookmarkSelection(selection(), ['a','b','d']);
@@ -177,4 +177,18 @@ for(const stage of ['configure','create'])test(`bookmark sidebar ${stage} failur
         async()=>{calls.push('seed cleanup');throw Error('cleanup failure');},async()=>calls.push('restore ordering')],async()=>{}),received=>received===error);
     assert.deepEqual(calls,stage==='configure'?['configure','seed cleanup','restore ordering']:['configure','create','seed cleanup','restore ordering']);
     assert.deepEqual(error.cleanupErrors,['cleanup failure']);
+});
+
+
+test('held bookmark drag continues inside the exact target instead of stopping at dragenter',async()=>{
+    const moves=[];await moveInsideBookmarkDropTarget({mouse:{move:async(...args)=>moves.push(args)}},{x:962,y:128,width:310,height:48});
+    assert.deepEqual(moves,[[965,152,{steps:18}],[970,152,{steps:2}]]);
+});
+test('target approach failure cannot replay pointer input or a drop',async()=>{
+    let moves=0;const error=Error('uncertain pointer transport');
+    await assert.rejects(()=>moveInsideBookmarkDropTarget({mouse:{move:async()=>{moves++;throw error;}}},{x:1,y:2,width:32,height:48}),received=>received===error);
+    assert.equal(moves,1);
+});
+test('unusable target geometry refuses pointer input',async()=>{
+    await assert.rejects(()=>moveInsideBookmarkDropTarget({mouse:{move:async()=>assert.fail('must not move')}},{x:1,y:2,width:10,height:48}),/interior/);
 });

@@ -25,6 +25,16 @@ export async function clickBookmarkFixtureRow(page, selector, modifiers, record 
     } finally { for (const key of [...modifiers].reverse()) await page.keyboard.up(key); }
 }
 
+export async function moveInsideBookmarkDropTarget(page, rect) {
+    assert(rect && rect.width >= 16 && rect.height > 0, 'A visible drop target needs interior pointer space.');
+    const y = rect.y + rect.height / 2;
+    await page.mouse.move(rect.x + 3, y, { steps: 18 });
+    // Entering a different icon on the final step can produce only dragenter.
+    // Continue the same held physical gesture inside it so Chrome delivers
+    // dragover before we assert the destination; never synthesize/replay a drop.
+    await page.mouse.move(rect.x + Math.min(8, rect.width / 4), y, { steps: 2 });
+}
+
 export function installBookmarkDragTrace() {
     globalThis.__pairedBatchDragEvents = [];
     globalThis.__pairedBatchDragStartRows = [];
@@ -67,7 +77,7 @@ export function readBookmarkDragState({ sourceSelector, targetSelector, from, to
         startRows: globalThis.__pairedBatchDragStartRows,
         source: describe(document.querySelector(sourceSelector)), target: describe(document.querySelector(targetSelector)),
         sourceHit: hit(from && { x: from.x + from.width / 2, y: from.y + from.height / 2 }),
-        destinationHit: hit(to && { x: to.x + 3, y: to.y + to.height / 2 }),
+        destinationHit: hit(to && { x: to.x + Math.min(8, to.width / 4), y: to.y + to.height / 2 }),
         marker: describe(document.querySelector('.favorites-drop-anchor')),
         status: document.getElementById('favoritesDropStatus')?.textContent,
         rows: [...document.querySelectorAll('.space.active .tab[data-bookmark-id]')].map(describe) };
@@ -278,8 +288,9 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
             await page.mouse.move(from.x + from.width / 2 + 15, from.y + from.height / 2, { steps: 5 });
             await page.waitForFunction(() => document.querySelectorAll('.dragging').length === 1, { polling: 50 });
             if (afterStart) await afterStart();
-            await page.mouse.move(to.x + 3, to.y + to.height / 2, { steps: 18 });
+            await moveInsideBookmarkDropTarget(page, to);
             if (!afterStart) {
+                await page.waitForFunction(id => globalThis.__pairedBatchDragEvents?.some(event => event.type === 'dragover' && event.trusted && event.favoriteId === id), { polling: 50 }, beforeId);
                 await page.waitForFunction(beforeId => { const marker = document.querySelector('.favorites-drop-anchor'); return marker && !marker.hidden && marker.dataset.beforeId === beforeId; }, { polling: 50 }, beforeId);
                 const selected = await selection(expectedIds), marker = await page.evaluate(readFavoritesDropMarker);
                 // External bookmark batches have no saved-Favorite source icon.
