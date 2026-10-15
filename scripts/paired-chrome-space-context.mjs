@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { tabToSelector } from './paired-chrome-sidebar-appearance.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
+import { clickFreshResult } from './paired-chrome-ui.mjs';
 
 export function assertSpaceContextFixtureEnvironment(env = process.env, uid = process.getuid?.()) {
     assert.equal(env.GITHUB_ACTIONS, 'true', 'The real Space-menu fixture is restricted to GitHub Actions.');
@@ -45,6 +46,15 @@ export async function captureStableSpaceMenu({ observe, capture, foreground, rec
         if (primaryError) throw primaryError;
     });
     return stages;
+}
+
+export async function rightClickFreshSpaceTrigger(page, selector, record = async () => {}) {
+    // Reuse the bounded, stack-verified pre-input guard. Preserve the exact
+    // selector and right button; never replay a successful or uncertain click.
+    await clickFreshResult(async timeout => {
+        const element = await page.waitForSelector(selector, { visible: true, timeout });
+        return { click: () => element.click({ button: 'right' }), dispose: () => element.dispose() };
+    }, observation => record({ phase: 'space-context-trigger-input', selector, ...observation }));
 }
 
 export const SPACE_COLOR_IDS = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'];
@@ -286,7 +296,7 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, scre
                 await tabToSelector(page, selector, 300);
                 await page.keyboard.down('Shift');
                 try { await page.keyboard.press('F10'); } finally { await page.keyboard.up('Shift'); }
-            } else await page.click(selector, { button: 'right' });
+            } else await rightClickFreshSpaceTrigger(page, selector, record);
             await page.waitForSelector('.space-context-menu', { visible: true });
         },
         inspect: async () => assertSpaceContextMenu(await page.evaluate(readSpaceContextSurface), name)

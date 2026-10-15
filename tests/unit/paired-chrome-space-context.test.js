@@ -7,7 +7,7 @@ import { runInNewContext } from 'node:vm';
 import { SPACE_MENU_ITEMS, SPACE_PICKER_IDS, assertSpaceContextMenu, assertSpaceIconPicker,
     assertSpaceIconProjection, assertSpaceContextUnchanged, assertSpaceIconSaved,
     assertSpaceDeleteWarning, cancelSpaceDeleteWithInput, assertSpaceContextFixtureEnvironment, captureRequiredSpaceScreenshot,
-    assertSpaceFolderScreenshot, readSpaceFolderScreenshot, captureStableSpaceMenu, observeSpaceMenuEvents, observeSpaceContextOpening, assertSpaceMetadataSaved, assertSpaceFolderCreated, SPACE_COLOR_IDS, assertSpaceColorPicker, assertSpaceNameEditor, assertSpaceDetailsProjection, readSpaceDetailsProjection } from '../../scripts/paired-chrome-space-context.mjs';
+    rightClickFreshSpaceTrigger, assertSpaceFolderScreenshot, readSpaceFolderScreenshot, captureStableSpaceMenu, observeSpaceMenuEvents, observeSpaceContextOpening, assertSpaceMetadataSaved, assertSpaceFolderCreated, SPACE_COLOR_IDS, assertSpaceColorPicker, assertSpaceNameEditor, assertSpaceDetailsProjection, readSpaceDetailsProjection } from '../../scripts/paired-chrome-space-context.mjs';
 
 test('Space detail reader compares resolved theme color while preserving a genuine mismatch', () => {
     const root = {}, container = { style: { getPropertyValue: () => 'var(--chrome-purple-color, rgba(255, 255, 255, 0.1))' } };
@@ -105,7 +105,8 @@ test('missing dialog times out and uncertain clicks are not retried', async () =
 test('fixture entry point stays separate, uses actual input and cannot launch a browser by import', async () => {
     const source = await readFile(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url), 'utf8');
     assert.match(source, /export async function exerciseSpaceContextBasics/);
-    assert.match(source, /page\.click\(selector, \{ button: 'right' \}\)/);
+    assert.match(source, /element\.click\(\{ button: 'right' \}\)/);
+    assert.match(source, /await rightClickFreshSpaceTrigger\(page, selector, record\)/);
     assert.match(source, /page\.keyboard\.press\('F10'\)/); assert.match(source, /page\.reload/);
     assert.doesNotMatch(source, /dispatchEvent\(|puppeteer\.launch|spawn\(|\.value\s*=/);
 });
@@ -372,4 +373,36 @@ for (const blocked of [0, 1, 2, 3, 4]) test(`folder screenshot rejects obstructi
     const state = runInNewContext(`(${readSpaceFolderScreenshot.toString()})({spaceId:'work',folderId:'saved-folder'})`, context);
     assert.equal(state.hits.length, 5); assert.equal(index, 5); assert.equal(state.hits[blocked].inside, false);
     assert.throws(() => assertSpaceFolderScreenshot(state, folderScreenshotOptions), /edge midpoints and center/);
+});
+
+
+function spaceTriggerFixture(errors = []) {
+    const calls = [], records = []; let clicks = 0, disposed = 0;
+    return { page: { waitForSelector: async (selector, options) => { calls.push({ selector, options });
+        return { click: async options => { assert.deepEqual(options, { button: 'right' }); const error = errors[clicks++]; if (error) throw error; }, dispose: async () => { disposed++; } }; } },
+        calls, records, record: async state => records.push(state), get clicks() { return clicks; }, get disposed() { return disposed; } };
+}
+const triggerDetachedError = () => {
+    const error = Error('Node is detached from document');
+    error.stack = 'Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (/runtime/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1314:23)\n    at async CdpElementHandle.scrollIntoView (/runtime/puppeteer-core/lib/puppeteer/cdp/ElementHandle.js:106:13)';
+    return error;
+};
+test('Space context trigger uses one genuine right click on the exact selected identity', async () => {
+    const f = spaceTriggerFixture(); await rightClickFreshSpaceTrigger(f.page, '#spaceSwitcher [data-space-id="exact"]', f.record);
+    assert.equal(f.clicks, 1); assert.equal(f.disposed, 1); assert.equal(f.calls[0].selector, '#spaceSwitcher [data-space-id="exact"]');
+    assert.equal(f.calls[0].options.visible, true); assert.equal(f.records[0].status, 'clicked');
+});
+test('Space context trigger reacquires only a proven pre-input detached target', async () => {
+    const f = spaceTriggerFixture([triggerDetachedError()]); await rightClickFreshSpaceTrigger(f.page, '#exact', f.record);
+    assert.equal(f.clicks, 2); assert.equal(f.disposed, 2); assert.deepEqual(f.calls.map(item => item.selector), ['#exact', '#exact']);
+    assert.deepEqual(f.records.map(item => item.status), ['detached-before-input', 'clicked']);
+});
+for (const error of [Error('Input.dispatchMouseEvent timed out'), Error('Node is detached from document')]) test(`Space context trigger never replays uncertain error ${error.message}`, async () => {
+    const f = spaceTriggerFixture([error]); await assert.rejects(rightClickFreshSpaceTrigger(f.page, '#exact', f.record), value => value === error);
+    assert.equal(f.clicks, 1); assert.equal(f.disposed, 1);
+});
+test('repeated detached Space context targets fail at the shared three-attempt cap', async () => {
+    const errors = [triggerDetachedError(), triggerDetachedError(), triggerDetachedError()], f = spaceTriggerFixture(errors);
+    await assert.rejects(rightClickFreshSpaceTrigger(f.page, '#exact', f.record), value => value === errors[2]);
+    assert.equal(f.clicks, 3); assert.equal(f.disposed, 3);
 });

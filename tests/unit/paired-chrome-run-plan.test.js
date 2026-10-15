@@ -176,5 +176,8 @@ test('supplemental native split mode preserves original full39/lifecycle5 and re
     assert.match(workflow, /ARCIFY_PAIRED_RUN_MODE: native-split/);
     assert.match(workflow, /name: paired-chrome-native-split-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
     assert.match(workflow, /path: arcify\/test-results\/paired-chrome-native-split\//);
+    const nativeJob = workflow.slice(workflow.indexOf('  native-split:'));
+    assert.match(nativeJob, /node scripts\/paired-chrome-native-split-update\.mjs/);
+    assert.doesNotMatch(workflow.slice(0, workflow.indexOf('  native-split:')), /paired-chrome-native-split-update\.mjs/);
     assert.doesNotMatch(workflow, /apt-get|dpkg -i|google-chrome-stable_current|puppeteer browsers install/);
 });
