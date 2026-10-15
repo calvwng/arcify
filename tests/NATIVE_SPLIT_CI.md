@@ -3,57 +3,71 @@
 The mandatory `native-split` job uses installed `channel: chrome`, the isolated
 locked driver, and the unchanged installed-package/process/namespace, PID, network
 and seccomp sandbox checks. Its CI-only preparation leaves Chrome 155+ untouched.
-If the runner image has older Chrome, it performs one bounded ordinary update of
-`google-chrome-stable` from Google's signed stable repository. Other browser jobs
-keep their image's package. Missing `chrome.tabs.createSplit` or `chrome.tabs.unsplit`,
-or Chrome older than 155, still fails the positive job; no capability is skipped or
-emulated. Unsupported capability belongs in separate pure unit tests.
+If the image has older Chrome, it uses the explicitly selected official HTTPS
+package route below. Other browser jobs keep their image's package. Missing
+`chrome.tabs.createSplit` or `chrome.tabs.unsplit`, or Chrome older than 155, still
+fails the positive job; unsupported capability belongs in separate pure unit tests.
 
-## Bounded browser preparation
+## Explicit official HTTPS package route
 
-GitHub's [image installer](https://github.com/actions/runner-images/commit/9bd788fe1d795e4faef89bb4925da555df4ccd3e)
-removes Chrome's apt source and retains `repo_add_once=false`; a global `apt upgrade`
-cannot be assumed to provide Chrome. The preparation uses a temporary, vendor-only
-source and fresh isolated apt lists/archive caches. The fixed HTTPS endpoint is
-`https://dl.google.com/linux/chrome-stable/deb/`, as specified by the
-[pinned vendor installer](https://github.com/chromium/chromium/blob/82de7cdaa0d37a8b1660727cce1165a9b8e06eaa/chrome/installer/linux/common/apt.include).
-It requires the existing root-controlled, non-symlink keyring at
-`/usr/share/keyrings/google-chrome.gpg` and scopes
-`Signed-By` to Google's [published active primary fingerprint](https://www.google.com/linuxrepositories/)
-`EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796` and its signing subkeys.
-The preinstalled defaults must contain `repo_add_once=false`, both vendor source
-files must already be absent, and no legacy global key may remain to migrate.
-Defaults and source/legacy-key absence must also match after the update. No key is
-fetched/imported and no persistent source is added by the preparation.
+The updater downloads only
+`https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb`, the
+same fixed Google URL used by the [official runner installer](https://github.com/actions/runner-images/blob/9bd788fe1d795e4faef89bb4925da555df4ccd3e/images/ubuntu/scripts/build/install-google-chrome.sh).
+Google also documents [Debian/Ubuntu .deb installation](https://support.google.com/chrome/answer/95346?hl=en&co=GENIE.Platform%3DDesktop).
+Normal system TLS certificate verification must succeed. Curl configuration files
+are not loaded, redirects are never followed, and the receipt must show HTTP 200,
+the exact effective URL, successful certificate verification, and the complete
+local byte count. TLS trust/backend environment overrides stop preparation; proxy
+routing is preserved. Downloads have explicit time/size limits and no alternate
+host or retry fallback.
 
-Fresh metadata must pass apt signature verification. A candidate must be the exact
-stable amd64 package at version 155+, and a simulation must change only the existing
-Chrome package. The downloaded archive must match the signed index SHA256 and its
-package/version/architecture before a second simulation and exact-version,
-`--no-download` install. No dependencies, removals, held-package overrides, security
-bypasses, alternate mirrors, channel fallback, or silent skips are permitted.
-Missing/unsafe existing keys, an unavailable signed source, an old candidate, a
-changed install plan, or any download/install failure stops the job.
+The package must identify exactly `google-chrome-stable`, amd64, version 155+.
+The updater records the received archive's SHA256 and checks the same bytes and
+metadata again immediately before installation. Two apt simulations may plan only
+the existing Chrome upgrade; apt then installs that exact local file with
+`--no-download`, no repository inputs, no new dependencies, no removals, no
+held-package overrides and no downgrade. Missing integrity/metadata, old versions,
+changed archives/plans, or command failures stop the job.
 
-This is an ordinary package-manager update, so the authenticated vendor's package
-maintainer scripts execute as they normally do, including refreshing the vendor's
-existing key, replacing packaged files, and restoring its packaged cron entry.
-The existing key must still validate against the same Google fingerprint afterward.
-It is not a claim that every package file remains byte-identical. The preparation does not manually install/repair a privileged
-helper, change its permissions, import keys, or alter AppArmor/sysctl/host policy.
-The existing AppArmor configuration hash, enablement and namespace restriction
-must remain unchanged after the update. The later fixture still runs as the ordinary runner
-user, checks the exact installed executable and actual process, and requires real
-Namespace/PID/network/seccomp evidence before installing extensions.
+This route authenticates delivery from the official HTTPS endpoint. It does not
+independently verify a repository/package signature. The computed SHA256 is a
+receipt and local-change check, not an independently authenticated expected digest.
+[APT repository authentication](https://manpages.debian.org/bookworm/apt/apt-secure.8.en.html)
+provides a different signature/checksum chain; a local package install must not be
+described as proof of that chain.
 
-`chrome-update.json` and `chrome-update.log` are retained in the native job artifact
-on success or failure. They record the unchanged-package or update route, existing
-key fingerprint/hash, source, exact candidate, signed archive SHA256, command
-results, and before/after runtime evidence. Initial installed-package MD5
-correspondence is not independent signature proof; the update's signature trust
-comes from apt's fresh signed repository metadata. Local tests mock commands and
-never install packages or launch Chrome. Only the exact-head CI run can establish
-that the live vendor repository, update, sandbox, and native API all work together.
+The runner's existing `repo_add_once=false` defaults and absent vendor source files
+are required before and after installation, with no legacy global key to migrate.
+The canonical modern vendor key file must already exist and remain a nonempty
+root-owned regular file afterward. Its presence/metadata is recorded only to avoid
+creating a new key location; its writable path is never treated as a signature
+trust anchor.
+The authenticated vendor's normal package maintainer scripts may refresh its
+existing packaged key, files and cron entry. Preparation adds no signing key or
+persistent apt source, changes no trust settings, and does not manually
+install/repair a helper, alter permissions, or change AppArmor/sysctl policy.
+The AppArmor profile hash, enablement and namespace restriction must remain
+unchanged. The later fixture runs as the ordinary runner user, validates the exact
+installed package and actual process, and requires real Namespace/PID/network/
+seccomp evidence before installing extensions.
+
+`chrome-update.json` and `chrome-update.log` are retained with the native artifact.
+They record the selected route, source/TLS/download receipt, package metadata,
+SHA256 meaning, command results, and before/after package/policy evidence. Pure local
+tests mock downloads and package-manager commands; no local installation or browser
+launch is part of validation. The exact-head CI job must still verify the live
+vendor package, installation, sandbox and positive native API together.
+
+### Preserved signed-source failure history
+
+The earlier signed-apt route in `paired-chrome-native-split-update.mjs` correctly
+[stopped before apt on head cc97e92](https://github.com/calvwng/arcify/actions/runs/38724660703/job/116387416227)
+because `/usr/share` was writable. This matches the [official image configuration](https://github.com/actions/runner-images/blob/5ebd98a1ebebec7fe09538a221405e85ee4f42ff/images/ubuntu/scripts/build/configure-system.sh),
+which makes that tree recursively writable. Its trusted-keyring guard remains
+unchanged, and the workflow no longer selects that route. The new HTTPS updater
+never catches that guard's failure or silently retries around it; it is a separate,
+explicitly authorized provenance choice. No host permissions or key trust were
+changed to make the signed-source route pass.
 
 The existing full 39 cases and fresh-profile Favorite lifecycle 5 cases remain
 mandatory, with their original order and assertions. The supplemental job uses
@@ -79,7 +93,7 @@ rejected incompatible-group drops without ordinary reorder fallthrough.
 
 Do not run the browser fixture locally. Pure checks are safe:
 
-- `node --test tests/unit/paired-chrome-native-split.test.js tests/unit/paired-chrome-native-split-update.test.js tests/unit/paired-chrome-run-plan.test.js`
+- `node --test tests/unit/paired-chrome-native-split.test.js tests/unit/paired-chrome-native-split-update.test.js tests/unit/paired-chrome-native-split-vendor-update.test.js tests/unit/paired-chrome-run-plan.test.js`
 - `python3 tests/unit/paired_chrome_native_split_capture_test.py`
 - `npm run test:unit`
 - `npm test --prefix scripts/paired-chrome-runtime`

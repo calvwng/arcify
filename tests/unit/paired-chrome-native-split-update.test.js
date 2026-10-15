@@ -130,9 +130,9 @@ test('post-update installed version and unchanged host policy are mandatory', as
 test('workflow updates only native split, before browser launch, and always uploads preparation evidence', () => {
     const workflow = readFileSync(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url), 'utf8');
     const native = workflow.slice(workflow.indexOf('  native-split:'));
-    assert.doesNotMatch(workflow.slice(0, workflow.indexOf('  native-split:')), /node scripts\/paired-chrome-native-split-update/);
-    assert.equal((native.match(/node scripts\/paired-chrome-native-split-update\.mjs/g) || []).length, 1);
-    assert(native.indexOf('node scripts/paired-chrome-native-split-update.mjs') < native.indexOf('xvfb-run'));
+    assert.doesNotMatch(workflow.slice(0, workflow.indexOf('  native-split:')), /node scripts\/paired-chrome-native-split-vendor-update/);
+    assert.equal((native.match(/node scripts\/paired-chrome-native-split-vendor-update\.mjs/g) || []).length, 1);
+    assert(native.indexOf('node scripts/paired-chrome-native-split-vendor-update.mjs') < native.indexOf('xvfb-run'));
     assert.match(native, /chrome-update\.log/); assert.match(native, /if: always\(\)/);
     assert.match(native, /path: arcify\/test-results\/paired-chrome-native-split\//);
     assert.doesNotMatch(native, /continue-on-error|no-sandbox|disable-web-security|CHROME_DEVEL_SANDBOX/);

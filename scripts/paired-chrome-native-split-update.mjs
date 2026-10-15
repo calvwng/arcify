@@ -136,7 +136,7 @@ async function exists(path) {
     try { await lstat(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 
-async function packagingState() {
+export async function inspectChromePackagingState() {
     await trustedExistingFile(DEFAULTS, false);
     const state = { defaults: await readFile(DEFAULTS, 'utf8'), sourcesPresent: [], legacyKeyPresent: await exists(LEGACY_KEY) };
     for (const path of SOURCE_PATHS) if (await exists(path)) state.sourcesPresent.push(path);
@@ -220,7 +220,7 @@ async function main() {
         return entry.stdout;
     };
     try {
-        await prepareNativeSplitChrome({ evidence, run, verifyPackagingState: packagingState, prepareSource: async report => {
+        await prepareNativeSplitChrome({ evidence, run, verifyPackagingState: inspectChromePackagingState, prepareSource: async report => {
             const root = `/tmp/arcify-native-chrome-${randomUUID()}`;
             report.temporaryRoot = root;
             // Readable by apt's existing _apt account without chmod/chown or a sandbox override.

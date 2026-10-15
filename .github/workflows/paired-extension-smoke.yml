@@ -22,6 +22,7 @@ on:
       - 'scripts/paired-chrome-sidebar-appearance.mjs'
       - 'scripts/paired-chrome-management-scroll.mjs'
       - 'scripts/paired-chrome-today-selection.mjs'
+      - 'scripts/paired-chrome-today-folder-diagnostics.mjs'
       - 'scripts/paired-chrome-space-context.mjs'
       - 'scripts/paired-chrome-tab-menu.mjs'
       - 'scripts/paired-chrome-native-close.*'
@@ -39,6 +40,7 @@ on:
       - 'tests/unit/paired-chrome-sidebar-appearance.test.js'
       - 'tests/unit/paired-chrome-management-scroll.test.js'
       - 'tests/unit/paired-chrome-today-selection.test.js'
+      - 'tests/unit/paired-chrome-today-folder-diagnostics.test.js'
       - 'tests/unit/paired-chrome-space-context.test.js'
       - 'tests/unit/paired-chrome-tab-menu.test.js'
       - 'tests/unit/paired-chrome-menu-wiring.test.js'
@@ -309,15 +311,16 @@ jobs:
           git -C arcify-spotlight rev-parse HEAD
           npm run build --prefix arcify
           npm run build --prefix arcify-spotlight
-      - name: Require supported Chrome using a bounded signed vendor update if necessary
+      - name: Require supported Chrome using the explicit official HTTPS package route
         working-directory: arcify
         # Only this positive-capability job may update the existing stable package.
-        # Keep the existing Google key, host policy, normal apt/browser sandboxing,
+        # Use verified TLS to the exact Google URL; no redirects or source/key imports.
+        # Keep host policy, normal apt/browser sandboxing,
         # channel: chrome, and every later package/process/sandbox assertion.
         run: |
           set -o pipefail
           mkdir -p test-results/paired-chrome-native-split
-          node scripts/paired-chrome-native-split-update.mjs 2>&1 | tee test-results/paired-chrome-native-split/chrome-update.log
+          node scripts/paired-chrome-native-split-vendor-update.mjs 2>&1 | tee test-results/paired-chrome-native-split/chrome-update.log
       - name: Exercise native Split View with real drag, keyboard and exact native pair evidence
         working-directory: arcify
         # channel: chrome uses the installed stable browser and its existing

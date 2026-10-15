@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
 import { selectResultWithKeyboard, clickFreshResult } from './paired-chrome-ui.mjs';
+import { withSavedTodayFolderDiagnostics, captureTodaySelectionFailure } from './paired-chrome-today-folder-diagnostics.mjs';
 
 export async function expandSavedTodayFolder(page, folderSelector, record = async () => {}) {
     const folder = await page.waitForSelector(folderSelector, { visible: true });
@@ -224,20 +225,24 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
         },'all four exact Today tabs saved and bound');
         const proof=assertTodayFolderSaved(beforeSave,afterSave,{selectedIds:seed.slice(0,4),title,folderId,spaceId:space.id,windowId:fixture.windowA});
         const folderSelector=`.space.active .folder[data-bookmark-id="${folderId}"]`;
-        await ui(sidebar.page,'Expand the newly saved Today folder for visible evidence',()=>expandSavedTodayFolder(sidebar.page,folderSelector,record));
-        const rendered=await poll(()=>sidebar.page.evaluate(({folderId,ids})=>{
-            const folder=document.querySelector(`.space.active .folder[data-bookmark-id="${folderId}"]`);
-            const rows=folder?[...folder.querySelectorAll('.tab[data-tab-id]')]:[];
-            return {title:folder?.querySelector('.folder-title')?.textContent,
-                expanded:folder?.getAttribute('aria-expanded')==='true',
-                tabIds:rows.map(row=>Number(row.dataset.tabId)),bookmarkIds:rows.map(row=>row.dataset.bookmarkId),
-                visible:rows.map(row=>Boolean(row.getClientRects().length && getComputedStyle(row).visibility==='visible')),
-                remaining:ids.filter(id=>document.querySelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`))};
-        },{folderId,ids:seed}),state=>{
-            try { assertTodayFolderRendered(state,{title,tabIds:seed.slice(0,4),bookmarkIds:proof.bookmarkIds,remaining:seed.slice(4)});return true; }
-            catch { return false; }
-        },'expanded saved folder with four visible exact live rows');
-        await ui(sidebar.page,'Capture named folder and remaining Today tabs',()=>screenshot(sidebar.page,'today-selection-saved-folder-keeps-live-identities'));
+        const rendered=await withSavedTodayFolderDiagnostics({page:sidebar.page,folderSelector,folderId,record},async checkpoint=>{
+            await ui(sidebar.page,'Expand the newly saved Today folder for visible evidence',()=>expandSavedTodayFolder(sidebar.page,folderSelector,record));
+            await checkpoint('after-input');
+            const rendered=await poll(()=>sidebar.page.evaluate(({folderId,ids})=>{
+                const folder=document.querySelector(`.space.active .folder[data-bookmark-id="${folderId}"]`);
+                const rows=folder?[...folder.querySelectorAll('.tab[data-tab-id]')]:[];
+                return {title:folder?.querySelector('.folder-title')?.textContent,
+                    expanded:folder?.getAttribute('aria-expanded')==='true',
+                    tabIds:rows.map(row=>Number(row.dataset.tabId)),bookmarkIds:rows.map(row=>row.dataset.bookmarkId),
+                    visible:rows.map(row=>Boolean(row.getClientRects().length && getComputedStyle(row).visibility==='visible')),
+                    remaining:ids.filter(id=>document.querySelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`))};
+            },{folderId,ids:seed}),state=>{
+                try { assertTodayFolderRendered(state,{title,tabIds:seed.slice(0,4),bookmarkIds:proof.bookmarkIds,remaining:seed.slice(4)});return true; }
+                catch { return false; }
+            },'expanded saved folder with four visible exact live rows');
+            await ui(sidebar.page,'Capture named folder and remaining Today tabs',()=>screenshot(sidebar.page,'today-selection-saved-folder-keeps-live-identities'));
+            return rendered;
+        });
         // Require an actual paired invalidation before returning, so focus recovery
         // cannot conceal missing delivery. No extra search or refresh is dispatched.
         const invalidation=await poll(()=>spotlight.page.evaluate(()=>({
@@ -252,7 +257,12 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
         await ui(spotlight.page,'Capture refreshed saved Today results',()=>screenshot(spotlight.page,'spotlight-fresh-saved-today-folder-results'));
         const evidence={seed,range,toggled,rightClick,beforeCancel,afterCancel,proof,rendered,searchSurface,invalidation,spotlightBefore,spotlightAfter,snapshot:fresh,realModifierMouse:true,nativePanel:false};
         await record({phase:'today-selection-complete',...evidence}); return evidence;
-    } catch(error){primaryError=error;await record({phase:'today-selection-failed',error:{message:error.message,stack:error.stack},seed,folderId}).catch(()=>{});throw error;}
+    } catch(error){
+        primaryError=error;
+        try { await record({phase:'today-selection-failed',error:{message:error.message,stack:error.stack},seed,folderId}); } catch {}
+        await captureTodaySelectionFailure({page:sidebar?.page,screenshot,record});
+        throw error;
+    }
     finally {
         const {finishBookmarkFixture}=await import('./paired-chrome-bookmark-selection.mjs');
         await finishBookmarkFixture([

@@ -107,6 +107,9 @@ let currentWindow = null;
 let defaultSpaceName = 'Home';
 let showAllOpenTabsInCollapsedFolders = false; // default Arc behavior is false (active-only)
 let activeChromeTabId = null;
+// Detached renders must not overwrite a folder toggle made while they await
+// storage. This also fences direct refreshes outside the coordinator.
+let folderStateGeneration = 0;
 const activeTabReveal = createActiveTabReveal({ getContext: () => ({
     tabId: activeChromeTabId, spaceId: activeSpaceId,
     content: getSpaceElement(activeSpaceId)?.querySelector('.space-content')
@@ -484,6 +487,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         // Alias/binding updates also arrive during inactive-tab cleanup. Repaint
         // their rows without the reveal intent reserved for Space navigation.
         if (areaName === 'local' && (changes.tabNameOverridesById || changes.pinnedTabStatesById)) refreshCoordinator.invalidateBookmarks();
+        if (areaName === 'local' && Object.keys(changes).some(key => key.startsWith('folderCollapsed:'))) {
+            folderStateGeneration++;
+            refreshCoordinator.invalidateBookmarks();
+        }
         if (areaName === 'sync' && changes.syncTabGroups) {
             maxDragFolderDepth = changes.syncTabGroups.newValue ? 1 : 2;
             sidebarDropFeedback.refresh();
@@ -1209,6 +1216,7 @@ function setFolderCollapsed(folderElement, collapsed, persist = true) {
     syncCollapsedFolderTabs(folderElement);
     bookmarkSelection.reconcile();
     if (persist) {
+        folderStateGeneration++;
         saveFolderCollapsed(folderElement.dataset.bookmarkId, collapsed)
             .catch(error => Logger.error('Could not save folder state', error));
     }
@@ -2164,6 +2172,7 @@ async function loadTabs(space, pinnedContainer, tempContainer, canCommit = () =>
 }
 
 async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit) {
+    const folderGeneration = folderStateGeneration;
     Logger.log('Loading tabs for space:', space.id);
     Logger.log('Space bookmarks in space:', space.spaceBookmarks);
     const representedPinnedTabIds = new Set();
@@ -2368,6 +2377,12 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
 
     if (editorSessions.isActive()) {
         refreshCoordinator.invalidateSpaces();
+        return false;
+    }
+    if (folderGeneration !== folderStateGeneration) {
+        // Keep the live toggle and retry only the repaint. Folder state is not
+        // navigation and must never request an active-tab reveal.
+        refreshCoordinator.invalidateBookmarks();
         return false;
     }
     if (!pinnedContainer.isConnected || !tempContainer.isConnected || !canCommit()) return false;

@@ -51,8 +51,13 @@ const allIds = () => nodes().map(node => node.id).sort();
 const area = state => ({ async get(keys, callback) {
     if (state === local) await hooks.storageRead?.(keys);
     const result = typeof keys === 'string' ? { [keys]: structuredClone(state[keys]) } : structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
+    if (state === local) await hooks.storageReadResult?.(keys, result);
     callback?.(result); return result;
-}, async set(next) { Object.assign(state, structuredClone(next)); if (state === local) await hooks.storageSet?.(next); }, async remove() {} });
+}, async set(next) {
+    if (state === local) await hooks.beforeStorageSet?.(next);
+    Object.assign(state, structuredClone(next));
+    if (state === local) await hooks.storageSet?.(next);
+}, async remove() {} });
 const onActivated = listeners();
 
 globalThis.window = window;
@@ -445,4 +450,204 @@ for (const phase of ['lookup', 'deleted', 'binding-write']) test(`saved-pin demo
         assert.deepEqual(storedSpaces, before); assert.deepEqual(local.pinnedTabStatesById, bindings);
         assert(document.querySelector('#spacesList [data-tab-id="2"]'), 'The same native tab remains represented even when a deleted bookmark requires fallback rendering');
     } finally { hooks = {}; delete tabs[1].splitViewId; }
+});
+
+// Folder toggles stay immediate even while the real sidebar builds a detached
+// replacement. Gate recovery too, so a transient stale commit cannot be hidden
+// by a later correct repaint.
+function renderGate() {
+    let reached, release, entered = false;
+    const ready = new Promise(resolve => { reached = resolve; });
+    const blocked = new Promise(resolve => { release = resolve; });
+    return { ready, release, get entered() { return entered; }, async pause() { entered = true; reached(); await blocked; } };
+}
+async function until(predicate, message) {
+    const deadline = Date.now() + 2500;
+    while (!predicate()) {
+        assert(Date.now() < deadline, message);
+        await wait(5);
+    }
+}
+async function reached(gate) {
+    let timer;
+    try { await Promise.race([gate.ready, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Render gate not reached')), 2500); })]); }
+    finally { clearTimeout(timer); }
+}
+function toggleFolder(id = 'f') {
+    row(id).querySelector(':scope > .folder-header').dispatchEvent(new window.Event('click', { bubbles: true }));
+}
+function assertFolder(collapsed) {
+    assert.equal(row('f').classList.contains('collapsed'), collapsed);
+    assert.equal(row('f').getAttribute('aria-expanded'), String(!collapsed));
+    assert.equal(row('f').querySelector(':scope > .folder-content').classList.contains('collapsed'), collapsed);
+    assert.equal(row('f').querySelector('.folder-toggle').getAttribute('aria-expanded'), String(!collapsed));
+    assert.equal(row('b').parentElement.className, collapsed ? 'folder-collapsed-tabs' : 'folder-content');
+    assert.equal(document.querySelectorAll('#spacesList [data-bookmark-id="b"]').length, 1);
+}
+async function startFolderRefresh(path) {
+    if (path === 'coordinator') await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
+    // This real settings listener calls refreshActiveSpaceUI directly. Keep the
+    // setting value unchanged so only the refresh path differs between cases.
+    else await onChanged.emit({ invertTabOrder: { newValue: false } }, 'sync');
+}
+function folderRaceViewport() {
+    const content = root().closest('.space-content');
+    const originalRect = window.HTMLElement.prototype.getBoundingClientRect;
+    const originalFocus = window.HTMLElement.prototype.focus;
+    let focused = document.body, top = 400;
+    const scrollWrites = [];
+    Object.defineProperty(document, 'activeElement', { configurable: true, get: () => focused });
+    window.HTMLElement.prototype.focus = function (options) { focused = this; this.focusOptions = options; };
+    Object.defineProperties(content, {
+        scrollHeight: { configurable: true, value: 1200 },
+        clientHeight: { configurable: true, value: 210 },
+        scrollTop: { configurable: true, get: () => top, set(value) { top = value; scrollWrites.push(value); } }
+    });
+    window.HTMLElement.prototype.getBoundingClientRect = function () {
+        // The active bookmark is deliberately offscreen. An accidental reveal
+        // during folder-state recovery would visibly change scrollTop.
+        const top = this.dataset.tabId === '2' ? -300 : 10;
+        if (this === content) return { top: 0, bottom: 210, left: 0, right: 280, width: 280, height: 210 };
+        return { top, bottom: top + 30, left: 0, right: 280, width: 280, height: 30 };
+    };
+    row('f').querySelector('.folder-toggle').focus();
+    return {
+        assert() {
+            assert.equal(content.scrollTop, 400);
+            assert(scrollWrites.every(value => value === 400), 'Folder recovery must never transiently reveal the offscreen active tab');
+            assert(document.activeElement === row('f').querySelector('.folder-toggle'), 'Focus must stay on the managed folder control');
+        },
+        restore() {
+            window.HTMLElement.prototype.getBoundingClientRect = originalRect;
+            window.HTMLElement.prototype.focus = originalFocus;
+            delete document.activeElement;
+            for (const property of ['scrollHeight', 'clientHeight', 'scrollTop']) delete content[property];
+        }
+    };
+}
+function folderRaceBaseline() {
+    const baseline = structuredClone({ tree, storedSpaces, tabs, session, bindings: local.pinnedTabStatesById });
+    return () => {
+        assert.deepEqual({ tree, storedSpaces, tabs, session, bindings: local.pinnedTabStatesById }, baseline,
+            'A folder repaint cannot change bookmarks, tab ownership, bindings, selection or browser tabs');
+        assert.deepEqual(writes, []);
+        assert.deepEqual(alerts, []);
+    };
+}
+
+for (const path of ['coordinator', 'direct']) {
+    for (const scenario of ['expand', 'collapse', 'rapid toggles']) test(`folder ${scenario} survives an older ${path} render without a stale commit`, async () => {
+        await reset();
+        if (scenario === 'collapse') {
+            toggleFolder();
+            await until(() => local['folderCollapsed:f'] === false, 'Initial expansion must persist');
+        }
+        const old = row('f'), oldRender = renderGate(), recovery = renderGate();
+        const viewport = folderRaceViewport(), assertUnchanged = folderRaceBaseline();
+        const folderWrites = [];
+        let reads = 0;
+        hooks.storageRead = key => key === 'folderCollapsed:g' ? (++reads === 1 ? oldRender.pause() : reads === 2 ? recovery.pause() : undefined) : undefined;
+        hooks.storageSet = next => { if ('folderCollapsed:f' in next) folderWrites.push(next['folderCollapsed:f']); };
+        const collapsed = scenario === 'collapse';
+        try {
+            await startFolderRefresh(path); await reached(oldRender);
+            assert(row('f') === old);
+            toggleFolder(); assertFolder(collapsed); viewport.assert();
+            if (scenario === 'rapid toggles') {
+                toggleFolder(); assertFolder(true);
+                toggleFolder(); assertFolder(false);
+            }
+            await until(() => folderWrites.length === (scenario === 'rapid toggles' ? 3 : 1), 'Every toggle must persist in order');
+            assert.deepEqual(folderWrites, scenario === 'rapid toggles' ? [false, true, false] : [collapsed]);
+            oldRender.release();
+            await until(() => recovery.entered || row('f') !== old, 'Recovery must start after rejecting the old render');
+            assert(row('f') === old, 'The stale detached tree must never replace the clicked folder');
+            await reached(recovery);
+            assertFolder(collapsed); viewport.assert();
+            recovery.release();
+            await until(() => row('f') !== old, 'A fresh repaint must complete');
+            assertFolder(collapsed); viewport.assert();
+            assert.deepEqual(document.activeElement.focusOptions, { preventScroll: true });
+            assert.equal(local['folderCollapsed:f'], collapsed);
+            assertUnchanged();
+        } finally {
+            hooks = {}; oldRender.release(); recovery.release(); viewport.restore();
+            await wait(150);
+        }
+    });
+
+    test(`folder toggle fences a pending ${path} storage read and waits for its durable write`, async () => {
+        await reset();
+        const old = row('f'), oldRead = renderGate(), write = renderGate(), recovery = renderGate();
+        const viewport = folderRaceViewport(), assertUnchanged = folderRaceBaseline();
+        let first = true, recovering = false;
+        hooks.storageReadResult = (key, result) => {
+            if (key === 'folderCollapsed:f' && first) {
+                first = false; assert.equal(result[key], true); return oldRead.pause();
+            }
+        };
+        hooks.beforeStorageSet = next => 'folderCollapsed:f' in next ? write.pause() : undefined;
+        hooks.storageRead = key => key === 'folderCollapsed:g' && recovering ? recovery.pause() : undefined;
+        try {
+            await startFolderRefresh(path); await reached(oldRead);
+            toggleFolder(); assertFolder(false); await reached(write);
+            assert.equal(local['folderCollapsed:f'], true, 'The test holds the write before persistence');
+            oldRead.release();
+            await wait(180); // Let recovery start; its folder read must wait for the held write.
+            assert(row('f') === old, 'Neither the old render nor recovery may replace the live toggle with unpersisted state');
+            assertFolder(false); viewport.assert();
+            recovering = true; write.release(); await reached(recovery);
+            assert(row('f') === old); assert.equal(local['folderCollapsed:f'], false);
+            recovery.release();
+            await until(() => row('f') !== old, 'Recovery must finish after the pending write');
+            assertFolder(false); viewport.assert(); assertUnchanged();
+        } finally {
+            hooks = {}; oldRead.release(); write.release(); recovery.release(); viewport.restore();
+            await wait(150);
+        }
+    });
+
+    for (const change of [false, undefined]) test(`external folder state ${change === false ? 'expansion' : 'removal'} invalidates an older ${path} render`, async () => {
+        await reset();
+        if (change === undefined) {
+            toggleFolder();
+            await until(() => local['folderCollapsed:f'] === false, 'Initial expansion must persist');
+        }
+        const old = row('f'), oldRender = renderGate(), recovery = renderGate();
+        const viewport = folderRaceViewport(), assertUnchanged = folderRaceBaseline();
+        let reads = 0;
+        hooks.storageRead = key => key === 'folderCollapsed:g' ? (++reads === 1 ? oldRender.pause() : reads === 2 ? recovery.pause() : undefined) : undefined;
+        try {
+            await startFolderRefresh(path); await reached(oldRender);
+            const oldValue = local['folderCollapsed:f'];
+            if (change === undefined) delete local['folderCollapsed:f'];
+            else local['folderCollapsed:f'] = change;
+            await onChanged.emit({ 'folderCollapsed:f': { oldValue, newValue: change } }, 'local');
+            oldRender.release();
+            await until(() => recovery.entered || row('f') !== old, 'Recovery must start after the external state change');
+            assert(row('f') === old, 'An external state event fences direct renders as well as coordinated renders');
+            await reached(recovery);
+            recovery.release();
+            await until(() => row('f') !== old, 'External state change must repaint');
+            assertFolder(change !== false); viewport.assert(); assertUnchanged();
+        } finally {
+            hooks = {}; oldRender.release(); recovery.release(); viewport.restore();
+            await wait(150);
+        }
+    });
+}
+
+test('folder storage changes repaint an idle sidebar without affecting unrelated or sync storage', async () => {
+    await reset();
+    const original = row('f'), viewport = folderRaceViewport(), assertUnchanged = folderRaceBaseline();
+    try {
+        await onChanged.emit({ unrelated: { newValue: 1 } }, 'local');
+        await onChanged.emit({ 'folderCollapsed:f': { newValue: false } }, 'sync');
+        await wait(160);
+        assert(row('f') === original);
+        local['folderCollapsed:f'] = false;
+        await onChanged.emit({ 'folderCollapsed:f': { oldValue: true, newValue: false } }, 'local');
+        await until(() => row('f') !== original, 'An idle sidebar must receive the changed folder state');
+        assertFolder(false); viewport.assert(); assertUnchanged();
+    } finally { viewport.restore(); await wait(150); }
 });
