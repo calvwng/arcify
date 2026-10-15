@@ -9,6 +9,7 @@ export async function favoriteRequest(action, payload, api = globalThis.chrome) 
     if (!response?.success) {
         const error = new Error(response?.error || 'Saved Favorites are temporarily unavailable.');
         error.code = response?.code;
+        if (response?.batch) error.batch = response.batch;
         throw error;
     }
     return response;

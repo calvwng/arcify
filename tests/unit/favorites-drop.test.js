@@ -32,7 +32,7 @@ test('provenance accepts one unchanged own-sidebar row, never transfer payload o
     row.dataset.bookmarkId = 'saved'; row.remove(); assert.match(drag.take().error, /changed/);
     assert.match(drag.inspect().error, /from this sidebar/);
     const folder = document.querySelector('.folder'); folder.classList.add('dragging'); drag.start(folder);
-    assert.match(drag.inspect().error, /one bookmark at a time/);
+    assert.match(drag.inspect().error, /does not accept folders/);
 });
 
 test('independent pinned-state writers use the origin lock and preserve both bindings', async () => {

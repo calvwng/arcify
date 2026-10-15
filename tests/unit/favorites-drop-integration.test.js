@@ -31,7 +31,7 @@ let storedSpaces, favoriteStore;
 const local = { tabGroupImportDismissed: true };
 const settings = { invertTabOrder: false, syncTabGroups: false, showAllOpenTabsInCollapsedFolders: true };
 const session = { activeSpaces: { 10: 'alpha' } };
-let tree, writes = [], alerts = [], nextId = 100, effects = [], hooks = {};
+let tree, writes = [], alerts = [], nextId = 100, effects = [], hooks = {}, favoriteMessages = [];
 let startupPinRace = true;
 const bookmark = (id, tabId = null) => ({ id, title: id, url: tabId ? tabs[tabId - 1].url : `https://${id}.test/` });
 function resetData() {
@@ -76,7 +76,14 @@ globalThis.MutationObserver = window.MutationObserver;
 globalThis.chrome = {
     runtime: { onMessage: listeners(), getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
-            if (message.type === 'favoriteStore') { try { return { success: true, ...await favoriteStore.dispatch(message) }; } catch (error) { return { success: false, error: error.message, code: error.code }; } }
+            if (message.type === 'favoriteStore') {
+                favoriteMessages.push(structuredClone(message));
+                try {
+                    const result = await favoriteStore.dispatch(message);
+                    await hooks.afterFavoriteDispatch?.(message, result);
+                    return { success: true, ...result };
+                } catch (error) { return { success: false, error: error.message, code: error.code, ...(error.batch ? { batch: error.batch } : {}) }; }
+            }
             if (message.type === 'sidebarTour') return { success: true, state: null };
             if (message.type === 'bookmarkOrder') {
                 try { return { success: true, ...await enqueueBookmarkOperation(message.operation) }; }
@@ -90,7 +97,7 @@ globalThis.chrome = {
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
     storage: { onChanged, local: area(local), sync: area(settings), session: area(session) },
-    windows: { async get(id) { if (![10, 99].includes(id)) throw new Error('Window missing'); return { id, type: 'normal', incognito: false }; }, getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
+    windows: { async get(id) { if (![10, 99].includes(id)) throw new Error('Window missing'); return { id, type: 'normal', incognito: false }; }, async update(id) { return { id }; }, getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
     tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved', 'onReplaced'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id) { await hooks.tabGet?.(id); const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Tab closed'); return structuredClone(tab); },
@@ -175,7 +182,8 @@ async function resetFavorites() {
     await reset();
     await chrome.tabs.onMoved.emit(1, { windowId: 10 });
     await wait(40);
-    effects = []; writes = [];
+    delete favorites()._rect;
+    effects = []; writes = []; favoriteMessages = [];
 }
 
 test('startup pin race retains exact native binding even when initial all-tabs snapshot was nonnative', () => {
@@ -237,9 +245,9 @@ test('actual sidebar rejects folders, external transfers, forged classes, and st
     drag(row('f').firstElementChild, 'dragstart');
     const folderOver = drag(target(), 'dragover', 25);
     assert.equal(folderOver.defaultPrevented, false); assert.equal(folderOver.dataTransfer.dropEffect, 'none');
-    assert.match(status(), /one bookmark at a time/);
+    assert.match(status(), /does not accept folders/);
     drag(target(), 'drop', 25); drag(row('f').firstElementChild, 'dragend');
-    assert.match(status(), /one bookmark at a time/);
+    assert.match(status(), /does not accept folders/);
     row('c').classList.add('dragging');
     const external = drag(target(), 'dragover', 25, { dataTransfer: { getData: () => 'c', types: ['text/plain', 'text/uri-list'] } });
     assert.equal(external.defaultPrevented, false); assert.match(status(), /from this sidebar/);
@@ -630,4 +638,134 @@ test('actual drop recomputes the final pointer destination instead of committing
     drag(target, 'drop', dropPoint.clientY, dropPoint); drag(source, 'dragend'); await wait(180);
     assert.deepEqual(favoriteIds(), ['saved-b', 'saved-c', 'saved-d', 'saved-e', 'saved-a']);
     assert.deepEqual(effects, []); assert.deepEqual(writes, []);
+});
+
+const selectedBookmarkIds = () => [...document.querySelectorAll('#spacesList .bookmark-selected')].map(node => node.dataset.bookmarkId);
+const selectBookmark = (id, modifiers = { ctrlKey: true }) => drag(row(id), 'click', 100, { button: 0, ...modifiers });
+const batchRequests = () => favoriteMessages.filter(message => message.action === 'addBookmarks');
+
+test('actual sidebar modifier selection spans visible projected rows without activation, folder expansion or writes', async () => {
+    await resetFavorites(); const original = structuredClone(tree), beforeTabs = structuredClone(tabs);
+    selectBookmark('a'); selectBookmark('c', { shiftKey: true });
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
+    assert.equal(document.getElementById('bookmarkSelectionStatus').dataset.count, '3');
+    assert.equal(row('a').getAttribute('aria-selected'), 'true'); assert.equal(row('closed').getAttribute('aria-selected'), 'false');
+    assert(row('f').classList.contains('collapsed')); assert.deepEqual(tabs, beforeTabs);
+    assert.deepEqual(tree, original); assert.deepEqual(effects, []); assert.deepEqual(writes, []); assert.deepEqual(batchRequests(), []);
+    selectBookmark('b', { metaKey: true }); assert.deepEqual(selectedBookmarkIds(), ['a', 'c']);
+    drag(document.body, 'keydown', 0, { key: 'Escape' }); assert.deepEqual(selectedBookmarkIds(), []);
+});
+
+test('actual ordinary closed-bookmark activation/re-render/blur preserves only its logical range anchor', async () => {
+    await resetFavorites(); const original = row('c');
+    selectBookmark('c', {}); await wait(240);
+    assert(effects.some(([kind, properties]) => kind === 'create' && properties.url === getNode('c').url && properties.active));
+    assert(row('c') && row('c') !== original, 'the actual activation replaces the closed row');
+    assert(row('c').dataset.tabId, 'new exact live binding is rendered');
+    assert.deepEqual(selectedBookmarkIds(), []);
+    drag(window, 'blur'); selectBookmark('a', { shiftKey: true });
+    assert.deepEqual(selectedBookmarkIds(), ['a', 'b', 'c']);
+    assert.equal(local.persistentFavorites.length, 0, 'range selection never adds Favorites');
+    drag(document.body, 'keydown', 0, { key: 'Escape' });
+});
+
+test('actual batch drag shows count and marker, preserves source bookmarks, and reuses exact repeated instances', async () => {
+    await resetFavorites(); const original = structuredClone(tree), originalActive = tabs.filter(tab => tab.active).map(tab => tab.id);
+    selectBookmark('a'); selectBookmark('c', { shiftKey: true });
+    let ghost;
+    const started = drag(row('b'), 'dragstart', 100, { dataTransfer: { setData() {}, setDragImage(node) { ghost = node; } } });
+    assert.equal(started.dataTransfer.effectAllowed, 'copy'); assert.equal(ghost.dataset.count, '3');
+    assert.equal(document.querySelectorAll('.dragging').length, 1);
+    drag(target(), 'dragover', 25); assert.equal(favoriteMarker().hidden, false, `Batch marker status: ${status()}; ${favoriteMarker().outerHTML}`);
+    assert.match(status(), /Add 3 bookmarks/);
+    drag(target(), 'drop', 25); assert.equal(favorites().getAttribute('aria-busy'), 'true');
+    drag(row('b'), 'dragend'); await wait(260);
+    assert.deepEqual(batchRequests()[0], { type: 'favoriteStore', action: 'addBookmarks', windowId: 10, spaceId: 'alpha', bookmarkFolderId: 'p', beforeId: null,
+        bookmarks: [{ bookmarkId: 'a', parentId: 'p', tabId: 1 }, { bookmarkId: 'b', parentId: 'f', tabId: 2 }, { bookmarkId: 'c', parentId: 'p' }] });
+    assert.deepEqual(local.persistentFavorites.map(item => item.sourceBookmarkId), ['a', 'b', 'c']);
+    assert.equal(tabs.filter(tab => tab.pinned).length, 3); assert.deepEqual(tabs.filter(tab => tab.active).map(tab => tab.id), originalActive);
+    assert.deepEqual(tree, original); assert.deepEqual(writes, []);
+    assert.equal(favorites().dataset.dropState, 'success'); assert.match(status(), /3 completed, 0 failed, 0 not attempted/);
+    assert.equal(favorites().getAttribute('aria-busy'), 'false'); assert.equal(document.querySelector('.bookmark-drag-preview'), null);
+    const before = structuredClone(local.persistentFavorites), instances = session.favoriteSession.bindings.map(item => [item.favoriteId, item.tabId]);
+    // All source rows are now closed placeholders; open the folder to make the
+    // exact b row visible, then repeat in the same visible order.
+    click(row('f').querySelector('.folder-header'));
+    selectBookmark('a'); selectBookmark('b'); selectBookmark('c');
+    await drop(row('a'), savedIcon(before[0].id), 25);
+    assert.equal(batchRequests().length, 2); assert.deepEqual(local.persistentFavorites, before);
+    assert.deepEqual(session.favoriteSession.bindings.map(item => [item.favoriteId, item.tabId]), instances);
+    assert.equal(effects.filter(([kind]) => kind === 'create').length, 1, 'repeat does not create a new page');
+    assert.deepEqual(tree, original); assert.deepEqual(writes, []);
+});
+
+test('actual batch is blocked from legacy Space, folder and temporary destinations before any row moves', async () => {
+    await resetFavorites(); const original = structuredClone(tree), memberships = structuredClone(storedSpaces);
+    selectBookmark('a'); selectBookmark('c');
+    const a = row('a'), parent = a.parentElement; drag(a, 'dragstart');
+    for (const destination of [root(), temporary(), row('g').querySelector('.folder-header'), row('f').querySelector('.folder-content')]) {
+        const over = drag(destination, 'dragover', 100);
+        assert.equal(over.dataTransfer.dropEffect, 'none'); drag(destination, 'drop', 100);
+        assert.equal(a.parentElement, parent); assert(row('g').classList.contains('collapsed'));
+        assert.match(status(), /only be dropped into Favorites/);
+    }
+    drag(a, 'dragend'); await wait(180);
+    assert.deepEqual(tree, original); assert.deepEqual(storedSpaces, memberships); assert.deepEqual(effects, []); assert.deepEqual(writes, []);
+    assert.deepEqual(batchRequests(), []); assert.equal(local.persistentFavorites.length, 0);
+});
+
+test('actual batch never shrinks to the dragged row after a selected row changes or disappears', async () => {
+    for (const change of ['binding', 'remove', 'hide', 'space']) {
+        await resetFavorites(); selectBookmark('a'); selectBookmark('b'); const a = row('a'); drag(a, 'dragstart');
+        if (change === 'binding') row('b').dataset.tabId = '999';
+        if (change === 'remove') row('b').remove();
+        if (change === 'hide') row('b').hidden = true;
+        if (change === 'space') await onChanged.emit({ activeSpaces: { newValue: { 10: 'unavailable-space' } } }, 'session');
+        drag(target(), 'drop', 25); assert.match(status(), /changed/);
+        drag(a, 'dragend'); await wait(180);
+        assert.deepEqual(batchRequests(), [], change); assert.deepEqual(effects, []); assert.deepEqual(writes, []);
+    }
+});
+
+test('actual partial batch reports completed, failed, and unattempted sources without automatic retries', async () => {
+    await resetFavorites();
+    getNode('p').children.push(bookmark('d'), bookmark('e'));
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+    const original = structuredClone(tree); let attempts = 0;
+    hooks.create = () => { if (++attempts === 2) throw new Error('Second create result was not verified'); };
+    selectBookmark('c'); selectBookmark('e', { shiftKey: true });
+    assert.deepEqual(selectedBookmarkIds(), ['c', 'd', 'e']);
+    await drop(row('c'), target(), 25);
+    assert.equal(favorites().dataset.dropState, 'error'); assert.equal(favorites().getAttribute('aria-busy'), 'false');
+    assert.match(status(), /1 completed, 1 failed, 1 not attempted/);
+    assert.match(status(), /Completed bookmark IDs: c/); assert.match(status(), /Failed bookmark d/); assert.match(status(), /Not attempted bookmark IDs: e/);
+    assert.match(status(), /Nothing was retried automatically/);
+    await wait(220); assert.equal(attempts, 2); assert.equal(batchRequests().length, 1);
+    assert(local.persistentFavorites.some(item => item.sourceBookmarkId === 'c'));
+    assert(!local.persistentFavorites.some(item => item.sourceBookmarkId === 'e'));
+    assert.equal(tabs.filter(tab => tab.pinned).length, 1); assert.deepEqual(tree, original); assert.deepEqual(writes, []);
+});
+
+test('actual batch with a lost reply reports unknown completion and never retries completed effects', async () => {
+    await resetFavorites(); getNode('p').children.push(bookmark('d'));
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+    hooks.afterFavoriteDispatch = message => { if (message.action === 'addBookmarks') throw new Error('Worker response was interrupted'); };
+    selectBookmark('c'); selectBookmark('d'); await drop(row('c'), target(), 25);
+    assert.equal(favorites().dataset.dropState, 'error'); assert.equal(favorites().getAttribute('aria-busy'), 'false');
+    assert.match(status(), /Could not confirm the batch result/); assert.match(status(), /Some Favorites may have been added/);
+    assert.match(status(), /Check Favorites before trying again/); assert.match(status(), /Nothing was retried automatically/);
+    assert.equal(batchRequests().length, 1); assert.deepEqual(local.persistentFavorites.map(item => item.sourceBookmarkId), ['c', 'd']);
+    assert.equal(favorites().querySelectorAll('.saved-favorite').length, 2, 'best-effort refresh exposes completed effects');
+    await wait(180); assert.equal(batchRequests().length, 1); assert.equal(effects.filter(([kind]) => kind === 'create').length, 2);
+});
+
+test('actual selected equal-URL bookmarks remain distinct exact Favorites and inactive instances', async () => {
+    await resetFavorites(); getNode('p').children.push({ ...bookmark('d'), url: getNode('c').url });
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+    const original = structuredClone(tree); selectBookmark('d'); selectBookmark('c'); await drop(row('d'), target(), 25);
+    assert.deepEqual(local.persistentFavorites.map(item => item.sourceBookmarkId), ['c', 'd']);
+    assert.equal(new Set(local.persistentFavorites.map(item => item.id)).size, 2);
+    const opened = tabs.filter(tab => tab.pinned); assert.equal(opened.length, 2); assert.equal(new Set(opened.map(tab => tab.id)).size, 2);
+    assert(opened.every(tab => tab.url === getNode('c').url && tab.active === false));
+    assert.deepEqual(tree, original); assert.deepEqual(writes, []); assert.equal(batchRequests().length, 1);
 });

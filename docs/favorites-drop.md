@@ -1,5 +1,8 @@
 # Saved Favorites
 
+For Shift/Ctrl/Cmd selection and ordered multi-bookmark drops, see the
+[bookmark selection guide](bookmark-selection.md).
+
 The top Favorites strip is a saved list shared across Spaces and normal,
 non-private windows in this browser profile. The list survives browser restarts;
 it does not sync across devices. Each Favorite has a stable ID, saved title and

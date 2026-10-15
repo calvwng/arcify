@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { exerciseBookmarkMultiSelection } from './paired-chrome-bookmark-selection.mjs';
 /**
  * GitHub-hosted, real-Chrome paired-extension fixture. No mocked Chrome APIs.
  * Do not invoke locally. Syntax checks (node --check) do not launch a browser.
@@ -71,6 +72,7 @@ const stepNames = [
     'Persistent Favorites close, reopen, share and explicitly remove without losing source bookmarks',
     'Spotlight finds closed Favorites and preserves saved identity through live closure',
     'Saved Favorites real-mouse destination markers match durable reordering without tab or bookmark changes',
+    'Visible bookmark multi-selection batches exact Favorites without altering source bookmarks',
     'Full same-profile browser restart preserves saved Favorites without guessing restored bindings'
 ];
 const report = {
@@ -1793,7 +1795,11 @@ try {
         screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
         record:async observation => { report.favoriteMarkerObservations ||= []; report.favoriteMarkerObservations.push(observation); await saveReport(); }}));
 
-    await step(stepNames[31], async () => {
+    await step(stepNames[31], () => exerciseBookmarkMultiSelection({ apiPage:arcifyOptions,newTabPage,ui,screenshot,
+        screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
+        record:async observation => { report.bookmarkMultiSelection ||= []; report.bookmarkMultiSelection.push(observation); await saveReport(); } }));
+
+    await step(stepNames[32], async () => {
         const restarted = await exerciseFavoritesBrowserRestart({browser,launchOptions,
             launch:async options => { browser = await puppeteer.launch(structuredClone(options)); return browser; },
             apiPage:arcifyOptions,fixture,arcifyId,spotlightId,

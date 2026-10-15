@@ -1,6 +1,6 @@
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { FavoriteStore, FAVORITES_KEY, FAVORITE_SESSION_KEY, registerFavoriteMessages } from '../../favorite-store.js';
+import { FavoriteStore, FAVORITES_KEY, FAVORITE_SESSION_KEY, MAX_FAVORITE_BOOKMARK_BATCH, validateFavoriteRequest, registerFavoriteMessages } from '../../favorite-store.js';
 import { captureFavoriteIcon, favoriteIconCacheSize, MAX_FAVORITE_ICON_CACHE, FAVORITE_ICON_CACHE_KEY } from '../../favorite-icons.js';
 import { pngIcon } from '../fixtures/favorite-icons.js';
 
@@ -52,7 +52,7 @@ beforeEach(() => {
     globalThis.chrome = {
         runtime: { id: SELF, getURL: path => `chrome-extension://${SELF}/${path}`, onMessage: event() },
         storage: { local: storage(local, 'local'), session: storage(session, 'session') },
-        windows: { async get(id) { const result = windows.find(window => window.id === id); if (!result) throw new Error('No window'); return copy(result); },
+        windows: { async get(id) { await hooks.window?.(id); const result = windows.find(window => window.id === id); if (!result) throw new Error('No window'); return copy(result); },
             async update(id, update) { effects.push(['focus', id, update]); return { ...windows.find(window => window.id === id), ...update }; } },
         tabs: { onRemoved: event(), onUpdated: event(), onReplaced: event(), onAttached: event(),
             async query(query) { await hooks.query?.(query); return copy(tabs.filter(tab => Object.entries(query).every(([key, value]) => tab[key] === value))); },
@@ -702,4 +702,328 @@ test('orphan and mismatched cache bytes consume no live cache budget; metadata i
     assert.equal((await store.dispatch(request('get'))).favorites[0].faviconDataUrl, icon); assert.equal(store.icons.size, 1);
     assert(favoriteIconCacheSize([...store.icons.values()]) > icon.length, 'identity, URL and envelope count toward budget');
     assert.deepEqual(local[FAVORITES_KEY], [live]);
+});
+
+
+// Batch drops exercise the real sole-writer module with the same Chrome API
+// boundary as single-item tests. Selection is bounded, exact-ID, and one Space.
+const batchBookmark = (bookmarkId, attrs = {}) => ({ bookmarkId, parentId: 'nested', ...attrs });
+const batchRequest = (bookmarks = ['bookmark', 'twin'].map(id => batchBookmark(id)), attrs = {}) => request('addBookmarks', {
+    spaceId: 'space', bookmarkFolderId: 'folder', beforeId: null, bookmarks, ...attrs
+});
+const addBatchNodes = (...ids) => nodes.push(...ids.map(id => ({ id, parentId: 'nested', title: id, url: `https://${id}.test/` })));
+const batchError = async promise => {
+    try { await promise; assert.fail('The batch should have failed'); }
+    catch (error) { assert(error.batch, error.message); return error; }
+};
+const batchStatuses = error => error.batch.entries.map(entry => entry.status);
+
+test('bounded strict batch schema rejects malformed, duplicate, injected, and non-bookmark entries', () => {
+    const valid = batchRequest();
+    for (const bookmarks of [undefined, null, {}, [], [null], ['bookmark'], [[]], Array(2),
+        [batchBookmark('bookmark'), batchBookmark('bookmark')],
+        [batchBookmark('bookmark', { tabId: 2 }), batchBookmark('twin', { tabId: 2 })],
+        [batchBookmark('bookmark', { url: URL })], [batchBookmark('bookmark', { title: 'Injected' })],
+        [batchBookmark('bookmark', { sourceBookmarkId: 'twin' })], [batchBookmark('bookmark', { requireNativePin: true })],
+        [batchBookmark('bookmark', { tabId: 0 })], [batchBookmark('bookmark', { tabId: '2' })],
+        [batchBookmark('bookmark', { tabId: null })], [batchBookmark('bookmark', { parentId: '' })],
+        [batchBookmark('x'.repeat(201))], Array.from({ length: 101 }, (_, i) => batchBookmark(String(i)))]) {
+        assert.throws(() => validateFavoriteRequest({ ...valid, bookmarks }), { code: 'INVALID_REQUEST' });
+    }
+    for (const patch of [{ beforeId: undefined }, { beforeId: '' }, { spaceId: '' }, { bookmarkFolderId: '' },
+        { tabId: 2 }, { bookmarkId: 'bookmark' }, { url: URL }, { windowId: 2.5 }]) {
+        assert.throws(() => validateFavoriteRequest({ ...valid, ...patch }), { code: 'INVALID_REQUEST' });
+    }
+    assert.equal(MAX_FAVORITE_BOOKMARK_BATCH, 100);
+    assert.doesNotThrow(() => validateFavoriteRequest(batchRequest(Array.from({ length: 100 }, (_, i) => batchBookmark(String(i))))));
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined);
+});
+
+test('batch preserves exact same-URL identities, requested order, source tree, inactive native pins and four-key records', async () => {
+    const before = copy(nodes), store = newStore({ captureIcon: async () => null });
+    const result = await store.dispatch(batchRequest(['twin', 'bookmark'].map(id => batchBookmark(id))));
+    assert.equal(result.batch.complete, true);
+    assert.deepEqual(result.batch.entries.map(entry => entry.status), ['completed', 'completed']);
+    assert.deepEqual(result.favorites.map(item => item.sourceBookmarkId), ['twin', 'bookmark']);
+    assert.deepEqual(result.batch.entries.map(entry => entry.favoriteId), result.favorites.map(item => item.id));
+    assert.deepEqual(result.batch.entries.map(entry => entry.tabId), [100, 101]);
+    assert.equal(new Set(result.favorites.map(item => item.id)).size, 2);
+    assert.deepEqual(creates().map(effect => effect[1]), [100, 101].map(() => ({ windowId: 1, url: URL, pinned: true, active: false })));
+    assert.deepEqual(updates(), []); assert.deepEqual(nodes, before);
+    assert.equal(get(1).pinned, false); assert.equal(get(3).pinned, true);
+    for (const item of local[FAVORITES_KEY]) assert.deepEqual(Object.keys(item).sort(), ['id', 'sourceBookmarkId', 'title', 'url']);
+});
+
+test('mixed live and closed bookmark batch adopts the exact navigated live tab without resetting or activating it', async () => {
+    const before = copy(nodes), store = newStore({ captureIcon: async () => null });
+    const result = await store.dispatch(batchRequest([batchBookmark('bookmark', { tabId: 2 }), batchBookmark('twin')]));
+    assert.deepEqual(result.batch.entries.map(entry => entry.tabId), [2, 100]);
+    assert.equal(creates().length, 1); assert.deepEqual(updates(), [['update', 2, { pinned: true }]]);
+    assert.equal(get(2).url, 'https://navigated.test/'); assert.deepEqual(spaceStore.spaces[0].spaceBookmarks, []);
+    assert.deepEqual(nodes, before); assert.deepEqual(effects.filter(effect => effect[0] === 'focus'), []);
+});
+
+for (const [selected, anchor, expected] of [
+    [['third', 'bookmark'], 'bookmark', ['third', 'bookmark', 'twin', 'fourth']],
+    [['fourth', 'twin'], 'twin', ['bookmark', 'fourth', 'twin', 'third']],
+    [['third', 'bookmark'], 'fourth', ['twin', 'third', 'bookmark', 'fourth']],
+    [['fourth', 'bookmark'], null, ['twin', 'third', 'fourth', 'bookmark']],
+    [['fourth', 'third'], 'fourth', ['bookmark', 'twin', 'fourth', 'third']],
+    [['fourth', 'third', 'twin', 'bookmark'], 'third', ['fourth', 'third', 'twin', 'bookmark']]
+]) test(`batch fixed anchor ${anchor} preserves exact selection order ${selected}`, async () => {
+    addBatchNodes('third', 'fourth'); const store = newStore({ captureIcon: async () => null });
+    for (const bookmarkId of ['bookmark', 'twin', 'third', 'fourth']) await store.dispatch(bookmark({ bookmarkId }));
+    const ids = new Map(local[FAVORITES_KEY].map(item => [item.sourceBookmarkId, item.id]));
+    const before = copy(nodes), result = await store.dispatch(batchRequest(selected.map(id => batchBookmark(id)), { beforeId: anchor && ids.get(anchor) }));
+    assert.deepEqual(result.favorites.map(item => item.sourceBookmarkId), expected);
+    assert.equal(creates().length, 4); assert.deepEqual(nodes, before);
+    assert.deepEqual(result.batch.entries.map(entry => entry.favoriteId), selected.map(id => ids.get(id)));
+});
+
+test('batch interleaves new and already-saved entries into one stable ordered block', async () => {
+    addBatchNodes('third', 'fourth', 'fifth'); const store = newStore({ captureIcon: async () => null });
+    for (const bookmarkId of ['bookmark', 'third', 'fifth']) await store.dispatch(bookmark({ bookmarkId }));
+    const anchor = local[FAVORITES_KEY].find(item => item.sourceBookmarkId === 'third').id;
+    const result = await store.dispatch(batchRequest(['fourth', 'bookmark', 'twin'].map(id => batchBookmark(id)), { beforeId: anchor }));
+    assert.deepEqual(result.favorites.map(item => item.sourceBookmarkId), ['fourth', 'bookmark', 'twin', 'third', 'fifth']);
+    assert.deepEqual(result.batch.entries.map(entry => entry.tabId), [103, 100, 104]); assert.equal(creates().length, 5);
+});
+
+for (const change of ['deleted', 'moved', 'folder', 'source-space', 'missing-active', 'active', 'tab-window', 'tab-binding', 'unsupported', 'folder-entry']) {
+    test(`batch preflight rejects late ${change} entry before any saved/session/tab mutation`, async () => {
+        const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+        let entries = [batchBookmark('twin'), batchBookmark('bookmark', { tabId: 2 })];
+        if (change === 'deleted') nodes = nodes.filter(node => node.id !== 'bookmark');
+        if (change === 'moved') nodes.find(node => node.id === 'bookmark').parentId = 'folder';
+        if (change === 'folder') nodes.find(node => node.id === 'folder').parentId = 'outside';
+        if (change === 'source-space') spaceStore.spaces[0].bookmarkFolderId = 'other';
+        if (change === 'missing-active') delete spaceStore.active[1];
+        if (change === 'active') spaceStore.active[1] = 'other';
+        if (change === 'tab-window') get(2).windowId = 2;
+        if (change === 'tab-binding') local.pinnedTabStatesById[2].bookmarkId = 'twin';
+        if (change === 'unsupported') nodes.find(node => node.id === 'bookmark').url = 'javascript:alert(1)';
+        if (change === 'folder-entry') entries[1] = batchBookmark('nested', { parentId: 'folder' });
+        const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(entries)));
+        assert.equal(error.batch.complete, false); assert.equal(error.batch.entries.some(entry => entry.status === 'completed'), false);
+        assert.deepEqual(writes, []); assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined);
+    });
+}
+
+for (const windowId of [3, 4, 99]) test(`batch rejects unavailable/private/nonnormal window ${windowId} before writes`, async () => {
+    const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(undefined, { windowId })));
+    assert.deepEqual(batchStatuses(error), ['unattempted', 'unattempted']);
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(session, {});
+});
+
+test('batch stale destination preflight preserves existing saved order and creates nothing', async () => {
+    const store = newStore({ captureIcon: async () => null }); await store.dispatch(request('addTab', { tabId: 3 }));
+    const before = copy(local[FAVORITES_KEY]), beforeSession = copy(session), count = effects.length;
+    const error = await batchError(store.dispatch(batchRequest(undefined, { beforeId: 'removed' })));
+    assert.equal(error.code, 'STALE_FAVORITE'); assert.deepEqual(batchStatuses(error), ['unattempted', 'unattempted']);
+    assert.deepEqual(local[FAVORITES_KEY], before); assert.deepEqual(session, beforeSession); assert.equal(effects.length, count);
+});
+
+test('batch rechecks earlier source after later asynchronous preflight lookup deletes it', async () => {
+    let reads = 0;
+    hooks.bookmarks = id => { if (id === 'nested' && ++reads === 3) nodes = nodes.filter(node => node.id !== 'bookmark'); };
+    const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
+    assert.deepEqual(batchStatuses(error), ['failed', 'unattempted']);
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(session, {});
+});
+
+test('batch preflight blocks an existing uncertain Favorite before an earlier new entry is saved', async () => {
+    const store = newStore({ captureIcon: async () => null, install: false });
+    hooks.create = () => { throw new Error('Chrome timeout'); };
+    await assert.rejects(store.dispatch(bookmark({ bookmarkId: 'twin' }))); hooks.create = undefined;
+    const before = copy(local[FAVORITES_KEY]), beforeSession = copy(session), count = effects.length;
+    const error = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(batchRequest()));
+    assert.equal(error.code, 'UNCERTAIN_RESULT'); assert.deepEqual(batchStatuses(error), ['unattempted', 'failed']);
+    assert.deepEqual(local[FAVORITES_KEY], before); assert.deepEqual(session, beforeSession); assert.equal(effects.length, count);
+});
+
+test('batch preflight blocks a source tab already owned by a different Favorite before saving earlier entries', async () => {
+    const store = newStore({ captureIcon: async () => null }); await store.dispatch(request('addTab', { tabId: 2 }));
+    const before = copy(local[FAVORITES_KEY]), count = effects.length;
+    const error = await batchError(store.dispatch(batchRequest([batchBookmark('twin'), batchBookmark('bookmark', { tabId: 2 })])));
+    assert.equal(error.code, 'FAVORITE_CONFLICT'); assert.deepEqual(batchStatuses(error), ['unattempted', 'failed']);
+    assert.deepEqual(local[FAVORITES_KEY], before); assert.equal(effects.length, count);
+});
+
+for (const change of ['moved', 'unpinned']) test(`batch preflight blocks already-saved ${change} instance before an earlier new entry changes`, async () => {
+    const store = newStore({ captureIcon: async () => null, install: false }); await store.dispatch(bookmark({ bookmarkId: 'twin' }));
+    if (change === 'moved') get(100).windowId = 2; else get(100).pinned = false;
+    const before = copy(local[FAVORITES_KEY]), beforeSession = copy(session), count = effects.length;
+    const error = await batchError(store.dispatch(batchRequest()));
+    assert.equal(error.code, 'STALE_TAB'); assert.deepEqual(batchStatuses(error), ['unattempted', 'failed']);
+    assert.deepEqual(local[FAVORITES_KEY], before); assert.deepEqual(session, beforeSession); assert.equal(effects.length, count);
+});
+
+test('batch stops on source deletion after one completed entry and retries only on another explicit drop', async () => {
+    addBatchNodes('last'); const original = copy(nodes.find(node => node.id === 'twin'));
+    hooks.created = tab => { if (tab.id === 100) nodes = nodes.filter(node => node.id !== 'twin'); };
+    const store = newStore({ captureIcon: async () => null }), input = batchRequest(['bookmark', 'twin', 'last'].map(id => batchBookmark(id)));
+    const error = await batchError(store.dispatch(input));
+    assert.deepEqual(batchStatuses(error), ['completed', 'failed', 'unattempted']);
+    assert.equal(error.batch.entries[0].tabId, 100); assert.equal(creates().length, 1); assert.equal(local[FAVORITES_KEY].length, 1);
+    assert.equal(get(100).pinned, true); hooks.created = undefined; nodes.push(original);
+    const next = await store.dispatch(input);
+    assert.equal(next.batch.complete, true); assert.deepEqual(next.batch.entries.map(entry => entry.tabId), [100, 101, 102]);
+    assert.equal(creates().length, 3); assert.equal(local[FAVORITES_KEY].length, 3);
+});
+
+test('batch reports a newly opened but stale second entry exactly, preserves both pages, and does not attempt the third', async () => {
+    addBatchNodes('last');
+    hooks.created = tab => { if (tab.id === 101) nodes.find(node => node.id === 'twin').parentId = 'outside'; };
+    const store = newStore({ captureIcon: async () => null }), input = batchRequest(['bookmark', 'twin', 'last'].map(id => batchBookmark(id)));
+    const error = await batchError(store.dispatch(input));
+    assert.deepEqual(batchStatuses(error), ['completed', 'failed', 'unattempted']);
+    assert.equal(error.batch.entries[1].saved, true); assert.equal(error.batch.entries[1].tabId, 101);
+    assert.equal(local[FAVORITES_KEY].length, 2); assert.equal(creates().length, 2); assert(get(100).pinned && get(101).pinned);
+    hooks.created = undefined; nodes.find(node => node.id === 'twin').parentId = 'nested';
+    const next = await store.dispatch(input); assert.deepEqual(next.batch.entries.map(entry => entry.tabId), [100, 101, 102]);
+    assert.equal(creates().length, 3);
+});
+
+test('batch durable-write failure preserves completed entries and reports later entries unattempted', async () => {
+    addBatchNodes('last');
+    hooks.localBeforeSet = value => { if (value[FAVORITES_KEY]?.length === 2) throw new Error('Quota unavailable'); };
+    const input = batchRequest(['bookmark', 'twin', 'last'].map(id => batchBookmark(id)));
+    const error = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(input));
+    assert.deepEqual(batchStatuses(error), ['completed', 'failed', 'unattempted']);
+    assert.equal(error.batch.entries[1].saved, undefined); assert.equal(creates().length, 1); assert.equal(local[FAVORITES_KEY].length, 1);
+    hooks.localBeforeSet = undefined;
+    const next = await newStore({ captureIcon: async () => null, install: false }).dispatch(input);
+    assert.deepEqual(next.batch.entries.map(entry => entry.tabId), [100, 101, 102]); assert.equal(creates().length, 3);
+});
+
+test('second uncertain create preserves actual page and blocks the entire replay after worker restart', async () => {
+    addBatchNodes('last'); const input = batchRequest(['bookmark', 'twin', 'last'].map(id => batchBookmark(id)));
+    hooks.created = tab => { if (tab.id === 101) throw new Error('Chrome timed out after creating the tab'); };
+    const error = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(input));
+    assert.deepEqual(batchStatuses(error), ['completed', 'failed', 'unattempted']); assert.equal(error.code, 'UNCERTAIN_RESULT');
+    assert.equal(error.batch.entries[1].saved, true); assert.equal(error.batch.entries[1].tabId, undefined);
+    assert.equal(get(101).pinned, true); assert.equal(creates().length, 2); assert.equal(local[FAVORITES_KEY].length, 2);
+    const before = copy(local[FAVORITES_KEY]), beforeSession = copy(session); hooks.created = undefined;
+    const retry = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(input));
+    assert.deepEqual(batchStatuses(retry), ['unattempted', 'failed', 'unattempted']); assert.equal(retry.code, 'UNCERTAIN_RESULT');
+    assert.deepEqual(local[FAVORITES_KEY], before); assert.deepEqual(session, beforeSession); assert.equal(creates().length, 2);
+});
+
+test('batch exact returned receipt survives in memory while a restarted worker blocks a lost receipt', async () => {
+    addBatchNodes('last'); const input = batchRequest(['bookmark', 'twin', 'last'].map(id => batchBookmark(id)));
+    hooks.sessionBeforeSet = value => { if (value[FAVORITE_SESSION_KEY]?.attempts.some(attempt => attempt.tabId === 101)) throw new Error('Receipt response lost'); };
+    const store = newStore({ captureIcon: async () => null, install: false }), error = await batchError(store.dispatch(input));
+    assert.deepEqual(batchStatuses(error), ['completed', 'failed', 'unattempted']); assert.equal(error.batch.entries[1].tabId, 101);
+    hooks.sessionBeforeSet = undefined;
+    const restarted = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(input));
+    assert.equal(restarted.code, 'UNCERTAIN_RESULT'); assert.equal(creates().length, 2);
+    const recovered = await store.dispatch(input);
+    assert.deepEqual(recovered.batch.entries.map(entry => entry.tabId), [100, 101, 102]); assert.equal(creates().length, 3);
+});
+
+for (const change of ['closed', 'moved', 'unpinned']) test(`existing exact Favorite ${change} between batch members cannot turn into a replacement create`, async () => {
+    const store = newStore({ captureIcon: async () => null, install: false }); await store.dispatch(bookmark({ bookmarkId: 'twin' }));
+    hooks.created = tab => { if (tab.id === 101) {
+        if (change === 'closed') tabs = tabs.filter(tab => tab.id !== 100);
+        if (change === 'moved') get(100).windowId = 2;
+        if (change === 'unpinned') get(100).pinned = false;
+    } };
+    const error = await batchError(store.dispatch(batchRequest()));
+    assert.deepEqual(batchStatuses(error), ['completed', 'failed']); assert.equal(error.code, 'STALE_TAB');
+    assert.equal(creates().length, 2); assert.equal(local[FAVORITES_KEY].length, 2);
+    if (change === 'unpinned') assert.equal(get(100).pinned, false);
+});
+
+for (const change of ['closed', 'moved', 'unpinned']) test(`legacy exact native candidate ${change} after batch preflight never authorizes a new page`, async () => {
+    tabs.push({ id: 4, windowId: 1, pinned: true, url: URL }); local.pinnedTabStatesById[4] = { bookmarkId: 'twin', pinnedUrl: URL };
+    session.favoriteDropAttempts = { [JSON.stringify([1, 'twin'])]: { tabId: 4, url: URL, complete: true } };
+    const receipt = copy(session.favoriteDropAttempts);
+    hooks.created = () => {
+        if (change === 'closed') tabs = tabs.filter(tab => tab.id !== 4);
+        if (change === 'moved') get(4).windowId = 2;
+        if (change === 'unpinned') get(4).pinned = false;
+    };
+    const error = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(batchRequest()));
+    assert.deepEqual(batchStatuses(error), ['completed', 'failed']); assert.equal(creates().length, 1);
+    assert.equal(local[FAVORITES_KEY].length, 1); assert.deepEqual(session.favoriteDropAttempts, receipt);
+});
+
+for (const change of ['active-cleared', 'window-closed', 'source-url']) test(`batch rechecks ${change} after durable commit and before native create`, async () => {
+    hooks.localAfterSet = value => { if (value[FAVORITES_KEY]) {
+        if (change === 'active-cleared') delete spaceStore.active[1];
+        if (change === 'window-closed') windows = windows.filter(window => window.id !== 1);
+        if (change === 'source-url') nodes.find(node => node.id === 'bookmark').url = 'https://changed.test/';
+    } };
+    const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
+    assert.deepEqual(batchStatuses(error), ['failed', 'unattempted']); assert.equal(error.batch.entries[0].saved, true);
+    assert.equal(creates().length, 0); assert.equal(local[FAVORITES_KEY].length, 1);
+});
+
+test('overlapping batch requests and a caller timeout stay on the sole queue and reuse exact successes', async () => {
+    let release, started; const creating = new Promise(resolve => { started = resolve; });
+    hooks.create = () => { started(); return new Promise(resolve => { release = resolve; }); };
+    const store = newStore({ captureIcon: async () => null }), first = store.dispatch(batchRequest());
+    await creating; const second = store.dispatch(batchRequest());
+    const callerTimeout = await Promise.race([first.then(() => 'completed'), new Promise(resolve => setImmediate(() => resolve('timeout')))]);
+    assert.equal(callerTimeout, 'timeout'); assert.equal(creates().length, 1);
+    hooks.create = undefined; release(); const results = await Promise.all([first, second]);
+    assert.equal(creates().length, 2); assert.deepEqual(results[0].batch, results[1].batch);
+    assert.equal(local[FAVORITES_KEY].length, 2);
+});
+
+test('batch runtime authentication and structured partial outcomes survive the real message handler', async () => {
+    const store = newStore({ captureIcon: async () => null }); registerFavoriteMessages(store);
+    const listener = chrome.runtime.onMessage.listeners[0], input = batchRequest();
+    const send = (message, sender) => new Promise(resolve => listener(message, sender, resolve));
+    for (const sender of [{ id: 'a'.repeat(32) }, { id: SELF, url: 'https://untrusted.test/' },
+        { id: SELF, url: chrome.runtime.getURL('sidebar.html'), tab: { windowId: 2 } }]) {
+        assert.equal((await send(input, sender)).code, 'UNAUTHORIZED');
+    }
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined);
+    hooks.created = tab => { if (tab.id === 100) nodes = nodes.filter(node => node.id !== 'twin'); };
+    const result = await send(input, { id: SELF, url: chrome.runtime.getURL('sidebar.html'), tab: { windowId: 1 } });
+    assert.equal(result.success, false); assert.equal(result.code, 'STALE_BOOKMARK');
+    assert.deepEqual(result.batch.entries.map(entry => entry.status), ['completed', 'failed']);
+    assert.equal(result.batch.entries[0].tabId, 100);
+});
+
+test('full bounded batch of 100 explicit identities executes once and repeated drops reuse every exact receipt', async () => {
+    const ids = Array.from({ length: MAX_FAVORITE_BOOKMARK_BATCH }, (_, i) => `selected-${i}`);
+    addBatchNodes(...ids); const source = copy(nodes), input = batchRequest(ids.map(id => batchBookmark(id)));
+    const store = newStore({ captureIcon: async () => null, install: false }), result = await store.dispatch(input);
+    assert.equal(result.batch.entries.length, 100); assert.equal(result.batch.complete, true);
+    assert.deepEqual(result.favorites.map(item => item.sourceBookmarkId), ids);
+    const repeated = await newStore({ captureIcon: async () => null, install: false }).dispatch(input);
+    assert.deepEqual(repeated.batch, result.batch); assert.equal(creates().length, 100); assert.deepEqual(nodes, source);
+    assert(creates().every(effect => effect[1].pinned && effect[1].active === false));
+});
+
+test('batch preflight respects another Favorite exact adoption attempt before any earlier member changes', async () => {
+    const store = newStore({ captureIcon: async () => null, install: false });
+    hooks.update = () => { throw new Error('Pin request failed'); };
+    await assert.rejects(store.dispatch(request('addTab', { tabId: 2 }))); hooks.update = undefined;
+    assert.equal(get(2).pinned, false); assert.equal(local[FAVORITES_KEY].length, 1);
+    const before = copy(local[FAVORITES_KEY]), beforeSession = copy(session), count = effects.length;
+    const error = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(batchRequest([
+        batchBookmark('twin'), batchBookmark('bookmark', { tabId: 2 })
+    ])));
+    assert.equal(error.code, 'FAVORITE_CONFLICT'); assert.deepEqual(batchStatuses(error), ['unattempted', 'failed']);
+    assert.deepEqual(local[FAVORITES_KEY], before); assert.deepEqual(session, beforeSession); assert.equal(effects.length, count);
+});
+
+test('batch unknown legacy receipt on the last member blocks all earlier additions without modifying the receipt', async () => {
+    session.favoriteDropAttempts = { [JSON.stringify([1, 'twin'])]: { tabId: null, url: URL } };
+    const before = copy(session), error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
+    assert.equal(error.code, 'UNCERTAIN_RESULT'); assert.deepEqual(batchStatuses(error), ['unattempted', 'failed']);
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(session, before);
+});
+
+test('batch known second receipt recovers after binding write failure on worker restart without opening a duplicate', async () => {
+    addBatchNodes('last'); const input = batchRequest(['bookmark', 'twin', 'last'].map(id => batchBookmark(id)));
+    hooks.sessionBeforeSet = value => { if (value[FAVORITE_SESSION_KEY]?.bindings.some(binding => binding.tabId === 101)) throw new Error('Binding interrupted'); };
+    const error = await batchError(newStore({ captureIcon: async () => null, install: false }).dispatch(input));
+    assert.deepEqual(batchStatuses(error), ['completed', 'failed', 'unattempted']); assert.equal(error.batch.entries[1].tabId, 101);
+    assert.equal(creates().length, 2); hooks.sessionBeforeSet = undefined;
+    const result = await newStore({ captureIcon: async () => null, install: false }).dispatch(input);
+    assert.deepEqual(result.batch.entries.map(entry => entry.tabId), [100, 101, 102]); assert.equal(creates().length, 3);
 });

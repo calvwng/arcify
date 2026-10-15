@@ -91,6 +91,25 @@ test('existing bookmark and live sources reuse exact saved identity for beforeId
     assert.equal(f.resolve({ ...bookmark, bookmarkId: 'unrelated', url: 'same-url' }, f.point('c')).beforeId, 'c');
 });
 
+test('bookmark batches exclude every selected exact Favorite identity and advance anchors within the moving block', () => {
+    const f = fixture();
+    const source = { ...f.external, kind: 'bookmarks', bookmarks: [{ bookmarkId: 'bookmark-b' }, { bookmarkId: 'bookmark-d' }] };
+    const before = f.resolve(source, f.point('c'));
+    assert.equal(before.beforeId, 'c'); assert.equal(before.index, 1);
+    for (const placement of ['before', 'after']) {
+        assert.equal(f.resolve(source, f.point('b', placement)).beforeId, 'c');
+        assert.equal(f.resolve(source, f.point('d', placement)).beforeId, 'e');
+    }
+    const allSelected = { ...source, bookmarks: f.favorites.map(item => ({ bookmarkId: item.sourceBookmarkId })) };
+    const onlyNativeBoundary = f.resolve(allSelected, f.point('c'));
+    assert.equal(onlyNativeBoundary.beforeId, null); assert.equal(onlyNativeBoundary.reference, f.nodes.get('11'));
+    assert.equal(onlyNativeBoundary.placement, 'before');
+    const equalUrls = { ...source, bookmarks: [{ bookmarkId: 'unrelated-a', url: 'same-url' }, { bookmarkId: 'unrelated-b', url: 'same-url' }] };
+    assert.equal(f.resolve(equalUrls, f.point('b')).beforeId, 'b', 'URLs never exclude an unrelated anchor');
+    assert.equal(f.resolve({ ...source, bookmarks: undefined }, f.point('b')), null);
+    assert.equal(f.resolve({ ...source, bookmarks: [{ bookmarkId: 'b' }, { bookmarkId: 'b' }] }, f.point('b')), null);
+});
+
 test('unsupported, detached, foreign, stale and malformed source/destination inputs fail closed', () => {
     const f = fixture();
     const point = f.point('b');

@@ -6,7 +6,10 @@ const identity = node => node.dataset.favoriteId || node.dataset.tabId;
 export function resolveFavoritesDrop({ container, source, target, clientX, clientY, favorites = [] }) {
     if (!container || !source || !target || !container.contains(target) ||
         !Number.isFinite(clientX) || !Number.isFinite(clientY) ||
-        !['saved', 'native', 'bookmark', 'live'].includes(source.kind)) return null;
+        !['saved', 'native', 'bookmark', 'bookmarks', 'live'].includes(source.kind)) return null;
+    if (source.kind === 'bookmarks' && (!Array.isArray(source.bookmarks) || source.bookmarks.length < 2 ||
+        source.bookmarks.some(item => !item || typeof item.bookmarkId !== 'string') ||
+        new Set(source.bookmarks.map(item => item.bookmarkId)).size !== source.bookmarks.length)) return null;
     const list = source.kind === 'native' ? 'native' : 'saved';
     const all = icons(container);
     const members = all.filter(node => node.classList.contains(`${list}-favorite`));
@@ -16,21 +19,29 @@ export function resolveFavoritesDrop({ container, source, target, clientX, clien
         ? favorites.find(item => item.sourceBookmarkId === source.bookmarkId)?.id
         : source.kind === 'live' ? favorites.find(item => item.tabId === source.tabId)?.id : null;
     const moving = source.kind === 'native' ? source.element : members.find(node => node.dataset.favoriteId === movingId);
+    const batchIds = source.kind === 'bookmarks' ? new Set(source.bookmarks.map(item => item.bookmarkId)) : null;
+    const batchFavoriteIds = batchIds ? new Set(favorites.filter(item => batchIds.has(item.sourceBookmarkId)).map(item => item.id)) : null;
     const internal = source.kind === 'saved' || source.kind === 'native';
     if (internal && (!members.includes(source.element) || moving !== source.element || source.element.contains(target))) return null;
-    const others = members.filter(node => node !== moving);
+    const others = members.filter(node => node !== moving && !batchFavoriteIds?.has(node.dataset.favoriteId));
     const hovered = target.closest?.('.pinned-favicon');
     let reference, placement, index;
     if (!others.length) {
         if (internal) return null;
         // An empty saved list still has a real insertion boundary ahead of pins.
-        reference = all.find(node => node.classList.contains('native-favorite')) || moving || container.querySelector('.pinned-placeholder-container') || container;
+        reference = all.find(node => node.classList.contains('native-favorite')) || moving || members[0] || container.querySelector('.pinned-placeholder-container') || container;
         placement = reference.matches('.pinned-favicon') ? 'before' : 'empty';
         index = 0;
     } else if (hovered && all.includes(hovered) && !members.includes(hovered)) {
         reference = list === 'saved' ? others.at(-1) : others[0];
         placement = list === 'saved' ? 'after' : 'before';
         index = list === 'saved' ? others.length : 0;
+    } else if (batchFavoriteIds?.has(hovered?.dataset.favoriteId)) {
+        // An anchor within the moving block advances to the next unselected
+        // saved Favorite, matching the writer's stable-ID destination rule.
+        const next = members.slice(members.indexOf(hovered) + 1).find(node => others.includes(node));
+        reference = next || others.at(-1); placement = next ? 'before' : 'after';
+        index = next ? others.indexOf(next) : others.length;
     } else {
         // Prefer an actual hovered icon. In row/column gaps use the nearest
         // physical row, then its horizontal midpoints; X alone fails on wrap.
