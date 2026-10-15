@@ -1,7 +1,20 @@
 /** Real Today-selection evidence helpers. Importing this module never launches a browser. */
 import assert from 'node:assert/strict';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
-import { selectResultWithKeyboard } from './paired-chrome-ui.mjs';
+import { selectResultWithKeyboard, clickFreshResult } from './paired-chrome-ui.mjs';
+
+export async function expandSavedTodayFolder(page, folderSelector, record = async () => {}) {
+    const folder = await page.waitForSelector(folderSelector, { visible: true });
+    let collapsed;
+    try { collapsed = await folder.evaluate(node => node.classList.contains('collapsed')); }
+    finally { await folder.dispose(); }
+    if (!collapsed) { await record({phase:'today-folder-expand',status:'already-expanded'}); return; }
+    // Saving exact bindings schedules normal row replacement. Reacquire only a
+    // proven pre-input detached toggle using the existing bounded click helper.
+    // A successful or uncertain delivered click is never repeated.
+    await clickFreshResult(timeout => page.waitForSelector(`${folderSelector}.collapsed > .folder-header .folder-toggle`, {visible:true,timeout}),
+        observation => record({phase:'today-folder-expand',...observation}));
+}
 
 const flatten = nodes => nodes.flatMap(node => [node, ...flatten(node.children || [])]);
 const tabIdentity = ({ id, windowId, url, pendingUrl, pinned, incognito, active }) => ({ id, windowId, url, pendingUrl: pendingUrl || null, pinned, incognito, active });
@@ -211,11 +224,7 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
         },'all four exact Today tabs saved and bound');
         const proof=assertTodayFolderSaved(beforeSave,afterSave,{selectedIds:seed.slice(0,4),title,folderId,spaceId:space.id,windowId:fixture.windowA});
         const folderSelector=`.space.active .folder[data-bookmark-id="${folderId}"]`;
-        await ui(sidebar.page,'Expand the newly saved Today folder for visible evidence',async()=>{
-            await sidebar.page.waitForSelector(folderSelector);
-            if(await sidebar.page.$eval(folderSelector,node=>node.classList.contains('collapsed')))
-                await sidebar.page.click(`${folderSelector} > .folder-header .folder-toggle`);
-        });
+        await ui(sidebar.page,'Expand the newly saved Today folder for visible evidence',()=>expandSavedTodayFolder(sidebar.page,folderSelector,record));
         const rendered=await poll(()=>sidebar.page.evaluate(({folderId,ids})=>{
             const folder=document.querySelector(`.space.active .folder[data-bookmark-id="${folderId}"]`);
             const rows=folder?[...folder.querySelectorAll('.tab[data-tab-id]')]:[];

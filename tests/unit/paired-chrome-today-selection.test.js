@@ -100,3 +100,30 @@ test('Today invalidation observer is passive and accepts only the paired window 
         delete globalThis.__pairedTodaySearch;
     }
 });
+
+
+import { expandSavedTodayFolder } from '../../scripts/paired-chrome-today-selection.mjs';
+function folderExpansionFixture({collapsed=true,errors=[]}={}) {
+    const calls=[],records=[];let clicks=0,disposed=0;
+    const page={async waitForSelector(selector,options){calls.push({selector,options});if(calls.length===1)return {evaluate:async()=>collapsed,dispose:async()=>{disposed++;}};
+        return {async click(){const error=errors[clicks++];if(error)throw error;},dispose:async()=>{disposed++;}};}};
+    return {page,calls,records,record:async value=>records.push(value),get clicks(){return clicks;},get disposed(){return disposed;}};
+}
+test('new saved Today folder expands via one real click on its exact collapsed identity',async()=>{
+    const f=folderExpansionFixture();await expandSavedTodayFolder(f.page,'.folder[data-bookmark-id="saved-7"]',f.record);
+    assert.equal(f.clicks,1);assert.equal(f.disposed,2);assert.equal(f.calls[1].selector,'.folder[data-bookmark-id="saved-7"].collapsed > .folder-header .folder-toggle');
+    assert.equal(f.records.at(-1).status,'clicked');assert.equal(f.records.at(-1).attempt,1);
+});
+test('already expanded saved Today folder is never toggled closed',async()=>{
+    const f=folderExpansionFixture({collapsed:false});await expandSavedTodayFolder(f.page,'#folder',f.record);
+    assert.equal(f.clicks,0);assert.equal(f.calls.length,1);assert.equal(f.disposed,1);assert.equal(f.records[0].status,'already-expanded');
+});
+test('detached saved Today toggle is reacquired only for known pre-input driver failure',async()=>{
+    const error=new Error('Node is detached from document');error.stack='Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (/runtime/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1314:23)\n    at async CdpElementHandle.scrollIntoView (/runtime/puppeteer-core/lib/puppeteer/cdp/ElementHandle.js:106:13)';
+    const f=folderExpansionFixture({errors:[error]});await expandSavedTodayFolder(f.page,'#folder',f.record);
+    assert.equal(f.clicks,2);assert.equal(f.disposed,3);assert.deepEqual(f.records.map(item=>item.status),['detached-before-input','clicked']);
+});
+test('uncertain delivered saved Today folder click fails without replay',async()=>{
+    const error=new Error('Input.dispatchMouseEvent timed out');const f=folderExpansionFixture({errors:[error]});
+    await assert.rejects(expandSavedTodayFolder(f.page,'#folder',f.record),e=>e===error);assert.equal(f.clicks,1);assert.equal(f.disposed,2);
+});
