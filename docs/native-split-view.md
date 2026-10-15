@@ -44,6 +44,11 @@ ownership before releasing it. If a saved-pin deletion already completed before
 a later native-state change, Arcify reports that partial effect without recreating
 the bookmark or retrying the move.
 
+An open Create/End Split context menu holds incidental sidebar re-renders until
+the action is submitted or the menu is dismissed. A queued native update must
+not detach the exact rows under a focused keyboard menu. Live native validation
+still rejects a changed pair; dismissing the menu resumes pending refreshes.
+
 Split IDs and row snapshots are session-only. No new permission, durable split
 identity or URL-based partner matching is introduced.
 

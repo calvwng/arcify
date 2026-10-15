@@ -751,6 +751,7 @@ async function initSidebar() {
         if (area === 'session' && changes.activeSpaces && sidebarReady) {
             const nextId = changes.activeSpaces.newValue?.[currentWindow.id];
             if (nextId && (nextId !== activeSpaceId || pendingActiveSpaceId)) {
+                tabContextMenuRequest++; closeTabContextMenu();
                 bookmarkSelection.clear();
                 if (spaces.some(space => space.id === nextId)) {
                     activeSpaceId = nextId;
@@ -1255,6 +1256,7 @@ async function setActiveSpace(spaceId, updateTab = true) {
     const space = spaces.find(s => s.id === spaceId);
     if (!space) return;
     if (activeSpaceId && activeSpaceId !== spaceId) {
+        tabContextMenuRequest++; closeTabContextMenu();
         bookmarkSelection.clear();
         previousSpaceId = activeSpaceId;
         const activeEditor = document.activeElement?.closest?.(`[data-space-id="${activeSpaceId}"]`);
@@ -2896,7 +2898,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             if (!isBookmarkOnly) muted = Boolean((await chrome.tabs.get(tab.id)).mutedInfo?.muted);
             actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || 1, muted });
         } catch (error) { showFavoritesStatus(error.message); return; }
-        if (menuRequest !== tabContextMenuRequest || todaySnapshot && !todaySelection.validate(todaySnapshot) || pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
+        if (menuRequest !== tabContextMenuRequest || pendingActiveSpaceId || todaySnapshot && !todaySelection.validate(todaySnapshot) || pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
         showTabContextMenu(
             keyboard ? tabElement.getBoundingClientRect().left : e.pageX,
             keyboard ? tabElement.getBoundingClientRect().bottom : e.pageY,
@@ -2927,7 +2929,12 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             },
             todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot) } : null,
             { ...actions, report: showFavoritesStatus },
-            splitActions ? { ...splitActions, keyboard } : null
+            splitActions ? { ...splitActions, keyboard,
+                ...(splitActions.create || splitActions.end ? { beginInteraction: () => {
+                    const session = editorSessions.begin('tab', tab.id);
+                    return () => { void editorSessions.complete(session); };
+                } } : {})
+            } : null
         );
     };
     tabElement.addEventListener('contextmenu', openTabContextMenu);
@@ -3303,6 +3310,7 @@ function handleTabActivated(activeInfo) {
         // still be its previous space. The authoritative session intent wins.
         if (!pendingActiveSpaceId && spaceWithTab && spaceWithTab.id !== activeSpaceId) {
             // Switch to the space containing the tab
+            tabContextMenuRequest++; closeTabContextMenu();
             activeSpaceId = spaceWithTab.id;
             // Session and tab events can arrive in either order. Queue a view
             // change independently of the metadata projection, and let the same

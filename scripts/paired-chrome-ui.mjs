@@ -135,8 +135,11 @@ export async function locateFreshDragGeometry(page, sourceSelector, targetSelect
             // lose the target between lookup and the later connectivity reads.
             // Require both the locked-driver origin and a fresh detached/replaced
             // DOM proof; generic errors and uncertain input are never replayed.
+            // The driver's CDP scroll can fall back to its API scroll method;
+            // either path checks attachment before dispatching any mouse input.
             const preInputScroll = error.message === 'Node is detached from document'
-                && /^Error: Node is detached from document\n    at CdpElementHandle\.assertConnectedElement \([^\n]*\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js:\d+:\d+\)\n    at async CdpElementHandle\.scrollIntoView \([^\n]*\/puppeteer-core\/lib\/puppeteer\/cdp\/ElementHandle\.js:\d+:\d+\)/.test(error.stack || '');
+                && /^Error: Node is detached from document\n    at CdpElementHandle\.assertConnectedElement \(([^\n]*)\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js:\d+:\d+\)\n(?:    at async CdpElementHandle\.scrollIntoView \(\1\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js:\d+:\d+\)\n    at async CdpElementHandle\.<anonymous> \(\1\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js:\d+:\d+\)\n)?    at async CdpElementHandle\.scrollIntoView \(\1\/puppeteer-core\/lib\/puppeteer\/cdp\/ElementHandle\.js:\d+:\d+\)/.test(error.stack || '')
+                && !/Input\.dispatch|Mouse\.click|mouse\.click|CdpMouse/.test(error.stack || '');
             if (!preInputScroll || !target) throw error;
             const targetCurrent = await target.evaluate((element, selector) =>
                 element.isConnected && element === document.querySelector(selector), targetSelector);

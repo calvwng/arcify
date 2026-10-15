@@ -375,6 +375,30 @@ function detachedScrollError() {
     error.stack = 'Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1314:23)\n    at async CdpElementHandle.scrollIntoView (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/cdp/ElementHandle.js:106:13)';
     return error;
 }
+function fallbackDetachedScrollError() {
+    const error = detachedScrollError();
+    error.stack = 'Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1314:23)\n    at async CdpElementHandle.scrollIntoView (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1367:13)\n    at async CdpElementHandle.<anonymous> (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:119:20)\n    at async CdpElementHandle.scrollIntoView (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/cdp/ElementHandle.js:115:17)\n    at async CdpElementHandle.<anonymous> (file:///fixture/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:130:24)\n    at async locateFreshDragGeometry (file:///fixture/scripts/paired-chrome-ui.mjs:118:13)';
+    return error;
+}
+test('observed CDP-to-API scroll fallback detachment reacquires geometry before input', async () => {
+    const h = dragGeometryHarness([{error: fallbackDetachedScrollError(), replaced: 'target'}, {}]);
+    const result = await locateFreshDragGeometry(h.page, '#source', '#target', h.record, {pause: h.pause});
+    assert.equal(result.target, h.handles[3]);
+    assert.equal(h.records[0].status, 'detached-during-scroll-before-input');
+    assert.equal(h.records[0].targetCurrent, false);
+    assert.equal(h.calls.filter(item => item.includes('dispose')).length, 2);
+});
+for (const kind of ['persistent', 'still-current', 'different-driver-path', 'wrong-caller', 'input-frame']) {
+    test(`scroll fallback cannot replay ${kind} failure`, async () => {
+        const error = fallbackDetachedScrollError();
+        if (kind === 'different-driver-path') error.stack = error.stack.replace('/puppeteer/cdp/', '/other-driver/cdp/');
+        if (kind === 'wrong-caller') error.stack = error.stack.replace('CdpElementHandle.scrollIntoView', 'CdpElementHandle.click');
+        if (kind === 'input-frame') error.stack += '\n    at CdpMouse.click (file:///fixture/Input.js:1:1)';
+        const h = dragGeometryHarness([{error, ...(kind === 'still-current' ? {} : {detached: 'target'})}]);
+        await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, {pause: h.pause}), value => value === error);
+        assert.equal(h.calls.filter(item => item.includes('lookup')).length, kind === 'persistent' ? 6 : 2);
+    });
+}
 test('drag target detached during scrolling is freshly verified and reacquired before any mouse input', async () => {
     const h = dragGeometryHarness([{error: detachedScrollError(), detached: 'target'}, {}]);
     const result = await locateFreshDragGeometry(h.page, '#source', '#target', h.record, {pause: h.pause});

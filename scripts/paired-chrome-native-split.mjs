@@ -82,9 +82,36 @@ export function installNativeSplitInputTrace() {
     globalThis.__nativeSplitDomLastChange=performance.now();
     new MutationObserver(()=>{globalThis.__nativeSplitDomLastChange=performance.now();}).observe(document.getElementById('spacesList'),{subtree:true,childList:true,attributes:true});
     for(const type of ['dragstart','dragover','drop','dragend','keydown']) window.addEventListener(type,event=>{
-        trace.push({type,trusted:event.isTrusted,tabId:Number(event.target.closest?.('.tab')?.dataset.tabId)||null,action:event.target.closest?.('[data-action]')?.dataset.action||null,key:event.key||null,shift:Boolean(event.shiftKey),ctrl:Boolean(event.ctrlKey),dropEffect:event.dataTransfer?.dropEffect||null});
+        trace.push({type,trusted:event.isTrusted,tabId:Number(event.target.closest?.('.tab')?.dataset.tabId)||null,action:event.target.closest?.('[data-action]')?.dataset.action||null,key:event.key||null,shift:Boolean(event.shiftKey),ctrl:Boolean(event.ctrlKey),alt:Boolean(event.altKey),meta:Boolean(event.metaKey),dropEffect:event.dataTransfer?.dropEffect||null});
         if(trace.length>400)trace.shift();
     },{capture:true,passive:true});
+}
+
+/** Passive failure evidence, captured before fixture tabs are cleaned up. */
+export function readNativeSplitSidebarState() {
+    const describe = node => node ? {tagName:node.tagName,id:node.id,action:node.dataset.action||null,
+        tabId:Number(node.closest?.('.tab')?.dataset.tabId)||null,connected:node.isConnected} : null;
+    const menu=document.getElementById('tab-context-menu');
+    return {visibility:document.visibilityState,hasFocus:document.hasFocus(),focused:describe(document.activeElement),
+        status:document.getElementById('favoritesDropNotice')?.textContent||'',
+        selection:document.getElementById('todaySelectionStatus')?.textContent||'',
+        menu:menu?{text:menu.textContent,actions:[...menu.querySelectorAll('[data-action]')].map(describe)}:null,
+        rows:[...document.querySelectorAll('.space.active [data-tab-type="temporary"] .tab')].map(row=>({
+            ...describe(row),url:row.dataset.url,selected:row.getAttribute('aria-selected'),splitBadge:Boolean(row.querySelector('.today-split-badge'))})),
+        inputTrace:[...(globalThis.__nativeSplitInputTrace||[])],
+        domQuietMs:performance.now()-(globalThis.__nativeSplitDomLastChange||0)};
+}
+
+export function assertNativeSplitKeyboardTrace(events,{tabId,actions}) {
+    const inputs=events.filter(event=>event.type==='keydown'&&['F10','Enter'].includes(event.key));
+    assert.deepEqual(inputs.map(event=>event.key),actions.flatMap(()=>['F10','Enter']),'Every exact menu open must precede its single Enter.');
+    const opens=inputs.filter(event=>event.key==='F10');
+    const enters=inputs.filter(event=>event.key==='Enter');
+    assert.deepEqual(opens.map(event=>event.tabId),actions.map(()=>tabId),'Each keyboard menu opens once on the exact Today row.');
+    assert(opens.every(event=>event.trusted&&event.shift&&event.ctrl===false&&event.alt===false&&event.meta===false),'Menu opens must be trusted Shift+F10 input.');
+    assert.deepEqual(enters.map(event=>event.action),actions,'Each requested menu action receives exactly one Enter; no replay.');
+    assert(enters.every(event=>event.trusted&&event.shift===false&&event.ctrl===false&&event.alt===false&&event.meta===false),'Menu submits must be trusted unmodified Enter input.');
+    return events;
 }
 
 export function assertNativeSplitDragTrace(events,{sourceId,targetId,allowed}) {
@@ -272,8 +299,13 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         await sidebar.page.evaluate(()=>{globalThis.__nativeSplitInputTrace.length=0;});
         await select(request.tabIds);await menu(seed[0],true);const beforeKeyboard=await read();await action('createSplitView',true);const keyboardCreated=await awaitPair(request);const keyboardPair=assertNativeSplitCreated(beforeKeyboard,keyboardCreated,request);await badges(request.tabIds);await focusRetained(seed[0]);await checkpoint('native-split-keyboard-created',{before:beforeKeyboard,after:keyboardCreated,pair:keyboardPair});
         const keyboardTrace=await sidebar.page.evaluate(()=>globalThis.__nativeSplitInputTrace.filter(event=>event.type==='keydown'));
-        assert(keyboardTrace.some(event=>event.key==='F10'&&event.shift&&event.trusted));assert(keyboardTrace.some(event=>event.key==='Enter'&&event.trusted));await checkpoint('native-split-trusted-keyboard-input',{keyboardTrace});
-        await menu(seed[0],true);const beforeKeyboardEnd=await read();await action('endSplitView',true);const keyboardEnded=await poll(read,state=>request.tabIds.every(id=>exactTab(state,id).splitViewId===-1),'keyboard end native split');assertNativeSplitEnded(beforeKeyboardEnd,keyboardEnded,request);await focusRetained(seed[0]);
+        assertNativeSplitKeyboardTrace(keyboardTrace,{tabId:seed[0],actions:['createSplitView']});await checkpoint('native-split-trusted-keyboard-input',{keyboardTrace});
+        await menu(seed[0],true);const beforeKeyboardEnd=await read();await action('endSplitView',true);
+        const afterKeyboardEndInput=await sidebar.page.evaluate(readNativeSplitSidebarState);
+        await checkpoint('native-split-keyboard-end-submitted',{sidebar:afterKeyboardEndInput});
+        assertNativeSplitKeyboardTrace(afterKeyboardEndInput.inputTrace,{tabId:seed[0],actions:['createSplitView','endSplitView']});
+        const keyboardEnded=await poll(read,state=>request.tabIds.every(id=>exactTab(state,id).splitViewId===-1),'keyboard end native split');assertNativeSplitEnded(beforeKeyboardEnd,keyboardEnded,request);await focusRetained(seed[0]);
+        await checkpoint('native-split-keyboard-ended',{before:beforeKeyboardEnd,after:keyboardEnded});
         // A three-row selection offers no split action, and Escape cannot mutate
         // native tabs or canonical Today order.
         await select([seed[0],seed[2],seed[1]]);const overSelectedBefore=await read();await menu(seed[0]);
@@ -292,7 +324,14 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         await drag(seed[0],seed[4],{allowed:false});await sidebar.page.waitForFunction(()=>!document.getElementById('spacesList')?.classList.contains('today-split-dragging'),{polling:50});
         const rejectedAfter=await read();assertNativeSplitRejected(rejectedBefore,rejectedAfter);await checkpoint('native-split-incompatible-drop-rejected',{before:rejectedBefore,after:rejectedAfter});
         return evidence;
-    }catch(error){primaryError=error;await checkpoint('native-split-failed',{error:{message:error.message,stack:error.stack}}).catch(()=>{});throw error;}
+    }catch(error){
+        primaryError=error;
+        const sidebarState=sidebar?await sidebar.page.evaluate(readNativeSplitSidebarState).catch(captureError=>({error:captureError.message})):null;
+        await checkpoint('native-split-failed',{error:{message:error.message,stack:error.stack},sidebar:sidebarState}).catch(()=>{});
+        // Never foreground a background tab just for failure diagnostics.
+        if(sidebarState?.visibility==='visible'&&sidebarState.hasFocus)await screenshot(sidebar.page,'native-split-failure-sidebar',true).catch(()=>{});
+        throw error;
+    }
     finally{await finishBookmarkFixture([
         ()=>apiPage.evaluate(async ids=>{const live=new Set((await chrome.tabs.query({})).map(tab=>tab.id));const present=ids.filter(id=>live.has(id));if(present.length)await chrome.tabs.remove(present);},owned),
         ()=>option('syncTabGroups',Boolean(settings.syncTabGroups)),()=>option('invertTabOrder',Boolean(settings.invertTabOrder))

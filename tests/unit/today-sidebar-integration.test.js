@@ -417,6 +417,136 @@ test('real sidebar keyboard selected pair creates and ends native Split View wit
     assert.equal(live(101).querySelector('.today-split-badge'), null); assert(live(101).querySelector('.today-split-target'));
 });
 
+test('native update refresh does not invalidate a freshly opened keyboard End menu', async () => {
+    clear();
+    for (const id of [101, 102]) tabs.find(tab => tab.id === id).splitViewId = 703;
+    await refresh();
+    // Native Create emits splitViewId changes, queuing a second debounced render.
+    await chrome.tabs.onUpdated.emit(101, { splitViewId: 703 }, structuredClone(tabs.find(tab => tab.id === 101)));
+    await splitKeyboardMenu(101);
+    const action = menuItem('endSplitView');
+    assert.equal(document.activeElement, action);
+    const before = nativeSplitCalls.length;
+    await wait(150);
+    event(action, 'keydown', { key: 'Enter' }); await wait(260);
+    assert.deepEqual(nativeSplitCalls.slice(before), [['end', 703]], document.getElementById('favoritesDropNotice')?.textContent);
+    assert.equal(document.activeElement, live(101));
+});
+
+test('Split menu cancellation resumes queued refresh without a native action', async () => {
+    const before = nativeSplitCalls.length;
+    for (const exit of ['Escape', 'outside', 'superseding', 'removed']) {
+        clear(); event(live(101), 'click', { ctrlKey: true }); event(live(102), 'click', { ctrlKey: true });
+        await splitKeyboardMenu(101);
+        const original = live(101); assert(menuItem('createSplitView'));
+        await chrome.tabs.onUpdated.emit(101, { splitViewId: -1 }, structuredClone(tabs.find(tab => tab.id === 101)));
+        await wait(160); assert.equal(live(101), original, 'Frozen rows stay connected during the menu interaction');
+        if (exit === 'Escape') clear();
+        if (exit === 'outside') event(document.body, 'click');
+        if (exit === 'superseding') await context(6);
+        if (exit === 'removed') document.getElementById('tab-context-menu').remove();
+        await wait(260); assert.notEqual(live(101), original, `${exit} releases pending refresh`);
+        clear();
+    }
+    assert.equal(nativeSplitCalls.length, before);
+});
+
+test('Space navigation dismisses a Split menu and resumes destination rendering without stealing focus', async () => {
+    clear();
+    const before = splitRequests.length, activeIds = tabs.filter(tab => tab.active).map(tab => tab.id);
+    const other = { id: 'split-other', name: 'Split Other', color: 'green', bookmarkFolderId: 'split-other-folder', spaceBookmarks: [], temporaryTabs: [201] };
+    tabs.push({ id: 201, windowId: 10, index: tabs.filter(tab => tab.windowId === 10).length, active: false, pinned: false, incognito: false, groupId: -1, splitViewId: -1, title: 'Other Space', url: 'https://other-space.test/' });
+    folders.push({ id: other.bookmarkFolderId, parentId: 'root', title: other.name });
+    storedSpaces.push(other); local.spaces = structuredClone(storedSpaces);
+    await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); await wait(260);
+    try {
+        for (const route of ['wheel', 'session', 'native']) {
+            clear(); event(live(101), 'click', { ctrlKey: true }); event(live(102), 'click', { ctrlKey: true });
+            await splitKeyboardMenu(101); const original = live(101);
+            await chrome.tabs.onUpdated.emit(101, { splitViewId: -1 }, structuredClone(tabs.find(tab => tab.id === 101)));
+            document.getElementById('newTabBtn').focus();
+            if (route === 'wheel') event(document.getElementById('sidebar-container'), 'wheel', { deltaX: 40, deltaY: 0 });
+            if (route === 'session') {
+                session.activeSpaces[10] = other.id;
+                await onChanged.emit({ activeSpaces: { newValue: structuredClone(session.activeSpaces) } }, 'session');
+            }
+            if (route === 'native') await activate(201);
+            await wait(260);
+            assert.equal(document.getElementById('tab-context-menu'), null, `${route} closes the obsolete menu`);
+            assert.equal(content().closest('.space').dataset.spaceId, other.id);
+            assert(live(201), `${route} renders the exact destination tab after the gate releases`);
+            assert.equal(splitRequests.length, before);
+            assert.equal(document.activeElement, document.getElementById('newTabBtn'));
+            session.activeSpaces[10] = 'alpha';
+            await onChanged.emit({ activeSpaces: { newValue: structuredClone(session.activeSpaces) } }, 'session'); await wait(260);
+            assert.notEqual(live(101), original); assert(live(101));
+        }
+    } finally {
+        clear(); session.activeSpaces[10] = 'alpha';
+        await onChanged.emit({ activeSpaces: { newValue: structuredClone(session.activeSpaces) } }, 'session');
+        storedSpaces = storedSpaces.filter(space => space.id !== other.id); local.spaces = structuredClone(storedSpaces);
+        tabs.splice(tabs.findIndex(tab => tab.id === 201), 1); folders.splice(folders.findIndex(folder => folder.id === other.bookmarkFolderId), 1);
+        for (const tab of tabs) tab.active = activeIds.includes(tab.id);
+        await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); await wait(260);
+    }
+});
+
+test('a pending new Space cancels an older async Split menu before adoption', async () => {
+    clear(); const before = splitRequests.length;
+    event(live(101), 'click', { ctrlKey: true }); event(live(102), 'click', { ctrlKey: true });
+    const other = { id: 'split-pending', name: 'Pending Space', color: 'green', bookmarkFolderId: 'split-pending-folder', spaceBookmarks: [], temporaryTabs: [202] };
+    let release, entered = false;
+    const delayed = new Promise(resolve => { release = resolve; });
+    beforeTree = async () => { entered = true; await delayed; };
+    try {
+        event(live(101), 'keydown', { key: 'F10', shiftKey: true }); await wait(20);
+        assert(entered); assert.equal(document.getElementById('tab-context-menu'), null);
+        session.activeSpaces[10] = other.id;
+        await onChanged.emit({ activeSpaces: { newValue: structuredClone(session.activeSpaces) } }, 'session');
+        beforeTree = null; release(); await wait(25);
+        assert.equal(document.getElementById('tab-context-menu'), null, 'An old request cannot reopen its actionable menu while the next Space is pending');
+        event(live(101), 'keydown', { key: 'F10', shiftKey: true }); await wait(25);
+        assert.equal(document.getElementById('tab-context-menu'), null, 'A new menu on the obsolete Space must not block pending destination adoption either');
+        tabs.push({ id: 202, windowId: 10, index: tabs.filter(tab => tab.windowId === 10).length, active: false, pinned: false, incognito: false, groupId: -1, splitViewId: -1, title: 'Pending Space Tab', url: 'https://pending-space.test/' });
+        folders.push({ id: other.bookmarkFolderId, parentId: 'root', title: other.name });
+        storedSpaces.push(other); local.spaces = structuredClone(storedSpaces);
+        await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); await wait(260);
+        assert.equal(content().closest('.space').dataset.spaceId, other.id); assert(live(202));
+        assert.equal(document.getElementById('tab-context-menu'), null); assert.equal(splitRequests.length, before);
+    } finally {
+        beforeTree = null; release(); clear(); session.activeSpaces[10] = 'alpha';
+        await onChanged.emit({ activeSpaces: { newValue: structuredClone(session.activeSpaces) } }, 'session');
+        storedSpaces = storedSpaces.filter(space => space.id !== other.id); local.spaces = structuredClone(storedSpaces);
+        const tabIndex = tabs.findIndex(tab => tab.id === 202); if (tabIndex >= 0) tabs.splice(tabIndex, 1);
+        const folderIndex = folders.findIndex(folder => folder.id === other.bookmarkFolderId); if (folderIndex >= 0) folders.splice(folderIndex, 1);
+        await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); await wait(260);
+    }
+});
+
+test('Split menu refresh gate never bypasses fresh native-state validation', async () => {
+    clear();
+    for (const id of [101, 102]) tabs.find(tab => tab.id === id).splitViewId = 704;
+    await refresh(); await splitKeyboardMenu(101);
+    const original = live(101), before = nativeSplitCalls.length, requests = splitRequests.length;
+    const changed = tabs.find(tab => tab.id === 102), previous = structuredClone(changed);
+    try {
+        changed.groupId = 88;
+        await chrome.tabs.onUpdated.emit(102, { groupId: 88 }, structuredClone(changed));
+        await wait(160); assert.equal(live(101), original);
+        event(menuItem('endSplitView'), 'keydown', { key: 'Enter' }); await wait(260);
+        assert.equal(splitRequests.length, requests + 1, 'The unchanged row snapshot reaches the live writer');
+        assert.equal(splitRequests.at(-1).action, 'end');
+        assert.equal(nativeSplitCalls.length, before, 'Fresh group mismatch must prevent native unsplit');
+        assert.match(document.getElementById('favoritesDropNotice').textContent, /Today tabs.*changed/);
+        assert.equal(changed.groupId, 88); assert.equal(changed.splitViewId, 704);
+        assert.notEqual(live(101), original, 'Rejected action still releases its interaction gate');
+    } finally {
+        Object.assign(changed, previous);
+        for (const id of [101, 102]) tabs.find(tab => tab.id === id).splitViewId = -1;
+        clear(); await refresh();
+    }
+});
+
 test('real sidebar split target consumes non-adjacent drag once without legacy drop or Favorite promotion', async () => {
     clear(); const before = nativeSplitCalls.length, beforeRequests = splitRequests.length;
     const source = live(101), target = live(103).querySelector('.today-split-target');

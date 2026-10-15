@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {parseHTML} from 'linkedom';
-import {assertNativeSplitCapability,assertNativeSplitPagesPreserved,assertNativeSplitPair,assertUnaffectedSpaceProjection,assertNativeSplitCreated,assertNativeSplitDragTrace,assertNativeSplitEnded,assertNativeSplitRejected,assertSplitTargetFeedback,serveNativeSplitFixture,readNativeSplitMenuAction,assertNativeSplitMenuAction} from '../../scripts/paired-chrome-native-split.mjs';
+import {assertNativeSplitCapability,assertNativeSplitPagesPreserved,assertNativeSplitPair,assertUnaffectedSpaceProjection,assertNativeSplitCreated,assertNativeSplitDragTrace,assertNativeSplitEnded,assertNativeSplitRejected,assertSplitTargetFeedback,serveNativeSplitFixture,readNativeSplitMenuAction,assertNativeSplitMenuAction,assertNativeSplitKeyboardTrace,readNativeSplitSidebarState} from '../../scripts/paired-chrome-native-split.mjs';
 import {validateNativeSplitCapture} from '../../scripts/paired-chrome-native-split-capture.mjs';
 const capability=()=>({createSplit:'function',unsplit:'function',none:-1,major:155});
 test('positive native capability requires both real methods and installed 155+',()=>assertNativeSplitCapability(capability()));
@@ -90,4 +90,19 @@ test('native split action guard accepts actual production DIV menuitems and reje
 test('both real native menu input paths validate semantics before unchanged mouse or focused Enter input',()=>{
     const source=readFileSync(new URL('../../scripts/paired-chrome-native-split.mjs',import.meta.url),'utf8');
     assert.match(source,/waitForSelector\(selector,\{visible:true\}\);\s*assertNativeSplitMenuAction\(await sidebar\.page\.\$eval\(selector,readNativeSplitMenuAction\),name\);\s*if\(keyboard\)\{assert\.equal\(await sidebar\.page\.\$eval\(selector,node=>node===document\.activeElement\),true\);await sidebar\.page\.keyboard\.press\('Enter'\);\}\s*else await sidebar\.page\.click\(selector\)/);
+});
+
+
+const keyboardTrace=()=>['createSplitView','endSplitView'].flatMap(action=>[
+    {type:'keydown',key:'F10',tabId:11,trusted:true,shift:true,ctrl:false,alt:false,meta:false},
+    {type:'keydown',key:'Enter',action,trusted:true,shift:false,ctrl:false,alt:false,meta:false}
+]);
+const keyboardRequest={tabId:11,actions:['createSplitView','endSplitView']};
+test('native keyboard proof requires each exact focused menu action once',()=>assertNativeSplitKeyboardTrace(keyboardTrace(),keyboardRequest));
+for(const[name,mutate]of Object.entries({missingEnd:s=>s.pop(),replayedEnd:s=>s.push({...s.at(-1)}),wrongAction:s=>s.at(-1).action='createSplitView',untrustedEnd:s=>s.at(-1).trusted=false,wrongRow:s=>s[2].tabId=12,missingShift:s=>s[2].shift=false,modifiedEnter:s=>s.at(-1).ctrl=true,altEnter:s=>s.at(-1).alt=true,metaOpen:s=>s[0].meta=true,missingModifiers:s=>delete s.at(-1).alt,reordered:s=>{[s[0],s[1]]=[s[1],s[0]];}}))test(`native keyboard proof rejects ${name}`,()=>{const events=keyboardTrace();mutate(events);assert.throws(()=>assertNativeSplitKeyboardTrace(events,keyboardRequest));});
+test('native failure captures passive sidebar and full End input before cleanup without retry',()=>{
+    const source=readFileSync(new URL('../../scripts/paired-chrome-native-split.mjs',import.meta.url),'utf8');
+    assert.match(source,/action\('endSplitView',true\);[\s\S]*?evaluate\(readNativeSplitSidebarState\)[\s\S]*?native-split-keyboard-end-submitted[\s\S]*?keyboard end native split/);
+    assert.match(source,/catch\(error\)\{[\s\S]*?evaluate\(readNativeSplitSidebarState\)[\s\S]*?native-split-failed[\s\S]*?finally\{await finishBookmarkFixture/);
+    assert.doesNotMatch(readNativeSplitSidebarState.toString(),/\.click\(|\.focus\(|dispatchEvent|sendMessage|chrome\./);
 });

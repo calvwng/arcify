@@ -421,6 +421,15 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
 
     // Adjust position to keep within viewport
     Utils.adjustMenuPosition(contextMenu, x, y);
+    // A Split menu freezes exact row identities. Hold incidental re-renders
+    // until this interaction finishes; the writer still checks live native state.
+    const finishInteraction = splitActions?.beginInteraction?.();
+    let closed = false;
+    // Other menu surfaces may replace this shared host directly.
+    const observer = finishInteraction ? new document.defaultView.MutationObserver(() => {
+        if (!contextMenu.isConnected) closeMenu();
+    }) : null;
+    observer?.observe(document.body, { childList: true });
     if (splitActions?.keyboard) contextMenu.querySelector('[role="menuitem"]')?.focus();
     contextMenu.addEventListener('keydown', event => {
         if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
@@ -434,10 +443,14 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     });
 
     function closeMenu() {
+        if (closed) return;
+        closed = true;
+        observer?.disconnect();
         contextMenu.remove();
         document.removeEventListener('click', closeContextMenu, true);
         document.removeEventListener('keydown', closeOnEscape, true);
         if (activeTabContextMenuCleanup === closeMenu) activeTabContextMenuCleanup = null;
+        finishInteraction?.();
     }
     function closeContextMenu(event) { if (!contextMenu.contains(event.target)) closeMenu(); }
     function closeOnEscape(event) { if (event.key === 'Escape') { event.preventDefault(); closeMenu(); if (splitActions?.keyboard && tabElement.isConnected) tabElement.focus(); } }
