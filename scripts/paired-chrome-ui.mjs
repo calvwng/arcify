@@ -57,9 +57,9 @@ export async function selectResultWithKeyboard(input, readRows, matches) {
     return { before, keys, after };
 }
 
-// In locked Puppeteer 25, this exact assertConnectedElement failure occurs in
-// scrollIntoViewIfNeeded, before clickablePoint and mouse.click. Only reacquire
-// for that proven pre-input condition; an uncertain click is never replayed.
+// In locked Puppeteer 25, these exact failures occur while scrolling or finding
+// clickablePoint, before mouse.click. Reacquire only for proven pre-input stacks;
+// an uncertain click is never replayed, and persistently unclickable rows fail.
 export async function clickFreshResult(locate, record = async () => {}, {
     timeoutMs = 20_000, maxAttempts = 3, now = Date.now,
     pause = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -76,13 +76,17 @@ export async function clickFreshResult(locate, record = async () => {}, {
             await element.click();
             clicked = true;
         } catch (error) {
+            const stack = typeof error.stack === 'string' ? error.stack : '';
             const preInputDetached = error.message === 'Node is detached from document'
-                && /\bat [^\n]*\.assertConnectedElement\b/.test(error.stack || '')
-                && /\bat [^\n]*\.(?:scrollIntoView|scrollIntoViewIfNeeded|isIntersectingViewport)\b/.test(error.stack || '')
-                && !/Input\.dispatch|Mouse\.click|mouse\.click|CdpMouse/.test(error.stack || '');
-            if (!preInputDetached) throw error;
+                && /\bat [^\n]*\.assertConnectedElement\b/.test(stack)
+                && /\bat [^\n]*\.(?:scrollIntoView|scrollIntoViewIfNeeded|isIntersectingViewport)\b/.test(stack);
+            // Require the actual origin and ordered caller frames from the same
+            // Puppeteer source, not just matching words somewhere in a stack.
+            const preInputUnclickable = error.message === 'Node is either not clickable or not an Element'
+                && /^Error: Node is either not clickable or not an Element\n    at CdpElementHandle\.clickablePoint \(([^)\n]*\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js):\d+:\d+\)\n    at async CdpElementHandle\.<anonymous> \(\1:\d+:\d+\)\n    at async CdpElementHandle\.click \(\1:\d+:\d+\)(?:\n|$)/.test(stack);
+            if ((!preInputDetached && !preInputUnclickable) || /Input\.dispatch|Mouse\.click|mouse\.click|CdpMouse/.test(stack)) throw error;
             lastError = error;
-            await record({ attempt, status: 'detached-before-input', error: error.message });
+            await record({ attempt, status: preInputDetached ? 'detached-before-input' : 'unclickable-before-input', error: error.message });
             if (attempt === maxAttempts || now() >= deadline) throw error;
         } finally { await element.dispose().catch(() => {}); }
         if (clicked) { await record({ attempt, status: 'clicked' }); return; }

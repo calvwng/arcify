@@ -186,6 +186,20 @@ function detachedError(stack = '    at CdpElementHandle.assertConnectedElement (
     error.stack = `${error.message}\n${stack}`.replaceAll('\\n','\n');
     return error;
 }
+// Origin/caller sequence from the pinned 25.12.0 runtime and failed paired run.
+const elementHandleSource = 'file:///fixture/scripts/paired-chrome-runtime/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js';
+const unclickableStack = [
+    `    at CdpElementHandle.clickablePoint (${elementHandleSource}:693:23)`,
+    `    at async CdpElementHandle.<anonymous> (${elementHandleSource}:119:20)`,
+    `    at async CdpElementHandle.click (${elementHandleSource}:723:30)`,
+    `    at async CdpElementHandle.<anonymous> (${elementHandleSource}:130:24)`,
+    '    at async clickFreshResult (file:///fixture/scripts/paired-chrome-ui.mjs:76:13)'
+].join('\n');
+function unclickableError(stack = unclickableStack) {
+    const error = new Error('Node is either not clickable or not an Element');
+    error.stack = `Error: ${error.message}\n${stack}`;
+    return error;
+}
 function clickHarness(errors = []) {
     let time = 0, lookups = 0, dispatched = 0, disposals = 0;
     const records = [], budgets = [];
@@ -196,11 +210,17 @@ function clickHarness(errors = []) {
     return { locate,records,budgets,options:{ now:() => time,pause:async ms => { time += ms; } },
         state:() => ({lookups,dispatched,disposals}),advance:ms => { time += ms; } };
 }
-test('result click reacquires only proven pre-input detachment and dispatches once', async () => {
-    const h = clickHarness([detachedError()]);
-    await clickFreshResult(h.locate,item => h.records.push(item),h.options);
+for (const [name, makeError, status] of [
+    ['detachment', detachedError, 'detached-before-input'],
+    ['missing clickable point', unclickableError, 'unclickable-before-input']
+]) test(`result click reacquires proven pre-input ${name} and dispatches once`, async () => {
+    const error = makeError(), h = clickHarness([error]);
+    await clickFreshResult(async remaining => {
+        assert.equal(h.state().disposals, h.state().lookups, 'Old handles must be disposed before reacquisition.');
+        return h.locate(remaining);
+    },item => h.records.push(item),h.options);
     assert.deepEqual(h.state(),{lookups:2,dispatched:1,disposals:2});
-    assert.deepEqual(h.records.map(item => item.status),['detached-before-input','clicked']);
+    assert.deepEqual(h.records,[{ attempt:1,status,error:error.message },{ attempt:2,status:'clicked' }]);
     assert.deepEqual(h.budgets,[20000,19950]);
 });
 for (const [name,error] of [
@@ -213,19 +233,58 @@ for (const [name,error] of [
     await assert.rejects(clickFreshResult(h.locate,item => h.records.push(item),h.options),observed => observed === error);
     assert.equal(h.state().lookups,1); assert.equal(h.state().disposals,1); assert.deepEqual(h.records,[]);
 });
-test('repeated pre-input detachment stops at the attempt cap and retains the final error', async () => {
-    const errors=[detachedError(),detachedError(),detachedError()],h=clickHarness(errors);
+for (const [name, stack] of [
+    ['missing origin', unclickableStack.split('\n').slice(1).join('\n')],
+    ['missing click caller', unclickableStack.replace(/^.*CdpElementHandle\.click .*\n/m, '')],
+    ['wrong caller file', unclickableStack.replace(`click (${elementHandleSource}`, 'click (file:///other/ElementHandle.js')],
+    ['wrong source', unclickableStack.replaceAll('/puppeteer-core/', '/other-driver/')],
+    ['reversed frames', unclickableStack.split('\n').reverse().join('\n')],
+    ['no origin position', unclickableStack.replace(':693:23', '')],
+    ['other origin before matching frames', `    at Other.click (other.js:1:1)\n${unclickableStack}`],
+    ['similar method name', unclickableStack.replace('.clickablePoint ', '.clickablePointLater ')],
+    ...['Input.dispatchMouseEvent', 'Mouse.click', 'mouse.click', 'CdpMouse.click'].map(frame =>
+        [`input frame ${frame}`, `${unclickableStack}\n    at ${frame} (Input.js:1:1)`])
+]) test(`missing clickable point never retries a malformed or uncertain stack: ${name}`, async () => {
+    const error=unclickableError(stack), h=clickHarness([error]);
+    await assert.rejects(clickFreshResult(h.locate,item => h.records.push(item),h.options), observed => observed === error);
+    assert.deepEqual(h.state(),{lookups:1,dispatched:0,disposals:1}); assert.deepEqual(h.records,[]);
+});
+for (const stack of [undefined, null, {}, 'Node is either not clickable or not an Element']) {
+    test(`missing clickable point without a usable Error stack is fatal (${JSON.stringify(stack)})`, async () => {
+        const error=unclickableError(); error.stack=stack; const h=clickHarness([error]);
+        await assert.rejects(clickFreshResult(h.locate,item => h.records.push(item),h.options), observed => observed === error);
+        assert.deepEqual(h.state(),{lookups:1,dispatched:0,disposals:1}); assert.deepEqual(h.records,[]);
+    });
+}
+for (const makeError of [detachedError, unclickableError]) test(`repeated pre-input ${makeError.name} stops at the attempt cap and retains the final error`, async () => {
+    const errors=[makeError(),makeError(),makeError()],h=clickHarness(errors);
     await assert.rejects(clickFreshResult(h.locate,item => h.records.push(item),h.options),error => error === errors[2]);
     assert.deepEqual(h.state(),{lookups:3,dispatched:0,disposals:3}); assert.equal(h.records.length,3);
+    assert.deepEqual(h.budgets,[20000,19950,19900]);
+});
+test('pre-input geometry failure cannot extend the shared lookup deadline', async () => {
+    const error=unclickableError(),h=clickHarness([error]);
+    await assert.rejects(clickFreshResult(h.locate,item => h.records.push(item),{
+        ...h.options, pause:async () => h.advance(20000)
+    }),observed => observed === error);
+    assert.deepEqual(h.state(),{lookups:1,dispatched:0,disposals:1}); assert.equal(h.records.length,1);
+});
+test('an input dispatch failure cannot replay a possibly completed click', async () => {
+    let lookups=0,dispatches=0,disposals=0;
+    const error=unclickableError(`${unclickableStack}\n    at CdpMouse.click (Input.js:1:1)`);
+    await assert.rejects(clickFreshResult(async () => {
+        lookups++; return {click:async () => {dispatches++;throw error;},dispose:async () => {disposals++;}};
+    }),observed => observed === error);
+    assert.deepEqual({lookups,dispatches,disposals},{lookups:1,dispatches:1,disposals:1});
 });
 test('shared lookup budget prevents another dispatch after expiration', async () => {
     const h=clickHarness();
     await assert.rejects(clickFreshResult(async budget => { const element=await h.locate(budget);h.advance(20001);return element; },undefined,h.options),/deadline expired/);
     assert.deepEqual(h.state(),{lookups:1,dispatched:0,disposals:1});
 });
-test('cleanup failure after a successful click cannot replay input', async () => {
+for (const makeError of [detachedError, unclickableError]) test(`cleanup ${makeError.name} after a successful click cannot replay input`, async () => {
     let clicks=0,lookups=0;
-    await clickFreshResult(async () => {lookups++;return {click:async () => {clicks++;},dispose:async () => {throw detachedError();}};});
+    await clickFreshResult(async () => {lookups++;return {click:async () => {clicks++;},dispose:async () => {throw makeError();}};});
     assert.equal(clicks,1);assert.equal(lookups,1);
 });
 test('exact result lookup rejection is fatal before clicking or retrying', async () => {
@@ -233,10 +292,15 @@ test('exact result lookup rejection is fatal before clicking or retrying', async
     await assert.rejects(clickFreshResult(async () => {lookups++;throw new Error('Expected one exact result, found 2.');}),/Expected one exact result/);
     assert.equal(lookups,1);
 });
-test('post-click evidence failure never repeats a completed click', async () => {
-    const h=clickHarness(),error=detachedError();
+for (const makeError of [detachedError, unclickableError]) test(`post-click evidence ${makeError.name} never repeats a completed click`, async () => {
+    const h=clickHarness(),error=makeError();
     await assert.rejects(clickFreshResult(h.locate,async () => {throw error;},h.options),observed => observed === error);
     assert.deepEqual(h.state(),{lookups:1,dispatched:1,disposals:1});
+});
+test('pre-input evidence failure disposes the handle and stops without retry', async () => {
+    const h=clickHarness([unclickableError()]),error=new Error('Evidence unavailable');
+    await assert.rejects(clickFreshResult(h.locate,async () => {throw error;},h.options),observed => observed === error);
+    assert.deepEqual(h.state(),{lookups:1,dispatched:0,disposals:1});
 });
 
 for (const index of [0, 1, 3]) test(`keyboard result selection observes target at row ${index}`, async () => {
