@@ -1,9 +1,9 @@
 // Static integration contract only. Importing the real runner would launch Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-const runner = await readFile(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url), 'utf8');
-const workflow = await readFile(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url), 'utf8');
+import { readSourceText } from '../source-text.js';
+const runner = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
+const workflow = readSourceText(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url));
 
 test('menu evidence modules execute once in full-only scope before Favorite receipts and browser restart', () => {
     const fullStart = runner.indexOf("    if (report.runMode === 'full') {\n");

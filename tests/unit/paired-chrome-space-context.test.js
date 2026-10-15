@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { readSourceText } from '../source-text.js';
 import { runInNewContext } from 'node:vm';
 import { SPACE_MENU_ITEMS, SPACE_PICKER_IDS, assertSpaceContextMenu, assertSpaceIconPicker,
     assertSpaceIconProjection, assertSpaceContextUnchanged, assertSpaceIconSaved,
@@ -103,7 +103,7 @@ test('missing dialog times out and uncertain clicks are not retried', async () =
     assert.equal(clicks, 2); assert.equal(page.listenerCount('dialog'), 0);
 });
 test('fixture entry point stays separate, uses actual input and cannot launch a browser by import', async () => {
-    const source = await readFile(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url), 'utf8');
+    const source = readSourceText(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url));
     assert.match(source, /export async function exerciseSpaceContextBasics/);
     assert.match(source, /element\.click\(\{ button: 'right' \}\)/);
     assert.match(source, /await rightClickFreshSpaceTrigger\(page, selector, record\)/);
@@ -125,7 +125,7 @@ test('Space fixture is restricted to non-root GitHub CI before touching any brow
         assert.throws(() => assertSpaceContextFixtureEnvironment(env, 1001));
     }
     assert.throws(() => assertSpaceContextFixtureEnvironment({ GITHUB_ACTIONS: 'true', CI: 'true' }, 0));
-    const source = await readFile(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url), 'utf8');
+    const source = readSourceText(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url));
     assert.match(source, /export async function exerciseSpaceContextBasics[^\n]+\n    assertSpaceContextFixtureEnvironment\(\);/);
 });
 const shot = () => ({ filename: '01-space.png', label: 'proof', url: 'chrome-extension://fixture/sidebar.html', capturedAt: '2026-10-15T06:00:00.000Z' });
@@ -265,7 +265,7 @@ for (const [name, mutate] of Object.entries({ wrongTarget: s => s.spaceId = 'oth
 })) test(`saved details projection rejects ${name}`, () => { const s = details(); mutate(s); assert.throws(() => assertSpaceDetailsProjection(s, detailOptions)); });
 
 test('real basic-edit fixture types and submits forms, verifies all exact-ID mutations, and retains required screenshots', async () => {
-    const source = await readFile(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url), 'utf8');
+    const source = readSourceText(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url));
     assert.match(source, /await page\.keyboard\.type\(text\)/);
     assert.match(source, /await page\.keyboard\.press\('Enter'\)/);
     for (const label of ['Rename', 'Theme Color', 'New Folder']) assert(source.includes(`openEditor(page, '${label}'`));
@@ -285,7 +285,7 @@ test('visible created-folder screenshot proof also requires the applied theme of
     }
 });
 test('icon-modal Cancel uses real input and checks pre-open state plus restored origin focus', async () => {
-    const source = await readFile(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url), 'utf8');
+    const source = readSourceText(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url));
     assert.match(source, /Cancel the icon picker[^\n]+page\.click\('\.space-editor > button'\)/);
     assert.match(source, /evidence\.iconCancelled = \{ before: evidence\.picker\.before, after: await read\(\) \}/);
     assert.match(source, /assertSpaceContextUnchanged\(evidence\.iconCancelled\.before, evidence\.iconCancelled\.after\);\n        assert\.equal\(await page\.\$eval\(chip\(target\.id\), node => node === document\.activeElement\), true\)/);
