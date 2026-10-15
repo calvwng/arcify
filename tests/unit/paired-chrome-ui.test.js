@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry } from '../../scripts/paired-chrome-ui.mjs';
+import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry } from '../../scripts/paired-chrome-ui.mjs';
 
 function dragGeometryHarness(states = [{}]) {
     const calls = [], records = [], handles = [];
@@ -333,4 +333,38 @@ test('uncaught renderer exceptions fail evidence even if UI predicates passed', 
 });
 test('console and expected observer diagnostics are retained without becoming renderer exceptions', () => {
  assert.doesNotThrow(() => assertNoPageErrors([{type:'console-error',message:'network unavailable'},{type:'reload-view-detach',message:'closed'}]));
+});
+
+
+test('enabled control readiness runs after foregrounding, then dispatches one real click', async () => {
+    const h = harness(); let enabled = false;
+    h.page.bringToFront = async () => { h.calls.push('foreground'); enabled = true; };
+    h.page.waitForSelector = async selector => { assert(enabled); assert.equal(selector, '#refresh:not([disabled])'); h.calls.push('ready'); };
+    h.page.click = async selector => { assert.equal(selector, '#refresh'); h.calls.push('real click'); return 42; };
+    assert.equal(await performVisibleClick(h.page, '#refresh', h.record, '#refresh:not([disabled])'), 42);
+    assert.deepEqual(h.calls, ['foreground', 'visible', 'observe', 'ready', 'real click']);
+    assert.deepEqual(h.records.map(item => item.phase), ['focus', 'action', 'completed']);
+});
+test('unready control fails without clicking or retrying', async () => {
+    const h = harness(); let clicks = 0, reads = 0;
+    const error = new Error('button remained disabled');
+    h.page.waitForSelector = async () => { reads++; throw error; };
+    h.page.click = async () => { clicks++; };
+    await assert.rejects(performVisibleClick(h.page, '#refresh', h.record, '#refresh:not([disabled])'), value => value === error);
+    assert.equal(reads, 1); assert.equal(clicks, 0); assert.equal(h.records.at(-1).failedPhase, 'action');
+});
+test('uncertain ready-control click is never repeated', async () => {
+    const h = harness(); let clicks = 0;
+    h.page.waitForSelector = async () => {};
+    const error = new Error('input transport failed');
+    h.page.click = async () => { clicks++; throw error; };
+    await assert.rejects(performVisibleClick(h.page, '#refresh', h.record, '#refresh:not([disabled])'), value => value === error);
+    assert.equal(clicks, 1);
+});
+test('ordinary click without a readiness predicate keeps the existing single-click path', async () => {
+    const h = harness(); let clicks = 0;
+    h.page.waitForSelector = async () => { throw new Error('unexpected readiness wait'); };
+    h.page.click = async () => { clicks++; };
+    await performVisibleClick(h.page, '#button', h.record);
+    assert.equal(clicks, 1); assert.equal(h.records.at(-1).phase, 'completed');
 });

@@ -31,6 +31,15 @@ export async function performVisibleAction(page, label, action, record = async (
     }
 }
 
+// Readiness can use RAF internally, so observe it only after the intended
+// control page is visible. Never retry an uncertain click or relax its selector.
+export async function performVisibleClick(page, selector, record = async () => {}, readySelector) {
+    return performVisibleAction(page, `Click ${selector}`, async () => {
+        if (readySelector) await page.waitForSelector(readySelector);
+        return page.click(selector);
+    }, record);
+}
+
 // Puppeteer's press() accepts one key, not Playwright-style chord strings.
 export async function replaceInputText(page, input, text) {
     // The centered panel grows/animates as results arrive. Focus the exact field

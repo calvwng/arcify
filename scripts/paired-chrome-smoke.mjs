@@ -21,7 +21,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry } from './paired-chrome-ui.mjs';
+import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry } from './paired-chrome-ui.mjs';
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { exercisePersistentFavorites } from './paired-chrome-persistent-favorites.mjs';
@@ -117,14 +117,15 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 const head = path => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: path, encoding: 'utf8' }).trim();
 const slug = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 async function saveReport() { await writeFile(resolve(OUTPUT, 'report.json'), JSON.stringify(report, null, 2)); }
-async function ui(page, label, action) {
-    return performVisibleAction(page, label, action, async checkpoint => {
-        report.uiActions ||= [];
-        report.uiActions.push(checkpoint);
-        await saveReport();
-    });
+async function recordUi(checkpoint) {
+    report.uiActions ||= [];
+    report.uiActions.push(checkpoint);
+    await saveReport();
 }
-async function clickUI(page, selector) { return ui(page, `Click ${selector}`, () => page.click(selector)); }
+async function ui(page, label, action) {
+    return performVisibleAction(page, label, action, recordUi);
+}
+async function clickUI(page, selector, readySelector) { return performVisibleClick(page, selector, recordUi, readySelector); }
 async function typeUI(page, selector, text) { return ui(page, `Type ${selector}`, () => page.type(selector, text)); }
 async function poll(read, accept, label, timeout = 20_000) {
     const deadline = Date.now() + timeout;
@@ -482,12 +483,10 @@ async function reloadPairedExtension(name) {
         if (name === 'arcify') arcifyOptions = reopened; else spotlightOptions = reopened;
         if (!page.isClosed()) await page.close();
         if (name === 'arcify') {
-            await spotlightOptions.waitForSelector('#refresh-connection:not([disabled])');
-            await clickUI(spotlightOptions, '#refresh-connection');
+            await clickUI(spotlightOptions, '#refresh-connection', '#refresh-connection:not([disabled])');
             await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
         } else {
-            await arcifyOptions.waitForSelector('#bridgeCheck:not([disabled])');
-            await clickUI(arcifyOptions, '#bridgeCheck');
+            await clickUI(arcifyOptions, '#bridgeCheck', '#bridgeCheck:not([disabled])');
             await arcifyOptions.waitForSelector('#bridgeStatus[data-state="connected"]');
         }
         const after = await poll(readTargets, targets => targets.some(target => target.type === 'service_worker' && target.url === url && target.targetId !== original.targetId), 'the reloaded extension worker');
@@ -917,8 +916,7 @@ try {
     await step(stepNames[12], async () => {
         const before = await snapshot();
         for (const name of ['arcify', 'spotlight']) await reloadPairedExtension(name);
-        await spotlightOptions.waitForSelector('#refresh-connection:not([disabled])');
-        await clickUI(spotlightOptions, '#refresh-connection'); await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
+        await clickUI(spotlightOptions, '#refresh-connection', '#refresh-connection:not([disabled])'); await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
         const after = await snapshot();
         assert.deepEqual(after.spaces.map(space => space.id), before.spaces.map(space => space.id));
         for (const tabId of [fixture.sourceA, fixture.alpha]) assert.equal(after.tabs.find(tab => tab.id === tabId)?.spaceId, before.tabs.find(tab => tab.id === tabId)?.spaceId);
