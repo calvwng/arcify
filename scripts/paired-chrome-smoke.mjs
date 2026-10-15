@@ -34,6 +34,7 @@ import { assertSavedBookmarkFavorite } from './paired-chrome-favorites.mjs';
 import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels } from './paired-chrome-space-marker.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
 import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
+import { installColdSetupObserver, readColdSetupObserver, stopColdSetupObserver, waitForColdSetupQuiescence } from './paired-chrome-cold-setup.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
 
@@ -965,30 +966,50 @@ try {
         return { startupOffer: offered, repeatedOffer: repeated, focusBefore, focusExplicitlySetForEnter: true, actualBrowserStartupTested: false, sourceBefore, native };
     });
     await step(stepNames[15], async () => {
-        const helper = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`);
-        await waitSidebarCommand(helper.page);
-        await helper.page.waitForSelector('[data-testid="spotlight-result"]:not([data-result-type="arcify-sidebar-command"])');
-        const offered = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: helper.tab.id });
-        assert.equal(offered.accepted, true, JSON.stringify(offered));
-        await helper.page.waitForSelector(`${sidebarSelector}.selected`);
-        const preparedInput = await sidebarInput(helper.page);
-        await ui(helper.page, 'Prepare Spotlight focus before stopping Arcify worker', () => preparedInput.asElement().focus());
-        await helper.page.evaluate(() => {
-            globalThis.__pairedSidebarKey = null;
-            document.addEventListener('keydown', event => {
-                if (event.key === 'Enter') globalThis.__pairedSidebarKey = { trusted: event.isTrusted, observedAt: Date.now(), focusedInput: event.target.matches('[data-testid="spotlight-input"]') };
-            }, { capture: true, once: true });
-        });
-        const beforeTabs = await tabsIn(fixture.windowA);
-        const eventCount = (await nativePanelState()).events.length;
-        const url = `chrome-extension://${arcifyId}/background.js`;
-        const workerTarget = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === url);
-        const worker = await workerTarget.worker();
-        const session = await browser.target().createCDPSession();
-        const readTargets = async () => (await session.send('Target.getTargets')).targetInfos;
-        report.sidebarColdWorker = [];
-        const lifecycleStart = report.targetLifecycle.length;
+        // Observe actual paired requests before helper creation, including any
+        // initialization still running when the selected row first appears.
+        const spotlightTarget = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === `chrome-extension://${spotlightId}/background.js`);
+        const setupWorker = await spotlightTarget.worker();
+        await setupWorker.evaluate(installColdSetupObserver, { kind: 'worker', peerId: arcifyId, windowId: fixture.windowA });
+        let helper, preparedInput, session, pageObserved = false, workerObserved = true;
+        report.sidebarColdSetup = [];
         try {
+            helper = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`);
+            await waitSidebarCommand(helper.page);
+            await helper.page.waitForSelector('[data-testid="spotlight-result"]:not([data-result-type="arcify-sidebar-command"])');
+            await helper.page.evaluate(installColdSetupObserver, { kind: 'page', peerId: arcifyId, windowId: fixture.windowA });
+            pageObserved = true;
+            const offered = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: helper.tab.id });
+            assert.equal(offered.accepted, true, JSON.stringify(offered));
+            await helper.page.waitForSelector(`${sidebarSelector}.selected`);
+            preparedInput = await sidebarInput(helper.page);
+            await ui(helper.page, 'Prepare Spotlight focus before stopping Arcify worker', () => preparedInput.asElement().focus());
+            await helper.page.evaluate(() => {
+                globalThis.__pairedSidebarKey = null;
+                document.addEventListener('keydown', event => {
+                    if (event.key === 'Enter') globalThis.__pairedSidebarKey = { trusted: event.isTrusted, observedAt: Date.now(), focusedInput: event.target.matches('[data-testid="spotlight-input"]') };
+                }, { capture: true, once: true });
+            });
+            const beforeTabs = await tabsIn(fixture.windowA);
+            const eventCount = (await nativePanelState()).events.length;
+            const url = `chrome-extension://${arcifyId}/background.js`;
+            const workerTarget = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === url);
+            const worker = await workerTarget.worker();
+            session = await browser.target().createCDPSession();
+            const readTargets = async () => (await session.send('Target.getTargets')).targetInfos;
+            report.sidebarColdWorker = [];
+            await waitForColdSetupQuiescence(async () => {
+                const [page, worker] = await Promise.all([
+                    helper.page.evaluate(readColdSetupObserver), setupWorker.evaluate(readColdSetupObserver)
+                ]);
+                return { page, worker };
+            }, async observation => { report.sidebarColdSetup.push(observation); await saveReport(); });
+            // Restore instrumentation before the one stop. These are local realm
+            // operations only, with no focus, query, peer request, or timer changes.
+            report.sidebarColdSetup.push(await helper.page.evaluate(stopColdSetupObserver)); pageObserved = false;
+            report.sidebarColdSetup.push(await setupWorker.evaluate(stopColdSetupObserver)); workerObserved = false;
+            await saveReport();
+            const lifecycleStart = report.targetLifecycle.length;
             const old = await terminateObservedWorker({ worker, url, readTargets,
                 releaseNetwork: async () => { const network = await networkTargets.get(workerTarget); assert(network); const id = network.id(); await network.detach(); networkTargets.delete(workerTarget); return id; },
                 record: async observation => { report.sidebarColdWorker.push(observation); await saveReport(); }
@@ -1017,7 +1038,19 @@ try {
             assert.equal(helper.page.isClosed(), false);
             await closeNativeSidebar(); await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
             return { oldTargetId: old.targetId, replacement, identity, native };
-        } finally { await preparedInput.dispose(); await session.detach(); }
+        } finally {
+            // Retain real request/event traces even when setup fails. Restoration
+            // is required on every exit; no observer survives the cold boundary.
+            try {
+                if (pageObserved) report.sidebarColdSetup.push(await helper.page.evaluate(stopColdSetupObserver));
+            } finally {
+                try {
+                    if (workerObserved) report.sidebarColdSetup.push(await setupWorker.evaluate(stopColdSetupObserver));
+                } finally {
+                    await preparedInput?.dispose(); await session?.detach(); await saveReport();
+                }
+            }
+        }
     });
     await step(stepNames[16], async () => {
         // Both extensions were reloaded earlier. Refresh this existing webpage so
