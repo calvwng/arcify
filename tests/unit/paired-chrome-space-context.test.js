@@ -340,7 +340,7 @@ test('created-folder screenshot requires the exact unobscured row inside its vie
 for (const [name, mutate] of Object.entries({ wrongSpace: s => s.spaceId = 'other', inactive: s => s.activeSpaceId = 'other', wrongFolder: s => s.folderId = 'other', duplicate: s => s.matches = 2,
     staleName: s => s.title = 'Old name', belowViewport: s => s.rect.y = 700, clipped: s => s.rect.x = -1, hidden: s => s.rect.height = 0, covered: s => s.unobscured = false
 })) test(`created-folder screenshot rejects ${name}`, () => { const state = folderScreenshot(); mutate(state); assert.throws(() => assertSpaceFolderScreenshot(state, folderScreenshotOptions)); });
-test('folder screenshot observer requires real hit-tested corners and center and has no scrolling or focus effect', () => {
+test('folder screenshot observer requires real hit-tested edge midpoints and center and has no scrolling or focus effect', () => {
     const points = [], leaf = {}, other = {}; let hit = leaf;
     const header = { getBoundingClientRect: () => ({ x: 8, y: 120, width: 208, height: 30 }), querySelector: () => ({ textContent: 'Created folder' }), contains: node => node === leaf };
     const folder = { dataset: { bookmarkId: 'saved-folder' }, querySelector: () => header };
@@ -348,6 +348,28 @@ test('folder screenshot observer requires real hit-tested corners and center and
     const context = { innerWidth: 224, innerHeight: 600, document: { querySelectorAll: () => [space], querySelector: () => space,
         elementFromPoint: (x, y) => { points.push([x, y]); return hit; } } };
     const read = () => runInNewContext(`(${readSpaceFolderScreenshot.toString()})({spaceId:'work',folderId:'saved-folder'})`, context);
-    assertSpaceFolderScreenshot(read(), folderScreenshotOptions); assert.deepEqual(points, [[10,122],[214,122],[10,148],[214,148],[112,135]]);
+    assertSpaceFolderScreenshot(read(), folderScreenshotOptions); assert.deepEqual(points, [[112,122],[112,148],[10,135],[214,135],[112,135]]);
     hit = other; assert.equal(read().unobscured, false);
+});
+
+test('rounded folder corners are not treated as opaque row pixels', () => {
+    const leaf = {}, background = {};
+    const header = { getBoundingClientRect: () => ({ x: 8, y: 120, width: 208, height: 30 }), querySelector: () => ({ textContent: 'Created folder' }), contains: node => node === leaf };
+    const folder = { dataset: { bookmarkId: 'saved-folder' }, querySelector: () => header };
+    const space = { dataset: { spaceId: 'work' }, querySelectorAll: () => [folder] };
+    const context = { innerWidth: 224, innerHeight: 600, document: { querySelectorAll: () => [space], querySelector: () => space,
+        elementFromPoint: (x, y) => ((x < 16 || x > 208) && (y < 128 || y > 142)) ? background : leaf } };
+    const state = runInNewContext(`(${readSpaceFolderScreenshot.toString()})({spaceId:'work',folderId:'saved-folder'})`, context);
+    assertSpaceFolderScreenshot(state, folderScreenshotOptions); assert.equal(state.hits.length, 5);
+});
+
+for (const blocked of [0, 1, 2, 3, 4]) test(`folder screenshot rejects obstruction at point ${blocked} and records every hit`, () => {
+    const leaf = {}, other = {}; let index = 0;
+    const header = { getBoundingClientRect: () => ({ x: 8, y: 120, width: 208, height: 30 }), querySelector: () => ({ textContent: 'Created folder' }), contains: node => node === leaf };
+    const folder = { dataset: { bookmarkId: 'saved-folder' }, querySelector: () => header };
+    const space = { dataset: { spaceId: 'work' }, querySelectorAll: () => [folder] };
+    const context = { innerWidth: 224, innerHeight: 600, document: { querySelectorAll: () => [space], querySelector: () => space, elementFromPoint: () => index++ === blocked ? other : leaf } };
+    const state = runInNewContext(`(${readSpaceFolderScreenshot.toString()})({spaceId:'work',folderId:'saved-folder'})`, context);
+    assert.equal(state.hits.length, 5); assert.equal(index, 5); assert.equal(state.hits[blocked].inside, false);
+    assert.throws(() => assertSpaceFolderScreenshot(state, folderScreenshotOptions), /edge midpoints and center/);
 });

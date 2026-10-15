@@ -220,17 +220,23 @@ export function readSpaceFolderScreenshot({ spaceId, folderId }) {
     const header = matches[0]?.querySelector(':scope > .folder-header');
     if (!header) return null;
     const { x, y, width, height } = header.getBoundingClientRect();
-    const points = [[x + 2, y + 2], [x + width - 2, y + 2], [x + 2, y + height - 2], [x + width - 2, y + height - 2], [x + width / 2, y + height / 2]];
+    // The folder clips its rounded 8px corners. Probe each edge midpoint and
+    // center instead of a point outside that legitimate painted shape.
+    const insetX = Math.min(2, width / 4), insetY = Math.min(2, height / 4);
+    const points = [[x + width / 2, y + insetY], [x + width / 2, y + height - insetY],
+        [x + insetX, y + height / 2], [x + width - insetX, y + height / 2], [x + width / 2, y + height / 2]];
+    const hits = points.map(([px, py]) => { const hit = document.elementFromPoint(px, py);
+        return { x: px, y: py, inside: header.contains(hit), tag: hit?.tagName || null, className: hit?.getAttribute?.('class') || null }; });
     return { spaceId, folderId, matches: matches.length, title: header.querySelector('.folder-title')?.textContent,
         activeSpaceId: document.querySelector('.space.active')?.dataset.spaceId,
         rect: { x, y, width, height }, viewport: { width: innerWidth, height: innerHeight },
-        unobscured: points.every(([px, py]) => header.contains(document.elementFromPoint(px, py))) };
+        hits, unobscured: hits.every(hit => hit.inside) };
 }
 export function assertSpaceFolderScreenshot(state, { spaceId, folder }) {
     assert(state, 'The exact created folder header must exist for its screenshot.');
     assert.equal(state.spaceId, spaceId); assert.equal(state.activeSpaceId, spaceId);
     assert.equal(state.folderId, folder.id); assert.equal(state.matches, 1); assert.equal(state.title, folder.title);
-    bounds(state); assert.equal(state.unobscured, true, 'The folder-header corners and center must hit the actual visible row.');
+    bounds(state); assert.equal(state.unobscured, true, 'The folder-header edge midpoints and center must hit the actual visible row.');
     return state;
 }
 
@@ -453,10 +459,16 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, ui, scre
             const folderHeader = await page.waitForSelector(`.space[data-space-id="${target.id}"] .folder[data-bookmark-id="${folder.id}"] > .folder-header`, { visible: true });
             try { await folderHeader.scrollIntoView(); } finally { await folderHeader.dispose(); }
             evidence.visibleCreatedFolder = await details(page, folder, true);
-            const inspectFolder = async () => assertSpaceFolderScreenshot(await page.evaluate(readSpaceFolderScreenshot, { spaceId: target.id, folderId: folder.id }), { spaceId: target.id, folder });
+            const inspectFolder = () => page.evaluate(readSpaceFolderScreenshot, { spaceId: target.id, folderId: folder.id });
             evidence.createdFolderScreenshotBefore = await inspectFolder();
+            await record({ phase: 'space-created-folder-before-capture', state: evidence.createdFolderScreenshotBefore });
+            // Preserve the actual pixels and geometry even when a paint guard
+            // fails. Capturing is passive; no reopen, activation or retry occurs.
             await capture(page, 'space-context-created-folder-renamed-header-and-theme-color');
             evidence.createdFolderScreenshotAfter = await inspectFolder();
+            await record({ phase: 'space-created-folder-after-capture', state: evidence.createdFolderScreenshotAfter });
+            assertSpaceFolderScreenshot(evidence.createdFolderScreenshotBefore, { spaceId: target.id, folder });
+            assertSpaceFolderScreenshot(evidence.createdFolderScreenshotAfter, { spaceId: target.id, folder });
             assertSpaceContextUnchanged(beforeFolderCapture, await read());
         });
         await openMenu(sidebarB.page, chip(target.id), target.name, true);

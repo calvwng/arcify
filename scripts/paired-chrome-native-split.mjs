@@ -142,6 +142,26 @@ export function readNativeSplitPage() {
     return {url:location.href,title:document.title,documentId:document.body.dataset.documentId,value:document.getElementById('split-input')?.value,timeOrigin:performance.timeOrigin,topLevel:window===window.top,frames:document.querySelectorAll('iframe,frame').length};
 }
 
+/** Passive DOM read: production actions are focusable DIV menuitems, not buttons. */
+export function readNativeSplitMenuAction(node) {
+    const menu=node.closest('#tab-context-menu');
+    return {tagName:node.tagName,connected:node.isConnected,role:node.getAttribute('role'),action:node.dataset.action,
+        tabIndexAttribute:node.getAttribute('tabindex'),menuRole:menu?.getAttribute('role'),disabledProperty:node.disabled,
+        disabledAttribute:node.hasAttribute('disabled'),ariaDisabled:node.getAttribute('aria-disabled'),
+        blocked:node.closest('[disabled], [inert], [hidden], [aria-disabled]:not([aria-disabled="false"])')!==null};
+}
+
+export function assertNativeSplitMenuAction(state,name) {
+    assert(['createSplitView','endSplitView'].includes(name));
+    assert.equal(state.tagName,'DIV','Expected the production context-menu DIV.');
+    assert.equal(state.connected,true);assert.equal(state.menuRole,'menu');
+    assert.equal(state.role,'menuitem');assert.equal(state.action,name);assert.equal(state.tabIndexAttribute,'0');
+    assert.equal(state.disabledProperty,undefined,'A DIV menuitem must not acquire a disabled property.');
+    assert.equal(state.disabledAttribute,false);
+    assert(state.ariaDisabled===null||state.ariaDisabled==='false','Menu action must not be ARIA-disabled.');
+    assert.equal(state.blocked,false,'Menu action and its ancestors must not be disabled, inert or hidden.');
+}
+
 /** No product action is dispatched by evaluate: only fixture seeding and passive reads. */
 export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageForUrl,ui,screenshot,captureNativeWindow,snapshot,poll,fixture,arcifyId,record=async()=>{}}) {
     assert.equal(process.env.GITHUB_ACTIONS,'true');assert.equal(process.env.CI,'true');assert.notEqual(process.getuid?.(),0);
@@ -174,7 +194,7 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
     });
     const action=async(name,keyboard=false)=>ui(sidebar.page,`Submit ${name} with ${keyboard?'Enter':'mouse'}`,async()=>{
         const selector=`#tab-context-menu [data-action="${name}"]`;await sidebar.page.waitForSelector(selector,{visible:true});
-        assert.equal(await sidebar.page.$eval(selector,node=>node.disabled),false);
+        assertNativeSplitMenuAction(await sidebar.page.$eval(selector,readNativeSplitMenuAction),name);
         if(keyboard){assert.equal(await sidebar.page.$eval(selector,node=>node===document.activeElement),true);await sidebar.page.keyboard.press('Enter');}
         else await sidebar.page.click(selector);
     });

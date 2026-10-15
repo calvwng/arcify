@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
-import {assertNativeSplitCapability,assertNativeSplitPagesPreserved,assertNativeSplitPair,assertUnaffectedSpaceProjection,assertNativeSplitCreated,assertNativeSplitDragTrace,assertNativeSplitEnded,assertNativeSplitRejected,assertSplitTargetFeedback,serveNativeSplitFixture} from '../../scripts/paired-chrome-native-split.mjs';
+import {parseHTML} from 'linkedom';
+import {assertNativeSplitCapability,assertNativeSplitPagesPreserved,assertNativeSplitPair,assertUnaffectedSpaceProjection,assertNativeSplitCreated,assertNativeSplitDragTrace,assertNativeSplitEnded,assertNativeSplitRejected,assertSplitTargetFeedback,serveNativeSplitFixture,readNativeSplitMenuAction,assertNativeSplitMenuAction} from '../../scripts/paired-chrome-native-split.mjs';
 import {validateNativeSplitCapture} from '../../scripts/paired-chrome-native-split-capture.mjs';
 const capability=()=>({createSplit:'function',unsplit:'function',none:-1,major:155});
 test('positive native capability requires both real methods and installed 155+',()=>assertNativeSplitCapability(capability()));
@@ -46,3 +47,47 @@ const projectionRequest={pair:{...request,splitViewId:21,groupId:-1},tabId:31,sp
 test('unaffected same-window Space really groups and collapses while only split Space defers',()=>assert.equal(assertUnaffectedSpaceProjection(projectionSample(),projectionRequest).group.id,55));
 for(const[name,mutate]of Object.entries({wholeWindowFreeze:s=>s.tabs.at(-1).groupId=-1,wrongWindow:s=>s.tabs.at(-1).windowId=8,wrongGroupWindow:s=>s.groups[0].windowId=8,wrongTitle:s=>s.groups[0].title='Other',wrongColor:s=>s.groups[0].color='red',uncollapsed:s=>s.groups[0].collapsed=false,wrongOwner:s=>s.projection['empty:7']=99,extraMember:s=>s.tabs[3].groupId=55,wrongCanonicalSpace:s=>s.spaces[1].temporaryTabs=[],splitRegrouped:s=>{s.tabs[0].groupId=8;s.tabs[1].groupId=8;},splitIdentityChanged:s=>{s.tabs[0].splitViewId=22;s.tabs[1].splitViewId=22;},activeSpaceChanged:s=>s.activeSpaceId='empty',unaffectedAlsoDeferred:s=>s.deferrals.push({spaceId:'empty',windowId:7,reason:'native-split'}),missingSplitDeferral:s=>s.deferrals=[]}))test(`unaffected projection rejects ${name}`,()=>{const s=projectionSample();mutate(s);assert.throws(()=>assertUnaffectedSpaceProjection(s,projectionRequest));});
 test('real sync-on fixture calls unaffected projection proof against fresh tabs/groups/session data',()=>{const source=readFileSync(new URL('../../scripts/paired-chrome-native-split.mjs',import.meta.url),'utf8');assert.match(source,/chrome\.tabGroups\.query\(\{\}\)/);assert.match(source,/spaceGroupProjection/);assert.match(source,/if\(enabled\)\{[\s\S]*?assertUnaffectedSpaceProjection\(state,request\)/);assert.match(source,/native-split-unaffected-space-projected/);assert.match(source,/owned\.push\(unaffected\.id\)/);});
+
+test('native split action guard accepts actual production DIV menuitems and rejects disabled or wrong targets',async t=>{
+    const previous={document:globalThis.document,window:globalThis.window};
+    const {document,window}=parseHTML('<html><body><div class="tab" tabindex="0"></div></body></html>');
+    Object.assign(globalThis,{document,window});
+    const previousRect=window.HTMLElement.prototype.getBoundingClientRect;
+    window.HTMLElement.prototype.getBoundingClientRect=()=>({width:200,height:100});
+    let closeTabContextMenu;
+    try{
+        const module=await import('../../domManager.js');closeTabContextMenu=module.closeTabContextMenu;
+        const row=document.querySelector('.tab');
+        const render=name=>{
+            module.showTabContextMenu(10,10,{id:11,url:'http://fixture/left'},false,false,row,()=>{},[],()=>{},()=>{},[],()=>{},null,null,
+                {count:2,save:()=>{}},null,{[name==='createSplitView'?'create':'end']:()=>{}});
+            return document.querySelector(`#tab-context-menu [data-action="${name}"]`);
+        };
+        for(const name of ['createSplitView','endSplitView'])await t.test(`actual ${name} has no button disabled property`,()=>{
+            const node=render(name);assert.equal(node.disabled,undefined);assert.equal(node.tagName,'DIV');
+            assertNativeSplitMenuAction(readNativeSplitMenuAction(node),name);
+            node.setAttribute('aria-disabled','false');assertNativeSplitMenuAction(readNativeSplitMenuAction(node),name);
+        });
+        const mutations={disabledProperty:n=>{n.disabled=true;},disabledAttribute:n=>n.setAttribute('disabled',''),ariaDisabled:n=>n.setAttribute('aria-disabled','true'),
+            malformedAria:n=>n.setAttribute('aria-disabled',''),inert:n=>n.setAttribute('inert',''),hidden:n=>n.setAttribute('hidden',''),
+            disabledAncestor:n=>n.parentElement.setAttribute('aria-disabled','true'),inertAncestor:n=>n.parentElement.setAttribute('inert',''),
+            hiddenAncestor:n=>n.parentElement.setAttribute('hidden',''),wrongRole:n=>n.setAttribute('role','button'),wrongAction:n=>{n.dataset.action='splitViewHint';},
+            notFocusable:n=>n.removeAttribute('tabindex'),negativeTabIndex:n=>n.setAttribute('tabindex','-1'),wrongMenuRole:n=>n.parentElement.setAttribute('role','dialog'),
+            outsideMenu:n=>document.body.append(n),disconnected:n=>n.remove(),nativeDisabledButton:n=>{const button=document.createElement('button');for(const a of n.attributes)button.setAttribute(a.name,a.value);button.disabled=true;n.replaceWith(button);return button;}};
+        for(const[name,mutate]of Object.entries(mutations))await t.test(`rejects ${name}`,()=>{
+            const node=render('endSplitView'),target=mutate(node)||node;
+            const observed=readNativeSplitMenuAction(target);
+            assert.throws(()=>assertNativeSplitMenuAction(observed,'endSplitView'));
+            if(target.parentElement===document.body)target.remove();
+        });
+    }finally{
+        closeTabContextMenu?.();
+        window.HTMLElement.prototype.getBoundingClientRect=previousRect;
+        for(const[key,value]of Object.entries(previous)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}
+    }
+});
+
+test('both real native menu input paths validate semantics before unchanged mouse or focused Enter input',()=>{
+    const source=readFileSync(new URL('../../scripts/paired-chrome-native-split.mjs',import.meta.url),'utf8');
+    assert.match(source,/waitForSelector\(selector,\{visible:true\}\);\s*assertNativeSplitMenuAction\(await sidebar\.page\.\$eval\(selector,readNativeSplitMenuAction\),name\);\s*if\(keyboard\)\{assert\.equal\(await sidebar\.page\.\$eval\(selector,node=>node===document\.activeElement\),true\);await sidebar\.page\.keyboard\.press\('Enter'\);\}\s*else await sidebar\.page\.click\(selector\)/);
+});
