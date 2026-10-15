@@ -15,7 +15,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors } from './paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry } from './paired-chrome-ui.mjs';
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { exercisePersistentFavorites } from './paired-chrome-persistent-favorites.mjs';
@@ -1454,15 +1454,15 @@ try {
             }
         });
         const drag = async (sourceSelector,targetSelector,placement,label) => ui(page,label,async () => {
-            const source = await page.$(sourceSelector), target = await page.$(targetSelector);
-            assert(source && target,'Exact drag source and destination must exist.');
+            let source, target;
             let mouseDown = false;
-            const diagnostic = {label,sourceSelector,targetSelector,placement};
+            const diagnostic = {label,sourceSelector,targetSelector,placement,geometryReads:[]};
             report.dragActions ||= []; report.dragActions.push(diagnostic);
             try {
-                await target.scrollIntoView();
-                const from = await source.boundingBox(),to = await target.boundingBox();
-                assert(from && to && from.height > 0 && to.height > 0);
+                const geometry = await locateFreshDragGeometry(page,sourceSelector,targetSelector,
+                    async observation => { diagnostic.geometryReads.push(observation); });
+                ({source,target} = geometry);
+                const {from,to} = geometry;
                 if (placement === 'before') assert(from.y > to.y,'The before-drop must move a later visual row, not assert an existing no-op.');
                 diagnostic.sourceRect = from; diagnostic.targetRect = to;
                 diagnostic.before = await page.evaluate(() => {
@@ -1519,15 +1519,15 @@ try {
                             top:element.scrollTop,height:element.scrollHeight,client:element.clientHeight
                         }))
                     }),{sourceSelector,targetSelector});
-                    diagnostic.sourceStillConnected = await source.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),sourceSelector);
-                    diagnostic.targetStillConnected = await target.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),targetSelector);
+                    diagnostic.sourceStillConnected = await source?.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),sourceSelector);
+                    diagnostic.targetStillConnected = await target?.evaluate((element,selector) => element.isConnected && element === document.querySelector(selector),targetSelector);
                     await screenshot(page,`${label}-failure-before-cleanup`,false);
                 } catch (captureError) { diagnostic.captureError = captureError.message; }
                 try { await saveReport(); } catch (saveError) { diagnostic.saveError = saveError.message; }
                 throw error;
             } finally {
                 if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
-                await source.dispose(); await target.dispose();
+                await source?.dispose(); await target?.dispose();
             }
         });
         try {

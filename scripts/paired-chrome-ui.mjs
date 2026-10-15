@@ -90,6 +90,44 @@ export async function clickFreshResult(locate, record = async () => {}, {
     }
 }
 
+// Locate geometry before any mouse input. A completed earlier drop can rebuild
+// the sidebar between lookup and measurement. Only proven detached/replaced
+// handles may be reacquired; a connected hidden row or arbitrary API error fails.
+// This helper never starts or retries a drag.
+export async function locateFreshDragGeometry(page, sourceSelector, targetSelector, record = async () => {}, {
+    maxAttempts = 3, pause = ms => new Promise(resolve => setTimeout(resolve, ms))
+} = {}) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let source, target, retained = false;
+        try {
+            source = await page.$(sourceSelector); target = await page.$(targetSelector);
+            if (!source || !target) throw new Error('Exact drag source and destination must exist.');
+            await target.scrollIntoView();
+            const from = await source.boundingBox(), to = await target.boundingBox();
+            const isCurrent = (element, selector) => element.isConnected && element === document.querySelector(selector);
+            const sourceCurrent = await source.evaluate(isCurrent, sourceSelector);
+            const targetCurrent = await target.evaluate(isCurrent, targetSelector);
+            await record({ attempt, sourceCurrent, targetCurrent, from, to });
+            if (!sourceCurrent || !targetCurrent) {
+                if (attempt === maxAttempts) throw new Error('Drag row kept changing before input.');
+            } else {
+                if (!from || !to || from.height <= 0 || to.height <= 0 || from.width <= 0 || to.width <= 0) {
+                    throw new Error('Connected drag rows must have visible geometry.');
+                }
+                retained = true;
+                return { source, target, from, to };
+            }
+        } finally {
+            if (!retained) {
+                await source?.dispose().catch(() => {});
+                await target?.dispose().catch(() => {});
+            }
+        }
+        await pause(50);
+    }
+    throw new Error('No drag geometry was acquired before input.');
+}
+
 // Optional failure evidence must not change the failed UI or mask its error.
 export async function captureVisibleFailurePage(page, label, capture) {
     const observation = { label, url: null, observedAt: new Date().toISOString(), closed: null };

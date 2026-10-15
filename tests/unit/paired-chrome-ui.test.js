@@ -1,6 +1,60 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors } from '../../scripts/paired-chrome-ui.mjs';
+import { performVisibleAction, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry } from '../../scripts/paired-chrome-ui.mjs';
+
+function dragGeometryHarness(states = [{}]) {
+    const calls = [], records = [], handles = [];
+    let lookup = 0;
+    const page = { async $(selector) {
+        const attempt = Math.floor(lookup++ / 2), side = selector === '#source' ? 'source' : 'target';
+        const state = states[Math.min(attempt, states.length - 1)];
+        calls.push([attempt, side, 'lookup']);
+        if (state.missing === side) return null;
+        const handle = {
+            async scrollIntoView() { calls.push([attempt,side,'scroll']); if (state.error) throw state.error; },
+            async boundingBox() { calls.push([attempt,side,'measure']); return state.hidden === side ? null : {x:1,y:2,width:100,height:32}; },
+            async evaluate(predicate, actualSelector) {
+                assert.equal(actualSelector,selector);
+                const element = { isConnected: state.detached !== side };
+                const old = globalThis.document;
+                globalThis.document = {querySelector: () => state.replaced === side ? {} : element};
+                try { return predicate(element,actualSelector); }
+                finally { if (old === undefined) delete globalThis.document; else globalThis.document = old; }
+            },
+            async dispose() { calls.push([attempt,side,'dispose']); }
+        };
+        handles.push(handle); return handle;
+    }, mouse: new Proxy({}, { get() { throw new Error('Geometry lookup must never dispatch mouse input.'); } }) };
+    return {page,calls,records,handles,record: async item => records.push(item),pause: async ms => calls.push(['pause',ms])};
+}
+test('fresh drag geometry retains exact current handles without dispatching input', async () => {
+    const h = dragGeometryHarness();
+    const result = await locateFreshDragGeometry(h.page,'#source','#target',h.record,{pause:h.pause});
+    assert.equal(result.source,h.handles[0]); assert.equal(result.target,h.handles[1]);
+    assert.equal(h.records.length,1); assert.equal(h.calls.some(item => item.includes('dispose')),false);
+});
+for (const reason of ['detached','replaced']) for (const side of ['source','target']) {
+    test(`proven ${reason} ${side} is reacquired only before input`, async () => {
+        const h = dragGeometryHarness([{[reason]:side},{}]);
+        const result = await locateFreshDragGeometry(h.page,'#source','#target',h.record,{pause:h.pause});
+        assert.equal(result.source,h.handles[2]); assert.equal(result.target,h.handles[3]);
+        assert.equal(h.records.length,2); assert.equal(h.calls.filter(item => item.includes('dispose')).length,2);
+        assert.equal(h.records[0][`${side}Current`],false); assert.equal(h.records[1].sourceCurrent,true);
+    });
+}
+test('persistent pre-input replacement fails after three reads without mouse input', async () => {
+    const h = dragGeometryHarness([{replaced:'source'}]);
+    await assert.rejects(locateFreshDragGeometry(h.page,'#source','#target',h.record,{pause:h.pause}),/kept changing/);
+    assert.equal(h.records.length,3); assert.equal(h.calls.filter(item => item.includes('dispose')).length,6);
+});
+for (const state of [{hidden:'source'},{hidden:'target'},{missing:'source'},{error:new Error('CDP failed')}]) {
+    test(`non-detachment geometry failure cannot be retried: ${Object.keys(state)[0]}`, async () => {
+        const h = dragGeometryHarness([state]);
+        await assert.rejects(locateFreshDragGeometry(h.page,'#source','#target',h.record,{pause:h.pause}));
+        assert.equal(h.calls.filter(item => item[0] === 'pause').length,0);
+        assert.equal(h.calls.filter(item => item.includes('lookup')).length,2);
+    });
+}
 
 function harness() {
     const calls = [], records = [];
