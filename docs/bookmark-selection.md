@@ -11,7 +11,8 @@ their folders. This does not import folder contents or move bookmarks.
   adds that range to the existing selection.
 - An ordinary click still opens or activates the bookmark and clears the selected
   batch. That bookmark becomes the range anchor while its exact saved identity
-  remains visible in the same Space/window view.
+  remains visible in the same Space/window view. Finishing asynchronous opening
+  bookkeeping does not reactivate that tab over a newer user tab choice.
 - Internal refreshes retain visible selection for the same saved bookmark IDs,
   parents and saved URLs in the same Space/window, including a closed bookmark
   becoming live. A later drag captures the current rows and live bindings.

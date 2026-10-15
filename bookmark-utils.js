@@ -220,16 +220,20 @@ export const BookmarkUtils = {
                 bookmarkId: bookmarkData.bookmarkId || null
             };
             const activeTabElement = await createTabElement(activeTabData, true, false);
-            activeTabElement.classList.add('active');
             replaceElement.replaceWith(activeTabElement);
         }
 
-        // Ensure the tab is actually active
-        await chrome.tabs.update(newTab.id, { active: true });
-
-        // Visually activate the tab
+        // Creation already performed the requested activation. Bookkeeping
+        // can outlast a newer user tab choice; never activate the new tab again.
+        // Paint only the actual current source-window tab after row replacement.
         if (activateTabInDOM) {
-            activateTabInDOM(newTab.id);
+            try {
+                const [activeTab] = await chrome.tabs.query({ active: true, windowId: currentWindow.id });
+                activateTabInDOM(activeTab?.id ?? null);
+            } catch (error) {
+                // An unavailable observation grants no fallback focus/highlight.
+                Logger.warn('[BookmarkUtils] Could not refresh active tab highlight:', error);
+            }
         }
 
         Logger.log('[BookmarkUtils] Successfully opened bookmark as tab:', newTab.id);
