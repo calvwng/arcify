@@ -27,11 +27,50 @@ export async function clickBookmarkFixtureRow(page, selector, modifiers, record 
 
 export function installBookmarkDragTrace() {
     globalThis.__pairedBatchDragEvents = [];
+    globalThis.__pairedBatchDragStartRows = [];
+    globalThis.__pairedBookmarkRowIdentities ||= new WeakMap();
+    globalThis.__pairedBookmarkRowSerial ||= 0;
     if (globalThis.__pairedBatchDragObserved) return;
     globalThis.__pairedBatchDragObserved = true;
-    for (const type of ['dragstart','dragend','drop']) document.addEventListener(type, event => {
-        globalThis.__pairedBatchDragEvents.push({ type, trusted: event.isTrusted, bookmarkId: event.target.closest?.('.tab')?.dataset.bookmarkId ?? null, dropEffect: event.dataTransfer?.dropEffect ?? null });
+    for (const type of ['dragstart','dragenter','dragover','dragleave','dragend','drop']) window.addEventListener(type, event => {
+        if (type === 'dragstart') globalThis.__pairedBatchDragStartRows = [...document.querySelectorAll('.space.active .tab[data-bookmark-id]')].map(node => {
+            if (!globalThis.__pairedBookmarkRowIdentities.has(node)) globalThis.__pairedBookmarkRowIdentities.set(node, ++globalThis.__pairedBookmarkRowSerial);
+            return { identity: globalThis.__pairedBookmarkRowIdentities.get(node), dataset: { ...node.dataset },
+                parentId: node.parentElement.closest('.folder')?.dataset.bookmarkId || null,
+                visible: Boolean(node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden') };
+        });
+        globalThis.__pairedBatchDragEvents.push({ type, at: performance.now(), trusted: event.isTrusted,
+            bookmarkId: event.target.closest?.('.tab')?.dataset.bookmarkId ?? null,
+            favoriteId: event.target.closest?.('.pinned-favicon')?.dataset.favoriteId ?? null,
+            target: event.target.id || event.target.className || event.target.tagName,
+            x: event.clientX, y: event.clientY, dropEffect: event.dataTransfer?.dropEffect ?? null });
+        if (globalThis.__pairedBatchDragEvents.length > 200) globalThis.__pairedBatchDragEvents.shift();
     }, { capture: true, passive: true });
+}
+
+// Read-only held-drag evidence. Logical selected IDs alone do not prove that
+// the immutable visible source view or the real pointer destination stayed valid.
+export function readBookmarkDragState({ sourceSelector, targetSelector, from, to }) {
+    const describe = node => {
+        if (!node) return null;
+        const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
+        if (globalThis.__pairedBookmarkRowIdentities && !globalThis.__pairedBookmarkRowIdentities.has(node))
+            globalThis.__pairedBookmarkRowIdentities.set(node, ++globalThis.__pairedBookmarkRowSerial);
+        return { identity: globalThis.__pairedBookmarkRowIdentities?.get(node), tag: node.tagName, id: node.id, className: node.className, connected: node.isConnected, hidden: node.hidden,
+            dataset: { ...node.dataset }, parentId: node.parentElement?.closest('.folder')?.dataset.bookmarkId || null,
+            visible: Boolean(node.getClientRects().length && style.visibility !== 'hidden'),
+            rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+            display: style.display, visibility: style.visibility };
+    };
+    const hit = point => point ? describe(document.elementFromPoint(point.x, point.y)) : null;
+    return { focused: document.hasFocus(), visibility: document.visibilityState, from, to,
+        startRows: globalThis.__pairedBatchDragStartRows,
+        source: describe(document.querySelector(sourceSelector)), target: describe(document.querySelector(targetSelector)),
+        sourceHit: hit(from && { x: from.x + from.width / 2, y: from.y + from.height / 2 }),
+        destinationHit: hit(to && { x: to.x + 3, y: to.y + to.height / 2 }),
+        marker: describe(document.querySelector('.favorites-drop-anchor')),
+        status: document.getElementById('favoritesDropStatus')?.textContent,
+        rows: [...document.querySelectorAll('.space.active .tab[data-bookmark-id]')].map(describe) };
 }
 
 // Passive evidence only: retain input/selection timing across asynchronous
@@ -210,12 +249,13 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         const targetSelector = `#pinnedFavicons .saved-favorite[data-favorite-id="${beforeId}"]`;
         await page.waitForSelector(targetSelector);
         const source = await page.$(row(sourceId)), target = await page.$(targetSelector);
-        let held = false;
+        let held = false, from = null, to = null;
         const operation = await page.$eval('#pinnedFavicons', node => Number(node.dataset.dropOperation || 0));
         await page.evaluate(installBookmarkDragTrace);
         try {
             await source.scrollIntoView();
-            const from = await source.boundingBox(), to = await target.boundingBox(); assert(from && to);
+            from = await source.boundingBox(); to = await target.boundingBox(); assert(from && to);
+            await record({ label, phase: 'before-native-drag', state: await page.evaluate(readBookmarkDragState, { sourceSelector: row(sourceId), targetSelector, from, to }) });
             await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
             await page.mouse.down(); held = true;
             await page.mouse.move(from.x + from.width / 2 + 15, from.y + from.height / 2, { steps: 5 });
@@ -251,7 +291,10 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
             }
         } catch (error) {
             const failure = { label, phase: 'failed-before-cleanup', error: error.message };
-            try { failure.events = await page.evaluate(() => globalThis.__pairedBatchDragEvents); failure.selection = await page.evaluate(readBookmarkSelection); } catch (observation) { failure.observationError = observation.message; }
+            try { failure.events = await page.evaluate(() => globalThis.__pairedBatchDragEvents); failure.selection = await page.evaluate(readBookmarkSelection);
+                failure.state = await page.evaluate(readBookmarkDragState, { sourceSelector: row(sourceId), targetSelector, from, to });
+            } catch (observation) { failure.observationError = observation.message; }
+            try { await screenshot(page, `failed-held-${label}`, true, { fullPage: false }); } catch (observation) { failure.screenshotError = observation.message; }
             try { await record(failure); } catch (observation) { error.diagnosticError = observation.message; }
             throw error;
         } finally {

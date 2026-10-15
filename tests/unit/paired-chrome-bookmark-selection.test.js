@@ -1,7 +1,7 @@
 // Evidence-validator tests only; importing these modules never launches Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace, installBookmarkDragTrace, readBookmarkDragState } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 const selection = () => ({ ids: ['a','b','d'], count: 3, text: '3 bookmarks selected', rows: ['a','b','d'].map(id => ({ id, ariaSelected: 'true', visible: true })) });
 test('selection requires exact visible order, announced count and accessible state', () => {
     assertBookmarkSelection(selection(), ['a','b','d']);
@@ -134,4 +134,32 @@ test('passive selection trace records trusted modifier evidence without dispatch
         for (let i = 0; i < 210; i++) mutation();
         assert.equal(globalThis.__pairedBookmarkSelectionTrace.length, 200);
     } finally { for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; } }
+});
+
+
+test('held drag diagnostics preserve exact row replacement identity and never dispatch or mutate product state', () => {
+    const keys = ['document','window','getComputedStyle','__pairedBatchDragEvents','__pairedBatchDragObserved','__pairedBatchDragStartRows','__pairedBookmarkRowIdentities','__pairedBookmarkRowSerial'];
+    const originals = keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis,key)]), listeners = new Map();
+    const make = id => ({ tagName:'DIV',id:'',className:'tab',isConnected:true,hidden:false,dataset:{bookmarkId:id},
+        parentElement:{closest:()=>null},getClientRects:()=>[{}],getBoundingClientRect:()=>({x:10,y:20,width:50,height:30}),closest:()=>null });
+    let rows = [make('a'),make('b')]; const target = make('favorite'); let hits=0;
+    try {
+        for (const key of keys.slice(3)) delete globalThis[key];
+        globalThis.getComputedStyle=()=>({display:'block',visibility:'visible'});
+        globalThis.window={addEventListener:(type,callback,options)=>{assert.deepEqual(options,{capture:true,passive:true});listeners.set(type,callback);}};
+        globalThis.document={querySelectorAll:()=>rows,querySelector:selector=>selector==='#source'?rows[0]:target,
+            getElementById:()=>({textContent:'Source changed'}),hasFocus:()=>true,visibilityState:'visible',elementFromPoint:()=>{hits++;return target;}};
+        installBookmarkDragTrace();
+        listeners.get('dragstart')({type:'dragstart',isTrusted:true,target:rows[0],clientX:35,clientY:35,dataTransfer:{dropEffect:'copy'}});
+        const before=readBookmarkDragState({sourceSelector:'#source',targetSelector:'#target',from:{x:10,y:20,width:50,height:30},to:{x:60,y:20,width:50,height:30}});
+        rows[0]=make('a');
+        const after=readBookmarkDragState({sourceSelector:'#source',targetSelector:'#target'});
+        assert.equal(before.startRows[0].identity,before.rows[0].identity);
+        assert.notEqual(after.rows[0].identity,before.rows[0].identity);
+        assert.deepEqual(after.rows[0].dataset,before.rows[0].dataset);
+        assert.equal(after.status,'Source changed');assert.equal(hits,2);
+        for(let i=0;i<210;i++)listeners.get('dragover')({type:'dragover',isTrusted:true,target,clientX:i,clientY:20});
+        assert.equal(globalThis.__pairedBatchDragEvents.length,200);
+        assert.deepEqual(rows.map(row=>row.dataset.bookmarkId),['a','b']);
+    } finally {for(const[key,descriptor]of originals){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}}
 });
