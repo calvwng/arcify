@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readSourceText } from '../source-text.js';
-import { assertTodayNewTabRow, assertRowDraftPreserved, assertOrdinaryRowFallback } from '../../scripts/paired-chrome-newtab-row.mjs';
+import { assertTodayNewTabRow, assertRowDraftPreserved, assertOrdinaryRowFallback, cleanupNewTabFixtureSpace, recordNewTabRowEvidence, assertNonemptyDraftSelection } from '../../scripts/paired-chrome-newtab-row.mjs';
 const id = 'a'.repeat(32);
 const row = () => ({ count: 1, buttons: 1, obsolete: 0, activeSpaceId: 'space', rowSpaceId: 'space', tag: 'BUTTON', text: '+ New Tab',
     visible: true, disabled: false, insideSortable: false, draggable: false, immediatelyAfterHeader: true, immediatelyBeforeList: true,
     inverted: 'false', footerNotices: true, row: { x: 10, y: 100, width: 280, height: 28, bottom: 128 },
-    header: { y: 80, bottom: 100 }, list: { y: 128 }, viewport: { width: 300, height: 700 }, todayIds: [] });
+    header: { y: 80, bottom: 100 }, list: { y: 128 }, viewport: { width: 300, height: 700 }, todayIds: [], visibleTodayIds: [] });
 const expected = { spaceId: 'space', inverted: false, empty: true };
 test('native geometry requires one usable unsortable row immediately beneath Today even when empty', () => assertTodayNewTabRow(row(), expected));
 for (const [name, change] of [
@@ -73,4 +73,101 @@ test('real row scenarios remain mandatory inside existing full-suite cases and r
     assert.doesNotMatch(source, /setViewport|dispatchEvent|chrome\.developerPrivate|chrome\.management|setTimeout|puppeteer\.launch/);
     assert(source.includes('A later successful launch cannot add a stale fallback.'));
     for (const path of ['scripts/paired-chrome-newtab-row.mjs', 'tests/unit/paired-chrome-newtab-row.test.js']) assert(workflow.includes(`- '${path}'`));
+});
+
+
+const cleanupFixture = () => ({ folder: { spaceId: 'fixture', folderId: 'folder-9' },
+    spaces: [{ id: 'original', bookmarkFolderId: 'folder-1', spaceBookmarks: [], temporaryTabs: [1] },
+        { id: 'fixture', bookmarkFolderId: 'folder-9', spaceBookmarks: [], temporaryTabs: [] }] });
+async function runCleanupProbe({ alter = () => {}, deleteError = null, converge = true } = {}) {
+    const fixture = cleanupFixture(), calls = [], observations = [];
+    alter(fixture); const oldChrome = globalThis.chrome;
+    globalThis.chrome = { tabs: { query: async () => [{ id: 1 }] }, runtime: { sendMessage: async message => {
+        calls.push(message);
+        return message.action === 'get' ? { success: true, spaces: fixture.spaces } : deleteError ? { success: false, error: deleteError } : { success: true };
+    } } };
+    let result, error, reads = 0;
+    try {
+        result = await cleanupNewTabFixtureSpace({ folder: fixture.folder,
+            apiPage: { evaluate: (callback, argument) => callback(argument) },
+            snapshot: async () => ({ spaces: ++reads > 1 && converge ? fixture.spaces.filter(space => space.id !== 'fixture') : fixture.spaces }),
+            poll: async (read, accept, label) => {
+                assert.match(label, /authoritative removal/);
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    const state = await read(); observations.push(state);
+                    if (accept(state)) return state;
+                }
+                throw new Error('cleanup never converged');
+            } });
+    } catch (caught) { error = caught; }
+    finally { globalThis.chrome = oldChrome; }
+    return { result, error, calls, observations };
+}
+test('fixture cleanup uses exact canonical deletion once and waits through stale authoritative snapshots', async () => {
+    const probe = await runCleanupProbe(); assert.equal(probe.error, undefined);
+    assert.deepEqual(probe.calls, [{ type: 'spaceStore', action: 'get' }, { type: 'spaceStore', action: 'delete', spaceId: 'fixture' }]);
+    assert.equal(probe.observations.length, 2, 'API completion alone must not release the global isolation gate.');
+    assert.deepEqual(probe.result, { spaceId: 'fixture', folderId: 'folder-9', authoritativeSpaceIds: ['original'] });
+});
+for (const [name, alter] of [
+    ['wrong folder', state => { state.spaces[1].bookmarkFolderId = 'other-folder'; }],
+    ['missing canonical Space', state => { state.spaces.pop(); }],
+    ['duplicate canonical Space', state => { state.spaces.push(structuredClone(state.spaces[1])); }],
+    ['live owned tab', state => { state.spaces[1].temporaryTabs.push(1); }]
+]) test(`cleanup refuses ${name} before any deletion`, async () => {
+    const probe = await runCleanupProbe({ alter }); assert.match(probe.error?.message, /Refusing cleanup/);
+    assert.deepEqual(probe.calls, [{ type: 'spaceStore', action: 'get' }]); assert.deepEqual(probe.observations, []);
+});
+test('cleanup errors and nonconvergence fail without retrying the mutation', async () => {
+    for (const options of [{ deleteError: 'delete failed' }, { converge: false }]) {
+        const probe = await runCleanupProbe(options); assert(probe.error);
+        assert.equal(probe.calls.filter(call => call.action === 'delete').length, 1);
+    }
+});
+test('cleanup input checkpoints retain full New Tab evidence and are kept separately', () => {
+    const report = {}, full = { nativePanel: true, layouts: [{ label: 'normal' }], reuse: [{ method: 'double-click' }], fallback: { tabId: 9 } };
+    recordNewTabRowEvidence(report, full);
+    recordNewTabRowEvidence(report, { phase: 'native-new-tab-input', label: 'Restore initial Space after row proof' });
+    assert.deepEqual(report.nativeNewTabRow, full);
+    const completed = { ...full, cleanup: { spaceId: 'fixture', authoritativeSpaceIds: ['original'] } };
+    recordNewTabRowEvidence(report, completed);
+    recordNewTabRowEvidence(report, { phase: 'native-new-tab-input', label: 'later observation' });
+    assert.deepEqual(report.nativeNewTabRow, completed);
+    assert.equal(report.nativeNewTabRowActions.length, 2);
+    completed.layouts.push({ label: 'not recorded' });
+    assert.equal(report.nativeNewTabRow.layouts.length, 1, 'Saved evidence must not alias mutable live objects.');
+});
+test('actual runner retains evidence and keeps strict window-B comparison after authoritative cleanup', () => {
+    const runner = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
+    const source = readSourceText(new URL('../../scripts/paired-chrome-newtab-row.mjs', import.meta.url));
+    assert.match(runner, /recordNewTabRowEvidence\(report, observation\); await saveReport\(\)/);
+    assert.doesNotMatch(runner, /report\.nativeNewTabRow = observation/);
+    assert.match(runner, /assert\.deepEqual\(await windowBState\(\), fixture\.windowBBaseline/);
+    assert.match(source, /evidence\.cleanup = await cleanupNewTabFixtureSpace\(\{ apiPage, folder, snapshot, poll \}\)/);
+    assert.doesNotMatch(source, /chrome\.bookmarks\.removeTree|windowBBaseline/);
+    assert.match(source, /if \(errors.length\) evidence.cleanupErrors = errors;\n        try \{ await record\(structuredClone\(evidence\)\)/);
+});
+
+
+test('fallback screenshot readiness requires the exact visible Today row as well as row geometry', () => {
+    const state = row(); state.todayIds = [9]; state.visibleTodayIds = [9];
+    assertTodayNewTabRow(state, { spaceId: 'space', inverted: false, requiredTabId: 9 });
+    for (const [ids, visible] of [[[], []], [[8], [8]], [[9], []], [[9, 9], [9]]]) {
+        assert.throws(() => assertTodayNewTabRow({ ...state, todayIds: ids, visibleTodayIds: visible }, { spaceId: 'space', inverted: false, requiredTabId: 9 }));
+    }
+});
+test('reuse evidence cannot call an unchanged collapsed caret a preserved selection', () => {
+    assertNonemptyDraftSelection(draft());
+    for (const [start, end] of [[9, 9], [-1, 2], [4, 2], [0, 500]]) {
+        const state = draft(); state.input.start = start; state.input.end = end;
+        assert.throws(() => assertNonemptyDraftSelection(state), /nonempty/);
+        assert.throws(() => assertRowDraftPreserved(state, structuredClone(state), [1], [1], id), /nonempty/);
+    }
+});
+test('real selection and fallback rendering readiness precede their measured actions and capture', () => {
+    const source = readSourceText(new URL('../../scripts/paired-chrome-newtab-row.mjs', import.meta.url));
+    assert.match(source, /field.press\('ArrowLeft'\); await field.press\('ArrowLeft'\)/);
+    assert.doesNotMatch(source, /field.press\('Home'\)|setSelectionRange/);
+    assert(source.indexOf('assertNonemptyDraftSelection(before);') < source.indexOf('await input(`Activate native New Tab'));
+    assert.match(source, /layout\('fallback-complete', folder.spaceId, false, false, fallback.tabId\)/);
 });

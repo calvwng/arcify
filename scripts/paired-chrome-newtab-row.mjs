@@ -20,10 +20,11 @@ export function readTodayNewTabRow() {
         immediatelyAfterHeader: header?.nextElementSibling === row, immediatelyBeforeList: row?.nextElementSibling === list,
         row: box(row), header: box(header), list: box(list), viewport: { width: innerWidth, height: innerHeight },
         inverted: list?.dataset.todayOrderInverted, todayIds: [...(list?.querySelectorAll('.tab[data-tab-id]') || [])].map(node => Number(node.dataset.tabId)),
+        visibleTodayIds: [...(list?.querySelectorAll('.tab[data-tab-id]') || [])].filter(visible).map(node => Number(node.dataset.tabId)),
         footerNotices: Boolean(document.querySelector('.new-tab-btn-container #spotlightStatus')) };
 }
 
-export function assertTodayNewTabRow(state, { spaceId, inverted, empty = false }) {
+export function assertTodayNewTabRow(state, { spaceId, inverted, empty = false, requiredTabId = null }) {
     assert.equal(state.count, 1, 'The document must contain exactly one New Tab row.');
     assert.equal(state.buttons, 1); assert.equal(state.obsolete, 0);
     assert.equal(state.activeSpaceId, spaceId); assert.equal(state.rowSpaceId, spaceId);
@@ -38,8 +39,17 @@ export function assertTodayNewTabRow(state, { spaceId, inverted, empty = false }
     assert(state.list.y >= state.row.bottom - 1, 'Today tabs must start below the New Tab row in either order.');
     assert(state.row.y >= 0 && state.row.bottom <= state.viewport.height && state.row.x >= 0 &&
         state.row.x + state.row.width <= state.viewport.width + 1, 'The full row must be inside the native panel viewport.');
+    if (requiredTabId !== null) {
+        assert.equal(state.todayIds.filter(id => id === requiredTabId).length, 1, 'The exact fallback tab must render once in Today.');
+        assert(state.visibleTodayIds.includes(requiredTabId), 'The fallback Today row must be visible before its screenshot.');
+    }
     if (empty) assert.deepEqual(state.todayIds, [], 'Empty-layout proof must have no Today rows.');
     return state;
+}
+
+export function assertNonemptyDraftSelection(state) {
+    assert(state.input && Number.isInteger(state.input.start) && Number.isInteger(state.input.end) && state.input.start >= 0 &&
+        state.input.start < state.input.end && state.input.end <= state.input.value.length, 'Reuse proof requires a real nonempty selected draft range.');
 }
 
 export function assertRowDraftPreserved(before, after, beforeIds, afterIds, extensionId) {
@@ -49,6 +59,7 @@ export function assertRowDraftPreserved(before, after, beforeIds, afterIds, exte
     assert.equal(after.tab.active, true); assert.equal(after.tab.status, 'complete');
     assert(!after.tab.pendingUrl, 'Reuse cannot leave an outbound navigation.');
     assert(before.input?.value, 'Proof must start with an actual typed draft.');
+    assertNonemptyDraftSelection(before);
     // Clicking the native panel intentionally transfers focus; content and caret
     // are conserved, without pretending the helper must retain document focus.
     const draft = state => ({ value: state.input.value, start: state.input.start, end: state.input.end, direction: state.input.direction });
@@ -84,6 +95,36 @@ export function installNewTabRowTrace() {
     globalThis.__newTabRowTrace = { events, stop: () => { for (const name of ['click', 'keydown']) document.removeEventListener(name, listener, true); } };
 }
 
+// Input checkpoints must never replace the accumulated layout/draft/fallback proof.
+export function recordNewTabRowEvidence(report, observation) {
+    if (observation.phase === 'native-new-tab-input') {
+        (report.nativeNewTabRowActions ||= []).push(structuredClone(observation));
+        return;
+    }
+    assert.equal(observation.nativePanel, true); assert(Array.isArray(observation.layouts)); assert(Array.isArray(observation.reuse));
+    report.nativeNewTabRow = structuredClone(observation);
+}
+
+// Removing a bookmark folder alone does not remove its canonical Space. Use the
+// same production delete operation as Space management, only for our exact empty
+// fixture, then observe authoritative convergence before global isolation gates.
+export async function cleanupNewTabFixtureSpace({ apiPage, folder, snapshot, poll }) {
+    assert(folder && typeof folder.spaceId === 'string' && folder.spaceId && typeof folder.folderId === 'string' && folder.folderId);
+    await apiPage.evaluate(async ({ spaceId, folderId }) => {
+        const state = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'get' });
+        if (!state.success) throw new Error(state.error);
+        const matches = state.spaces.filter(space => space.id === spaceId);
+        if (matches.length !== 1 || matches[0].bookmarkFolderId !== folderId) throw new Error('Refusing cleanup of an unverified New Tab fixture Space.');
+        const members = new Set([...matches[0].spaceBookmarks, ...matches[0].temporaryTabs]);
+        if ((await chrome.tabs.query({})).some(tab => members.has(tab.id))) throw new Error('Refusing cleanup while the New Tab fixture Space still owns a live tab.');
+        const removed = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'delete', spaceId });
+        if (!removed.success) throw new Error(removed.error);
+    }, folder);
+    const state = await poll(snapshot, state => state.spaces.every(space => space.id !== folder.spaceId && space.bookmarkFolderId !== folder.folderId),
+        'authoritative removal of the exact New Tab fixture Space');
+    return { ...folder, authoritativeSpaceIds: state.spaces.map(space => space.id) };
+}
+
 export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage, spotlightId, windowId, snapshot, poll,
     ui, search, activate, screenshot, record }) {
     const initial = await snapshot(), settings = await apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder'));
@@ -117,9 +158,9 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
             document.documentElement.dataset.spaceHeaderSize === String(spaceHeaderSize), { polling: 50 }, { favoritesLayout, spaceHeaderSize });
         await focusWindow();
     };
-    const layout = async (label, spaceId, inverted, empty = false) => {
+    const layout = async (label, spaceId, inverted, empty = false, requiredTabId = null) => {
         const state = await poll(() => page.evaluate(readTodayNewTabRow), state => {
-            try { assertTodayNewTabRow(state, { spaceId, inverted, empty }); return true; } catch { return false; }
+            try { assertTodayNewTabRow(state, { spaceId, inverted, empty, requiredTabId }); return true; } catch { return false; }
         }, `native New Tab row layout: ${label}`);
         const shot = await screenshot(page, `native-new-tab-row-${label}`, true, { fullPage: false });
         assert(shot?.filename, 'Native row evidence requires a screenshot.');
@@ -143,11 +184,15 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
         const field = await helper.page.$('[data-testid="spotlight-input"]');
         await ui(helper.page, 'Give the Spotlight draft a real caret selection', async () => {
             await selectResultWithKeyboard(field, () => helper.page.evaluate(readSpotlightRows), row => row.type === 'search-query' && row.title === 'Search for "retained native New Tab draft"');
-            await field.press('Home'); await helper.page.keyboard.down('Shift');
-            try { await field.press('ArrowRight'); await field.press('ArrowRight'); } finally { await helper.page.keyboard.up('Shift'); }
+            // Spotlight consumes Home for result navigation. Left remains native
+            // text editing, so select backwards from the freshly typed end.
+            await helper.page.keyboard.down('Shift');
+            try { await field.press('ArrowLeft'); await field.press('ArrowLeft'); } finally { await helper.page.keyboard.up('Shift'); }
+            assertNonemptyDraftSelection(await helper.page.evaluate(readNewTabReuseState));
         }); await field.dispose();
         for (const method of ['double-click', 'Enter']) {
             const before = await helper.page.evaluate(readNewTabReuseState), beforeIds = (await read()).tabs.map(tab => tab.id);
+            assertNonemptyDraftSelection(before);
             const traceStart = await page.evaluate(() => globalThis.__newTabRowTrace.events.length);
             await input(`Activate native New Tab with ${method}`, async () => {
                 if (method === 'double-click') await page.click('#newTabBtn', { count: 2 });
@@ -209,7 +254,7 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
         const providerContext = await poll(() => peerPage.evaluate(async id => (await chrome.runtime.getContexts({ contextTypes: ['TAB'] })).find(context => context.tabId === id), fallback.tabId),
             context => context?.documentUrl === `chrome-extension://${spotlightId}/newtab.html`, 'installed provider handling the browser New Tab');
         evidence.fallback = { ...fallback, actualPairingDisconnected: true, existingNewTabOverridePreserved: true, providerContext, before: beforeFallback, after: afterFallback };
-        await layout('fallback-complete', folder.spaceId, false);
+        await layout('fallback-complete', folder.spaceId, false, false, fallback.tabId);
         const reconnectDraft = await helper.page.evaluate(readNewTabReuseState);
         await reconnect(); await activate(helper.tab.id);
         await poll(snapshot, state => state.activeSpaceId === initial.activeSpaceId, 'original helper Space after reconnect');
@@ -237,10 +282,12 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
                 await input('Restore initial Space after row proof', () => page.click(`#spaceSwitcher > button[data-space-id="${initial.activeSpaceId}"]`));
                 await poll(snapshot, state => state.activeSpaceId === initial.activeSpaceId, 'original current Space restored');
             },
-            async () => { if (folder) await apiPage.evaluate(id => chrome.bookmarks.removeTree(id), folder.folderId); }
+            async () => { if (folder) evidence.cleanup = await cleanupNewTabFixtureSpace({ apiPage, folder, snapshot, poll }); }
         ];
         const errors = [];
         for (const cleanup of cleanups) try { await cleanup(); } catch (error) { errors.push(error.message); }
+        if (errors.length) evidence.cleanupErrors = errors;
+        try { await record(structuredClone(evidence)); } catch (error) { errors.push(`Could not save cleanup evidence: ${error.message}`); }
         if (errors.length) { if (primaryError) primaryError.cleanupErrors = errors; else throw new Error(`New Tab fixture cleanup failed: ${errors.join('; ')}`); }
     }
 }

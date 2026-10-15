@@ -3,7 +3,7 @@ import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NA
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
 import { exerciseTodayMove, serveTodayMoveFixture } from './paired-chrome-today-move.mjs';
-import { exerciseNativeNewTabRow } from './paired-chrome-newtab-row.mjs';
+import { exerciseNativeNewTabRow, recordNewTabRowEvidence } from './paired-chrome-newtab-row.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
 import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
@@ -1031,7 +1031,7 @@ try {
         const { page: rowPage } = await resolveNativeSidebarTarget();
         const newTabRow = await exerciseNativeNewTabRow({ page: await observePage(rowPage), helper, apiPage: arcifyOptions,
             peerPage: spotlightOptions, spotlightId, windowId: fixture.windowA, snapshot, poll, ui, search, activate, screenshot,
-            record: async observation => { report.nativeNewTabRow = observation; await saveReport(); } });
+            record: async observation => { recordNewTabRowEvidence(report, observation); await saveReport(); } });
         await closeNativeSidebar(); await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
         return { startupOffer: offered, repeatedOffer: repeated, focusBefore, focusExplicitlySetForEnter: true, actualBrowserStartupTested: false, sourceBefore, native, newTabRow };
     });
