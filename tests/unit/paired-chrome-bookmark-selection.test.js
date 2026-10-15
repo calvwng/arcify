@@ -1,7 +1,7 @@
 // Evidence-validator tests only; importing these modules never launches Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace, installBookmarkDragTrace, readBookmarkDragState } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { assertBookmarkSelection, assertBatchFavoriteResult, cancelHeldBookmarkDrag, finishBookmarkFixture, cleanupBookmarkFavoritesInSourceWindow, clickBookmarkFixtureRow, assertNativeDragSourceStable, installBookmarkSelectionTrace, installBookmarkDragTrace, readBookmarkDragState, prepareBookmarkSidebar } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 const selection = () => ({ ids: ['a','b','d'], count: 3, text: '3 bookmarks selected', rows: ['a','b','d'].map(id => ({ id, ariaSelected: 'true', visible: true })) });
 test('selection requires exact visible order, announced count and accessible state', () => {
     assertBookmarkSelection(selection(), ['a','b','d']);
@@ -162,4 +162,19 @@ test('held drag diagnostics preserve exact row replacement identity and never di
         assert.equal(globalThis.__pairedBatchDragEvents.length,200);
         assert.deepEqual(rows.map(row=>row.dataset.bookmarkId),['a','b']);
     } finally {for(const[key,descriptor]of originals){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}}
+});
+
+
+test('bookmark sidebar mounts only after display configuration has completed', async () => {
+    const calls=[]; let release; const pending=new Promise(resolve=>{release=resolve;});
+    const result=prepareBookmarkSidebar(async()=>{calls.push('configure');await pending;calls.push('configured');},async()=>{calls.push('create');return 'sidebar';},[async()=>calls.push('cleanup')]);
+    await Promise.resolve();assert.deepEqual(calls,['configure']);release();
+    assert.equal(await result,'sidebar');assert.deepEqual(calls,['configure','configured','create']);
+});
+for(const stage of ['configure','create'])test(`bookmark sidebar ${stage} failure restores settings and seed without hiding the original error`,async()=>{
+    const error=Error(stage), calls=[];
+    await assert.rejects(()=>prepareBookmarkSidebar(async()=>{calls.push('configure');if(stage==='configure')throw error;},async()=>{calls.push('create');throw error;},[
+        async()=>{calls.push('seed cleanup');throw Error('cleanup failure');},async()=>calls.push('restore ordering')],async()=>{}),received=>received===error);
+    assert.deepEqual(calls,stage==='configure'?['configure','seed cleanup','restore ordering']:['configure','create','seed cleanup','restore ordering']);
+    assert.deepEqual(error.cleanupErrors,['cleanup failure']);
 });

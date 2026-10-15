@@ -85,6 +85,8 @@ export function installBookmarkSelectionTrace() {
     };
     for (const type of ['click', 'focus', 'blur']) window.addEventListener(type, event => {
         const input = { type, trusted: event.isTrusted, bookmarkId: event.target.closest?.('.tab')?.dataset.bookmarkId || null,
+            folderId: event.target.closest?.('.folder')?.dataset.bookmarkId || null,
+            target: { id: event.target.id, tag: event.target.tagName, className: event.target.className },
             shift: Boolean(event.shiftKey), control: Boolean(event.ctrlKey), meta: Boolean(event.metaKey) };
         record(input); if (type === 'click') queueMicrotask(() => record({ ...input, type: 'click-microtask' }));
     }, { capture: true, passive: true });
@@ -110,6 +112,13 @@ export async function finishBookmarkFixture(cleanups, primaryError, record = asy
     try { await record({ phase: 'cleanup-failed', errors: messages }); } catch (error) { messages.push(`Evidence: ${error.message}`); }
     if (primaryError) primaryError.cleanupErrors = messages;
     else throw new AggregateError(errors, `Bookmark fixture cleanup failed: ${messages.join('; ')}`);
+}
+
+// Initialize display ordering before mounting the view. Updating it afterward
+// schedules a full renderer replacement underneath the first setup click.
+export async function prepareBookmarkSidebar(configure, create, cleanups, record) {
+    try { await configure(); return await create(); }
+    catch (error) { await finishBookmarkFixture(cleanups, error, record); throw error; }
 }
 
 export async function cleanupBookmarkFavoritesInSourceWindow({ windowId, ids }) {
@@ -204,9 +213,18 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
         return { root, a, open, b, closed, hidden, d, e, control };
         } catch (error) { try { await chrome.bookmarks.removeTree(root.id); } catch (cleanup) { error.cleanupError = cleanup.message; } throw error; }
     }, { parentId: space.bookmarkFolderId, base: fixture.base });
-    let sidebar;
-    try { sidebar = await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`); }
-    catch (error) { try { await apiPage.evaluate(id => chrome.bookmarks.removeTree(id), seed.root.id); } catch (cleanup) { error.cleanupError = cleanup.message; } throw error; }
+    const originalInvert = await apiPage.$eval('#invertTabOrder', element => element.checked);
+    const restoreOrdering = async () => {
+        if (originalInvert !== await apiPage.$eval('#invertTabOrder', element => element.checked))
+            await ui(apiPage, 'Restore original bookmark display ordering', () => apiPage.click('label.toggle-label[for="invertTabOrder"]'));
+        await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), settings => settings.invertTabOrder === originalInvert, 'restored bookmark display ordering');
+    };
+    const sidebar = await prepareBookmarkSidebar(async () => {
+        if (originalInvert) await ui(apiPage, 'Use normal visible order for bookmark selection fixture', () => apiPage.click('label.toggle-label[for="invertTabOrder"]'));
+        await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), settings => settings.invertTabOrder === false, 'explicit non-inverted bookmark selection ordering');
+    }, () => newTabPage(`chrome-extension://${arcifyId}/sidebar.html`), [
+        () => apiPage.evaluate(id => chrome.bookmarks.removeTree(id), seed.root.id), restoreOrdering
+    ], record);
     const page = sidebar.page;
     const row = id => `.space.active .tab[data-bookmark-id="${id}"]`;
     const folder = id => `.space.active .folder[data-bookmark-id="${id}"]`;
@@ -244,7 +262,6 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
     };
     const observations = [];
     let ordinaryTabId = null, primaryError = null;
-    const originalInvert = await apiPage.$eval('#invertTabOrder', element => element.checked);
     const drag = async ({ sourceId, beforeId, expectedIds, label, afterStart }) => ui(page, label, async () => {
         const targetSelector = `#pinnedFavicons .saved-favorite[data-favorite-id="${beforeId}"]`;
         await page.waitForSelector(targetSelector);
@@ -305,11 +322,6 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
     try {
         await page.waitForSelector('#bookmarkSelectionStatus');
         await page.evaluate(installBookmarkSelectionTrace);
-        // Previous cases restore the user's default (inverted) order. This
-        // scenario deliberately asserts A→B→D, so select that display mode via
-        // the actual options UI rather than silently sorting observed rows.
-        if (originalInvert) await ui(apiPage, 'Use normal visible order for bookmark selection fixture', () => apiPage.click('label.toggle-label[for="invertTabOrder"]'));
-        await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), settings => settings.invertTabOrder === false, 'explicit non-inverted bookmark selection ordering');
         await page.waitForSelector(`.space.active[data-space-id="${space.id}"]`);
         await setExpanded(seed.root.id, true); await setExpanded(seed.open.id, true); await setExpanded(seed.closed.id, false);
         for (const id of [seed.a.id, seed.b.id, seed.d.id, seed.e.id]) await page.waitForSelector(row(id), { visible: true });
@@ -415,7 +427,9 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
     } catch (error) {
         primaryError = error;
         const failure = { phase: 'failed-before-cleanup', error: error.message };
-        try { failure.selection = await page.evaluate(readBookmarkSelection); failure.inputTrace = await page.evaluate(() => globalThis.__pairedBookmarkSelectionTrace); } catch (observation) { failure.observationError = observation.message; }
+        try { failure.selection = await page.evaluate(readBookmarkSelection); failure.inputTrace = await page.evaluate(() => globalThis.__pairedBookmarkSelectionTrace);
+            failure.folders = await page.evaluate(() => [...document.querySelectorAll('.space.active .folder[data-bookmark-id]')].map(node => ({ id: node.dataset.bookmarkId, collapsed: node.classList.contains('collapsed'), expanded: node.getAttribute('aria-expanded') })));
+        } catch (observation) { failure.observationError = observation.message; }
         try { await record(failure); } catch (observation) { error.diagnosticError = observation.message; }
         throw error;
     } finally {
@@ -431,11 +445,7 @@ export async function exerciseBookmarkMultiSelection({ apiPage, newTabPage, ui, 
                     await chrome.bookmarks.removeTree(rootId);
                 }, { tabIds, rootId: seed.root.id, sidebarId: sidebar.tab.id, ordinaryTabId });
             },
-            async () => {
-                if (originalInvert !== await apiPage.$eval('#invertTabOrder', element => element.checked))
-                    await ui(apiPage, 'Restore original bookmark display ordering', () => apiPage.click('label.toggle-label[for="invertTabOrder"]'));
-                await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), settings => settings.invertTabOrder === originalInvert, 'restored bookmark display ordering');
-            }
+            restoreOrdering
         ], primaryError, record);
     }
 }
