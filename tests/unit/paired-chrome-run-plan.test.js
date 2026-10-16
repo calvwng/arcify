@@ -313,7 +313,9 @@ test('every existing case body, name and option remains byte-identical across al
         }
     }
     assert.deepEqual([...definitions.keys()].sort((a, b) => a - b), Array.from({ length: 50 }, (_, index) => index));
-    assert.equal(digest([...definitions].sort(([a], [b]) => a - b).map(([, item]) => item)), 'c341d091fdf6929f40399f6901f4a77434828927e6f41965df5ec561b5852c89');
+    // Reviewed case 36 setup insertion normalizes exact fixture controls before
+    // the unchanged Favorite lifecycle baseline; all other case bodies remain.
+    assert.equal(digest([...definitions].sort(([a], [b]) => a - b).map(([, item]) => item)), 'b7f1addd2dca0e23e437a6ff6035dbfeec8f06e9a6aa843f5b726d31016e6107');
     assert.equal(digest(names), '82b76b57d9a4a3fcefa59ea4db2f52af9664a1d5693b2efff89405c32827c36c');
 });
 

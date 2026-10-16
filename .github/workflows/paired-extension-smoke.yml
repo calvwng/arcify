@@ -27,6 +27,8 @@ on:
       - 'native-split-safety.js'
       - 'tests/unit/native-split-safety.test.js'
       - 'scripts/paired-chrome-reload-fixtures.mjs'
+      - 'scripts/paired-chrome-control-window.mjs'
+      - 'tests/unit/paired-chrome-control-window.test.js'
       - 'tests/unit/paired-chrome-run-plan.test.js'
       - 'scripts/paired-chrome-sandbox.mjs'
       - 'scripts/paired-chrome-ui.mjs'
