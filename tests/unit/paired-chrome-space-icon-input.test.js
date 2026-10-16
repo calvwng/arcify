@@ -6,7 +6,8 @@ import { readSourceText } from '../source-text.js';
 import { EMOJI_INPUT_SELECTOR, SPACE_EMOJI_EXAMPLES, assertSpaceIconInputEnvironment,
     installSpaceEmojiInputObservation, readSpaceEmojiEditor, assertSpaceEmojiEditor, assertSpaceEmojiInputEvents,
     replaceSpaceEmojiWithInput, assertSpaceNameAppearance, assertSpaceChipAccessibility,
-    assertSpaceAppearanceOnlyChanged, assertIconOnlySpaceReordered, assertIconOnlySpaceActivated, finishIconOnlySpaceDrag } from '../../scripts/paired-chrome-space-icon-input.mjs';
+    assertSpaceAppearanceOnlyChanged, assertIconOnlySpaceReordered, assertIconOnlySpaceActivated, finishIconOnlySpaceDrag,
+    readSpaceChipInputGeometry, planSpaceChipInputReveal, assertSpaceChipInputRevealed, clickUnobscuredSpaceChip } from '../../scripts/paired-chrome-space-icon-input.mjs';
 
 const event = (type, fields = {}) => ({ type, trusted: true, key: null, ctrlKey: false, inputType: null, data: null, composing: false, value: '', ...fields });
 const events = (value, route = 'keyboard') => [event('keydown', { key: 'a', ctrlKey: true }),
@@ -184,4 +185,78 @@ test('cross-window renders are polled through their complete assertion after per
     const context = readSourceText(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url));
     assert(context.indexOf('evidence.customForIconOnlySaved') < context.indexOf('evidence.iconOnly = await exerciseSpaceIconOnlySwitcher'));
     assert.match(context, /glyph: '👩🏽‍💻', requireVisibleHeader: true/);
+});
+
+// Geometry from the hosted screenshot142/report: the fifth 32px chip center
+// overlaps the separate + control. The prior click target was not recorded, so
+// interception is an inference; the revised fixture observes it before input.
+const occludedChip = () => ({ spaceId: 'custom', matches: 1, visibility: 'visible', focused: true,
+    viewport: { width: 224, height: 600 }, activeSpaceId: 'work',
+    chip: { x: 168, y: 533, width: 32, height: 32, visible: true },
+    overlay: { x: 184, y: 533, width: 32, height: 32, visible: true },
+    strip: { x: 0, y: 525, width: 216, height: 44, visible: true, scrollLeft: 0, scrollWidth: 248, clientWidth: 216 },
+    center: { x: 184, y: 549, hit: { spaceId: null, add: true, inSwitcher: false } },
+    pointer: { x: 90, y: 549, hit: { spaceId: 'personal', add: false, inSwitcher: true } } });
+const uncoveredChip = before => {
+    const state = structuredClone(before); state.strip.scrollLeft = 32; state.chip.x -= 32;
+    state.center.x -= 32; state.center.hit = { spaceId: 'custom', add: false, inSwitcher: true }; return state;
+};
+test('fifth icon-only chip reveal plans one real bounded wheel outside the separate + overlay', () => {
+    const before = occludedChip(), input = planSpaceChipInputReveal(before, 'custom');
+    assert.deepEqual(input, { x: 90, y: 549, deltaX: 32, deltaY: 0 });
+    assertSpaceChipInputRevealed(before, uncoveredChip(before), input);
+    assert.equal(planSpaceChipInputReveal(uncoveredChip(before), 'custom'), null);
+});
+for (const [name, mutate] of Object.entries({ wrongId: s => s.spaceId = 'other', duplicate: s => s.matches = 2,
+    hidden: s => s.visibility = 'hidden', unfocused: s => s.focused = false, hiddenChip: s => s.chip.visible = false,
+    hiddenStrip: s => s.strip.visible = false, hiddenOverlay: s => s.overlay.visible = false, invalidGeometry: s => s.chip.x = NaN,
+    changedCenter: s => s.center.x = 180, verticalClip: s => { s.chip.y = 580; s.center.y = 596; },
+    unknownOverlay: s => s.center.hit.add = false, wrongOverlayPosition: s => s.overlay.x = 200,
+    noOverflow: s => s.strip.scrollWidth = 216, impossibleScroll: s => s.strip.scrollLeft = 33,
+    wheelOnAdd: s => s.pointer.hit.add = true, wheelOutsideStrip: s => s.pointer.hit.inSwitcher = false,
+    wheelOutsideSafeArea: s => s.pointer.x = 190, insufficientScroll: s => s.strip.scrollWidth = 226
+})) test(`chip reveal refuses ${name} before input`, () => { const before = occludedChip(); mutate(before); assert.throws(() => planSpaceChipInputReveal(before, 'custom')); });
+for (const [name, mutate] of Object.entries({ noMovement: s => s.strip.scrollLeft = 0, wrongMovement: s => s.strip.scrollLeft = 30,
+    viewport: s => s.viewport.width = 230, activation: s => s.activeSpaceId = 'custom', metadata: s => s.spaceId = 'other',
+    changedStrip: s => s.strip.width++, changedChip: s => s.chip.width++, movedOverlay: s => s.overlay.x++,
+    detachedChipMovement: s => { s.chip.x += 2; s.center.x += 2; }, stillOccluded: s => { s.center.hit.spaceId = null; s.center.hit.add = true; }
+})) test(`chip reveal rejects ${name} rather than retrying input`, () => { const before = occludedChip(), after = uncoveredChip(before); mutate(after); assert.throws(() => assertSpaceChipInputRevealed(before, after, planSpaceChipInputReveal(before, 'custom'))); });
+
+test('chip input sends one measured wheel and one native click with trusted exact-target evidence', async () => {
+    for (const failure of [null, 'wrong-click', 'untrusted', 'wrong-wheel', 'state-change', 'uncertain-click']) {
+        const before = occludedChip(), after = uncoveredChip(before), calls = [], records = [], baseline = { activeSpaceId: 'work', names: ['Work', 'Custom'], tabs: [1, 2] };
+        let geometryReads = 0, stateReads = 0;
+        const inputEvents = [{ type: 'wheel', trusted: true, deltaX: failure === 'wrong-wheel' ? 30 : 32, deltaY: 0, inSwitcher: true, add: false },
+            ...['mousedown', 'mouseup', 'click'].map(type => ({ type, trusted: failure !== 'untrusted', x: 152, y: 549, spaceId: failure === 'wrong-click' ? null : 'custom', add: failure === 'wrong-click' }))];
+        const page = { mouse: { move: async (...values) => calls.push(['move', ...values]), wheel: async input => calls.push(['wheel', input]),
+            click: async (...values) => { calls.push(['click', ...values]); if (failure === 'uncertain-click') throw Error('Uncertain native click'); } },
+            evaluate: async (fn, spaceId) => {
+                if (fn === readSpaceChipInputGeometry) { assert.equal(spaceId, 'custom'); return geometryReads++ ? after : before; }
+                if (fn.toString().includes('const events = globalThis')) { calls.push(['listen']); return; }
+                if (fn.toString().includes('__stopSpaceChipNativeInput')) { calls.push(['stop']); return; }
+                if (fn.toString().includes('__spaceChipNativeInput')) return inputEvents;
+                assert.fail(`Unexpected browser mutation: ${fn}`);
+            } };
+        const operation = clickUnobscuredSpaceChip({ page, spaceId: 'custom',
+            read: async () => { const state = structuredClone(baseline); if (stateReads++ && failure === 'state-change') state.activeSpaceId = 'custom'; return state; },
+            unchanged: (a, b) => assert.deepEqual(b, a), poll: async (read, valid) => { const state = await read(); assert(valid(state)); return state; },
+            capture: async () => ({ filename: 'required.png' }), record: async value => records.push(value) });
+        if (failure) await assert.rejects(operation); else assert.deepEqual((await operation).events, inputEvents);
+        assert.equal(calls.filter(([type]) => type === 'wheel').length, 1);
+        assert.equal(calls.filter(([type]) => type === 'click').length, failure === 'state-change' ? 0 : 1);
+        assert.equal(calls.at(-1)[0], 'stop');
+        if (['wrong-click', 'untrusted', 'wrong-wheel'].includes(failure)) assert(records.some(item => item.phase === 'space-chip-observed-native-input'));
+    }
+});
+test('selection wiring keeps the original UUID/native-tab activation assertions and forbids a DOM click or input retry', () => {
+    const source = readSourceText(new URL('../../scripts/paired-chrome-space-icon-input.mjs', import.meta.url));
+    const helper = source.slice(source.indexOf('export async function clickUnobscuredSpaceChip'), source.indexOf('async function dragIconOnlySpace'));
+    assert.equal((helper.match(/page\.mouse\.wheel\(/g) || []).length, 1); assert.equal((helper.match(/page\.mouse\.click\(/g) || []).length, 1);
+    assert.match(helper, /assertSpaceChipInputRevealed\(before, await page\.evaluate\(readSpaceChipInputGeometry, spaceId\), input\)/);
+    assert.doesNotMatch(helper, /page\.click\(|dispatchEvent\(|\.scrollLeft\s*=|\.click\(\)|setTimeout|sleep\(/);
+    const context = readSourceText(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url));
+    assert.match(context, /clickUnobscuredSpaceChip\(\{ page, spaceId: target\.id, read, unchanged: assertSpaceContextUnchanged, poll, capture, record \}\)/);
+    assert.match(context, /document\.querySelector\('\.space\.active'\)\?\.dataset\.spaceId === id/);
+    assert.match(context, /tabs => tabs\[0\]\?\.id === seededTabs\[0\]/);
+    assert.match(context, /assertIconOnlySpaceActivated\(beforeIconOnlyActivation, afterIconOnlyActivation/);
 });

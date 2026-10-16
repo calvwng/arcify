@@ -236,6 +236,106 @@ export function assertIconOnlySpaceActivated(before, after, { spaceId, windowId,
     assert.deepEqual(after, expected, 'Clicking the icon-only chip may activate only its exact Space and owned tab in the acting window.');
 }
 
+// An in-viewport chip can still sit underneath the switcher's separate +
+// control. Observe the actual center hit before the single native click; never
+// substitute a DOM click, choose a different Space, or retry uncertain input.
+export function readSpaceChipInputGeometry(spaceId) {
+    const strip = document.getElementById('spaceSwitcher');
+    const matches = [...(strip?.querySelectorAll('button[data-space-id]') || [])].filter(node => node.dataset.spaceId === spaceId);
+    const chip = matches[0], add = document.querySelector('.add-space-toggle');
+    const rect = node => { if (!node) return null; const { x, y, width, height } = node.getBoundingClientRect(); return { x, y, width, height }; };
+    const box = rect(strip), target = rect(chip), overlay = rect(add);
+    const visible = node => Boolean(node && node.getClientRects().length && getComputedStyle(node).visibility === 'visible' && getComputedStyle(node).display !== 'none');
+    const hit = point => { const node = document.elementFromPoint(point.x, point.y); return {
+        spaceId: node?.closest('#spaceSwitcher button[data-space-id]')?.dataset.spaceId || null,
+        add: Boolean(node?.closest('.add-space-toggle')), inSwitcher: Boolean(node?.closest('#spaceSwitcher')),
+        tag: node?.tagName || null, className: node?.getAttribute('class') || null }; };
+    const center = target ? { x: target.x + target.width / 2, y: target.y + target.height / 2 } : null;
+    const safeRight = box && overlay ? Math.min(innerWidth, box.x + box.width, overlay.x - 4) : null;
+    const pointer = box && target ? { x: (Math.max(0, box.x) + safeRight) / 2, y: target.y + target.height / 2 } : null;
+    return { spaceId, matches: matches.length, visibility: document.visibilityState, focused: document.hasFocus(),
+        viewport: { width: innerWidth, height: innerHeight }, activeSpaceId: document.querySelector('.space.active')?.dataset.spaceId,
+        chip: target && { ...target, visible: visible(chip) }, overlay: overlay && { ...overlay, visible: visible(add) },
+        strip: box && { ...box, visible: visible(strip), scrollLeft: strip.scrollLeft, scrollWidth: strip.scrollWidth, clientWidth: strip.clientWidth },
+        center: center && { ...center, hit: hit(center) }, pointer: pointer && { ...pointer, hit: hit(pointer) } };
+}
+export function planSpaceChipInputReveal(state, spaceId) {
+    assert.equal(state.spaceId, spaceId); assert.equal(state.matches, 1);
+    assert.equal(state.visibility, 'visible'); assert.equal(state.focused, true);
+    for (const value of Object.values(state.viewport)) assert(Number.isFinite(value) && value >= 100);
+    for (const box of [state.chip, state.strip, state.overlay]) {
+        assert(box?.visible); for (const key of ['x', 'y', 'width', 'height']) assert(Number.isFinite(box[key]));
+        assert(box.width > 0 && box.height > 0);
+    }
+    const { chip, strip, overlay, center, pointer, viewport } = state;
+    assert.equal(center.x, chip.x + chip.width / 2); assert.equal(center.y, chip.y + chip.height / 2);
+    assert(center.x > Math.max(0, strip.x) && center.x < Math.min(viewport.width, strip.x + strip.width));
+    assert(chip.y >= Math.max(0, strip.y) && chip.y + chip.height <= Math.min(viewport.height, strip.y + strip.height));
+    if (center.hit.spaceId === spaceId && !center.hit.add) return null;
+    assert.equal(center.hit.add, true, 'Only the measured + overlay can authorize this horizontal reveal.');
+    assert(center.x >= overlay.x && center.x <= overlay.x + overlay.width && center.y >= overlay.y && center.y <= overlay.y + overlay.height);
+    for (const key of ['scrollLeft', 'scrollWidth', 'clientWidth']) assert(Number.isFinite(strip[key]));
+    const max = strip.scrollWidth - strip.clientWidth, safeRight = Math.min(viewport.width, strip.x + strip.width, overlay.x - 4);
+    assert(max > 0 && strip.scrollLeft >= 0 && strip.scrollLeft <= max);
+    assert.equal(pointer.hit.inSwitcher, true); assert.equal(pointer.hit.add, false);
+    assert(pointer.x > Math.max(0, strip.x) && pointer.x < safeRight && pointer.y > strip.y && pointer.y < strip.y + strip.height);
+    const deltaX = Math.min(max - strip.scrollLeft, center.x - pointer.x);
+    assert(deltaX > 0 && center.x - deltaX > Math.max(0, strip.x) && chip.x + chip.width - deltaX < safeRight,
+        'One bounded horizontal wheel must fully uncover the same chip.');
+    return { x: pointer.x, y: pointer.y, deltaX, deltaY: 0 };
+}
+export function assertSpaceChipInputRevealed(before, after, input) {
+    assert.deepEqual(planSpaceChipInputReveal(before, before.spaceId), input);
+    assert.equal(planSpaceChipInputReveal(after, before.spaceId), null, 'The final click center must hit the exact target chip.');
+    for (const key of ['spaceId', 'matches', 'visibility', 'focused', 'viewport', 'activeSpaceId', 'overlay']) assert.deepEqual(after[key], before[key]);
+    for (const key of ['x', 'y', 'width', 'height', 'visible', 'scrollWidth', 'clientWidth']) assert.equal(after.strip[key], before.strip[key]);
+    for (const key of ['y', 'width', 'height', 'visible']) assert.equal(after.chip[key], before.chip[key]);
+    const moved = after.strip.scrollLeft - before.strip.scrollLeft;
+    assert(Math.abs(moved - (input?.deltaX || 0)) <= 1);
+    if (input) assert(moved > 0);
+    assert(Math.abs(after.chip.x - before.chip.x + moved) <= 1, 'The same chip must move with its actual scrollport.');
+    return after;
+}
+export async function clickUnobscuredSpaceChip({ page, spaceId, read, unchanged, poll, capture, record }) {
+    const baseline = await read(), before = await page.evaluate(readSpaceChipInputGeometry, spaceId);
+    await record({ phase: 'space-chip-before-native-input', before });
+    const input = planSpaceChipInputReveal(before, spaceId), evidence = { before, input };
+    await page.evaluate(() => {
+        const events = globalThis.__spaceChipNativeInput = [];
+        const observe = event => events.push({ type: event.type, trusted: event.isTrusted, x: event.clientX, y: event.clientY,
+            deltaX: event.deltaX ?? null, deltaY: event.deltaY ?? null,
+            spaceId: event.target.closest?.('#spaceSwitcher button[data-space-id]')?.dataset.spaceId || null,
+            inSwitcher: Boolean(event.target.closest?.('#spaceSwitcher')), add: Boolean(event.target.closest?.('.add-space-toggle')) });
+        for (const type of ['wheel', 'mousedown', 'mouseup', 'click']) document.addEventListener(type, observe, { capture: true, passive: true });
+        globalThis.__stopSpaceChipNativeInput = () => { for (const type of ['wheel', 'mousedown', 'mouseup', 'click']) document.removeEventListener(type, observe, true); };
+    });
+    try {
+        if (input) {
+            await page.mouse.move(input.x, input.y); await page.mouse.wheel({ deltaX: input.deltaX, deltaY: 0 });
+            evidence.revealed = await poll(() => page.evaluate(readSpaceChipInputGeometry, spaceId), state => {
+                try { assertSpaceChipInputRevealed(before, state, input); return true; } catch { return false; }
+            }, 'one measured horizontal wheel uncovers the exact Space chip from the + overlay');
+        } else evidence.revealed = before;
+        unchanged(baseline, await read());
+        evidence.screenshot = await capture(page, 'space-icon-only-exact-chip-unobscured-before-selection');
+        const ready = assertSpaceChipInputRevealed(before, await page.evaluate(readSpaceChipInputGeometry, spaceId), input);
+        unchanged(baseline, await read());
+        await record({ phase: 'space-chip-ready-for-single-click', ...evidence, ready });
+        await page.mouse.click(ready.center.x, ready.center.y);
+        const events = await page.evaluate(() => globalThis.__spaceChipNativeInput);
+        evidence.events = events; await record({ phase: 'space-chip-observed-native-input', ...evidence });
+        assert(events.every(event => event.trusted));
+        const wheels = events.filter(event => event.type === 'wheel'); assert.equal(wheels.length, input ? 1 : 0);
+        if (input) { assert.equal(wheels[0].inSwitcher, true); assert.equal(wheels[0].add, false); assert.equal(wheels[0].deltaY, 0); assert(Math.abs(wheels[0].deltaX - input.deltaX) <= 1); }
+        for (const type of ['mousedown', 'mouseup', 'click']) {
+            const matches = events.filter(event => event.type === type); assert.equal(matches.length, 1);
+            assert.equal(matches[0].spaceId, spaceId); assert.equal(matches[0].add, false);
+            assert(Math.abs(matches[0].x - ready.center.x) <= 1 && Math.abs(matches[0].y - ready.center.y) <= 1);
+        }
+        evidence.events = events; await record({ phase: 'space-chip-single-native-click', ...evidence }); return evidence;
+    } finally { await page.evaluate(() => globalThis.__stopSpaceChipNativeInput()); }
+}
+
 async function dragIconOnlySpace({ page, sourceId, anchorId, ui, poll, capture, screenshotBytes, record }) {
     const selector = id => `#spaceSwitcher button[data-space-id="${id}"]`;
     return ui(page, 'Drag adjacent icon-only Space chips with native mouse input', async () => {

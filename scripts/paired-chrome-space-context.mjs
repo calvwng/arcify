@@ -4,7 +4,7 @@ import { tabToSelector } from './paired-chrome-sidebar-appearance.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { clickFreshResult } from './paired-chrome-ui.mjs';
 import { randomBytes } from 'node:crypto';
-import { exerciseSpaceEmojiInput, exerciseSpaceIconOnlySwitcher, assertIconOnlySpaceActivated, replaceSpaceEmojiWithInput } from './paired-chrome-space-icon-input.mjs';
+import { exerciseSpaceEmojiInput, exerciseSpaceIconOnlySwitcher, assertIconOnlySpaceActivated, replaceSpaceEmojiWithInput, clickUnobscuredSpaceChip } from './paired-chrome-space-icon-input.mjs';
 import { exerciseExternalMenuDismissal, readMenuPreservedState } from './paired-chrome-menu-focus.mjs';
 
 export function assertSpaceContextFixtureEnvironment(env = process.env, uid = process.getuid?.()) {
@@ -509,7 +509,8 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForU
             capture, screenshotBytes, poll, record, whileHidden: async () => {
                 // Deliberate activation is separate from the inactive metadata tests above.
                 const beforeIconOnlyActivation = await read();
-                await ui(page, 'Show edited Space header using its chip', () => page.click(chip(target.id)));
+                evidence.iconOnlySelectionInput = await ui(page, 'Show edited Space header using its chip', () =>
+                    clickUnobscuredSpaceChip({ page, spaceId: target.id, read, unchanged: assertSpaceContextUnchanged, poll, capture, record }));
                 await page.waitForFunction(id => document.querySelector('.space.active')?.dataset.spaceId === id, { polling: 50 }, target.id);
                 await poll(() => apiPage.evaluate(windowId => chrome.tabs.query({ windowId, active: true }), fixture.windowA),
                     tabs => tabs[0]?.id === seededTabs[0], 'explicit Space activation reached its exact owned tab');

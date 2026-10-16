@@ -166,7 +166,7 @@ describe('Space Management', () => {
         await sidebarPage.evaluate(() => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.textContent.trim() === 'Space to Delete') {
+            if (btn.querySelector('.space-switcher-name').textContent.trim() === 'Space to Delete') {
               btn.click();
               break;
             }
@@ -282,7 +282,7 @@ describe('Space Management', () => {
         await sidebarPage.evaluate((targetName) => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.textContent.trim() === targetName) {
+            if (btn.querySelector('.space-switcher-name').textContent.trim() === targetName) {
               btn.click();
               break;
             }
@@ -309,7 +309,7 @@ describe('Space Management', () => {
         await sidebarPage.evaluate(() => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.textContent.trim() === 'Switch Target') {
+            if (btn.querySelector('.space-switcher-name').textContent.trim() === 'Switch Target') {
               btn.click();
               break;
             }
@@ -352,7 +352,7 @@ describe('Space Management', () => {
         await sidebarPage.evaluate((targetName) => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.textContent.trim() === targetName) {
+            if (btn.querySelector('.space-switcher-name').textContent.trim() === targetName) {
               btn.click();
               break;
             }
@@ -426,7 +426,7 @@ describe('Space Management', () => {
         // Get all switcher button texts
         const switcherNames = await sidebarPage.evaluate(() => {
           const buttons = document.querySelectorAll('.space-switcher button');
-          return Array.from(buttons).map(btn => btn.textContent.trim());
+          return Array.from(buttons).map(btn => btn.querySelector('.space-switcher-name').textContent.trim());
         });
         logTestStep(`Switcher buttons: ${switcherNames.join(', ')}`);
 
@@ -624,7 +624,7 @@ describe('Space Management', () => {
         const switcherHasName = await sidebarPage.evaluate((name) => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.classList.contains('active') && btn.textContent.trim() === name) {
+            if (btn.classList.contains('active') && btn.querySelector('.space-switcher-name').textContent.trim() === name) {
               return true;
             }
           }
