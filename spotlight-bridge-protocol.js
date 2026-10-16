@@ -4,6 +4,9 @@ export const BRIDGE_VERSION = 1;
 export const PEER_KEY = 'arcifyBridgePeerId';
 export const PAIRING_GENERATION_KEY = 'arcifyBridgePairingGeneration';
 export const GLOBAL_FAVORITES_FEATURE = 'globalFavoritesV1';
+export const SPACE_ACTIONS_FEATURE = 'spaceActionsV1';
+export const SPACE_ACTION_COMMANDS = ['openSettings', 'createSpaceFolder', 'pinCurrentTab', 'removeCurrentPin'];
+const supportedFeatures = [GLOBAL_FAVORITES_FEATURE, SPACE_ACTIONS_FEATURE];
 export const isExtensionId = value => typeof value === 'string' && /^[a-p]{32}$/.test(value);
 export const isWindowId = value => Number.isSafeInteger(value) && value > 0;
 const isId = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
@@ -29,8 +32,26 @@ export function isFavoriteUrl(value) {
 const commandFields = {
     hello: [], snapshot: [], invalidate: [], activateSpace: ['spaceId'], activateTab: ['tabId'],
     openTab: ['url', 'spaceId'], navigateTab: ['tabId', 'url'],
-    openBookmark: ['spaceId', 'bookmarkId'], openFavorite: ['favoriteId'], launch: ['mode'], startupSuggestion: ['tabId']
+    openBookmark: ['spaceId', 'bookmarkId'], openFavorite: ['favoriteId'], launch: ['mode'], startupSuggestion: ['tabId'],
+    actionContext: ['tabId'], openSettings: ['context'], createSpaceFolder: ['context', 'title'],
+    pinCurrentTab: ['context'], removeCurrentPin: ['context', 'confirmed']
 };
+const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+const boundedText = (value, limit) => typeof value === 'string' && value.length <= limit && !/[\u0000-\u001f\u007f]/.test(value);
+export function isSpaceActionContext(value) {
+    if (!exactKeys(value, ['windowId', 'spaceId', 'bookmarkFolderId', 'pairingGeneration', 'sourceTabId', 'tab'])
+        || !isWindowId(value.windowId) || !isId(value.spaceId) || !isId(value.bookmarkFolderId)
+        || !(value.pairingGeneration === null || isId(value.pairingGeneration)) || !isTabId(value.sourceTabId)) return false;
+    const tab = value.tab;
+    if (tab === null) return true;
+    if (!exactKeys(tab, ['id', 'url', 'title', 'section', 'bookmark']) || tab.id !== value.sourceTabId
+        || !isSafeUrl(tab.url) || !boundedText(tab.title, 1024) || !['today', 'saved'].includes(tab.section)) return false;
+    if (tab.section === 'today') return tab.bookmark === null;
+    const bookmark = tab.bookmark;
+    return exactKeys(bookmark, ['id', 'parentId', 'title', 'url']) && isId(bookmark.id) && isId(bookmark.parentId)
+        && boundedText(bookmark.title, 1024) && isSafeUrl(bookmark.url);
+}
 export function validateRequest(message, commands) {
     if (!message || typeof message !== 'object' || Array.isArray(message) || message.type !== BRIDGE_TYPE)
         throw bridgeError('INVALID_REQUEST', 'Invalid bridge message.');
@@ -41,16 +62,24 @@ export function validateRequest(message, commands) {
     const fields = ['type', 'version', 'requestId', 'windowId', 'command', 'supportedFeatures', ...commandFields[message.command]];
     if (Object.keys(message).some(key => !fields.includes(key))) throw bridgeError('INVALID_REQUEST', 'Unexpected request field.');
     if (message.supportedFeatures !== undefined && (!Array.isArray(message.supportedFeatures)
-        || message.supportedFeatures.length !== 1 || message.supportedFeatures[0] !== GLOBAL_FAVORITES_FEATURE))
+        || message.supportedFeatures.length < 1 || message.supportedFeatures.length > supportedFeatures.length
+        || new Set(message.supportedFeatures).size !== message.supportedFeatures.length
+        || message.supportedFeatures.some(feature => !supportedFeatures.includes(feature))))
         throw bridgeError('INVALID_REQUEST', 'Invalid supported feature marker.');
     if (['activateSpace', 'openBookmark'].includes(message.command) && !isId(message.spaceId)
         || message.command === 'openTab' && message.spaceId !== undefined && !isId(message.spaceId)
-        || ['activateTab', 'navigateTab', 'startupSuggestion'].includes(message.command) && !isTabId(message.tabId)
+        || ['activateTab', 'navigateTab', 'startupSuggestion', 'actionContext'].includes(message.command) && !isTabId(message.tabId)
         || ['openTab', 'navigateTab'].includes(message.command) && !isSafeUrl(message.url)
         || message.command === 'openBookmark' && !isId(message.bookmarkId)
         || message.command === 'openFavorite' && !isId(message.favoriteId)
         || message.command === 'launch' && !['current-tab', 'new-tab'].includes(message.mode))
         throw bridgeError('INVALID_REQUEST', 'Invalid command payload.');
+    if (SPACE_ACTION_COMMANDS.includes(message.command) && (!isSpaceActionContext(message.context)
+        || message.context.windowId !== message.windowId
+        || message.command === 'createSpaceFolder' && (!boundedText(message.title, 256) || !message.title.trim())
+        || message.command === 'pinCurrentTab' && message.context.tab?.section !== 'today'
+        || message.command === 'removeCurrentPin' && (message.context.tab?.section !== 'saved' || message.confirmed !== true)))
+        throw bridgeError('INVALID_REQUEST', 'Invalid Space action context.');
     return message;
 }
 export function responseFor(request, role, payload = {}) {

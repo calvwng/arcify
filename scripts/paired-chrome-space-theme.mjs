@@ -349,6 +349,45 @@ export async function restoreThemeNativeFixture(apiPage, original) {
     }, { groups: original.groups, tabs: original.tabs, projection: original.projection });
 }
 
+/** Choose a visible non-no-op preview without changing persisted Space order. */
+export function chooseThemeMarkerRequest(visibleIds, orderedIds) {
+    for (const ids of [visibleIds, orderedIds]) {
+        assert(Array.isArray(ids) && ids.every(id => typeof id === 'string' && id.length));
+        assert.equal(new Set(ids).size, ids.length, 'Duplicate chip identity cannot authorize drag evidence.');
+    }
+    assert(visibleIds.length >= 2, 'At least two visible native chips are needed for a real insertion marker.');
+    const indices = visibleIds.map(id => orderedIds.indexOf(id));
+    assert(indices.every((index, offset) => index >= 0 && (!offset || index > indices[offset - 1])), 'Visible chips must retain the authoritative Space order.');
+    // The old first-before-second gesture describes the existing slot, so the
+    // real resolver correctly suppresses its marker. Reverse those identities.
+    return { sourceSpaceId: visibleIds[1], anchorSpaceId: visibleIds[0], placement: 'before' };
+}
+
+/** Drain authoritative reconciliation before reading the composite fixture baseline. */
+export async function readThemeFixtureState(apiPage, snapshot, windowId) {
+    const bridge = await snapshot(windowId);
+    const state = await apiPage.evaluate(async () => {
+        const bookmark = ({ id, parentId, index, title, url, children }) => ({ id, parentId, index, title, ...(url === undefined ? {} : { url }), ...(children ? { children: children.map(bookmark) } : {}) });
+        const local = await chrome.storage.local.get(['spaces', 'spaceRegistry', 'sidebarAppearance', 'persistentFavorites', 'pinnedTabStatesById']);
+        const session = await chrome.storage.session.get(['activeSpaces', 'spaceGroupProjection']);
+        return { spaces: local.spaces, registry: local.spaceRegistry || {}, appearance: local.sidebarAppearance ?? null,
+            favorites: local.persistentFavorites || [], bindings: local.pinnedTabStatesById || {}, sync: await chrome.storage.sync.get(null),
+            bookmarks: (await chrome.bookmarks.getTree()).map(bookmark), activeSpaces: session.activeSpaces || {}, projection: session.spaceGroupProjection || {},
+            groups: (await chrome.tabGroups.query({})).sort((a, b) => a.id - b.id),
+            windows: (await chrome.windows.getAll()).map(({ id, focused }) => ({ id, focused })).sort((a, b) => a.id - b.id),
+            tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pinned, active, groupId }) => ({ id, windowId, index, url, pinned, active, groupId })).sort((a, b) => a.id - b.id) };
+    });
+    state.bridgeColors = bridge.spaces.map(({ id, color, ...rest }) => { assert(!Object.hasOwn(rest, 'customTint'), 'v1 must not acquire a new metadata field.'); return { id, color }; });
+    return state;
+}
+
+/** All cleanup targets come from the same post-reconciliation baseline. */
+export function themeRestorationState(state, spaceId) {
+    return structuredClone({ space: targetSpace(state, spaceId), appearance: state.appearance,
+        activeSpaces: state.activeSpaces, activeTabs: state.tabs.filter(tab => tab.active).map(tab => tab.id),
+        focusedWindowId: state.windows.find(window => window.focused)?.id });
+}
+
 /** Runner owns browser launch, sandbox and native mounting. Reload evidence is a real document reload. */
 export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, ui, screenshot, screenshotBytes, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
     assertSpaceContextFixtureEnvironment();
@@ -356,28 +395,11 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
     const nonce = randomBytes(8).toString('hex'), windowId = fixture.windowA;
     const initial = await snapshot(windowId), target = initial.spaces.find(space => space.id === fixture.spaces.work);
     assert(target?.bookmarkFolderId);
-    const original = await apiPage.evaluate(async spaceId => ({ space: (await chrome.storage.local.get('spaces')).spaces.find(space => space.id === spaceId), appearance: (await chrome.storage.local.get('sidebarAppearance')).sidebarAppearance ?? null,
-        activeSpaces: (await chrome.storage.session.get('activeSpaces')).activeSpaces || {}, activeTabs: (await chrome.tabs.query({ active: true })).map(({ id }) => id),
-        focusedWindowId: (await chrome.windows.getAll()).find(window => window.focused)?.id }), target.id);
     const ownedTabs = [], ownedBookmarks = [], ownedFavorites = [];
-    let native, settings, primaryError, beforeFixture;
+    let native, settings, primaryError, beforeFixture, original;
     const evidence = { nativePanel: true, nonce, checkpoints: [], screenshots: [], nativeColorPicker: 'Manual follow-up: the OS color dialog is not automated. Hex saves use real keyboard input.', systemPreference: 'Chrome rendering-media emulation, not a physical OS setting change.' };
     const checkpoint = async (phase, data = {}) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
-    const read = async () => {
-        const state = await apiPage.evaluate(async () => {
-            const bookmark = ({ id, parentId, index, title, url, children }) => ({ id, parentId, index, title, ...(url === undefined ? {} : { url }), ...(children ? { children: children.map(bookmark) } : {}) });
-            const local = await chrome.storage.local.get(['spaces', 'spaceRegistry', 'sidebarAppearance', 'persistentFavorites', 'pinnedTabStatesById']);
-            const session = await chrome.storage.session.get(['activeSpaces', 'spaceGroupProjection']);
-            return { spaces: local.spaces, registry: local.spaceRegistry || {}, appearance: local.sidebarAppearance ?? null,
-                favorites: local.persistentFavorites || [], bindings: local.pinnedTabStatesById || {}, sync: await chrome.storage.sync.get(null),
-                bookmarks: (await chrome.bookmarks.getTree()).map(bookmark), activeSpaces: session.activeSpaces || {}, projection: session.spaceGroupProjection || {},
-                groups: (await chrome.tabGroups.query({})).sort((a, b) => a.id - b.id),
-                windows: (await chrome.windows.getAll()).map(({ id, focused }) => ({ id, focused })).sort((a, b) => a.id - b.id),
-                tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pinned, active, groupId }) => ({ id, windowId, index, url, pinned, active, groupId })).sort((a, b) => a.id - b.id) };
-        });
-        state.bridgeColors = (await snapshot(windowId)).spaces.map(({ id, color, ...rest }) => { assert(!Object.hasOwn(rest, 'customTint'), 'v1 must not acquire a new metadata field.'); return { id, color }; });
-        return state;
-    };
+    const read = () => readThemeFixtureState(apiPage, snapshot, windowId);
     const host = async () => {
         const value = await native.page.evaluate(async () => ({ tab: await chrome.tabs.getCurrent() || null, windowId: (await chrome.windows.getCurrent()).id,
             url: location.href, visibility: document.visibilityState, width: innerWidth, height: innerHeight,
@@ -438,6 +460,8 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
     };
     try {
         beforeFixture = await read();
+        original = themeRestorationState(beforeFixture, target.id);
+        await checkpoint('before-theme-fixture', { before: beforeFixture });
         settings = await newTabPage(`chrome-extension://${arcifyId}/options.html`, windowId); ownedTabs.push(settings.tab.id);
         await settings.page.evaluateOnNewDocument(observeThemeFirstPaint);
         await apiPage.evaluate(async ({ tabId, spaceId }) => { const reply = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId, spaceId }); if (!reply.success) throw Error(reply.error); }, { tabId: settings.tab.id, spaceId: target.id });
@@ -492,8 +516,9 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
             }
             // A real drag reveals the marker. Cancel through the native input session; never drop or mutate Space order.
             const visible = await native.page.$$eval('#spaceSwitcher button[data-space-id]', nodes => nodes.filter(node => { const r = node.getBoundingClientRect(); return r.x >= 6 && r.right < innerWidth - 6; }).map(node => node.dataset.spaceId));
-            assert(visible.length >= 2, 'At least two visible native chips are needed for a real insertion marker.');
-            const sourceId = visible[0], anchorId = visible[1], beforeDrag = await read();
+            const beforeDrag = await read();
+            const request = chooseThemeMarkerRequest(visible, beforeDrag.spaces.map(space => space.id));
+            const { sourceSpaceId: sourceId, anchorSpaceId: anchorId } = request;
             const { source, target: anchor, from, to } = await locateFreshDragGeometry(native.page, chip(sourceId), chip(anchorId), observation => checkpoint('drag-geometry', { observation }));
             let held = false;
             await native.page.evaluate(installSpaceDragObservation);
@@ -503,7 +528,6 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
                     await native.page.mouse.move(from.x + from.width / 2, from.y - 12, { steps: 5 });
                     await native.page.mouse.move(to.x + 7, to.y + to.height / 2, { steps: 20 });
                 });
-                const request = { sourceSpaceId: sourceId, anchorSpaceId: anchorId, placement: 'before' };
                 const marker = await poll(() => native.page.evaluate(readSpaceDropMarker), state => accepted(value => assertSpaceDropMarker(value, request), state), 'genuine visible Space insertion marker');
                 const { bytes } = await capture(`space-theme-${mode}-native-drop-marker`);
                 const pixels = await native.page.evaluate(readMarkerScreenshotPixels, { base64: bytes.toString('base64'), marker });
@@ -514,6 +538,7 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
                 assert(!trace.events.some(event => event.type === 'drop'));
                 await native.page.mouse.up(); held = false; assert.deepEqual(await read(), beforeDrag);
             } finally {
+                await checkpoint('theme-drag-observation', { request, trace: await native.page.evaluate(readSpaceDragObservation).catch(error => ({ error: error.message })) }).catch(() => {});
                 if (held) { await favoriteDragInputClient(native.page).send('Input.cancelDragging').catch(() => {}); const trace = await native.page.evaluate(readSpaceDragObservation).catch(() => null); if (trace?.events.some(event => event.type === 'dragend' && event.trusted)) await native.page.mouse.up(); }
                 await source.dispose(); await anchor.dispose();
             }
@@ -618,7 +643,7 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
     } catch (error) {
         primaryError = error; await checkpoint('space-theme-failed', { error: { message: error.message, stack: error.stack } }).catch(() => {}); throw error;
     } finally {
-        await finishBookmarkFixture([
+        if (original) await finishBookmarkFixture([
             async () => { if (native) { await native.page.emulateMediaFeatures([]); await native.close(); } },
             async () => { // Exact-owned fixture cleanup, not acceptance input or broad storage replacement.
                 const cleanup = await newTabPage(`chrome-extension://${arcifyId}/options.html`, windowId); ownedTabs.push(cleanup.tab.id);
@@ -638,6 +663,7 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
                 // Restore focus after the explicit settings/cleanup operations.
                 await apiPage.evaluate(async ({ activeTabs, focusedWindowId }) => { for (const id of activeTabs) await chrome.tabs.update(id, { active: true }); if (focusedWindowId !== undefined) await chrome.windows.update(focusedWindowId, { focused: true }); }, original);
                 await restoreThemeLastTabs(apiPage, beforeFixture.spaces);
+                await checkpoint('before-theme-cleanup-assertion', { before: beforeFixture, after: await read() });
                 const restored = await poll(read, state => accepted(value => assertThemeFixtureRestored(beforeFixture, value, target.id), state), 'exact original theme fixture state restored');
                 await checkpoint('theme-fixture-restored', { before: beforeFixture, after: restored });
             } }

@@ -7,7 +7,7 @@ const workflow = readSourceText(new URL('../../.github/workflows/paired-extensio
 
 test('menu evidence modules execute once in full-only scope before Favorite receipts and browser restart', () => {
     const fullStart = runner.indexOf("    if (report.runMode === 'full') {\n");
-    const fullEnd = runner.indexOf('    } // Full-only cases 3–31, 33–35, 37–38 and 40–47;');
+    const fullEnd = runner.indexOf('    } // Full-only cases 3–31, 33–35, 37–38 and 40–49;');
     assert(fullStart > 0 && fullEnd > fullStart);
     for (const [name, index] of [['exerciseSpaceContextBasics', 37], ['exerciseTabMenuActions', 38]]) {
         assert.match(runner, new RegExp(`import \\{[^}]*${name}[^}]*\\} from './paired-chrome-`));

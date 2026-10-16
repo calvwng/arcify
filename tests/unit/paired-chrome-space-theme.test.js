@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readSourceText } from '../source-text.js';
-import { THEME_MODES, THEME_EXTREMES, parseThemeRgb, computedThemeContrast, assertThemeSample,
+import { themeRestorationState, readThemeFixtureState, chooseThemeMarkerRequest, THEME_MODES, THEME_EXTREMES, parseThemeRgb, computedThemeContrast, assertThemeSample,
     assertThemeResolved, assertThemeNativeProjection, assertThemeMetadataSaved, assertThemeFixtureRestored, setThemeGroupSync, restoreThemeNativeFixture, restoreThemeLastTabs, assertThemeModeSaved, assertThemeReload, assertThemeKeyboardTrace,
     assertThemeFocusKept, assertThemeNativeHost, assertThemeHeaderGeometry, assertThemeHeaderSaved, assertThemeFirstPaint, chooseThemeMode, replaceThemeHex, THEME_HEX_INPUT } from '../../scripts/paired-chrome-space-theme.mjs';
 
@@ -228,4 +228,53 @@ test('native cleanup relocates whole groups atomically without tabs.move array u
         assert.deepEqual(live, original.tabs);
         assert.deepEqual(calls, [['tab', 1, 1], ['group', 22, 0], ['projection', { spaceGroupProjection: original.projection }]]);
     } finally { if (prior === undefined) delete globalThis.chrome; else globalThis.chrome = prior; }
+});
+
+
+test('theme marker gesture moves the second visible Space before the first, never the adjacent no-op', () => {
+    assert.deepEqual(chooseThemeMarkerRequest(['a', 'b'], ['a', 'b', 'c']), { sourceSpaceId: 'b', anchorSpaceId: 'a', placement: 'before' });
+    assert.deepEqual(chooseThemeMarkerRequest(['b', 'd'], ['a', 'b', 'c', 'd']), { sourceSpaceId: 'd', anchorSpaceId: 'b', placement: 'before' });
+});
+for (const [name, visible, ordered] of [
+    ['one visible', ['a'], ['a', 'b']], ['duplicate visible', ['a', 'a'], ['a', 'b']],
+    ['duplicate stored', ['a', 'b'], ['a', 'b', 'b']], ['stale chip', ['a', 'missing'], ['a', 'b']],
+    ['reversed DOM', ['b', 'a'], ['a', 'b']], ['invalid identity', ['a', null], ['a', 'b']]
+]) test(`theme marker planning rejects ${name}`, () => assert.throws(() => chooseThemeMarkerRequest(visible, ordered)));
+
+
+test('theme composite baseline drains authoritative reconciliation before raw API capture', async () => {
+    const order = [], live = { spaces: [{ id: 'work', color: 'blue', temporaryTabs: [1] }], tabs: [{ id: 1, groupId: -1 }] };
+    const snapshot = async windowId => {
+        assert.equal(windowId, 7); order.push('snapshot');
+        // Queue draining can reconcile live group/member metadata before capture.
+        live.tabs[0].groupId = 22;
+        return { spaces: structuredClone(live.spaces) };
+    };
+    const page = { evaluate: async () => { order.push('raw'); return structuredClone(live); } };
+    const result = await readThemeFixtureState(page, snapshot, 7);
+    assert.deepEqual(order, ['snapshot', 'raw']);
+    assert.equal(result.tabs[0].groupId, 22);
+    assert.deepEqual(result.bridgeColors, [{ id: 'work', color: 'blue' }]);
+});
+test('theme baseline fails closed if the authoritative barrier fails or v1 colors acquire tint', async () => {
+    let reads = 0; const page = { evaluate: async () => { reads++; return {}; } };
+    await assert.rejects(() => readThemeFixtureState(page, async () => { throw Error('snapshot failed'); }, 7), /snapshot failed/);
+    assert.equal(reads, 0);
+    await assert.rejects(() => readThemeFixtureState(page, async () => ({ spaces: [{ id: 'work', color: 'blue', customTint: '#ffffff' }] }), 7), /v1 must not acquire/);
+});
+
+test('cleanup targets derive from the same captured baseline without another asynchronous raw read', () => {
+    const before = state(); before.windows = [{ id: 1, focused: false }, { id: 2, focused: true }];
+    before.tabs.push({ id: 8, active: false }, { id: 9, active: true });
+    const result = themeRestorationState(before, 'work');
+    assert.deepEqual(result, { space: before.spaces[0], appearance: before.appearance, activeSpaces: before.activeSpaces, activeTabs: [1, 9], focusedWindowId: 2 });
+    result.space.color = 'red'; result.activeSpaces[1] = 'other';
+    assert.equal(before.spaces[0].color, 'blue'); assert.equal(before.activeSpaces[1], 'work');
+    assert.throws(() => themeRestorationState(before, 'missing'));
+});
+
+test('theme cleanup cannot run when exact restoration target derivation fails', async () => {
+    const source = await readSourceText(new URL('../../scripts/paired-chrome-space-theme.mjs', import.meta.url));
+    assert.match(source, /beforeFixture = await read\(\);\s+original = themeRestorationState\(beforeFixture, target\.id\);/);
+    assert.match(source, /finally \{\s+if \(original\) await finishBookmarkFixture\(\[/);
 });

@@ -2,13 +2,14 @@
 
 The full suite retains every previous 45 case and adds two mandatory cases,
 46 (Arcify native Space theme) and 47 (Spotlight options appearance), before the
-unchanged ordinary-Favorite and browser-restart ending. The full suite requires
-47 passing cases exactly once in declared order. Independent Favorite lifecycle
+unchanged ordinary-Favorite and browser-restart ending. Recovery and initial
+Spotlight action cases 48/49 now follow both theme cases. The full suite requires
+49 passing cases exactly once in declared order. Independent Favorite lifecycle
 and native Split View jobs still require 5 and 4 cases. Missing, failed, skipped,
 incomplete or extra evidence fails the existing strict run-plan gates.
 
 All three jobs and the runner pin Spotlight to reviewed, published commit
-`4e4204bacde4beef5f8686437cbf9c540f65fe7c`. After verifying that exact checkout,
+`dae17a24d4e3b90cecd42a19ceeb7322b755370b`. After verifying that exact checkout,
 case 47 imports and executes its unchanged
 `test/e2e/options-appearance-evidence.js`. Missing collector code is a failure.
 The Arcify adapter adds only passive observation, required-artifact validation
@@ -79,7 +80,7 @@ required assertion fails.
 
 Local validation is limited to pure validators, mocked adapters, source contracts,
 syntax checks and production builds. These checks are not browser acceptance;
-the final combined commit still requires a successful hosted 47/5/4 run.
+the final combined commit still requires a successful hosted 49/5/4 run.
 No browser, native helper, privileged installation, security flag or host-policy
 change is used locally. Hosted Chrome keeps its normal namespace sandbox.
 

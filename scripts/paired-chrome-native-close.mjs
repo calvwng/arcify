@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url';
 
 const HELPER = fileURLToPath(new URL('./paired-chrome-native-close.py', import.meta.url));
 const probes = new WeakMap();
+const CHORDS = Object.freeze({
+    'close-tab': Object.freeze(['Control_L', 'w']),
+    'spotlight-command': Object.freeze(['Alt_L', 't']),
+});
 
 export function nativeDisplayNumber(display) {
     assert.equal(typeof display, 'string', 'An explicit DISPLAY is required');
@@ -49,6 +53,9 @@ function runHelper(request) {
 }
 
 async function invoke(request, run) {
+    const action = request.action || 'close-tab';
+    assert(Object.hasOwn(CHORDS, action));
+    const [modifier, key] = CHORDS[action];
     let output;
     try { output = await run(request); }
     catch (cause) {
@@ -68,7 +75,11 @@ async function invoke(request, run) {
         assert.equal(evidence.schemaVersion, 1);
         assert.equal(evidence.status, 'ok', evidence.error?.message || 'Native close helper rejected the request');
         assert.equal(evidence.mode, request.mode);
-        assert.equal(evidence.route, 'X11 XTEST native Control_L+w');
+        assert.equal(evidence.route, `X11 XTEST native ${modifier}+${key}`);
+        if (action === 'spotlight-command') {
+            assert.equal(evidence.action, action);
+            assert.equal(evidence.browserCommandVerified, false, 'Native transport alone cannot prove registered command dispatch');
+        }
         assert.equal(evidence.physicalKeyboard, false);
         assert.equal(evidence.browserClosureVerified, false, 'The input helper cannot prove Chrome tab closure');
         const expected = validateExpected(evidence.expected);
@@ -87,11 +98,16 @@ async function invoke(request, run) {
             assert.deepEqual(evidence.events, []); assert.deepEqual(evidence.cleanup, []);
         } else {
             assert.equal(evidence.chordAttempted, true); assert.equal(evidence.chordCompleted, true);
+            if (action === 'spotlight-command') {
+                assert(Number.isFinite(Date.parse(evidence.inputStartedAt)));
+                assert(Number.isFinite(Date.parse(evidence.commandKeyDownAt)));
+                assert(Date.parse(evidence.commandKeyDownAt) >= Date.parse(evidence.inputStartedAt));
+            }
             assert.deepEqual(evidence.target, request.baseline.target);
             assert.deepEqual(evidence.host, request.baseline.host);
             assert.deepEqual(evidence.keycodes, request.baseline.keycodes);
             assert.deepEqual(evidence.events.map(({ key, pressed }) => [key, pressed]),
-                [['Control_L', true], ['w', true], ['w', false], ['Control_L', false]]);
+                [[modifier, true], [key, true], [key, false], [modifier, false]]);
             assert(evidence.events.every(event => event.result !== 0 && Number.isInteger(event.result)
                 && event.delayMs === 0 && event.keycode === evidence.keycodes[event.key]));
             assert.deepEqual(evidence.cleanup, []);
@@ -108,21 +124,25 @@ async function invoke(request, run) {
     return evidence;
 }
 
-/** Returns an opaque one-use probe plus reviewable JSON evidence. No input sent. */
-export async function probeNativeCloseTarget(target, { run = runHelper } = {}) {
+/** Internal static-action probe. No input is sent; evidence is a defensive copy. */
+async function probeTarget(target, action, { run = runHelper } = {}) {
     const expected = validateExpected(target);
-    const evidence = await invoke({ mode: 'probe', expected }, run);
-    // Internal copies prevent callers from changing the target between probe/send.
+    const evidence = await invoke({ mode: 'probe', expected, action }, run);
     const token = Object.freeze({ evidence: structuredClone(evidence) });
-    probes.set(token, { baseline: structuredClone(evidence), run, consumed: false });
+    probes.set(token, { baseline: structuredClone(evidence), run, consumed: false, action });
     return token;
 }
-
-/** Call only AFTER exact tab/Favorite/target identities and removal observers are armed. */
-export async function sendOneNativeClose(probe) {
+async function sendOne(probe, action) {
     const state = probes.get(probe);
-    assert(state, 'A probe issued by probeNativeCloseTarget is required');
+    assert(state, 'A probe issued by the matching native target probe is required');
+    assert.equal(state.action, action, 'A probe cannot authorize a different native chord');
     assert.equal(state.consumed, false, 'This native-close probe has already been consumed; never repeat an uncertain chord');
     state.consumed = true; // Before starting the process: a timeout is not retry permission.
-    return invoke({ mode: 'send', expected: state.baseline.expected, baseline: state.baseline }, state.run);
+    return invoke({ mode: 'send', expected: state.baseline.expected, baseline: state.baseline, action }, state.run);
 }
+/** Call only after exact tab/Favorite/target identities and removal observers are armed. */
+export const probeNativeCloseTarget = (target, options) => probeTarget(target, 'close-tab', options);
+export const sendOneNativeClose = probe => sendOne(probe, 'close-tab');
+/** Static registered Spotlight Alt+T only. Never an arbitrary keyboard interface. */
+export const probeNativeSpotlightCommandTarget = (target, options) => probeTarget(target, 'spotlight-command', options);
+export const sendOneNativeSpotlightCommand = probe => sendOne(probe, 'spotlight-command');

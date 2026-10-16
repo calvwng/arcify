@@ -8,7 +8,7 @@ const theme = readSourceText(new URL('../../scripts/paired-chrome-space-theme.mj
 
 test('both new theme cases execute exactly once in mandatory full scope before unchanged lifecycle and restart', () => {
     const start = runner.indexOf("    if (report.runMode === 'full') {\n");
-    const end = runner.indexOf('    } // Full-only cases 3–31, 33–35, 37–38 and 40–47;');
+    const end = runner.indexOf('    } // Full-only cases 3–31, 33–35, 37–38 and 40–49;');
     assert(start > 0 && end > start);
     for (const [name, index] of [['exerciseSpaceTheme', 46], ['exerciseSpotlightOptionsAppearance', 47]]) {
         assert.equal((runner.match(new RegExp(`${name}\\(`, 'g')) || []).length, 1);
@@ -45,7 +45,7 @@ test('workflow watches new evidence/runtime/paint/docs with all three exact peer
         assert(workflow.includes(`- '${path}'`), `Missing required workflow watch path: ${path}`);
     }
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
-    assert.equal(pin, '4e4204bacde4beef5f8686437cbf9c540f65fe7c');
+    assert.equal(pin, 'dae17a24d4e3b90cecd42a19ceeb7322b755370b');
     assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 3);
     assert.match(runner, /assert\.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);

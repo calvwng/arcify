@@ -119,9 +119,10 @@ mutated profile.
 
 The accepted modes are `full` (the default when unset), `favorite-lifecycle`, and
 the [supplemental native-Split mode](../tests/NATIVE_SPLIT_CI.md); any other value
-fails. The full plan requires all **41** cases, preserving the original cases'
-order and adding two Move-to-Space cases before Favorite lifecycle receipts:
-0–31, 33–35, 37–38, 40–41, 36, then 32. Case 39 remains the distinct native-Split
+fails. The current full plan requires all **49** cases, preserving the original
+cases' order and retaining Move, Today-order, theme, recovery and initial
+Spotlight action coverage before Favorite lifecycle receipts:
+0–31, 33–35, 37–38, 40–49, 36, then 32. Case 39 remains the distinct native-Split
 case; the full suite never substitutes its four-case supplemental job.
 The supplemental plan requires exactly **5** cases, in zero-based case-index order
 **0, 1, 2, 36, 32**:

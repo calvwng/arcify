@@ -7,9 +7,10 @@ export async function canCreateFolder(spaceFolderId, parentId) {
     return Boolean(parent && !parent.url && parent.parentId === spaceFolderId);
 }
 
-export async function createFolder(spaceFolderId, parentId, title) {
+export async function createFolder(spaceFolderId, parentId, title, { beforeWrite } = {}) {
     if (!await canCreateFolder(spaceFolderId, parentId)) {
         throw new Error('Nested folders require tab group sync to be off and support two folder levels.');
     }
+    await beforeWrite?.();
     return chrome.bookmarks.create({ parentId, title });
 }

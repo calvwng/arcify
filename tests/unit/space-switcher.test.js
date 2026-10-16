@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
+import { chooseThemeMarkerRequest } from '../../scripts/paired-chrome-space-theme.mjs';
 import { createSpaceSwitcher } from '../../space-switcher.js';
 import { moveSpace, projectSpaceOrder } from '../../space-order.js';
 
@@ -327,4 +328,20 @@ test('appearance geometry refresh retargets the live marker without replacing dr
     assert.equal(f.line.hidden, true); // Pointer now hits its source, a no-op.
     assert.deepEqual(f.buttons(), nodes); assert.equal(nodes[2].classList.contains('dragging-switcher'), true);
     assert.deepEqual(f.moves, []); f.event(nodes[2], 'dragend');
+});
+
+
+test('hosted theme preview plan resolves to the real visible marker and cancellation changes no order', () => {
+    const f = setup(), ids = f.ids(), request = chooseThemeMarkerRequest(ids, ids);
+    const source = f.buttons().find(button => button.dataset.spaceId === request.sourceSpaceId);
+    const anchor = f.buttons().find(button => button.dataset.spaceId === request.anchorSpaceId);
+    f.event(source, 'dragstart');
+    f.event(anchor, 'dragover', { clientX: anchor.getBoundingClientRect().left + 7 });
+    assert.equal(f.line.hidden, false);
+    assert.equal(f.line.dataset.sourceSpaceId, request.sourceSpaceId);
+    assert.equal(f.line.dataset.anchorSpaceId, request.anchorSpaceId);
+    assert.equal(f.line.dataset.placement, request.placement);
+    f.event(source, 'dragend');
+    assert.equal(f.line.hidden, true);
+    assert.deepEqual(f.ids(), ids); assert.deepEqual(f.moves, []); assert.deepEqual(f.activations, []);
 });

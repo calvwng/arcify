@@ -223,3 +223,27 @@ test('current-session refresh repairs a lost acknowledgement without trusting th
     await a.refresh({ state: state(), items });
     assert.equal(f.local[LOCAL].peerGeneration, f.peerGeneration); assert.deepEqual(await f.reload(), state());
 });
+
+for (let stopAt = 1; stopAt <= 6; stopAt++) test(`guarded selection checkpoint stops at boundary ${stopAt} without later writes`, async () => {
+    const f = fixture(), adapter = await f.seed();
+    const writes = f.writes.length, calls = f.calls.length;
+    let guards = 0;
+    await assert.rejects(adapter.checkpointSelection({ state: state(), items, spaces: [{ id: 'space' }], activeSpaces: { 1: 'space' },
+        spaceSessionUpdate: { activeSpaces: { 1: 'space' } },
+        beforeWrite: async () => { if (++guards === stopAt) throw new Error('Companion pairing revoked'); } }), /Companion pairing revoked/);
+    assert.equal(guards, stopAt);
+    // First guard precedes save's asynchronous preparation; later guards each
+    // precede invalidation, session, local mirror, witness, and acknowledgement.
+    assert.equal(f.writes.length - writes, [0, 0, 1, 2, 3, 3][stopAt - 1]);
+    assert.equal(f.calls.length - calls, stopAt === 6 ? 1 : 0);
+});
+
+test('unchanged selection checkpoint still checks its caller guard after awaited reads', async () => {
+    const f = fixture(), adapter = await f.seed();
+    const payload = { state: state(), items, spaces: [{ id: 'space' }], activeSpaces: { 1: 'space' }, spaceSessionUpdate: { activeSpaces: { 1: 'space' } } };
+    await adapter.checkpointSelection(payload);
+    const before = f.writes.length; let revoked = false;
+    f.beforeQuery = () => { revoked = true; };
+    await assert.rejects(adapter.checkpointSelection({ ...payload, beforeWrite: async () => { if (revoked) throw new Error('Pairing revoked during lookup'); } }), /Pairing revoked during lookup/);
+    assert.equal(f.writes.length, before);
+});

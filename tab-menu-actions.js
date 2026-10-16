@@ -2,6 +2,7 @@ import { getSpaceBookmarkById } from './space-bookmarks.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { Utils } from './utils.js';
 import { assertNotNativeSplit } from './native-split-safety.js';
+import { removeSavedSpacePin } from './space-pin-actions.js';
 
 const ACTIONS = new Set(['describe', 'rename', 'editUrl', 'copyLink', 'mute', 'duplicate', 'removePin']);
 const id = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
@@ -108,48 +109,8 @@ export function runTabMenuAction(store, request) {
             }
         }
         if (action === 'removePin') {
-            target = await resolve();
-            const linked = new Set();
-            // Include every exact binding, even a pane in another window or a
-            // live pane behind the clicked closed bookmark row. No URL pairing.
-            const guard = async () => {
-                getSpace();
-                const states = await Utils.getPinnedTabStates();
-                for (const [key, binding] of Object.entries(states)) if (binding.bookmarkId === bookmarkId) linked.add(Number(key));
-                // Check all exact linked panes at one boundary: serial gets can
-                // stale an earlier pane while a later cross-window read waits.
-                const tabs = await chrome.tabs.query({});
-                for (const live of tabs) if (linked.has(live.id)) assertNotNativeSplit(live);
-                getSpace();
-            };
-            await guard();
-            await chrome.bookmarks.remove(bookmarkId);
-            try {
-                await guard();
-                const states = await Utils.getPinnedTabStates(), affected = [];
-                for (const [key, binding] of Object.entries(states)) {
-                    const liveId = Number(key);
-                    if (binding.bookmarkId !== bookmarkId || store.isGlobalTab?.(liveId) || !target.space.spaceBookmarks.includes(liveId)) continue;
-                    let live;
-                    try { live = await chrome.tabs.get(liveId); } catch { continue; }
-                    if (!live.pinned && !live.incognito) affected.push(liveId);
-                }
-                await Utils.removePinnedTabStates(affected, { beforeWrite: guard, expectedBookmarkId: bookmarkId });
-                // The in-lock post-write guard is the final native read; update
-                // membership synchronously rather than opening another await gap.
-                for (const liveId of affected) {
-                    target.space.spaceBookmarks = target.space.spaceBookmarks.filter(member => member !== liveId);
-                    if (!target.space.temporaryTabs.includes(liveId)) target.space.temporaryTabs.push(liveId);
-                }
-                await Utils._serializeTabNameOp(async () => {
-                    const names = await Utils.getTabNameOverrides();
-                    for (const liveId of affected) delete names[liveId];
-                    await Utils.saveTabNameOverrides(names);
-                });
-                await store.persist();
-            } catch (error) {
-                throw new Error(`The saved pin was removed, but its live display could not be fully refreshed. ${error.message} Nothing was retried or recreated.`);
-            }
+            await resolve();
+            await removeSavedSpacePin(store, { getSpace, bookmarkId });
             return {};
         }
         // Recheck immediately before Chrome's non-transactional bookmark write.

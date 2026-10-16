@@ -1,6 +1,6 @@
 # Unified Today New Tab row: paired Chrome evidence
 
-The full hosted Chrome job retains all 41 mandatory cases. Case 8 still launches
+The full hosted Chrome job retains all 49 mandatory cases. Case 8 still launches
 Spotlight from an ordinary sidebar tab and checks helper reuse, now through the
 single `#newTabBtn`. Case 14 retains its startup command, unchanged source-tab,
 native `SIDE_PANEL`, exact-window `onOpened`, and native screenshot assertions,

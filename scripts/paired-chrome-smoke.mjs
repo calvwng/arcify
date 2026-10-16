@@ -11,6 +11,9 @@ import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
 import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership, seedFocusedReloadSpacePins } from './paired-chrome-ordinary-favorites.mjs';
 import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
+import { exerciseOverlayRecovery, overlayRecoveryFixtureResponse } from './paired-chrome-overlay-recovery.mjs';
+import { exerciseSpotlightActions, serveSpotlightActionFixture, SPOTLIGHT_ACTION_CASE_NAME } from './paired-chrome-spotlight-actions.mjs';
+import { randomBytes } from 'node:crypto';
 import { exerciseSpaceTheme } from './paired-chrome-space-theme.mjs';
 import { exerciseSpotlightOptionsAppearance } from './paired-chrome-spotlight-appearance.mjs';
 import { exerciseSidebarAppearance } from './paired-chrome-sidebar-appearance.mjs';
@@ -55,7 +58,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '4e4204bacde4beef5f8686437cbf9c540f65fe7c';
+const PINNED_SPOTLIGHT = 'dae17a24d4e3b90cecd42a19ceeb7322b755370b';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',
@@ -104,8 +107,11 @@ const stepNames = [
     'Saved pin and nested folder Move preserves all linked windows and exact identities with group sync off',
     'Saved pin and nested folder Move preserves inverted order and all-window native projection with group sync on',
     'Native Space custom tint and appearance retain real named groups, readable controls and exact identities',
-    'Spotlight options appearance follows System and explicit modes through real controls and first paint'
+    'Spotlight options appearance follows System and explicit modes through real controls and first paint',
+    'Native Spotlight command recovers dormant and orphaned overlays and wakes a cold worker without losing the source',
+    'Initial Spotlight actions preserve exact live and saved identities through overlay and browser New Tab input'
 ];
+assert.equal(stepNames[49], SPOTLIGHT_ACTION_CASE_NAME, 'Initial Spotlight action case must retain its reviewed identity.');
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -121,7 +127,7 @@ const report = {
         'Outside-focus menu checks use ordinary sidebar.html tabs and a separate disposable localhost browser window with trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; actual native-panel external focus and Helium remain manual.',
         'General workspace rendering regressions use sidebar.html in a regular tab. Command, Today Move, Space theme and unified New Tab row checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
-        'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
+        'Case 13 reads command registration only. Case 48 separately requires one guarded native XTEST Alt+T per recovery scenario, real browser command dispatch, reload invalidation and cold-worker target ordering. Physical keyboard hardware and Helium shortcut dispatch remain untested.',
         'The ordinary-Favorite close case separately sends one native XTEST Ctrl+W to the verified Chrome window under CI Xvfb and requires exact tab/target destruction. It does not claim physical keyboard hardware or Helium shortcut acceptance.',
         'Independent overlay cases wait for the previous close animation to remove its host. Rapid close/reopen stress is not exercised.',
         'The runner uses its installed stable Chrome and existing AppArmor policy, with actual Namespace/PID/network/seccomp sandbox evidence required. No privileged helper is manually selected, repaired or modified. The native-split job may first update the installed stable package from the exact official Google HTTPS package URL when the image is older than 155, with verified TLS and an explicit non-signature provenance receipt; other jobs keep the image version. Package/runtime evidence is recorded for each run.',
@@ -527,6 +533,129 @@ async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
     }
 }
 
+// This adapter operates on the recovered overlay itself. A helper/new-tab
+// launch here would invalidate the recovery case's native-tab conservation.
+async function verifyRecoveredOverlaySidebar({ page, surface, sourceTab }) {
+    assert.equal(sourceTab.windowId, fixture.windowA);
+    assert.notEqual(surface, page, 'Recovery Sidebar input must originate in the existing isolated frame.');
+    const host = await page.$('#arcify-spotlight-host'); assert(host);
+    const beforeTabs = await tabsIn(sourceTab.windowId);
+    let panelOpened = false, primaryError;
+    try {
+        await search(page, 'Open Arcify sidebar');
+        await surface.waitForSelector(`${sidebarSelector}.selected`, { visible: true });
+        await surface.evaluate(() => {
+            globalThis.__recoverySidebarInput = [];
+            const listener = event => {
+                if (event.key === 'Enter') globalThis.__recoverySidebarInput.push({ trusted: event.isTrusted,
+                    focusedInput: event.target.matches('[data-testid="spotlight-input"]'),
+                    selected: document.querySelector('[data-testid="spotlight-result"].selected')?.dataset.resultType });
+            };
+            document.addEventListener('keydown', listener, { capture: true, once: true });
+        });
+        const afterEvent = (await nativePanelState()).events.length;
+        await sidebarEnter(page, 'Invoke Sidebar with genuine Enter in the recovered overlay');
+        await waitSidebarSuccess(page); panelOpened = true;
+        const input = await surface.evaluate(() => globalThis.__recoverySidebarInput);
+        assert.deepEqual(input, [{ trusted: true, focusedInput: true, selected: 'arcify-sidebar-command' }]);
+        const native = await captureNativeSidebar(afterEvent, 'overlay-recovery-native-sidebar-direct-gesture');
+        assert.deepEqual((await tabsIn(sourceTab.windowId)).map(tab => tab.id), beforeTabs.map(tab => tab.id));
+        await closeNativeSidebar(); panelOpened = false;
+        await ui(page, 'Return focus to the same recovered Spotlight input', async () => {
+            const input = await sidebarInput(page);
+            try { await input.asElement().focus(); } finally { await input.dispose(); }
+        });
+        assert.equal(await host.evaluate(node => node.isConnected && node === document.getElementById('arcify-spotlight-host') && node.shadowRoot.querySelector('dialog')?.open === true), true,
+            'Native sidebar open/close must leave the exact recovered overlay available.');
+        return { ...native, sourceTabId: sourceTab.id, trustedInput: input, sameRecoveredOverlay: true };
+    } catch (error) { primaryError = error; throw error; }
+    finally {
+        try {
+            if (panelOpened || primaryError && (await nativePanelState()).contexts.length) await closeNativeSidebar();
+        } catch (error) {
+            if (!primaryError) throw error;
+            primaryError.sidebarCleanupError = error.message;
+        } finally { await host.dispose(); }
+    }
+}
+
+async function runHostedOverlayRecovery() {
+    const nonce = randomBytes(16).toString('hex');
+    const url = `${fixture.base}/overlay-recovery-host?nonce=${nonce}`;
+    const helperUrl = `chrome-extension://${spotlightId}/newtab.html`;
+    const beforeTabs = await arcifyOptions.evaluate(() => chrome.tabs.query({}));
+    const originalActive = beforeTabs.find(tab => tab.windowId === fixture.windowA && tab.active); assert(originalActive);
+    const beforeTargets = new Set(browser.targets());
+    const created = await arcifyOptions.evaluate(options => chrome.tabs.create(options), { windowId: fixture.windowA, url, active: true });
+    report.overlayRecovery = { nonce, sourceTabId: created.id, checkpoints: [] };
+    const record = async observation => { report.overlayRecovery.checkpoints.push(observation); await saveReport(); };
+    let targetsCdp, primaryError, evidence;
+    try {
+        const source = await attachCreatedFixtureTab(created, async () => {
+            const sourceTab = await poll(() => tab(created.id), tab => tab.status === 'complete' && tab.url === url && !tab.pendingUrl,
+                'exact nonce-bearing recovery source settled');
+            assert.equal(sourceTab.windowId, fixture.windowA);
+            const freshTabs = (await arcifyOptions.evaluate(() => chrome.tabs.query({}))).filter(tab => !beforeTabs.some(old => old.id === tab.id));
+            assert.deepEqual(freshTabs.map(tab => tab.id), [created.id], 'Recovery setup creates only its exact source tab.');
+            const target = await poll(async () => {
+                const fresh = browser.targets().filter(target => target.type() === 'page' && !beforeTargets.has(target));
+                assert(fresh.length <= 1, 'Do not guess among multiple fresh recovery page targets.');
+                return fresh.length === 1 && fresh[0].url() === url ? fresh[0] : null;
+            }, Boolean, 'one exact fresh recovery source target');
+            return { sourceTab, page: await observePage(await target.page()) };
+        }, id => arcifyOptions.evaluate(id => chrome.tabs.remove(id), id));
+        targetsCdp = await browser.target().createCDPSession();
+        const readTargets = async () => (await targetsCdp.send('Target.getTargets')).targetInfos;
+        evidence = await exerciseOverlayRecovery({ browser, ...source, arcifyOptions, spotlightId, ui, poll, record, screenshot,
+            reloadSpotlight: async () => (await reloadPairedExtension('spotlight')).evidence,
+            stopSpotlightWorker: async () => {
+                const url = `chrome-extension://${spotlightId}/background.js`;
+                const target = browser.targets().find(target => target.type() === 'service_worker' && target.url() === url); assert(target);
+                const worker = await target.worker(), observations = [];
+                await terminateObservedWorker({ worker, url, readTargets,
+                    releaseNetwork: async () => {
+                        const network = await networkTargets.get(target); assert(network);
+                        const id = network.id(); await network.detach(); networkTargets.delete(target); return id;
+                    },
+                    record: async observation => { observations.push(observation); await record({ phase: 'recovery-worker-stop', observation }); }
+                });
+                // No page/peer/status/worker evaluation after close. The exercise
+                // now performs its final raw absence read and one guarded send.
+                return { observations };
+            },
+            observeReplacementWorker: target => blockExternalHttps(target),
+            verifySidebar: verifyRecoveredOverlaySidebar });
+        assert.deepEqual(evidence.cases.map(item => item.kind), ['dormant', 'cold-worker', 'marked-orphan', 'unmarked-legacy-shape']);
+        report.overlayRecovery.evidence = evidence;
+        return evidence;
+    } catch (error) { primaryError = error; throw error; }
+    finally {
+        const cleanup = { removedTabIds: [], failures: [] };
+        try {
+            const current = await arcifyOptions.evaluate(() => chrome.tabs.query({}));
+            const helpers = current.filter(tab => tab.windowId === fixture.windowA && (tab.url === helperUrl || tab.pendingUrl === helperUrl) && !beforeTabs.some(old => old.id === tab.id));
+            // These exact new helper identities are captured even when the
+            // exercise throws after a native fallback and cannot return evidence.
+            cleanup.helpers = helpers; assert(helpers.length <= 1, 'Unexpected extra recovery helpers fail cleanup rather than broadening deletion.');
+            for (const helper of helpers) {
+                assert(!helper.pendingUrl || helper.pendingUrl === helperUrl, 'Never remove a helper navigating outside its exact owned URL.');
+                await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.id); cleanup.removedTabIds.push(helper.id);
+            }
+        } catch (error) { cleanup.failures.push({ phase: 'helper', message: error.message }); }
+        try {
+            const present = await arcifyOptions.evaluate(id => chrome.tabs.query({}).then(tabs => tabs.some(tab => tab.id === id)), created.id);
+            if (present) { await arcifyOptions.evaluate(id => chrome.tabs.remove(id), created.id); cleanup.removedTabIds.push(created.id); }
+            await activate(originalActive.id);
+        } catch (error) { cleanup.failures.push({ phase: 'source', message: error.message }); }
+        try { await targetsCdp?.detach(); } catch (error) { cleanup.failures.push({ phase: 'raw-target-observer', message: error.message }); }
+        report.overlayRecovery.cleanup = cleanup; await saveReport();
+        if (cleanup.failures.length) {
+            if (primaryError) primaryError.recoveryCleanupErrors = cleanup.failures;
+            else throw new Error(`Recovery cleanup failed: ${JSON.stringify(cleanup.failures)}`);
+        }
+    }
+}
+
 // Retain the same raw-target, original-view, registry and fresh-identity proof
 // for every real reload, including Favorite continuity acceptance.
 async function reloadPairedExtension(name) {
@@ -790,6 +919,12 @@ try {
     await step(stepNames[2], async () => {
         const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two', '/today-selection-one': 'Today Selection One', '/today-selection-two': 'Today Selection Two', '/today-selection-four': 'Today Selection Four', '/today-selection-five': 'Today Selection Five', '/today-selection-six': 'Today Selection Six' };
         server = createServer((request, response) => {
+            if (serveSpotlightActionFixture(request, response)) return;
+            const recovery = overlayRecoveryFixtureResponse(request.url);
+            if (recovery) {
+                response.writeHead(200, { 'content-type': recovery.type, 'content-security-policy': recovery.csp, 'cache-control': 'no-store' });
+                response.end(recovery.body); return;
+            }
             if (serveNativeSplitFixture(request, response)) return;
             if (serveTabMenuFixture(request, response)) return;
             if (serveTodayMoveFixture(request, response)) return;
@@ -2086,7 +2221,11 @@ try {
             label:'Required Spotlight options appearance', capturedAt:new Date().toISOString() });
         await saveReport(); return evidence;
     });
-    } // Full-only cases 3–31, 33–35, 37–38 and 40–47; preserve the original cases' order.
+    await step(stepNames[48], () => runHostedOverlayRecovery());
+    await step(stepNames[49], () => exerciseSpotlightActions({ apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,
+        ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,
+        record:async evidence => { report.spotlightActions = evidence; await saveReport(); } }));
+    } // Full-only cases 3–31, 33–35, 37–38 and 40–49; preserve the original cases' order.
 
     if (report.runMode === 'native-split') {
         await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,

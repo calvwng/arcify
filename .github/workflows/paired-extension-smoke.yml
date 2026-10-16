@@ -7,6 +7,16 @@ on:
     paths:
       - '.github/workflows/paired-extension-smoke.yml'
       - 'scripts/paired-chrome-smoke.mjs'
+      - 'scripts/paired-chrome-overlay-recovery.mjs'
+      - 'scripts/paired-chrome-spotlight-actions.mjs'
+      - 'tests/unit/paired-chrome-overlay-recovery.test.js'
+      - 'tests/unit/paired-chrome-spotlight-actions.test.js'
+      - 'tests/unit/paired-chrome-spotlight-wiring.test.js'
+      - 'docs/OVERLAY-RECOVERY-HOSTED.md'
+      - 'docs/spotlight-actions-paired-ci.md'
+      - 'spotlight-space-actions.js'
+      - 'tests/unit/spotlight-space-actions.test.js'
+      - 'tests/unit/spotlight-bridge.test.js'
       - 'scripts/paired-chrome-run-plan.mjs'
       - 'scripts/paired-chrome-native-split*'
       - 'tests/unit/paired-chrome-native-split*'
@@ -180,7 +190,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 4e4204bacde4beef5f8686437cbf9c540f65fe7c
+          ref: dae17a24d4e3b90cecd42a19ceeb7322b755370b
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -249,7 +259,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 4e4204bacde4beef5f8686437cbf9c540f65fe7c
+          ref: dae17a24d4e3b90cecd42a19ceeb7322b755370b
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -317,7 +327,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 4e4204bacde4beef5f8686437cbf9c540f65fe7c
+          ref: dae17a24d4e3b90cecd42a19ceeb7322b755370b
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node

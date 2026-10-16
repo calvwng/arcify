@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI-only, one-shot XTEST Ctrl+W. Importing this module never opens a display.
+"""CI-only, one-shot XTEST Ctrl+W or registered Spotlight Alt+T. Importing this module never opens a display.
 
 The probe is read-only. A send revalidates its exact probe, queues one native
 Control_L/w chord, and verifies released keys. This proves an X-server input
@@ -19,6 +19,16 @@ import sys
 CHROME = '/opt/google/chrome/chrome'
 XVFB = '/usr/bin/Xvfb'
 CONTROL_L, W, CONTROL_MASK = 0xFFE3, 0x77, 4
+ALT_L, T = 0xFFE9, 0x74
+# Closed set of reviewed actions, never caller-supplied keys or modifiers.
+CHORDS = {
+    'close-tab': (('Control_L', CONTROL_L, 2), ('w', W, None)),
+    'spotlight-command': (('Alt_L', ALT_L, 3), ('t', T, None)),
+}
+
+def chord(action):
+    require(isinstance(action, str) and action in CHORDS, 'Only close-tab and spotlight-command are supported')
+    return CHORDS[action]
 SCHEMA = 1
 
 
@@ -261,14 +271,14 @@ class NativeX11:
         pressed = [key for key in range(256) if bytes(bitmap)[key // 8] & (1 << (key % 8))]
         return {'pressedKeycodes': pressed, 'xkb': {name: int(getattr(state, name)) for name, _ in state._fields_}}
 
-    def keycodes(self):
+    def keycodes(self, action='close-tab'):
+        modifier, ordinary = chord(action)
         minimum, maximum = C.c_int(), C.c_int()
         self.x.XDisplayKeycodes(self.display, C.byref(minimum), C.byref(maximum))
         require(8 <= minimum.value <= maximum.value <= 255 and not self.errors, 'Invalid X keycode range')
-        keys = {'Control_L': int(self.x.XKeysymToKeycode(self.display, CONTROL_L)),
-                'w': int(self.x.XKeysymToKeycode(self.display, W))}
-        require(len(set(keys.values())) == 2, 'Control_L and w must have distinct keycodes')
-        for name, symbol in (('Control_L', CONTROL_L), ('w', W)):
+        keys = {name: int(self.x.XKeysymToKeycode(self.display, symbol)) for name, symbol, _ in (modifier, ordinary)}
+        require(len(set(keys.values())) == 2, 'Reviewed chord keys must have distinct keycodes')
+        for name, symbol, _ in (modifier, ordinary):
             code = keys[name]
             require(minimum.value <= code <= maximum.value, f'Invalid {name} keycode')
             require(self.x.XkbKeycodeToKeysym(self.display, code, 0, 0) == symbol and not self.errors,
@@ -280,7 +290,8 @@ class NativeX11:
             require(0 < width <= 32 and bool(mapping.contents.modifiermap), 'Invalid X modifier map')
             slots = {name: [index // width for index in range(8 * width)
                            if mapping.contents.modifiermap[index] == code] for name, code in keys.items()}
-            require(slots['Control_L'] == [2] and not slots['w'], 'Require ordinary Control_L and non-modifier w')
+            require(slots[modifier[0]] == [modifier[2]] and not slots[ordinary[0]],
+                    'Require the reviewed modifier slot and ordinary non-modifier key')
         finally:
             self.x.XFreeModifiermap(mapping)
         return {'minimum': minimum.value, 'maximum': maximum.value, **keys}
@@ -324,6 +335,12 @@ def execute(request, host=None, native_factory=NativeX11):
                 'events': [], 'cleanup': [], 'observedAt': datetime.datetime.now(datetime.timezone.utc).isoformat()}
     native, owned = None, []
     try:
+        require(set(request) <= {'mode', 'expected', 'baseline', 'action'}, 'Unsupported native request fields')
+        action = request.get('action', 'close-tab')
+        modifier, ordinary = chord(action)
+        evidence['action'] = action
+        evidence['route'] = f'X11 XTEST native {modifier[0]}+{ordinary[0]}'
+        evidence['browserCommandVerified'] = False
         require(request.get('mode') in ('probe', 'send'), 'Require explicit probe or send mode')
         expected = request.get('expected')
         evidence['host'] = inspect_host(expected, host, allow_title_discovery=request['mode'] == 'probe')
@@ -334,6 +351,7 @@ def execute(request, host=None, native_factory=NativeX11):
                     and baseline.get('schemaVersion') == SCHEMA and baseline.get('mode') == 'probe'
                     and baseline.get('chordAttempted') is False,
                     'Send requires a successful read-only probe')
+            require(baseline.get('action', 'close-tab') == action, 'Probe action cannot authorize a different chord')
             require(baseline.get('expected') == expected and baseline.get('host') == evidence['host'],
                     'Expected process/display identity changed since the read-only probe')
         native = native_factory(expected['display'])
@@ -342,7 +360,7 @@ def execute(request, host=None, native_factory=NativeX11):
         evidence['target'] = target_identity(evidence['focus'], expected)
         expected = {**expected, 'windowTitle': evidence['target']['windowTitle']}
         evidence['expected'] = expected
-        evidence['keycodes'] = native.keycodes()
+        evidence['keycodes'] = native.keycodes() if action == 'close-tab' else native.keycodes(action)
         evidence['keyboardBefore'] = native.keyboard()
         assert_neutral(evidence['keyboardBefore'])
         evidence['preflightSync'] = native.sync()
@@ -357,9 +375,13 @@ def execute(request, host=None, native_factory=NativeX11):
             evidence['keyboardBeforeSend'] = native.keyboard()
             assert_neutral(evidence['keyboardBeforeSend'])
             codes = evidence['keycodes']
-            for name, pressed in [('Control_L', True), ('w', True), ('w', False), ('Control_L', False)]:
+            for name, pressed in [(modifier[0], True), (ordinary[0], True), (ordinary[0], False), (modifier[0], False)]:
                 # Mark uncertainty BEFORE the FFI call. Even a thrown call may
                 # have queued a key down; cleanup releases only our own keys.
+                if not evidence['chordAttempted']:
+                    evidence['inputStartedAt'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                if name == ordinary[0] and pressed:
+                    evidence['commandKeyDownAt'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 evidence['chordAttempted'] = True
                 if pressed:
                     owned.append(codes[name])

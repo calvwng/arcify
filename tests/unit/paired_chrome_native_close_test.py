@@ -334,5 +334,79 @@ class BindingTests(unittest.TestCase):
         conn.close()
 
 
+class SpotlightNative(FakeNative):
+    def __init__(self):
+        super().__init__()
+        self.codes = {'minimum': 8, 'maximum': 255, 'Alt_L': 64, 't': 28}
+    def keycodes(self, action):
+        assert action == 'spotlight-command'
+        self.calls.append('keycodes'); return dict(self.codes)
+
+class SpotlightLibrary(FakeLibrary):
+    def __init__(self):
+        super().__init__(); self.modifier_slot = 3
+    def impl_XKeysymToKeycode(self, _d, keysym): return 64 if keysym == native.ALT_L else 28
+    def impl_XkbKeycodeToKeysym(self, _d, code, group, level):
+        if group or level: raise AssertionError('Mapping must be neutral')
+        return native.ALT_L if code == 64 else native.T
+    def impl_XGetModifierMapping(self, _d):
+        buffer = (C.c_ubyte * 8)(); buffer[self.modifier_slot] = 64
+        self.keep.append(buffer); self.mapping = native.ModifierMap(1, buffer)
+        return C.pointer(self.mapping)
+
+class SpotlightTests(unittest.TestCase):
+    def probe(self):
+        lib = SpotlightNative()
+        result = native.execute({'mode': 'probe', 'action': 'spotlight-command', 'expected': EXPECTED}, FakeHost(), lib.factory)
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(lib.events, [])
+        return result
+    def test_one_static_alt_t_chord(self):
+        baseline = self.probe(); lib = SpotlightNative()
+        result = native.execute({'mode': 'send', 'action': 'spotlight-command', 'expected': EXPECTED, 'baseline': baseline}, FakeHost(), lib.factory)
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(lib.events, [(64, True), (28, True), (28, False), (64, False)])
+        self.assertEqual(result['route'], 'X11 XTEST native Alt_L+t')
+        self.assertLessEqual(native.datetime.datetime.fromisoformat(result['inputStartedAt']), native.datetime.datetime.fromisoformat(result['commandKeyDownAt']))
+        self.assertFalse(result['physicalKeyboard']); self.assertFalse(result['browserCommandVerified'])
+        self.assertEqual(result['keyboardAfter']['pressedKeycodes'], [])
+    def test_cross_action_and_arbitrary_fields_fail_before_display(self):
+        baseline = self.probe()
+        for patch in ({'action': 'close-tab'}, {'action': 'Alt+F4'}, {'action': None}, {'keys': ['Alt_L', 't']}, {'delay': 1}):
+            lib = SpotlightNative()
+            result = native.execute({'mode': 'send', 'action': 'spotlight-command', 'expected': EXPECTED, 'baseline': baseline, **patch}, FakeHost(), lib.factory)
+            self.assertEqual(result['status'], 'failed', result); self.assertFalse(result['chordAttempted'])
+            self.assertEqual(lib.calls, [])
+    def test_alt_t_preserves_host_guards_and_preinput_focus_recheck(self):
+        baseline = self.probe()
+        for change in ('root', 'not-ci', 'pid-reuse', 'lock', 'focus', 'held'):
+            host, lib = FakeHost(), SpotlightNative()
+            if change == 'root': host.ids = (0, 0)
+            if change == 'not-ci': host.env['GITHUB_ACTIONS'] = 'false'
+            if change == 'pid-reuse': host.processes[456]['startTicks'] = '201'
+            if change == 'lock': host.lock = 999
+            if change == 'focus': lib.move_focus = True
+            if change == 'held': lib.pressed.add(64)
+            result = native.execute({'mode': 'send', 'action': 'spotlight-command', 'expected': EXPECTED, 'baseline': baseline}, host, lib.factory)
+            self.assertEqual(result['status'], 'failed', result); self.assertFalse(result['chordAttempted'])
+            self.assertEqual(lib.events, [])
+    def test_every_failed_alt_event_releases_only_owned_keys_without_retry(self):
+        baseline = self.probe()
+        for failed in range(1, 5):
+            lib = SpotlightNative(); lib.fail_key = failed
+            result = native.execute({'mode': 'send', 'action': 'spotlight-command', 'expected': EXPECTED, 'baseline': baseline}, FakeHost(), lib.factory)
+            self.assertEqual(result['status'], 'failed'); self.assertFalse(result['chordCompleted'])
+            self.assertEqual(sum(pressed for _, pressed in lib.events), min(failed, 2))
+            self.assertEqual(lib.events[failed:], [(64, False)] if failed == 1 else [(28, False), (64, False)])
+            self.assertEqual(lib.pressed, set())
+    def test_alt_mapping_requires_mod1_and_neutral_t(self):
+        for slot in (2, 3, 4):
+            lib = SpotlightLibrary(); lib.modifier_slot = slot
+            conn = native.NativeX11(':99', loader=lib.loader)
+            if slot == 3: self.assertEqual(conn.keycodes('spotlight-command')['t'], 28)
+            else:
+                with self.assertRaises(native.Rejected): conn.keycodes('spotlight-command')
+            conn.close()
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

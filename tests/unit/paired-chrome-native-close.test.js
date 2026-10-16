@@ -120,3 +120,54 @@ test('invalid caller target is rejected before invoking even an injected helper'
     }
     assert.equal(h.requests.length, 0);
 });
+
+const { probeNativeSpotlightCommandTarget, sendOneNativeSpotlightCommand } = await import('../../scripts/paired-chrome-native-close.mjs');
+function commandHarness(transform = value => value) {
+    const requests = [];
+    return { requests, options: { run: async request => {
+        requests.push(structuredClone(request));
+        const value = evidence(request.mode);
+        value.action = 'spotlight-command'; value.route = 'X11 XTEST native Alt_L+t'; value.browserCommandVerified = false;
+        value.inputStartedAt = '2026-10-16T05:00:00.000Z'; value.commandKeyDownAt = '2026-10-16T05:00:00.001Z';
+        value.keycodes = { minimum: 8, maximum: 255, Alt_L: 64, t: 28 };
+        value.events = request.mode === 'probe' ? [] : [['Alt_L', true], ['t', true], ['t', false], ['Alt_L', false]]
+            .map(([key, pressed]) => ({ key, keycode: value.keycodes[key], pressed, delayMs: 0, result: 1 }));
+        return { stdout: JSON.stringify(transform(value, request)), stderr: '' };
+    } } };
+}
+test('Spotlight has one fixed native Alt+T API, not a generic arbitrary-key transport', async () => {
+    const h = commandHarness(), probe = await probeNativeSpotlightCommandTarget(target, h.options);
+    const result = await sendOneNativeSpotlightCommand(probe);
+    assert.equal(result.route, 'X11 XTEST native Alt_L+t'); assert.equal(result.physicalKeyboard, false);
+    assert.equal(result.browserCommandVerified, false); assert.equal(result.browserClosureVerified, false);
+    assert.deepEqual(h.requests.map(request => request.action), ['spotlight-command', 'spotlight-command']);
+    await assert.rejects(sendOneNativeSpotlightCommand(probe), /already been consumed/);
+    assert.equal(h.requests.length, 2);
+});
+test('native probes cannot cross-authorize Ctrl+W and Alt+T; a mismatched call sends nothing', async () => {
+    const close = harness(), command = commandHarness();
+    const closeProbe = await probeNativeCloseTarget(target, close.options);
+    const commandProbe = await probeNativeSpotlightCommandTarget(target, command.options);
+    await assert.rejects(sendOneNativeClose(commandProbe), /different native chord/);
+    await assert.rejects(sendOneNativeSpotlightCommand(closeProbe), /different native chord/);
+    assert.equal(close.requests.length, 1); assert.equal(command.requests.length, 1);
+    await sendOneNativeClose(closeProbe); await sendOneNativeSpotlightCommand(commandProbe);
+});
+for (const corrupt of ['route', 'action', 'browserCommandVerified', 'events', 'keyboardAfter', 'missing-timestamp', 'backwards-timestamp']) test(`Alt+T invalid ${corrupt} evidence consumes the token`, async () => {
+    const h = commandHarness((value, request) => {
+        if (request.mode === 'send') {
+            if (corrupt === 'route') value.route = 'CDP keypress';
+            if (corrupt === 'action') value.action = 'close-tab';
+            if (corrupt === 'browserCommandVerified') value.browserCommandVerified = true;
+            if (corrupt === 'events') value.events[1].key = 'w';
+            if (corrupt === 'keyboardAfter') value.keyboardAfter.pressedKeycodes.push(64);
+            if (corrupt === 'missing-timestamp') delete value.commandKeyDownAt;
+            if (corrupt === 'backwards-timestamp') value.commandKeyDownAt = '2026-10-16T04:59:59.999Z';
+        }
+        return value;
+    });
+    const probe = await probeNativeSpotlightCommandTarget(target, h.options);
+    await assert.rejects(sendOneNativeSpotlightCommand(probe));
+    await assert.rejects(sendOneNativeSpotlightCommand(probe), /already been consumed/);
+    assert.equal(h.requests.length, 2);
+});

@@ -7,9 +7,10 @@ import { Utils } from './utils.js';
 import { projectTabTitle } from './tab-title-projection.js';
 import { SIDEBAR_COMMAND_TYPE, createSidebarCommandHandler } from './sidebar-command.js';
 import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
-import { GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
+import { readSpaceActionContext, runSpaceAction } from './spotlight-space-actions.js';
+import { SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
-const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite'];
+const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', ...SPACE_ACTION_COMMANDS];
 const JOURNAL_KEY = 'spotlightBridgeRequests';
 
 // Only reads Arcify's authoritative model. Group IDs/names never enter the protocol.
@@ -158,7 +159,12 @@ export function createSpotlightBridge(store) {
         };
         if (!trustedSender(sender, peerId)) throw bridgeError('UNAUTHORIZED', 'This extension is not paired with Arcify.');
         validateRequest(request, COMMANDS);
-        const readOnly = ['hello', 'snapshot'].includes(request.command);
+        const readOnly = ['hello', 'snapshot', 'actionContext'].includes(request.command);
+        const spaceAction = SPACE_ACTION_COMMANDS.includes(request.command);
+        if ((spaceAction || request.command === 'actionContext') && !request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE))
+            throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate Space actions before sending this request.');
+        if (spaceAction && request.context.pairingGeneration !== (generation ?? null))
+            throw bridgeError('UNAUTHORIZED', 'The companion pairing changed. Refresh Spotlight.');
         const requireFeatures = async () => {
             if (!request.supportedFeatures?.includes(GLOBAL_FAVORITES_FEATURE)
                 && await store.favoriteStore?.requiresOrdinaryCapability?.()) {
@@ -182,10 +188,15 @@ export function createSpotlightBridge(store) {
             }
             throw bridgeError('UNCERTAIN_RESULT', 'The previous action may have completed. Refresh before trying again.');
         }
-        const snapshot = await getBridgeSnapshot(store, request.windowId);
+        const snapshot = spaceAction ? null : await getBridgeSnapshot(store, request.windowId);
         await checkPairing();
-        if (readOnly) return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot,
-            ...(commandCapabilities(request, chrome, store)) });
+        if (readOnly) {
+            const actionContext = request.command === 'actionContext' ? await store.run(() => readSpaceActionContext(store, request,
+                { pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : undefined;
+            await checkPairing();
+            return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot,
+                ...(actionContext ? { actionContext } : {}), ...(commandCapabilities(request, chrome, store)) });
+        }
         const entry = { key, fingerprint: JSON.stringify(request) };
         const next = [...journal.slice(-99), entry];
         await chrome.storage.session.set({ [JOURNAL_KEY]: next });
@@ -193,11 +204,26 @@ export function createSpotlightBridge(store) {
             await checkPairing();
             await requireFeatures();
             // Serialize with native tab events and sidebar writes; validate again at execution.
-            const snapshot = await readBridgeSnapshot(store, request.windowId);
+            const snapshot = spaceAction ? null : await readBridgeSnapshot(store, request.windowId);
             const beforeMutation = async () => { await checkPairing(); await requireFeatures(); };
             await beforeMutation();
-            return runBridgeAction(store, request, snapshot, { beforeMutation });
+            return spaceAction ? runSpaceAction(store, request, { beforeMutation })
+                : runBridgeAction(store, request, snapshot, { beforeMutation });
         });
+        if (spaceAction) {
+            // Record a confirmed commit before the ancillary UI snapshot. Never
+            // turn a refresh failure into permission to recreate a folder/pin.
+            try {
+                await checkPairing();
+                entry.response = responseFor(request, 'arcify', { ok: true, ...data });
+                await chrome.storage.session.set({ [JOURNAL_KEY]: next });
+                const snapshot = await getBridgeSnapshot(store, request.windowId);
+                await checkPairing();
+                return { ...entry.response, snapshot };
+            } catch (error) {
+                throw bridgeError('PARTIAL_COMMIT', `The action committed, but its final confirmation or display refresh failed. Check Arcify before trying again. ${error.message}`);
+            }
+        }
         const response = responseFor(request, 'arcify', { ok: true, ...data, snapshot: await getBridgeSnapshot(store, request.windowId) });
         await checkPairing();
         // Do not retain a full browsing snapshot in the journal.
@@ -248,6 +274,7 @@ export function registerSpotlightBridge(store) {
 function commandCapabilities(request, browser, store) {
     return request.command === 'hello' ? { capabilities: [
         ...(typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : []),
+        ...(request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE) ? [SPACE_ACTIONS_FEATURE] : []),
         ...(store.favoriteStore ? ['persistentFavorites'] : []),
         ...(typeof store.favoriteStore?.requiresOrdinaryCapability === 'function' ? [GLOBAL_FAVORITES_FEATURE] : [])
     ] } : {};

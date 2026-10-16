@@ -416,6 +416,7 @@ export class SpaceStore {
                 if (record.pinnedState) pinnedStates[record.tabId] = record.pinnedState;
                 if (record.nameOverride) overrides[record.tabId] = record.nameOverride;
             }
+            if (beforeWrite) await beforeWrite();
             await chrome.storage.local.set({ pinnedTabStatesById: pinnedStates, tabNameOverridesById: overrides });
             this.restoredMetadata = [];
         }
@@ -464,14 +465,17 @@ export class SpaceStore {
         if (favorites?.ownershipPersistence?.checkpointSelection) {
             try {
                 await favorites.ownershipPersistence.checkpointSelection({ state: favorites.state, items: favorites.items,
-                    spaces: this.spaces, activeSpaces: this.active, spaceSessionUpdate });
+                    spaces: this.spaces, activeSpaces: this.active, spaceSessionUpdate, beforeWrite });
             } catch (error) {
                 // A rejected checkpoint must reload its authoritative session
                 // before a later read can expose the uncommitted selection.
                 this.initialized = false;
                 throw error;
             }
-        } else await chrome.storage.session.set(spaceSessionUpdate);
+        } else {
+            if (beforeWrite) await beforeWrite();
+            await chrome.storage.session.set(spaceSessionUpdate);
+        }
         try { if (!skipGroupSync) await syncSpaceGroups(this.spaces, this.active, [...tabs.values()].filter(tab => this.isGlobalTab(tab)).map(tab => tab.id)); }
         catch (error) { console.warn('Tab group sync deferred:', error); }
     }

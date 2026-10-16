@@ -87,8 +87,9 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
     const checkPairing = async pairing => {
         if (!same(pairing, await config())) throw new Error('Favorite pairing changed. Try again.');
     };
-    async function save({ state, items, spaceSessionUpdate, selectedContext = selection }, recovery = null) {
+    async function save({ state, items, spaceSessionUpdate, selectedContext = selection, beforeWrite = null }, recovery = null) {
         if (!validContinuityState(state)) throw new Error('Invalid exact Favorite continuity state.');
+        if (beforeWrite) await beforeWrite();
         const pairing = await ensureGeneration(await config());
         if (!current || !same(current, pairing) || current.revision >= Number.MAX_SAFE_INTEGER) current = newCurrent(pairing);
         const next = { ...current, revision: current.revision + 1, fingerprint: await digest(state) };
@@ -99,16 +100,22 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         }
         // Invalidate BEFORE writing session state or reporting a detach/remove.
         // A failure here forbids the caller's subsequent native mutation.
+        if (beforeWrite) await beforeWrite();
         await api.storage.local.set({ [CONTINUITY_LOCAL_KEY]: { version: 1, phase: 'invalid' } });
         await checkPairing(pairing);
+        if (beforeWrite) await beforeWrite();
         await api.storage.session.set({ ...spaceSessionUpdate, [SESSION_KEY]: copy(state), [CONTINUITY_SESSION_KEY]: { ...copy(next), ...(recovery ? { phase: 'recovering' } : {}) } });
         current = next; selection = copy(selectedContext);
         const journal = { ...next, phase: 'committed', items: items.map(identity), state: copy(state), peerGeneration: null };
         await checkPairing(pairing);
-        if (!recovery) await api.storage.local.set({ [CONTINUITY_LOCAL_KEY]: journal });
+        if (!recovery) {
+            if (beforeWrite) await beforeWrite();
+            await api.storage.local.set({ [CONTINUITY_LOCAL_KEY]: journal });
+        }
         await checkPairing(pairing);
         if (!pairing.peerId) return;
         let acknowledgement;
+        if (beforeWrite) await beforeWrite();
         try { acknowledgement = await sendRequest(pairing.peerId, 'write', { ...receiptFields(next),
             ...(recovery ? { expectedPeerGeneration: recovery.peerGeneration, expectedRevision: recovery.revision } : {}) }, { api }); }
         catch (error) { if (recovery) throw error; return; } // Ordinary ownership works with its own surviving session.
@@ -120,9 +127,13 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         }
         // Ack persistence failure leaves the mirror deliberately unrecoverable;
         // working session ownership stays valid and the caller sees the failure.
+        if (beforeWrite) await beforeWrite();
         await api.storage.local.set({ [CONTINUITY_LOCAL_KEY]: { ...journal, peerGeneration: acknowledgement.peerGeneration } });
         await checkPairing(pairing);
-        if (recovery) await api.storage.session.set({ [SESSION_KEY]: copy(state), [CONTINUITY_SESSION_KEY]: copy(next) });
+        if (recovery) {
+            if (beforeWrite) await beforeWrite();
+            await api.storage.session.set({ [SESSION_KEY]: copy(state), [CONTINUITY_SESSION_KEY]: copy(next) });
+        }
     }
     async function refresh({ state, items }) {
         if (!current || !validReceipt(current)) return;
@@ -143,7 +154,7 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
     // No queue entry here: both stores already hold SpaceStore.run(). Include
     // Space session state in the receipt write so no torn selection can be
     // acknowledged with an older recoverable journal.
-    async function checkpointSelection({ state, items, spaces, activeSpaces, spaceSessionUpdate }) {
+    async function checkpointSelection({ state, items, spaces, activeSpaces, spaceSessionUpdate, beforeWrite = null }) {
         const live = await api.tabs.query({});
         const windows = [];
         for (const [key, spaceId] of Object.entries(activeSpaces)) {
@@ -159,11 +170,12 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         const nextSelection = { version: 1, windows: windows.sort((a, b) => a.windowId - b.windowId) };
         if (!selectionDirty && encodeFavoriteContinuityState(selection) === encodeFavoriteContinuityState(nextSelection)
             && current && same(current, await config())) {
+            if (beforeWrite) await beforeWrite();
             await api.storage.session.set(spaceSessionUpdate);
             return;
         }
         selectionDirty = true;
-        await save({ state, items, spaceSessionUpdate, selectedContext: nextSelection });
+        await save({ state, items, spaceSessionUpdate, selectedContext: nextSelection, beforeWrite });
         selectionDirty = false;
     }
     const selectionAnchor = tab => tab && !tab.incognito && !isStartupLauncherTab(tab, api)
