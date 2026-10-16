@@ -190,3 +190,51 @@ test('settings completion never masks an uncertain native outcome or an unretire
         assert.deepEqual(calls, failedStage === 'settings' ? ['settings'] : ['settings', 'source']);
     }
 });
+
+function settingsObservation() {
+    const { before, options } = sample(), after = clone(before);
+    after.tabs[0].active = false;
+    after.tabs.push({ ...before.tabs[0], id: 999, index: 5, url: `chrome-extension://${OWN}/options.html`, active: true });
+    const request = { type: 'arcify-bridge', version: 1, requestId: 'settings-evidence-test', command: 'openSettings',
+        windowId: 7, supportedFeatures: SPACE_ACTION_FEATURES, context: options.context };
+    after.journal.push({ fingerprint: JSON.stringify(request), response: { ok: true, tabId: 999 } });
+    const trace = { events: [
+        { type: 'tabs.onCreated', data: [clone(after.tabs.at(-1))] },
+        { type: 'external', data: { message: request, sender: { id: PEER } } }
+    ], peerEvents: [], input: input('openSettings') };
+    return { before, after, trace, context: options.context };
+}
+
+for (const stage of ['request', 'input', 'native']) test(`failed ${stage} validation preserves complete raw action evidence before any success claim`, async () => {
+    const source = readFileSync(new globalThis.URL('../../scripts/paired-chrome-spotlight-actions.mjs', import.meta.url), 'utf8');
+    const start = source.indexOf('            const trace = await observed(surface, inputOwner)');
+    const end = source.indexOf("            await checkpoint('action-committed-once'", start);
+    assert(start > 0 && end > start);
+    const evidence = settingsObservation(), records = [], owned = [], roots = [];
+    if (stage === 'request') evidence.trace.events[1].data.sender.id = 'wrong';
+    if (stage === 'input') evidence.trace.input[0].trusted = false;
+    if (stage === 'native') evidence.trace.events.push({ type: 'windows.onFocusChanged', data: [77] });
+    const run = new vm.Script(`(async () => { ${source.slice(start, end)} })()`).runInNewContext({
+        ...evidence, sourceContext: evidence.context, command: 'openSettings', surface: {}, inputOwner: {}, rows: [], prompt: undefined, title: undefined,
+        spotlightId: PEER, arcifyId: OWN, owned, roots, assert,
+        observed: async () => clone(evidence.trace), checkpoint: async (phase, data) => records.push({ phase, ...clone(data) }),
+        assertSpotlightActionRequest, assertSpotlightActionInput, assertSpotlightSettingsOpened, assertSpotlightActionCommitted
+    });
+    await assert.rejects(run);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].phase, 'action-observed-before-validation');
+    for (const key of ['before', 'after', 'trace']) assert.deepEqual(records[0][key], evidence[key]);
+    assert.deepEqual(records[0].sourceContext, evidence.context);
+    assert.equal(records[0].command, 'openSettings');
+    assert.deepEqual(owned, []); assert.deepEqual(roots, []);
+});
+
+test('Settings failure reports every forbidden native event payload without accepting any of them', () => {
+    for (const type of ['tabs.onRemoved', 'tabs.onReplaced', 'tabs.onAttached', 'tabs.onDetached', 'tabs.onMoved',
+        'windows.onCreated', 'windows.onRemoved', 'windows.onFocusChanged', 'bookmarks.onCreated', 'sidePanel.onOpened']) {
+        const evidence = settingsObservation(), forbidden = { type, data: [77, { detail: 'exact offending payload' }] };
+        evidence.trace.events.push(forbidden);
+        assert.throws(() => assertSpotlightSettingsOpened(evidence.before, evidence.after, { context: evidence.context, arcifyId: OWN, events: evidence.trace.events }),
+            error => error.message.includes(JSON.stringify([forbidden])));
+    }
+});

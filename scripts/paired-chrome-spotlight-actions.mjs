@@ -240,7 +240,8 @@ export function assertSpotlightSettingsOpened(before, after, { context, arcifyId
     for (const key of ['windows', 'bookmarks', 'bindings', 'aliases', 'favorites', 'favoriteSession', 'activeSpaces', 'pageStates']) assert.deepEqual(after[key], before[key], `Settings must preserve ${key}.`);
     const other = Number(Object.keys(before.snapshots).find(wid => Number(wid) !== context.windowId)); assert.deepEqual(snapshots({ [other]: after.snapshots[other] }), snapshots({ [other]: before.snapshots[other] }));
     assert.equal(events.filter(event => event.type === 'tabs.onCreated').length, 1);
-    assert(!events.some(event => /^tabs\.(onRemoved|onReplaced|onAttached|onDetached|onMoved)$|^windows\.|^bookmarks\.|^sidePanel\./.test(event.type)));
+    const forbidden = events.filter(event => /^tabs\.(onRemoved|onReplaced|onAttached|onDetached|onMoved)$|^windows\.|^bookmarks\.|^sidePanel\./.test(event.type));
+    assert.equal(forbidden.length, 0, `Settings emitted forbidden native events: ${JSON.stringify(forbidden)}`);
     return settings;
 }
 
@@ -365,7 +366,11 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
                 const requests = state.journal.filter(entry => { try { const request = JSON.parse(entry.fingerprint); return request.command === command && JSON.stringify(request.context) === JSON.stringify(sourceContext) && entry.response?.ok; } catch { return false; } });
                 return requests.length === 1;
             }, `one confirmed durable ${command} receipt`);
-            const trace = await observed(surface, inputOwner), request = assertSpotlightActionRequest(trace.events, command, sourceContext, spotlightId, title ? { title } : command === 'removeCurrentPin' ? { confirmed: true } : {});
+            const trace = await observed(surface, inputOwner);
+            // Persist raw observations before any oracle can throw. This checkpoint
+            // records an unvalidated attempt, never a successful action.
+            await checkpoint('action-observed-before-validation', { command, sourceContext, before, after, rows, prompt, trace });
+            const request = assertSpotlightActionRequest(trace.events, command, sourceContext, spotlightId, title ? { title } : command === 'removeCurrentPin' ? { confirmed: true } : {});
             assertSpotlightActionInput(trace.input, command, { confirmed: Boolean(prompt), ...(title ? { folderTitle: title } : {}) });
             const receipt = after.journal.find(entry => entry.fingerprint === JSON.stringify(request));
             const resultId = receipt.response[command === 'createSpaceFolder' ? 'folderId' : command === 'openSettings' ? 'tabId' : 'bookmarkId'];
