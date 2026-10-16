@@ -1,7 +1,7 @@
 /** Hosted, real-input Space theme evidence. Importing this module never starts Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { tabToSelector, setAppearanceControl, waitForAppearanceControlSaved } from './paired-chrome-sidebar-appearance.mjs';
+import { tabToSelector, setAppearanceControl, waitForAppearanceControlSaved, assertAppearanceSelectTrace } from './paired-chrome-sidebar-appearance.mjs';
 import { clickBookmarkFixtureRow, finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { rightClickFreshSpaceTrigger, captureRequiredSpaceScreenshot, assertSpaceContextFixtureEnvironment } from './paired-chrome-space-context.mjs';
 import { replaceSpaceEmojiWithInput } from './paired-chrome-space-icon-input.mjs';
@@ -164,19 +164,27 @@ export async function replaceThemeHex(page, value) {
     assert.equal(await page.$eval(THEME_HEX_INPUT, node => node.value), value);
     return assertThemeKeyboardTrace(await page.evaluate(() => globalThis.__spaceThemeInput.events), value);
 }
+/** Require the complete page-delivered key sequence, including for no-op selections. */
+export function assertThemeModeKeyboardTrace(events, before, mode) {
+    assertAppearanceSelectTrace(events, before, mode, THEME_MODES);
+    if (before !== 'system' || mode !== 'system' || events.some(event => ['input', 'change'].includes(event.type))) assertThemeKeyboardTrace(events, mode, { select: true });
+    return events;
+}
 export async function chooseThemeMode(page, mode) {
     assert(THEME_MODES.includes(mode));
     await page.waitForSelector('#themeMode:not([disabled])');
     await tabToSelector(page, '#themeMode', 200);
+    // A retained native select popup can consume keys without page keydown events.
+    // Close it with real input. Home/ArrowDown commit the closed select directly;
+    // a trailing Enter would open a new popup for the next operation to inherit.
+    await page.keyboard.press('Escape');
+    assert.equal(await page.$eval('#themeMode', node => document.activeElement === node), true);
     const before = await page.$eval('#themeMode', node => node.value);
     await page.evaluate(installThemeInputTrace, '#themeMode');
     await page.keyboard.press('Home');
     for (let index = 0; index < THEME_MODES.indexOf(mode); index++) await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('Enter');
     assert.equal(await page.$eval('#themeMode', node => node.value), mode);
-    const trace = await page.evaluate(() => globalThis.__spaceThemeInput.events);
-    if (before !== mode) assertThemeKeyboardTrace(trace, mode, { select: true });
-    else assert(trace.every(event => event.trusted));
+    const trace = assertThemeModeKeyboardTrace(await page.evaluate(() => globalThis.__spaceThemeInput.events), before, mode);
     const saved = await waitForAppearanceControlSaved(page, 'themeMode', mode, { changed: trace.some(event => event.type === 'change') });
     return { before, mode, trace, saved };
 }

@@ -101,19 +101,20 @@ test('Tab transport failure is not replayed', async () => {
     await assert.rejects(() => tabToSelector(page, '#dismiss'), /uncertain transport/); assert.equal(count, 1);
 });
 function appearanceInputPage(id, initial, desired) {
-    const calls = []; let current = initial;
+    const calls = []; let current = initial; const events = [];
     const receipt = () => ({ control: String(current), status: 'Sidebar appearance saved for this Chrome profile.', stored: { [id]: desired } });
     const page = { waitForSelector: async selector => calls.push(`wait:${selector}`), waitForFunction: async () => calls.push('queue-complete'),
-        evaluate: async fn => fn.toString().includes('document.activeElement') ? true : receipt(),
-        keyboard: { press: async key => { calls.push(key); if (id === 'favoritesLayout') current = key === 'ArrowDown' ? 'compact' : key === 'Home' ? 'standard' : current;
-            else if (key === 'Home') current = 12; else if (key === 'ArrowRight') current++; } },
-        $eval: async (_selector, fn) => fn.toString().includes('node.min') ? { min: 12, max: 20 } : String(current) };
+        evaluate: async fn => fn.name === 'installAppearanceSelectTrace' ? events.splice(0) : fn.toString().includes('document.activeElement') ? true : fn.toString().includes('__appearanceSelectInput.events') ? events : receipt(),
+        keyboard: { press: async key => { calls.push(key); const previous = current; events.push({ type: 'keydown', trusted: true, key, value: current }); if (id === 'favoritesLayout') current = key === 'ArrowDown' ? 'compact' : key === 'Home' ? 'standard' : current;
+            else if (key === 'Home') current = 12; else if (key === 'ArrowRight') current++;
+            if (previous !== current) for (const type of ['input', 'change']) events.push({ type, trusted: true, key: null, value: current }); } },
+        $eval: async (_selector, fn) => fn.toString().includes('document.activeElement') ? true : fn.toString().includes('node.min') ? { min: 12, max: 20 } : String(current) };
     return { page, calls };
 }
 test('appearance select uses actual keyboard selection and waits for genuine save completion', async () => {
     const { page, calls } = appearanceInputPage('favoritesLayout', 'standard', 'compact');
     await setAppearanceControl(page, 'favoritesLayout', 'compact');
-    assert.deepEqual(calls, ['wait:#favoritesLayout:not([disabled])', 'Home', 'ArrowDown', 'Enter', 'queue-complete']);
+    assert.deepEqual(calls, ['wait:#favoritesLayout:not([disabled])', 'Escape', 'Home', 'ArrowDown', 'queue-complete']);
 });
 test('appearance range uses real Tab then Home/ArrowRight and waits for the final queue', async () => {
     const { page, calls } = appearanceInputPage('spaceHeaderSize', 16, 14);

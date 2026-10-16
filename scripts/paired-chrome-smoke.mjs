@@ -46,7 +46,7 @@ import { exerciseFavoriteSearch } from './paired-chrome-favorite-search.mjs';
 import { assertSavedBookmarkFavorite } from './paired-chrome-favorites.mjs';
 import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels, installSpaceDragObservation, readSpaceDragObservation, recordSpaceDragObservation, assertAcceptedSpaceDragover } from './paired-chrome-space-marker.mjs';
 import { readDeveloperModeDomState, developerModeStateReady, enableDeveloperModeViaUi, findInstalledExtension, waitForEnabledExtension } from './paired-chrome-extensions.mjs';
-import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, requestObservedExtensionReload, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { installColdSetupObserver, readColdSetupObserver, stopColdSetupObserver, waitForColdSetupQuiescence } from './paired-chrome-cold-setup.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
@@ -624,7 +624,7 @@ async function runHostedOverlayRecovery() {
         targetsCdp = await browser.target().createCDPSession();
         const readTargets = async () => (await targetsCdp.send('Target.getTargets')).targetInfos;
         evidence = await exerciseOverlayRecovery({ browser, ...source, arcifyOptions, spotlightId, ui, poll, record, screenshot,
-            reloadSpotlight: async () => (await reloadPairedExtension('spotlight')).evidence,
+            reloadSpotlight: async () => (await reloadPairedExtension('spotlight', { preserveForeground: true })).evidence,
             stopSpotlightWorker: async () => {
                 const url = `chrome-extension://${spotlightId}/background.js`;
                 const target = browser.targets().find(target => target.type() === 'service_worker' && target.url() === url); assert(target);
@@ -675,8 +675,9 @@ async function runHostedOverlayRecovery() {
 
 // Retain the same raw-target, original-view, registry and fresh-identity proof
 // for every real reload, including Favorite continuity acceptance.
-async function reloadPairedExtension(name) {
+async function reloadPairedExtension(name, { preserveForeground = false } = {}) {
     assert(['arcify', 'spotlight'].includes(name));
+    assert(!preserveForeground || name === 'spotlight', 'Only overlay recovery reloads preserve foreground.');
     const id = name === 'arcify' ? arcifyId : spotlightId;
     const page = name === 'arcify' ? arcifyOptions : spotlightOptions;
     const url = `chrome-extension://${id}/background.js`;
@@ -697,7 +698,7 @@ async function reloadPairedExtension(name) {
     });
     viewCdp.on('Runtime.executionContextsCleared', () => view.invalidations.push({ allContextsCleared: true }));
     report.extensionReloads ||= [];
-    const evidence = { name, view, observations: [], registry: [] };
+    const evidence = { name, view, preserveForeground, observations: [], registry: [] };
     const expected = { ...report.extensions[name], path: resolve(name === 'arcify' ? ROOT : COMPANION, 'dist') };
     const readRegistry = async () => (await targetsCdp.send('Extensions.getExtensions')).extensions;
     const recordRegistry = async (phase, extensions) => { evidence.registry.push({ phase, extensions, observedAt: new Date().toISOString() }); await saveReport(); };
@@ -720,7 +721,7 @@ async function reloadPairedExtension(name) {
                 evidence.detachedWorkerSessionId = worker.client.id();
                 await worker.client.detach();
             },
-            reload: () => ui(page, `Reload ${name} extension`, () => page.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 50); })),
+            reload: () => requestObservedExtensionReload(page, ui, { name, preserveForeground }),
             viewInvalidated: async () => { view.closed = page.isClosed(); return view.closed || view.invalidations.length > 0; },
             record: async observation => { evidence.observations.push({ ...observation, observedAt: new Date().toISOString() }); await saveReport(); }
         });

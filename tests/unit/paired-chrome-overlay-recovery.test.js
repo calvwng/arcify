@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { overlayRecoveryFixtureResponse, assertOverlayRecoveryEnvironment, assertRecoveryManifest,
     assertRecoverySourceUnchanged, assertRecoveryReload, installOverlayRecoveryTrace, readOverlayRecoveryTrace, stopOverlayRecoveryTrace,
-    assertRecoveryTrace, assertRecoveredOverlay, assertLegacyOverlayPreserved, assertRecoveryNativeTabs,
+    assertRecoveryTrace, assertRecoveryOrphanPreserved, assertRecoveredOverlay, assertLegacyOverlayPreserved, assertRecoveryNativeTabs,
     assertOneRecoveryReceiver, assertRecoveryTrustedTyping, assertUncertainRecoveryTrace, assertRecoveryWorkerStopped, assertRecoveryWindowsUnchanged, assertColdRecoveryWake, recordOverlayRecoveryFailure } from '../../scripts/paired-chrome-overlay-recovery.mjs';
 const id = 'a'.repeat(32), nonce = 'b'.repeat(32), url = `http://localhost:1234/overlay-recovery-host?nonce=${nonce}`;
 const source = { id: 12, windowId: 3, url, active: true, incognito: false, pinned: false, index: 0, groupId: 5 };
@@ -176,5 +176,24 @@ test('cold and warm failed native sends persist full uncertain transport evidenc
         assert.equal(recorded.length, 1); assert.equal(recorded[0].phase, phase); assert.equal(recorded[0].failure.nativeUncertain, true);
         assert.deepEqual(recorded[0].failure.nativeEvidence, nativeCloseEvidence); assert.equal(recorded[0].inputBoundary, 123);
         assert.deepEqual(recorded[0].lifecycle, evidence.lifecycle);
+    }
+});
+
+
+test('recovery cannot proceed when reload setup removes, replaces or edits the intended orphan', () => {
+    for (const owner of [id, null]) {
+        const before = { ...opened(), owner, oldHostConnected: true, sameHost: true };
+        assertRecoveryOrphanPreserved(before, structuredClone(before));
+        // Exact failure shape from hosted run 38867256531: Options activation
+        // removed the host before the native command could test draft recovery.
+        const absent = { hostCount: 0, frameCount: 0, owner: null, open: false,
+            draft: null, oldHostConnected: false, sameHost: false };
+        assert.throws(() => assertRecoveryOrphanPreserved(before, absent), /old host before recovery/);
+        for (const patch of [{ hostCount: 2 }, { frameCount: 0 }, { open: false }, { oldHostConnected: false },
+            { sameHost: false }, { owner: 'wrong' }, { draft: { ...before.draft, value: '' } },
+            { draft: { ...before.draft, start: 5 } }, { draft: { ...before.draft, end: 9 } },
+            { draft: { ...before.draft, direction: 'backward' } }]) {
+            assert.throws(() => assertRecoveryOrphanPreserved(before, { ...before, ...patch }));
+        }
     }
 });

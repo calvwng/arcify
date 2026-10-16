@@ -1,7 +1,8 @@
 import test from 'node:test';
+import { parseHTML } from 'linkedom';
 import { EventEmitter } from 'node:events';
 import assert from 'node:assert/strict';
-import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from '../../scripts/paired-chrome-worker.mjs';
+import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWorkerTarget, terminateObservedWorker, requestObservedExtensionReload, reloadObservedExtension, observeTargetDiagnostics, assertNoTargetCrashes } from '../../scripts/paired-chrome-worker.mjs';
 const id = 'a'.repeat(32), url = `chrome-extension://${id}/background.js`;
 const ready = { url, hasRuntime: true, id, manifest: { name: 'Fixture', version: '1.0.0' } };
 const starting = { url, hasRuntime: false, id: null, manifest: null };
@@ -184,3 +185,36 @@ test('a script-load/evaluation promise that never settles fails within its own d
         /Worker identity evaluation exceeded 10ms, including script-load readiness/);
     assert.equal(calls, 1);
 });
+
+
+for (const preserveForeground of [false, true]) {
+    test(`reload request preserves the actual orphan DOM only in recovery mode (${preserveForeground})`, async () => {
+        const { document } = parseHTML('<html><body><div id="arcify-spotlight-host"><input value="orphan draft"></div></body></html>');
+        const host = document.getElementById('arcify-spotlight-host'), calls = [];
+        const originalChrome = globalThis.chrome, originalTimeout = globalThis.setTimeout;
+        const page = {
+            async bringToFront() {
+                calls.push('activate-options');
+                // Model the existing tabs.onActivated close handler, which retires
+                // the actual DOM node before the old extension can be invalidated.
+                host.remove();
+            },
+            async evaluate(action) { calls.push('evaluate-options'); return action(); }
+        };
+        const ui = async (target, label, action) => {
+            assert.equal(target, page); assert.equal(label, 'Reload spotlight extension');
+            await target.bringToFront(); return action();
+        };
+        try {
+            globalThis.chrome = { runtime: { reload: () => calls.push('runtime.reload') } };
+            globalThis.setTimeout = (action, delay) => { assert.equal(delay, 50); action(); };
+            await requestObservedExtensionReload(page, ui, { name: 'spotlight', preserveForeground });
+            assert.equal(host.isConnected, preserveForeground, 'The recovery reload must leave the existing orphan DOM attached');
+            assert.equal(host.querySelector('input').value, 'orphan draft');
+            assert.deepEqual(calls, [...(preserveForeground ? [] : ['activate-options']), 'evaluate-options', 'runtime.reload']);
+        } finally {
+            globalThis.setTimeout = originalTimeout;
+            if (originalChrome === undefined) delete globalThis.chrome; else globalThis.chrome = originalChrome;
+        }
+    });
+}

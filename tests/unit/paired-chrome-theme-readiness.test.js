@@ -2,8 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readSourceText } from '../source-text.js';
-import { appearanceSaveComplete, waitForAppearanceControlSaved } from '../../scripts/paired-chrome-sidebar-appearance.mjs';
-import { themeSelectionTab, assertThemeSelectionComplete, selectThemeFixtureSpace, pollThemeConservation,
+import { appearanceSaveComplete, waitForAppearanceControlSaved, setAppearanceControl, assertAppearanceSelectTrace } from '../../scripts/paired-chrome-sidebar-appearance.mjs';
+import { chooseThemeMode, assertThemeModeKeyboardTrace, themeSelectionTab, assertThemeSelectionComplete, selectThemeFixtureSpace, pollThemeConservation,
     THEME_LEGACY_SYNC_KEYS, restoreThemeLegacySync, captureThemeSettingsSamples } from '../../scripts/paired-chrome-space-theme.mjs';
 
 const expected = { spaceId: 'work', windowId: 1, extensionId: 'fixture', tabId: 3 };
@@ -121,4 +121,77 @@ test('a diagnostic write failure cannot replace the primary conservation error',
     const failure = Error('primary strict failure');
     await assert.rejects(pollThemeConservation({ read: async () => ({}), poll: async () => { throw failure; }, validate: () => {}, label: 'strict',
         record: async () => { throw Error('disk write failed'); } }), error => error === failure);
+});
+
+/** Model the native popup swallowing document keydowns until real Escape closes it. */
+async function withSelectPage({ id, initial, choices, open = false, rejectKey, swallowKeys = false }, action) {
+    const saved = Object.fromEntries(['document', 'chrome', '__spaceThemeInput', '__appearanceSelectInput'].map(key => [key, globalThis[key]]));
+    const calls = [], listeners = new Map(); let popup = open, value = initial;
+    const node = { get value() { return value; }, matches: selector => selector === `#${id}` };
+    globalThis.document = { activeElement: node, querySelector: selector => selector === '#sidebarAppearanceStatus'
+        ? { textContent: 'Sidebar appearance saved for this Chrome profile.' } : node, getElementById: () => node,
+        addEventListener: (type, handler) => { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(handler); },
+        removeEventListener: (type, handler) => listeners.get(type)?.delete(handler) };
+    globalThis.chrome = { storage: { local: { get: async () => ({ sidebarAppearance: { [id]: value } }) } } };
+    const emit = (type, key = null) => { for (const handler of listeners.get(type) || []) handler({ type, target: node, isTrusted: true, key }); };
+    const page = { evaluate: (fn, arg) => fn(arg), $eval: (_selector, fn) => fn(node), waitForSelector: async () => {},
+        waitForFunction: async (fn, _options, arg) => assert.equal(await fn(arg), true),
+        keyboard: { press: async key => {
+            calls.push(key); if (key === rejectKey) throw Error('uncertain native input');
+            if (key === 'Escape') { popup = false; return; }
+            if (key === 'Enter') { popup = !popup; return; }
+            if (popup || swallowKeys) return;
+            emit('keydown', key); const before = value;
+            if (key === 'Home') value = choices[0];
+            if (key === 'ArrowDown') value = choices[Math.min(choices.indexOf(value) + 1, choices.length - 1)];
+            if (before !== value) { emit('input'); emit('change'); }
+        } } };
+    try { return await action({ page, calls, isOpen: () => popup }); }
+    finally { Object.assign(globalThis, saved); }
+}
+for (const open of [false, true]) for (const before of ['system', 'light', 'dark']) for (const mode of ['system', 'light', 'dark']) {
+    test(`theme ${before}→${mode} from ${open ? 'open' : 'closed'} native popup requires exact trusted keys and completes closed`, async () => {
+        await withSelectPage({ id: 'themeMode', initial: before, choices: ['system', 'light', 'dark'], open }, async ({ page, calls, isOpen }) => {
+            const result = await chooseThemeMode(page, mode);
+            assert.deepEqual(calls, ['Escape', 'Home', ...Array(['system', 'light', 'dark'].indexOf(mode)).fill('ArrowDown')]);
+            assert.equal(result.before, before); assert.equal(result.saved.stored.themeMode, mode); assert.equal(isOpen(), false);
+            assertThemeModeKeyboardTrace(result.trace, before, mode);
+        });
+    });
+}
+for (const open of [false, true]) for (const before of ['standard', 'compact']) for (const value of ['standard', 'compact']) {
+    test(`layout ${before}→${value} from ${open ? 'open' : 'closed'} popup follows the same closed-select protocol`, async () => {
+        await withSelectPage({ id: 'favoritesLayout', initial: before, choices: ['standard', 'compact'], open }, async ({ page, calls, isOpen }) => {
+            const result = await setAppearanceControl(page, 'favoritesLayout', value);
+            assert.deepEqual(calls, ['Escape', 'Home', ...(value === 'compact' ? ['ArrowDown'] : [])]);
+            assert.equal(result.stored.favoritesLayout, value); assert.equal(isOpen(), false);
+            assertAppearanceSelectTrace(result.trace, before, value, ['standard', 'compact']);
+        });
+    });
+}
+test('the exact observed popup-swallowed trusted input/change trace still fails without page keydowns', () => {
+    assert.throws(() => assertThemeModeKeyboardTrace([{ type: 'input', trusted: true, key: null, value: 'light' },
+        { type: 'change', trusted: true, key: null, value: 'light' }], 'system', 'light'), /complete page-delivered/);
+});
+test('repeated Light or Dark must show the intermediate genuine selection changes; only System→System can be key-only', () => {
+    const key = value => ({ type: 'keydown', trusted: true, key: value });
+    assertThemeModeKeyboardTrace([key('Home')], 'system', 'system');
+    for (const [mode, count] of [['light', 1], ['dark', 2]]) {
+        assert.throws(() => assertThemeModeKeyboardTrace([key('Home'), ...Array.from({ length: count }, () => key('ArrowDown'))], mode, mode), /Missing trusted select input/);
+    }
+    assert.throws(() => assertThemeModeKeyboardTrace([], 'system', 'system'));
+    assert.throws(() => assertThemeModeKeyboardTrace([{ ...key('Home'), trusted: false }], 'system', 'system'));
+    assert.throws(() => assertThemeModeKeyboardTrace([key('Home'), key('Enter')], 'system', 'system'));
+});
+test('uncertain native key input is never replayed and no later keys or save poll run', async () => {
+    await withSelectPage({ id: 'themeMode', initial: 'system', choices: ['system', 'light', 'dark'], rejectKey: 'Home' }, async ({ page, calls }) => {
+        page.waitForFunction = async () => assert.fail('Cannot claim a save after uncertain input');
+        await assert.rejects(chooseThemeMode(page, 'dark'), /uncertain native input/);
+        assert.deepEqual(calls, ['Escape', 'Home']);
+    });
+});
+test('a no-op request cannot hide keys still consumed outside the page', async () => {
+    await withSelectPage({ id: 'themeMode', initial: 'system', choices: ['system', 'light', 'dark'], swallowKeys: true }, async ({ page }) => {
+        await assert.rejects(chooseThemeMode(page, 'system'), /native trusted input/);
+    });
 });

@@ -79,6 +79,15 @@ export async function terminateObservedWorker({ worker, url, readTargets, releas
     throw new Error(`Worker close did not destroy raw Chrome target ${before.targetId}; remaining targets: ${JSON.stringify(last)}`);
 }
 
+// Request one real extension reload from its existing options realm. Lifecycle
+// verification remains the responsibility of reloadObservedExtension.
+export function requestObservedExtensionReload(page, ui, { name, preserveForeground = false }) {
+    const reload = () => page.evaluate(() => { setTimeout(() => chrome.runtime.reload(), 50); });
+    // Foregrounding Options activates another tab and intentionally closes any
+    // live Spotlight overlay before invalidation. Recovery needs the real orphan.
+    return preserveForeground ? reload() : ui(page, `Reload ${name} extension`, reload);
+}
+
 export async function reloadObservedExtension({ url, readTargets, releaseObservers, reload, viewInvalidated, record }, {
     timeout = 20_000, interval = 100, now = Date.now,
     sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))

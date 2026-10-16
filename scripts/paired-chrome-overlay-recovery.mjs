@@ -148,6 +148,18 @@ export function assertRecoveryTrace(trace, source, { fallback = false, restricte
     assert.equal(trace.creations.length, fallback ? 1 : 0, 'Unexpected helper creation or duplicate fallback');
     return trace;
 }
+// A missing pre-command orphan tests dormant injection, not draft recovery.
+// Require the exact old host and draft through both reload and source refocus.
+export function assertRecoveryOrphanPreserved(before, after) {
+    for (const state of [before, after]) {
+        assert.equal(state.hostCount, 1, 'The orphan fixture must retain exactly one old host before recovery');
+        assert.equal(state.frameCount, 1); assert.equal(state.open, true);
+        assert.equal(state.oldHostConnected, true); assert.equal(state.sameHost, true);
+    }
+    assert.equal(after.owner, before.owner);
+    assert.deepEqual(after.draft, before.draft, 'Reload setup must preserve the orphan text, range and direction');
+    return after;
+}
 export function assertRecoveredOverlay(state, spotlightId, expectedDraft) {
     assert.equal(state.hostCount, 1); assert.equal(state.frameCount, 1); assert.equal(state.open, true);
     assert.equal(state.owner, spotlightId);
@@ -266,7 +278,10 @@ export async function exerciseOverlayRecovery({ browser, page, sourceTab, arcify
                     await surface.$eval('[data-testid="spotlight-input"]', input => input.focus());
                     await page.keyboard.down('Control'); try { await page.keyboard.press('KeyA'); } finally { await page.keyboard.up('Control'); }
                     await page.keyboard.type(`w ${kind} draft`);
-                    await page.keyboard.press('Home'); await page.keyboard.down('Shift');
+                    // Home alone is Spotlight result navigation, not caret editing.
+                    await page.keyboard.down('Control');
+                    try { await page.keyboard.press('Home'); } finally { await page.keyboard.up('Control'); }
+                    await page.keyboard.down('Shift');
                     try { await page.keyboard.press('ArrowRight'); await page.keyboard.press('ArrowRight'); } finally { await page.keyboard.up('Shift'); }
                 });
                 await page.evaluate(legacy => {
@@ -274,7 +289,10 @@ export async function exerciseOverlayRecovery({ browser, page, sourceTab, arcify
                     if (legacy) globalThis.__overlayRecoveryOldHost.removeAttribute('data-arcify-spotlight-owner');
                 }, kind === 'unmarked-legacy-shape');
                 orphan = (await read()).host;
-                assert.equal(orphan.open, true); assert(orphan.draft.value.includes(kind));
+                assert.equal(orphan.owner, kind === 'marked-orphan' ? spotlightId : null);
+                assert.deepEqual(orphan.draft, { value: `w ${kind} draft`, start: 0, end: 2, direction: 'forward' },
+                    'Trusted editing input must create a nonempty selection before reload');
+                assertRecoveryOrphanPreserved(orphan, orphan);
             }
             const lifecycle = assertRecoveryReload(await reloadSpotlight(), spotlightId);
             const target = await browser.waitForTarget(target => target.type() === 'service_worker' && target.url() === `chrome-extension://${spotlightId}/background.js`);
@@ -289,6 +307,7 @@ export async function exerciseOverlayRecovery({ browser, page, sourceTab, arcify
             const item = { kind, lifecycle, identity, registered, invalidated, before, orphan };
             evidence.cases.push(item); await record({ phase: 'overlay-recovery-before-command', ...item });
             try {
+                if (orphan) assertRecoveryOrphanPreserved(orphan, before.host);
                 item.native = await ui(page, `Invoke the registered Spotlight command once for ${kind}`, async () => {
                     const recheck = assertRecoverySourceUnchanged(original, await read());
                     assert.equal(recheck.tab.active, true); assert.equal(recheck.host.url, sourceTab.url);
@@ -296,6 +315,10 @@ export async function exerciseOverlayRecovery({ browser, page, sourceTab, arcify
                     item.windowsBefore = await readWindows(); assertRecoveryWindowsUnchanged(item.windowsBefore, item.windowsBefore, sourceTab.windowId);
                     const probe = await probeNativeSpotlightCommandTarget(nativeTarget);
                     item.nativeProbe = probe.evidence; await record({ phase: 'overlay-recovery-native-probe', kind, evidence: probe.evidence });
+                    item.preCommand = assertRecoverySourceUnchanged(original, await read());
+                    assert.equal(item.preCommand.tab.active, true);
+                    if (orphan) assertRecoveryOrphanPreserved(orphan, item.preCommand.host);
+                    await record({ phase: 'overlay-recovery-pre-command-source', kind, source: item.preCommand });
                     return sendOneNativeSpotlightCommand(probe);
                 });
                 const fallback = kind === 'unmarked-legacy-shape';

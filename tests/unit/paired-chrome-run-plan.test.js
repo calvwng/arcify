@@ -412,14 +412,14 @@ test('setup 0–2 supplies every recovery/action fixture dependency; later cases
     const recovery = smoke.slice(smoke.indexOf('async function runHostedOverlayRecovery()'), smoke.indexOf('// Retain the same raw-target'));
     assert.match(recovery, /beforeTabs = await arcifyOptions.evaluate\(\(\) => chrome.tabs.query\(\{\}\)\)/);
     assert.match(recovery, /created = await arcifyOptions.evaluate\(options => chrome.tabs.create\(options\), \{ windowId: fixture.windowA, url, active: true \}\)/);
-    assert.match(recovery, /reloadSpotlight: async \(\) => \(await reloadPairedExtension\('spotlight'\)\).evidence/);
+    assert.match(recovery, /reloadSpotlight: async \(\) => \(await reloadPairedExtension\('spotlight', \{ preserveForeground: true \}\)\).evidence/);
     assert.doesNotMatch(recovery, /persistentFixture|ordinaryFixture|sidebarFixture|spaceTheme|spotlightOptionsAppearance/);
 });
 
 test('shared step gates, recovery/sidebar evidence and final failure handling preserve their reviewed bytes', () => {
     for (const [start, end, expected] of [
         ['async function step(', 'async function internal(', '791e0719836b826f1e9fac58a48514b9cdbb3de25cb9c658c9e854888a930835'],
-        ['async function runHostedOverlayRecovery()', '// Retain the same raw-target', 'dbc00667391c6b96127388f053172bfb2a92bd9d603ebb31eadce9e8dd884c5f'],
+        ['async function runHostedOverlayRecovery()', '// Retain the same raw-target', '1b1dc1d20f36ee902e35121291cac88d4b9f3677d227f9083a187c03f7ba2e6c'],
         ['async function verifyRecoveredOverlaySidebar(', 'async function runHostedOverlayRecovery()', '27285659431753430ede7585b4027d73491e1ac1df4e8751fdedbc80f7173556'],
         ['    assert(report.screenshots.length > 0', null, 'b4864b3961076a90186da6bc9885b17c0eb31228514fa487d80daa7e9a46ef5b']
     ]) {

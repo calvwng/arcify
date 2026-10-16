@@ -159,15 +159,44 @@ export async function waitForAppearanceControlSaved(page, id, value, { changed =
     return receipt;
 }
 
+/** Passive observation only; select changes still come from native keyboard input. */
+export function installAppearanceSelectTrace(selector) {
+    globalThis.__appearanceSelectInput?.dispose();
+    const events = [], listen = event => {
+        if (event.target.matches?.(selector)) events.push({ type: event.type, trusted: event.isTrusted, key: event.key || null, value: event.target.value });
+    };
+    for (const type of ['keydown', 'input', 'change']) document.addEventListener(type, listen, true);
+    globalThis.__appearanceSelectInput = { events, dispose() { for (const type of ['keydown', 'input', 'change']) document.removeEventListener(type, listen, true); } };
+}
+export function assertAppearanceSelectTrace(events, before, value, choices) {
+    assert(choices.includes(before) && choices.includes(value));
+    assert(events.length && events.every(event => event.trusted), 'Every select input must be native trusted input.');
+    assert.deepEqual(events.filter(event => event.type === 'keydown').map(event => event.key),
+        ['Home', ...Array(choices.indexOf(value)).fill('ArrowDown')], 'Require the complete page-delivered select key sequence, including no-op requests.');
+    if (before !== choices[0] || value !== choices[0] || events.some(event => ['input', 'change'].includes(event.type))) {
+        for (const type of ['input', 'change']) assert(events.some(event => event.type === type), `Missing trusted select ${type}.`);
+        assert.equal(events.filter(event => ['input', 'change'].includes(event.type)).at(-1)?.value, value);
+    }
+    return events;
+}
+
 // Genuine select/range keyboard input. No .value assignment, dispatchEvent, test CSS or settings write.
 export async function setAppearanceControl(page, id, value) {
     await page.waitForSelector(`#${id}:not([disabled])`);
     await tabToSelector(page, `#${id}`, 200);
+    if (id === 'favoritesLayout') {
+        // Close any retained popup before observing the closed-select key sequence.
+        await page.keyboard.press('Escape');
+        assert.equal(await page.$eval(`#${id}`, node => document.activeElement === node), true);
+    }
     const before = await page.$eval(`#${id}`, node => node.value);
-    let changed = before !== String(value);
+    let changed = before !== String(value), trace;
     if (id === 'favoritesLayout') {
         assert(['standard', 'compact'].includes(value));
-        await page.keyboard.press('Home'); if (value === 'compact') await page.keyboard.press('ArrowDown'); await page.keyboard.press('Enter');
+        await page.evaluate(installAppearanceSelectTrace, `#${id}`);
+        await page.keyboard.press('Home'); if (value === 'compact') await page.keyboard.press('ArrowDown');
+        trace = assertAppearanceSelectTrace(await page.evaluate(() => globalThis.__appearanceSelectInput.events), before, value, ['standard', 'compact']);
+        changed = trace.some(event => event.type === 'change');
     } else {
         const { min, max } = await page.$eval(`#${id}`, node => ({ min: Number(node.min), max: Number(node.max) }));
         assert(Number.isInteger(value) && value >= min && value <= max);
@@ -176,7 +205,8 @@ export async function setAppearanceControl(page, id, value) {
         for (let index = min; index < value; index++) await page.keyboard.press('ArrowRight');
     }
     assert.equal(await page.$eval(`#${id}`, node => node.value), String(value));
-    return waitForAppearanceControlSaved(page, id, value, { changed });
+    const saved = await waitForAppearanceControlSaved(page, id, value, { changed });
+    return { ...saved, ...(trace ? { trace } : {}) };
 }
 
 export async function exerciseSidebarAppearance({ apiPage, newTabPage, ui, screenshot, screenshotBytes, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
