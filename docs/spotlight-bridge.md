@@ -54,7 +54,13 @@ This does not make an older store release bridge-compatible.
 
 For an update, fetch both **user forks**, check out the paired revisions, run
 `npm ci && npm run build` in both, and click **Reload** for both in Extensions.
-Refresh web pages with old Spotlight content scripts, then check both connections.
+Accept any permission prompt Chrome requires, then check both connections. With
+Spotlight's approved `activeTab`/`scripting` permissions, the next Spotlight-owned
+keyboard command repairs a missing receiver on an unchanged eligible web page; it never
+automatically refreshes the page. Restricted pages keep the helper fallback. An
+already-open, unmarked pre-upgrade overlay may still need its draft copied and a
+manual page refresh. See Spotlight's [overlay recovery guide](https://github.com/calvwng/arcify-spotlight/blob/integration/arcify-bridge-v1/docs/OVERLAY-RECOVERY.md)
+for the exact eligibility, draft preservation, and fallback limits.
 Keep the unpacked paths fixed to preserve their IDs. If an ID changes, re-pair both
 sides. Update both when the protocol version changes. Reloading never imports a
 Spotlight-owned workspace copy into Arcify.
@@ -271,6 +277,15 @@ revisions and runs `npm run test:paired-chrome` on an independently provisioned
 runner. Its JSON report and screenshots document actual Chrome coverage, including
 the tested revisions and IDs. It never disables sandbox/web security or bypasses
 an installation policy. The paired PRs link the exact run and its result.
+
+For **Open Arcify settings** only, the Linux acceptance oracle permits at most one
+exact `windows.onFocusChanged` notification with `WINDOW_ID_NONE` (`[-1]`), as
+described by the [Chrome windows API](https://developer.chrome.com/docs/extensions/reference/api/windows#event-onFocusChanged).
+It still requires the source window to be the sole focused window before and after
+the action, retains the raw notification, and rejects positive or additional focus
+events and every other prohibited native mutation. This proves endpoint focus,
+not uninterrupted transient native focus or the precise cause of the notification.
+Pin, removal, folder, and cancellation checks do not permit this exception.
 
 See [bridge-validation.md](bridge-validation.md) for the interactive cloud-browser
 policy restriction, CI coverage boundaries, and remaining manual checks.

@@ -205,6 +205,75 @@ function settingsObservation() {
     return { before, after, trace, context: options.context };
 }
 
+function validateSettings(evidence, platform) {
+    return assertSpotlightSettingsOpened(evidence.before, evidence.after, {
+        context: evidence.context, arcifyId: OWN, events: evidence.trace.events, platform
+    });
+}
+const noWindowFocus = () => ({ type: 'windows.onFocusChanged', data: [-1] });
+
+for (const platform of ['linux', 'darwin', 'win32', 'freebsd', null, 'Linux', '']) {
+    test(`Settings without focus events keeps exact source focus on ${platform}`, () => {
+        assert.equal(validateSettings(settingsObservation(), platform).id, 999);
+    });
+    test(`Settings permits one exact WINDOW_ID_NONE only on Linux, platform ${platform}`, () => {
+        const evidence = settingsObservation(); evidence.trace.events.unshift(noWindowFocus());
+        const original = clone(evidence);
+        if (platform === 'linux') assert.equal(validateSettings(evidence, platform).id, 999);
+        else assert.throws(() => validateSettings(evidence, platform), /forbidden native events/);
+        assert.deepEqual(evidence, original, 'Never discard the raw focus notification from evidence.');
+    });
+}
+test('Settings platform defaults to the actual hosted Node platform', () => {
+    const evidence = settingsObservation(); evidence.trace.events.unshift(noWindowFocus());
+    if (process.platform === 'linux') assert.equal(validateSettings(evidence).id, 999);
+    else assert.throws(() => validateSettings(evidence), /forbidden native events/);
+});
+
+for (const [name, events] of Object.entries({
+    duplicateSentinel: [noWindowFocus(), noWindowFocus()],
+    sourceWindow: [{ type: 'windows.onFocusChanged', data: [7] }],
+    otherWindow: [{ type: 'windows.onFocusChanged', data: [8] }],
+    sentinelThenSource: [noWindowFocus(), { type: 'windows.onFocusChanged', data: [7] }],
+    sentinelThenOther: [noWindowFocus(), { type: 'windows.onFocusChanged', data: [8] }],
+    missingData: [{ type: 'windows.onFocusChanged' }],
+    ...Object.fromEntries([null, -1, '-1', { 0: -1, length: 1 }, [], ['-1'], [-2], [0], [null], [-1, 7], [-1, -1],
+        Object.assign([-1], { extra: true })].map((data, index) => [`malformed${index}`, [{ type: 'windows.onFocusChanged', data }]]))
+})) test(`Linux Settings rejects focus boundary ${name}`, () => {
+    const evidence = settingsObservation(); evidence.trace.events.unshift(...clone(events));
+    assert.throws(() => validateSettings(evidence, 'linux'), /forbidden native events/);
+});
+
+for (const sentinel of [false, true]) for (const endpoint of ['before', 'after', 'both']) for (const [name, mutate] of Object.entries({
+    noFocusedWindow: windows => { windows[0].focused = false; },
+    otherFocusedWindow: windows => { windows[0].focused = false; windows[1].focused = true; },
+    bothFocusedWindows: windows => { windows[1].focused = true; },
+    sourceMissing: windows => { windows.shift(); },
+    duplicateSource: windows => { windows.push(clone(windows[0])); },
+    malformedSourceFocus: windows => { windows[0].focused = 'true'; },
+    malformedOtherFocus: windows => { windows[1].focused = 0; }
+})) test(`Settings requires sole source focus at ${endpoint}: ${name}, sentinel ${sentinel}`, () => {
+    const evidence = settingsObservation(); if (sentinel) evidence.trace.events.unshift(noWindowFocus());
+    for (const key of endpoint === 'both' ? ['before', 'after'] : [endpoint]) mutate(evidence[key].windows);
+    assert.throws(() => validateSettings(evidence, 'linux'));
+});
+
+for (const type of ['tabs.onRemoved', 'tabs.onReplaced', 'tabs.onAttached', 'tabs.onDetached', 'tabs.onMoved',
+    'windows.onCreated', 'windows.onRemoved', 'windows.onBoundsChanged', 'bookmarks.onCreated', 'bookmarks.onRemoved',
+    'bookmarks.onChanged', 'bookmarks.onMoved', 'sidePanel.onOpened']) test(`Linux Settings sentinel never excuses ${type}`, () => {
+    const evidence = settingsObservation(), forbidden = { type, data: [77] };
+    evidence.trace.events.unshift(noWindowFocus(), forbidden);
+    assert.throws(() => validateSettings(evidence, 'linux'), error => error.message.includes(JSON.stringify([forbidden])));
+});
+
+for (const command of ['pinCurrentTab', 'removeCurrentPin', 'createSpaceFolder']) test(`${command} still rejects the exact Linux focus sentinel`, () => {
+    const { before, after, options } = sample(command); options.events.unshift(noWindowFocus());
+    assert.throws(() => assertSpotlightActionCommitted(before, after, options), /never mutate native pages/);
+});
+test('cancelled and rejected actions still reject the exact Linux focus sentinel', () => {
+    for (const allowRejectedRequests of [false, true]) assert.throws(() => assertSpotlightActionNoWrites([noWindowFocus()], { allowRejectedRequests }), /window focus/);
+});
+
 for (const stage of ['request', 'input', 'native']) test(`failed ${stage} validation preserves complete raw action evidence before any success claim`, async () => {
     const source = readFileSync(new globalThis.URL('../../scripts/paired-chrome-spotlight-actions.mjs', import.meta.url), 'utf8');
     const start = source.indexOf('            const trace = await observed(surface, inputOwner)');

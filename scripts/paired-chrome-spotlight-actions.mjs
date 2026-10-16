@@ -1,6 +1,7 @@
 /** Initial paired Space-action acceptance. Import-safe; the hosted harness owns Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { spotlightSurface } from './paired-chrome-keyboard.mjs';
 import { replaceInputText, clickFreshResult, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
 import { readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
@@ -232,15 +233,26 @@ export function assertSpotlightActionCommitted(before, after, { command, context
     assert.equal(receipt[0].response[command === 'createSpaceFolder' ? 'folderId' : 'bookmarkId'], resultId);
     return { command, resultId, affected, bookmarkEvents };
 }
-export function assertSpotlightSettingsOpened(before, after, { context, arcifyId, events }) {
+export function assertSpotlightSettingsOpened(before, after, { context, arcifyId, events, platform = process.platform }) {
     const added = after.tabs.filter(tab => !before.tabs.some(previous => previous.id === tab.id)); assert.equal(added.length, 1);
     const settings = added[0]; assert.equal(settings.windowId, context.windowId); assert.equal(settings.url, `chrome-extension://${arcifyId}/options.html`); assert.equal(settings.active, true); assert.equal(settings.pinned, false);
     assert.deepEqual(after.tabs.filter(tab => tab.id !== settings.id).map(tab => ({ ...tab, active: exact(before.tabs, tab.id).active })), before.tabs, 'Settings retains all pre-existing IDs, native order, URLs, windows and pin state.');
     for (const tab of before.tabs) assert.equal(exact(after.tabs, tab.id).active, tab.windowId === context.windowId ? false : tab.active);
     for (const key of ['windows', 'bookmarks', 'bindings', 'aliases', 'favorites', 'favoriteSession', 'activeSpaces', 'pageStates']) assert.deepEqual(after[key], before[key], `Settings must preserve ${key}.`);
+    for (const [endpoint, state] of [['before', before], ['after', after]]) {
+        exact(state.windows, context.windowId);
+        assert(state.windows.every(window => window.focused === (window.id === context.windowId)), `Settings requires the source window alone focused ${endpoint} the action.`);
+    }
     const other = Number(Object.keys(before.snapshots).find(wid => Number(wid) !== context.windowId)); assert.deepEqual(snapshots({ [other]: after.snapshots[other] }), snapshots({ [other]: before.snapshots[other] }));
     assert.equal(events.filter(event => event.type === 'tabs.onCreated').length, 1);
-    const forbidden = events.filter(event => /^tabs\.(onRemoved|onReplaced|onAttached|onDetached|onMoved)$|^windows\.|^bookmarks\.|^sidePanel\./.test(event.type));
+    // Chrome documents Linux WINDOW_ID_NONE notifications during native focus transitions:
+    // https://developer.chrome.com/docs/extensions/reference/api/windows#event-onFocusChanged
+    // Permit only the single exact sentinel observed in hosted Settings acceptance.
+    // The guards above prove endpoint focus, not uninterrupted transient native focus.
+    // Keep the notification in raw evidence and reject every positive/extra focus event.
+    const focusEvents = events.filter(event => event.type === 'windows.onFocusChanged');
+    const allowedFocusEvent = platform === 'linux' && focusEvents.length === 1 && isDeepStrictEqual(focusEvents[0].data, [-1]) ? focusEvents[0] : null;
+    const forbidden = events.filter(event => event !== allowedFocusEvent && /^tabs\.(onRemoved|onReplaced|onAttached|onDetached|onMoved)$|^windows\.|^bookmarks\.|^sidePanel\./.test(event.type));
     assert.equal(forbidden.length, 0, `Settings emitted forbidden native events: ${JSON.stringify(forbidden)}`);
     return settings;
 }
