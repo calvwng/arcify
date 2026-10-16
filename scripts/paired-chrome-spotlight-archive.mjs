@@ -105,6 +105,37 @@ export async function collectArchiveOpenFailure({ sourcePage, sourceSurface, nat
     } : { unavailable: 'No native document was resolved before the original failure.' };
     return observations;
 }
+/** Passive exact-request journal read. A missing reply never implies in-flight work. */
+export async function readArchiveReopenJournal({ spotlightId, entryId, windowId, sourceTabId, requests }) {
+    if (!Array.isArray(requests)) return { journal: [], responseEvidence: 'unavailable',
+        limitation: 'The request trace is unavailable; no journal response can be attributed to this attempt.' };
+    const exactRequests = requests.filter(request => request?.command === 'reopenArchivedTab' && request.entryId === entryId
+        && request.windowId === windowId && request.context?.sourceTabId === sourceTabId).map(request => ({
+        key: `${spotlightId}:${request.context.pairingGeneration ? `${request.context.pairingGeneration}:` : ''}${request.requestId}`, fingerprint: JSON.stringify(request)
+    }));
+    const stored = await chrome.storage.session.get('spotlightBridgeRequests');
+    const journal = (stored.spotlightBridgeRequests || []).filter(item => exactRequests.some(request => item.key === request.key && item.fingerprint === request.fingerprint));
+    return { journal, responseEvidence: journal.some(item => Object.hasOwn(item, 'response')) ? 'retained-journal-response' : 'unavailable',
+        limitation: 'Failed raw replies are not retained. A journal entry without a response does not prove the action is still in flight.' };
+}
+export async function collectArchiveReopenFailure({ apiPage, spotlightOptions, sourcePage, sourceSurface, spotlightId, entryId, windowId, sourceTabId }) {
+    const read = async operation => { try { return { ok: true, value: await operation() }; }
+        catch (error) { return { ok: false, error: archiveFailureError(error) }; } };
+    const events = await read(() => apiPage.evaluate(() => globalThis.__spaceActionObservation.events));
+    const requests = events.ok && Array.isArray(events.value) ? events.value.filter(event => event?.type === 'external' && event.data?.sender?.id === spotlightId).map(event => event.data.message) : null;
+    // Each already-owned document is independent: a detached source must not
+    // discard either extension's native/storage/request trace. No target lookup,
+    // queued store read, transport wrapper, replay or UI interaction on failure.
+    return {
+        events,
+        peerEvents: await read(() => spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events)),
+        input: await read(() => sourcePage.evaluate(() => globalThis.__archiveInputEvents || [])),
+        source: await read(() => sourcePage.evaluate(readArchiveDocumentStatus)),
+        spotlight: await read(() => sourceSurface.evaluate(readArchiveDocumentStatus)),
+        claim: await read(() => apiPage.evaluate(async entryId => (await chrome.storage.local.get('archiveReopenClaims')).archiveReopenClaims?.entries?.[entryId] || null, entryId)),
+        receipt: await read(() => apiPage.evaluate(readArchiveReopenJournal, { spotlightId, entryId, windowId, sourceTabId, requests }))
+    };
+}
 export async function withArchiveFailureEvidence(operation, diagnose, record) {
     try { return await operation(); }
     catch (error) {
@@ -654,9 +685,10 @@ export async function exerciseSpotlightArchiveReopen(adapters) {
         // consume only its exact durable record while preserving the other.
         for (const [entry, kind, method] of [[entries[1], 'browser-newtab', 'Enter'], [entries[0], 'overlay', 'click']]) {
             const origin = await sourcePage(kind, current), title = `Reopen ${entry.name}`;
-            const selected = await ready(origin.page, { entryId: entry.entryId, title });
-            await ui(origin.page, `Reopen exact archived twin with trusted ${method}`, async () => {
+            const selected = await ready(origin.page, { entryId: entry.entryId, title }), attempt = {};
+            await withArchiveFailureEvidence(() => ui(origin.page, `Reopen exact archived twin with trusted ${method}`, async () => {
                 const before = await settle(); await reset();
+                attempt.baseline = before;
                 await capture(origin.page, `${kind}-exact-entry-selected`);
                 const beforeTargets = new Set(browser.targets());
                 await invoke(selected, method);
@@ -673,7 +705,10 @@ export async function exerciseSpotlightArchiveReopen(adapters) {
                 const destination = await captureArchiveReopenedDestination({ browser, apiPage, observePage, poll, beforeTargets, before, receipt, windowId, url: entry.url,
                     capture, settle, read, trace, label: `${kind}-exact-reopened-destination` });
                 await checkpoint('exact-reopened-destination-captured', { kind, method, entryId: entry.entryId, destination });
-            });
+            }), () => collectArchiveReopenFailure({ apiPage, spotlightOptions, sourcePage: origin.page, sourceSurface: selected.surface,
+                spotlightId, entryId: entry.entryId, windowId, sourceTabId: origin.tab.id }),
+            failure => checkpoint('archive-reopen-attempt-failed', { kind, method, entryId: entry.entryId, sourceTabId: origin.tab.id,
+                windowId, baseline: attempt.baseline || null, ...failure }));
             // Repeating a captured real request exercises the actual receiver;
             // it cannot create or consume a URL twin, even after source activation changed.
             const request = requests.at(-1), before = await settle(); await reset();

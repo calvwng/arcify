@@ -10,7 +10,7 @@ import { registerFavoriteMessages } from '../../favorite-store.js';
 import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
 import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
     assertArchiveReopenRequest, waitForArchiveReopenCompletion, readArchiveDestinationDocument, captureArchiveReopenedDestination, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation,
-    readArchiveDocumentStatus, collectArchiveOpenFailure, withArchiveFailureEvidence,
+    readArchiveDocumentStatus, collectArchiveOpenFailure, readArchiveReopenJournal, collectArchiveReopenFailure, withArchiveFailureEvidence,
     readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
     ARCHIVE_FEATURES, ARCHIVE_OPEN_TYPE, ARCHIVE_ENTRY_TYPE } from '../../scripts/paired-chrome-spotlight-archive.mjs';
 const copy = value => structuredClone(value), ARCIFY = 'a'.repeat(32), SPOTLIGHT = 'b'.repeat(32), URL = 'http://127.0.0.1:9999/same';
@@ -505,6 +505,78 @@ test('hosted Archive failure boundary saves observations before outer cleanup wi
     assert.doesNotMatch(diagnostics, /runtime\.sendMessage|sidePanel\.open|tabs\.(?:update|create|remove)|\.focus\(|bringToFront|\.click\(|\.wheel\(|setTimeout|setInterval|waitFor|poll\(|nativePanel\.(?:resolve|close|capture)/);
 });
 
+function reopenFailureDiagnosticFixture(fault = null) {
+    const calls = [], values = {
+        events: [external(copy(reopen)), { type: 'tabs.onUpdated', data: { id: 30, change: { status: 'loading', url: URL } } }],
+        peerEvents: [{ type: 'internal', data: { message: { action: 'arcifyArchiveReopen', entryId: entry.entryId } } }],
+        input: [input({ type: ARCHIVE_ENTRY_TYPE, entryId: entry.entryId })], source: { url: URL, visibility: 'visible' },
+        spotlight: { statuses: [{ role: 'alert', text: 'Exact created tab could not be assigned.' }] },
+        claim: { phase: 'created', tabId: 30, expected: entry, requestId: reopen.requestId },
+        receipt: { journal: [{ fingerprint: JSON.stringify(reopen) }], responseEvidence: 'unavailable' }
+    };
+    const read = key => { calls.push(key); if (fault === key) throw new Error(`Read failed: ${key}`); return copy(values[key]); };
+    const args = { spotlightId: SPOTLIGHT, entryId: entry.entryId, windowId: 7, sourceTabId: 10,
+        apiPage: { evaluate: async (fn, value) => {
+            if (fn === readArchiveReopenJournal) { assert.deepEqual(value, { spotlightId: SPOTLIGHT, entryId: entry.entryId, windowId: 7, sourceTabId: 10, requests: fault === 'events' ? null : [copy(reopen)] }); return read('receipt'); }
+            if (value !== undefined) { assert.equal(value, entry.entryId); assert.match(fn.toString(), /chrome\.storage\.local\.get\('archiveReopenClaims'\)/); return read('claim'); }
+            return read('events');
+        } }, spotlightOptions: { evaluate: async () => read('peerEvents') },
+        sourcePage: { evaluate: async fn => read(fn === readArchiveDocumentStatus ? 'source' : 'input') },
+        sourceSurface: { evaluate: async fn => { assert.equal(fn, readArchiveDocumentStatus); return read('spotlight'); } } };
+    return { args, calls, values };
+}
+for (const fault of [null, 'events', 'peerEvents', 'input', 'source', 'spotlight', 'claim', 'receipt']) test(`reopen failure retains independent passive probes despite ${fault || 'no read failure'}`, async () => {
+    const f = reopenFailureDiagnosticFixture(fault), result = await collectArchiveReopenFailure(f.args);
+    assert.deepEqual(f.calls, Object.keys(f.values));
+    for (const [key, value] of Object.entries(f.values)) {
+        if (fault === key) { assert.equal(result[key].ok, false); assert.equal(result[key].error.message, `Read failed: ${key}`); }
+        else assert.deepEqual(result[key], { ok: true, value });
+    }
+});
+for (const hasResponse of [false, true]) test(`failure journal only retains exact entry/source/window/peer request${hasResponse ? ' with an actual stored response' : ' without guessing a missing response'}`, async () => {
+    const request = copy(reopen), keyFor = (value, peer = SPOTLIGHT) => `${peer}:${value.context.pairingGeneration}:${value.requestId}`;
+    const item = { key: keyFor(request), fingerprint: JSON.stringify(request), ...(hasResponse ? { response: { ok: true, archiveResult: { entryId: entry.entryId } } } : {}) };
+    const unrelated = [
+        { ...request, requestId: 'different-request-id' }, { ...request, entryId: twin.entryId }, { ...request, windowId: 8 },
+        { ...request, context: { ...request.context, sourceTabId: 99 } }, { ...request, command: 'archiveContext' }
+    ].map(value => ({ key: keyFor(value), fingerprint: JSON.stringify(value), response: { ok: true } }));
+    unrelated.push({ ...item, key: keyFor(request, 'c'.repeat(32)) }, { ...item, key: `${item.key}-wrong-request-id` }, { fingerprint: 'bad JSON' }, { fingerprint: 'null' });
+    const reads = [], chrome = { storage: { session: { get: async key => { reads.push(key); return { spotlightBridgeRequests: [...unrelated, item] }; } } } };
+    const result = copy(await vm.runInNewContext(`(${readArchiveReopenJournal})(${JSON.stringify({ spotlightId: SPOTLIGHT, entryId: entry.entryId, windowId: 7, sourceTabId: 10, requests: [request] })})`, { chrome }));
+    assert.deepEqual(reads, ['spotlightBridgeRequests']); assert.deepEqual(result.journal, [item]);
+    assert.equal(result.responseEvidence, hasResponse ? 'retained-journal-response' : 'unavailable');
+    assert.match(result.limitation, /without a response does not prove the action is still in flight/);
+});
+test('missing request trace cannot attribute another journal response to this attempt', async () => {
+    const chrome = { storage: { session: { get: async () => assert.fail('No scope-based journal lookup without the observed request') } } };
+    const result = copy(await vm.runInNewContext(`(${readArchiveReopenJournal})({requests: null})`, { chrome }));
+    assert.deepEqual(result.journal, []); assert.equal(result.responseEvidence, 'unavailable'); assert.match(result.limitation, /request trace is unavailable/);
+});
+for (const fault of [null, 'diagnose', 'record']) test(`real reopen poll failure captures exact owned evidence before cleanup despite ${fault || 'no diagnostic fault'}`, async () => {
+    const start = source.indexOf('            await withArchiveFailureEvidence(() => ui(origin.page, `Reopen exact archived twin');
+    const end = source.indexOf('            // Repeating a captured real request', start), code = source.slice(start, end);
+    const f = reopenFailureDiagnosticFixture(), calls = [], records = [], before = { original: 'baseline' };
+    const original = Object.freeze(new Error('Original exact consumption timeout')), origin = { page: f.args.sourcePage, tab: { id: 10 } }, selected = { surface: f.args.sourceSurface };
+    const params = { ...f.args, origin, selected, entry, kind: 'browser-newtab', method: 'Enter', attempt: {}, windowId: 7,
+        withArchiveFailureEvidence, ui: async (page, label, run) => { assert.equal(page, origin.page); return run(); },
+        settle: async () => before, reset: async () => {}, capture: async () => {}, browser: { targets: () => [] },
+        invoke: async () => { calls.push('trusted-input'); }, poll: async () => { calls.push('poll'); throw original; }, read: () => assert.fail('No extra queued store reads'),
+        collectArchiveReopenFailure: async args => { calls.push('diagnose'); assert.deepEqual(args, f.args); if (fault === 'diagnose') throw new Error('Diagnostic read failed'); return collectArchiveReopenFailure(args); },
+        checkpoint: async (phase, proof) => { calls.push('record'); records.push({ phase, ...proof }); if (fault === 'record') throw new Error('Evidence write failed'); } };
+    const run = new (Object.getPrototypeOf(async function () {}).constructor)(...Object.keys(params), code);
+    let caught; try { await run(...Object.values(params)); } catch (error) { caught = error; } finally { calls.push('cleanup'); }
+    assert.equal(caught, original); assert.deepEqual(calls, ['trusted-input', 'poll', 'diagnose', 'record', 'cleanup']);
+    assert.equal(records[0].phase, 'archive-reopen-attempt-failed'); assert.equal(records[0].baseline, before);
+    assert.equal(records[0].entryId, entry.entryId); assert.equal(records[0].sourceTabId, 10); assert.equal(records[0].windowId, 7);
+    assert.equal(records[0].error.message, original.message); assert.equal(records[0].error.stack, original.stack);
+    if (fault !== 'diagnose') assert.equal(records[0].observations.spotlight.value.statuses[0].text, f.values.spotlight.statuses[0].text);
+});
+test('reopen failure capture cannot dispatch, retry, resolve or mutate anything', () => {
+    const diagnostics = source.slice(source.indexOf('export async function readArchiveReopenJournal'), source.indexOf('export async function withArchiveFailureEvidence'));
+    assert.doesNotMatch(diagnostics, /runtime\.sendMessage|sidePanel\.open|tabs\.(?:update|create|remove)|storage\.\w+\.(?:set|remove)|\.focus\(|bringToFront|\.click\(|setTimeout|setInterval|waitFor|poll\(|trace\(|local\(/);
+    assert.match(source, /'exact archive consumption and known created native ID active'\);/);
+});
+
 function destinationCaptureFixture({ before = () => {}, during = () => {} } = {}) {
     const data = reopenedFixture(), receipt = assertArchiveReopened(data.before, data.after, data.events, data.expected);
     const state = { authoritative: copy(data.after), tabs: data.after.tabs.map(tab => ({ ...copy(tab), incognito: false, status: 'complete' })),
@@ -600,11 +672,11 @@ test('destination document reader only records real visibility, focus and stable
 
 for (const captureFailure of [false, true]) test(`real reopen wiring persists action proof before required destination capture${captureFailure ? ' failure' : ''}`, async () => {
     const start = source.indexOf('                const before = await settle(); await reset();', source.indexOf('export async function exerciseSpotlightArchiveReopen'));
-    const end = source.indexOf('\n            });', start), code = source.slice(start, end);
+    const end = source.indexOf('\n            }), () => collectArchiveReopenFailure', start), code = source.slice(start, end);
     const data = reopenedFixture(), origin = { page: {}, tab: { id: 10 } }, oldTarget = {}, freshTarget = {}, calls = [], checkpoints = [], requests = [], evidence = { matrix: [] }, owned = [];
     let invoked = false;
     const params = { browser: { targets: () => invoked ? [oldTarget, freshTarget] : [oldTarget] }, observePage: {}, apiPage: {},
-        origin, selected: { surface: {} }, kind: 'overlay', method: 'click', title: `Reopen ${entry.name}`, entry,
+        origin, attempt: {}, selected: { surface: {} }, kind: 'overlay', method: 'click', title: `Reopen ${entry.name}`, entry,
         source: { id: 'selected' }, target: { id: 'original', name: 'Original', bookmarkFolderId: 'original-root' }, windowId: 7, spotlightId: SPOTLIGHT,
         settle: async () => data.before, reset: async () => {}, capture: async (page, label) => { assert.equal(page, origin.page); assert.equal(label, 'overlay-exact-entry-selected'); calls.push('selected'); },
         invoke: async () => { invoked = true; calls.push('trusted-input'); }, read: async () => data.after,
