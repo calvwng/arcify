@@ -215,6 +215,9 @@ async function readSpaceChipAccessibility(page, spaces) {
     }
     return evidence;
 }
+export function assertDefaultSpaceAppearance(appearance) {
+    assert.deepEqual(appearance, { favoritesLayout: 'standard', favoriteTileSize: 44, spaceHeaderSize: 16, hideSpaceNames: false, themeMode: 'system' });
+}
 export function assertSpaceAppearanceOnlyChanged(before, after, hidden) {
     const expected = structuredClone(before); assert(expected.appearance && typeof hidden === 'boolean');
     expected.appearance.hideSpaceNames = hidden;
@@ -427,7 +430,7 @@ export async function exerciseSpaceIconOnlySwitcher({ apiPage, pages, windowIds,
     let primaryError;
     try {
         const initial = await read();
-        assert.deepEqual(initial.appearance, { favoritesLayout: 'standard', favoriteTileSize: 44, spaceHeaderSize: 16, hideSpaceNames: false });
+        assertDefaultSpaceAppearance(initial.appearance);
         evidence.default = await inspect(false); evidence.enabled = await set(true); evidence.hidden = await inspect(true);
         evidence.hiddenAccessibility = await readSpaceChipAccessibility(pages[0], initial.spaces);
         assert(evidence.hidden[0].chips.some(chip => chip.glyph), 'Include a real saved icon.');

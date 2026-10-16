@@ -3,10 +3,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { readSourceText } from '../source-text.js';
+import { DEFAULT_SIDEBAR_APPEARANCE } from '../../sidebar-appearance.js';
 import { EMOJI_INPUT_SELECTOR, SPACE_EMOJI_EXAMPLES, assertSpaceIconInputEnvironment,
     installSpaceEmojiInputObservation, readSpaceEmojiEditor, assertSpaceEmojiEditor, assertSpaceEmojiInputEvents,
     replaceSpaceEmojiWithInput, assertSpaceNameAppearance, assertSpaceChipAccessibility,
-    assertSpaceAppearanceOnlyChanged, assertIconOnlySpaceReordered, assertIconOnlySpaceActivated, finishIconOnlySpaceDrag,
+    assertDefaultSpaceAppearance, assertSpaceAppearanceOnlyChanged, assertIconOnlySpaceReordered, assertIconOnlySpaceActivated, finishIconOnlySpaceDrag,
     readSpaceChipInputGeometry, planSpaceChipInputReveal, assertSpaceChipInputRevealed, clickUnobscuredSpaceChip } from '../../scripts/paired-chrome-space-icon-input.mjs';
 
 const event = (type, fields = {}) => ({ type, trusted: true, key: null, ctrlKey: false, inputType: null, data: null, composing: false, value: '', ...fields });
@@ -105,14 +106,27 @@ test('accessibility proof checks the actual Chrome button name, not hidden text 
     const space = spaces()[1]; assertSpaceChipAccessibility({ role: 'button', name: 'Switch to space Work' }, space);
     for (const snapshot of [null, { role: 'generic', name: 'Switch to space Work' }, { role: 'button', name: '⭐' }, { role: 'button', name: 'Switch to space Work', disabled: true }]) assert.throws(() => assertSpaceChipAccessibility(snapshot, space));
 });
-const durable = () => ({ spaces: spaces(), appearance: { favoritesLayout: 'standard', favoriteTileSize: 44, spaceHeaderSize: 16, hideSpaceNames: false },
+test('icon-only initial evidence requires the complete actual appearance defaults including System theme', () => {
+    assertDefaultSpaceAppearance({ ...DEFAULT_SIDEBAR_APPEARANCE });
+    const source = readSourceText(new URL('../../scripts/paired-chrome-space-icon-input.mjs', import.meta.url));
+    assert.match(source, /assertDefaultSpaceAppearance\(initial\.appearance\);/);
+    for (const key of Object.keys(DEFAULT_SIDEBAR_APPEARANCE)) {
+        const absent = { ...DEFAULT_SIDEBAR_APPEARANCE }; delete absent[key];
+        assert.throws(() => assertDefaultSpaceAppearance(absent));
+        assert.throws(() => assertDefaultSpaceAppearance({ ...DEFAULT_SIDEBAR_APPEARANCE, [key]: null }));
+    }
+    for (const patch of [{ themeMode: 'dark' }, { themeMode: 'light' }, { themeMode: 'auto' }, { hiddenExtra: true }]) {
+        assert.throws(() => assertDefaultSpaceAppearance({ ...DEFAULT_SIDEBAR_APPEARANCE, ...patch }));
+    }
+});
+const durable = () => ({ spaces: spaces(), appearance: { favoritesLayout: 'standard', favoriteTileSize: 44, spaceHeaderSize: 16, hideSpaceNames: false, themeMode: 'system' },
     registry: { folder: { spaceUuid: 'work', name: 'Work', icon: 'star' } }, activeSpaces: { 1: 'home', 2: 'work' },
     bookmarks: [{ id: 'folder', title: 'Work' }], favorites: [{ id: 'f', title: 'Keep' }], bindings: { 22: { bookmarkId: 'pin' } },
     tabs: [{ id: 21, windowId: 1, index: 0, url: 'https://one.test', active: true, groupId: -1 }, { id: 22, windowId: 1, index: 1, url: 'https://two.test', active: false, groupId: -1 }, { id: 23, windowId: 2, index: 0, url: 'https://three.test', active: true, groupId: -1 }] });
 const mutateCases = { rename: s => s.spaces[0].name = 'Changed', icon: s => s.spaces.find(space => space.id === 'home').icon = 'star', membership: s => s.spaces.find(space => space.id === 'work').temporaryTabs = [],
     registry: s => s.registry.folder.spaceUuid = 'home', bookmark: s => s.bookmarks.pop(), favorite: s => s.favorites.pop(), binding: s => s.bindings = {},
     navigate: s => s.tabs[0].url = 'https://changed.test', move: s => s.tabs[0].windowId = 2, close: s => s.tabs.pop(), nativeOrder: s => s.tabs[0].index = 5,
-    group: s => s.tabs[0].groupId = 8, unrelatedOption: s => s.appearance.favoriteTileSize = 64, otherWindow: s => s.activeSpaces[2] = 'home' };
+    group: s => s.tabs[0].groupId = 8, unrelatedOption: s => s.appearance.favoriteTileSize = 64, themeMode: s => s.appearance.themeMode = 'dark', otherWindow: s => s.activeSpaces[2] = 'home' };
 for (const kind of ['setting', 'reorder', 'selection']) {
     const after = before => {
         const state = structuredClone(before);
