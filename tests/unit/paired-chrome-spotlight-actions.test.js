@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { assertSpotlightActionEnvironment, serveSpotlightActionFixture, assertSpotlightActionContext, assertSpotlightActionUnchanged,
     assertSpotlightActionNoWrites, assertSpotlightActionInput, assertSpotlightActionRequest, assertSpotlightHelperProof, assertSpotlightActionCommitted,
-    assertSpotlightSettingsOpened, assertSpotlightActionPrompt, installSpotlightActionInputObservation, waitForSpotlightActionCompletion, SPACE_ACTION_TITLES, SPACE_ACTION_FEATURES } from '../../scripts/paired-chrome-spotlight-actions.mjs';
+    assertSpotlightSettingsOpened, assertSpotlightActionPrompt, installSpotlightActionInputObservation, waitForSpotlightActionCompletion, assertSpotlightHelperActionRows, SPACE_ACTION_TITLES, SPACE_ACTION_FEATURES } from '../../scripts/paired-chrome-spotlight-actions.mjs';
 const PEER = 'b'.repeat(32), OWN = 'a'.repeat(32), URL = 'http://127.0.0.1/same-address';
 const clone = structuredClone;
 const leaf = (id, parentId, index, title = id) => ({ id, parentId, index, title, url: URL, dateAdded: 10 });
@@ -399,4 +399,25 @@ test('Settings failure reports every forbidden native event payload without acce
         assert.throws(() => assertSpotlightSettingsOpened(evidence.before, evidence.after, { context: evidence.context, arcifyId: OWN, events: evidence.trace.events }),
             error => error.message.includes(JSON.stringify([forbidden])));
     }
+});
+
+
+test('helper action oracle retains the exact legacy set and allows only the explicit extended Switch row', () => {
+    const row = title => ({ type: 'arcify-space-action', title });
+    const legacy = [row(SPACE_ACTION_TITLES.createSpaceFolder), row(SPACE_ACTION_TITLES.openSettings)];
+    const extended = [...legacy, row('Switch Space')];
+    assert.doesNotThrow(() => assertSpotlightHelperActionRows(legacy));
+    assert.doesNotThrow(() => assertSpotlightHelperActionRows(extended, { helperNavigation: true }));
+    assert.throws(() => assertSpotlightHelperActionRows(extended));
+    assert.throws(() => assertSpotlightHelperActionRows(legacy, { helperNavigation: true }));
+    for (const helperNavigation of [false, true]) {
+        const expected = helperNavigation ? extended : legacy;
+        for (const extra of ['Move current tab to another Space', SPACE_ACTION_TITLES.pinCurrentTab, SPACE_ACTION_TITLES.removeCurrentPin, 'Unexpected']) {
+            assert.throws(() => assertSpotlightHelperActionRows([...expected, row(extra)], { helperNavigation }));
+        }
+        assert.throws(() => assertSpotlightHelperActionRows([...expected, expected[0]], { helperNavigation }));
+        assert.throws(() => assertSpotlightHelperActionRows(expected.slice(1), { helperNavigation }));
+        assert.throws(() => assertSpotlightHelperActionRows([...expected, { type: 'arcify-tab-action', title: 'Copy current link' }], { helperNavigation }));
+    }
+    for (const helperNavigation of [null, 'true', 1, []]) assert.throws(() => assertSpotlightHelperActionRows(extended, { helperNavigation }));
 });

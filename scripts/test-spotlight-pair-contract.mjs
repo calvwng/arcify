@@ -5,12 +5,14 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as arcify from '../spotlight-bridge-protocol.js';
+import { assertExtendedActionsContract } from './lib/spotlight-pair-extended-contract.mjs';
 import { assertCommonV1Contract, assertInitialSpaceActionsContract } from './lib/spotlight-pair-contract.mjs';
 
 if (process.argv.length !== 3) throw new Error('Usage: node scripts/test-spotlight-pair-contract.mjs <spotlight-checkout>');
 const peerModule = path => import(pathToFileURL(resolve(process.argv[2], path)).href);
 const spotlight = await peerModule('shared/arcify-bridge-protocol.js');
 const actions = await peerModule('shared/arcify-space-actions-protocol.js');
+const tabActions = await peerModule('shared/arcify-tab-actions-protocol.js');
 
 test('actual pair passes despite intentionally different optional-action module layouts', async () => {
     const sentinel = { contractTest: true }, previous = globalThis.chrome;
@@ -58,4 +60,50 @@ for (const [label, replacement] of actionMutations) test(`initial action contrac
 test('initial action checks detect provider-side context and command drift', () => {
     assert.throws(() => assertInitialSpaceActionsContract({ ...arcify, isSpaceActionContext: () => true }, actions));
     assert.throws(() => assertInitialSpaceActionsContract({ ...arcify, SPACE_ACTION_COMMANDS: ['openSettings'] }, actions));
+});
+
+
+test('additive extended contract passes the actual integrated pair', () => {
+    assertExtendedActionsContract(arcify, actions, tabActions);
+});
+for (const [label, replacement] of [
+    ['navigation marker', { SPACE_NAVIGATION_FEATURE: 'other' }],
+    ['navigation commands', { SPACE_NAVIGATION_COMMANDS: ['switchSpace'] }],
+    ['destination context ignored', { validateNavigationContext: value => value }],
+    ['navigation payload broadened', { validateActionPayload: (command, payload) => payload }],
+    ['navigation result identity ignored', { validateActionResult: (command, result) => result }]
+]) test(`extended contract detects ${label}`, () => {
+    assert.throws(() => assertExtendedActionsContract(arcify, { ...actions, ...replacement }, tabActions));
+});
+for (const [label, replacement] of [
+    ['tab marker', { TAB_ACTIONS_FEATURE: 'other' }], ['tab commands', { TAB_ACTION_COMMANDS: ['copyCurrentLink'] }],
+    ['tab context broadened', { validateTabActionContext: context => context }],
+    ['tab payload broadened', { validateTabActionPayload: (command, payload) => payload }],
+    ['tab result identity ignored', { validateTabActionResult: (command, result) => result }],
+    ['URL normalization changed', { normalizeTabActionUrl: value => value }]
+]) test(`extended contract detects ${label}`, () => {
+    assert.throws(() => assertExtendedActionsContract(arcify, actions, { ...tabActions, ...replacement }));
+});
+for (const [label, replacement] of [
+    ['provider tab context broadened', { isTabActionContext: () => true }],
+    ['provider payload broadened', { validateRequest: message => message }],
+    ['provider URL normalization changed', { normalizeTabActionUrl: value => value }],
+    ['provider navigation commands changed', { SPACE_NAVIGATION_COMMANDS: ['switchSpace'] }],
+    ['provider tab commands changed', { TAB_ACTION_COMMANDS: ['copyCurrentLink'] }]
+]) test(`extended contract detects ${label}`, () => {
+    assert.throws(() => assertExtendedActionsContract({ ...arcify, ...replacement }, actions, tabActions));
+});
+
+for (const command of ['copyCurrentLink', 'setCurrentTabMuted']) test(`extended contract requires saved-pin ${command} on both sides`, () => {
+    const rejectSaved = context => {
+        if (context?.tab?.section === 'saved') throw Object.assign(new Error('saved command drift'), { code: 'INVALID_REQUEST' });
+    };
+    assert.throws(() => assertExtendedActionsContract(arcify, actions, { ...tabActions, validateTabActionPayload(actual, payload) {
+        if (actual === command) rejectSaved(payload.context);
+        return tabActions.validateTabActionPayload(actual, payload);
+    } }));
+    assert.throws(() => assertExtendedActionsContract({ ...arcify, validateRequest(message, commands) {
+        if (message.command === command) rejectSaved(message.context);
+        return arcify.validateRequest(message, commands);
+    } }, actions, tabActions));
 });

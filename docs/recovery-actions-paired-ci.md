@@ -32,11 +32,11 @@ This supplemental result isolates recovery/actions from unrelated cumulative or
 theme fixture failures. It provides no appearance/theme or full-suite acceptance.
 It does not retry a failed case or reuse another job's mutated profile. The full
 **49**, Favorite lifecycle **5**, native Split View **4**, and appearance/actions
-**8** jobs remain unchanged mandatory outcomes. All five jobs must pass on the
+**8** jobs remain unchanged mandatory outcomes. All six jobs must pass on the
 exact integrated commit; success here cannot override another job's failure.
 
 All jobs keep exact read-only checkouts with Spotlight pinned to
-`9c4462fb0f3cbfe2585757c43f34398e9c906fde`, production builds and the isolated driver.
+`6379d3a22608507a4865bb44d17344ef8ea1eff6`, production builds and the isolated driver.
 The new job has no dependency on another job, browser update, new secret,
 permission change, security exemption or retry. Sandbox, native input, exact
 identity, window-B, screenshot, crash and page-error gates are unchanged.

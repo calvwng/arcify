@@ -13,7 +13,8 @@ const fullOrder = [...Array.from({ length: 32 }, (_, index) => index), 33, 34, 3
 const lifecycleOrder = [0, 1, 2, 36, 32];
 const appearanceActionsOrder = [0, 1, 2, 33, 46, 47, 48, 49];
 const recoveryActionsOrder = [0, 1, 2, 48, 49];
-const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder]];
+const extendedActionsOrder = [0, 1, 2, 50, 51];
+const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder]];
 const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 const indices = report => report.expectedCases.map(item => item.caseIndex);
 const stepIndices = source => [...source.matchAll(/await step\(stepNames\[(\d+)\]/g)].map(match => Number(match[1]));
@@ -123,10 +124,12 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     const preparation = smoke.indexOf('    await prepareRecoverySidebarObservation();');
     const recovery = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions' || report.runMode === 'recovery-actions') {");
     const recoveryEnd = smoke.indexOf('    } // Shared recovery/actions cases 48–49;');
+    const extended = smoke.indexOf("    if (report.runMode === 'extended-actions') {");
+    const extendedEnd = smoke.indexOf('    } // Supplemental extended-action cases 50–51;');
     const lifecycle = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {");
     assert(firstFull > 0 && firstFull < firstEnd && firstEnd < appearance && appearance < appearanceEnd &&
-        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < lifecycle);
-    assert.deepEqual(stepIndices(smoke), fullOrder, 'Every full case definition remains single and in its original order.');
+        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < extended && extended < extendedEnd && extendedEnd < lifecycle);
+    assert.deepEqual(stepIndices(smoke), [...fullOrder.slice(0, -2), 50, 51, ...fullOrder.slice(-2)], 'Every case definition remains single; the original full case order is unchanged.');
     assert.deepEqual(stepIndices(smoke.slice(0, firstFull)), [0, 1, 2]);
     assert.deepEqual(stepIndices(smoke.slice(firstFull, firstEnd)), Array.from({ length: 29 }, (_, index) => index + 3));
     assert.deepEqual(stepIndices(smoke.slice(appearance, appearanceEnd)), [33]);
@@ -134,6 +137,7 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     assert.deepEqual(stepIndices(smoke.slice(actions, actionsEnd)), [46, 47]);
     assert.deepEqual(stepIndices(smoke.slice(recovery, preparation)), []);
     assert.deepEqual(stepIndices(smoke.slice(recovery, recoveryEnd)), [48, 49]);
+    assert.deepEqual(stepIndices(smoke.slice(extended, extendedEnd)), [50, 51]);
     assert.deepEqual(stepIndices(smoke.slice(lifecycle)), [36, 32]);
     assert.match(smoke, /createPairedChromeRunReport\(stepNames, process\.env\.ARCIFY_PAIRED_RUN_MODE\)/);
     assert.match(smoke, /const check = beginPairedChromeCase\(report, name\)/);
@@ -196,10 +200,10 @@ for (const [mode, order] of allPlans) for (const caseIndex of order) {
 
 test('workflow preserves original jobs and adds independent mandatory fresh-runner acceptance', () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  [a-z-]+:\n|$(?![\s\S]))/gm)];
-    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split', 'recovery-actions']);
-    const full = jobs[0][2], lifecycle = jobs[1][2], appearanceActions = jobs[2][2], nativeSplit = jobs[3][2], recoveryActions = jobs[4][2];
+    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split', 'recovery-actions', 'extended-actions']);
+    const full = jobs[0][2], lifecycle = jobs[1][2], appearanceActions = jobs[2][2], nativeSplit = jobs[3][2], recoveryActions = jobs[4][2], extendedActions = jobs[5][2];
     const peerPin = smoke.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
-    for (const job of [full, lifecycle, appearanceActions, nativeSplit, recoveryActions]) {
+    for (const job of [full, lifecycle, appearanceActions, nativeSplit, recoveryActions, extendedActions]) {
         assert.match(job, /runs-on: ubuntu-24\.04/);
         assert.match(job, /CI: 'true'/);
         assert.match(job, /ARCIFY_TEST_HEAD: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/);
@@ -232,8 +236,14 @@ test('workflow preserves original jobs and adds independent mandatory fresh-runn
     assert.match(recoveryActions, /path: arcify\/test-results\/paired-chrome-recovery-actions\//);
     assert.match(recoveryActions, /timeout-minutes: 20\n/);
     assert.doesNotMatch(recoveryActions, /vendor-update|native-split-update|retry|if: (?!always\(\))/);
+    assert.match(extendedActions, /ARCIFY_PAIRED_RUN_MODE: extended-actions/);
+    assert.match(extendedActions, /tee test-results\/paired-chrome-extended-actions\/runner\.log/);
+    assert.match(extendedActions, /name: paired-chrome-extended-actions-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+    assert.match(extendedActions, /path: arcify\/test-results\/paired-chrome-extended-actions\//);
+    assert.match(extendedActions, /timeout-minutes: 20\n/);
+    assert.doesNotMatch(extendedActions, /vendor-update|native-split-update|retry|if: (?!always\(\))/);
     assert.match(workflow, /^permissions:\n  contents: read$/m);
-    for (const path of ['scripts/paired-chrome-run-plan.mjs', 'tests/unit/paired-chrome-run-plan.test.js', 'docs/appearance-actions-paired-ci.md', 'docs/recovery-actions-paired-ci.md']) {
+    for (const path of ['scripts/paired-chrome-run-plan.mjs', 'tests/unit/paired-chrome-run-plan.test.js', 'docs/appearance-actions-paired-ci.md', 'docs/recovery-actions-paired-ci.md', 'docs/extended-actions-paired-ci.md']) {
         assert(workflow.includes(`      - '${path}'`), `Changes to ${path} must trigger all jobs.`);
     }
 });
@@ -303,7 +313,7 @@ test('shared appearance prerequisite owns its fixtures and persists defaults thr
 // Preservation receipts from reviewed Arcify 920c901cead1c497e6f6921952883744d948538c.
 // These hash exact callback text/options and job text, not execution results.
 // A later deliberate change must be reviewed before updating its receipt.
-test('every existing case body, name and option remains byte-identical across all run modes', async () => {
+test('existing callbacks retain their reviewed bytes except exact additive routes and peer helper compatibility', async () => {
     const definitions = new Map();
     for (const [mode] of allPlans) {
         const observed = []; await runOrchestration(mode, null, observed);
@@ -312,23 +322,31 @@ test('every existing case body, name and option remains byte-identical across al
             else definitions.set(definition.caseIndex, definition);
         }
     }
-    assert.deepEqual([...definitions.keys()].sort((a, b) => a - b), Array.from({ length: 50 }, (_, index) => index));
-    // Reviewed case 36 setup insertion normalizes exact fixture controls before
-    // the unchanged Favorite lifecycle baseline; all other case bodies remain.
-    assert.equal(digest([...definitions].sort(([a], [b]) => a - b).map(([, item]) => item)), 'b7f1addd2dca0e23e437a6ff6035dbfeec8f06e9a6aa843f5b726d31016e6107');
-    assert.equal(digest(names), '82b76b57d9a4a3fcefa59ea4db2f52af9664a1d5693b2efff89405c32827c36c');
+    assert.deepEqual([...definitions.keys()].sort((a, b) => a - b), Array.from({ length: 52 }, (_, index) => index));
+    // Normalize only these reviewed additive harness lines. The reviewed case 36 control-window setup
+    // is retained in its new receipt; other original bodies/options/names stay unchanged. New wiring has its
+    // own executable mocked-adapter tests in paired-chrome-extended-wiring.
+    const preserved = [...definitions].filter(([index]) => index < 50).sort(([a], [b]) => a - b).map(([, item]) => ({ ...item,
+        callback: item.callback.replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
+            .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
+            .replace('        helperNavigation:true,\n', '') }));
+    assert.equal(digest(preserved), 'b7f1addd2dca0e23e437a6ff6035dbfeec8f06e9a6aa843f5b726d31016e6107');
+    assert.equal(digest(names.slice(0, 50)), '82b76b57d9a4a3fcefa59ea4db2f52af9664a1d5693b2efff89405c32827c36c');
 });
 
-test('all four original workflow jobs retain their exact reviewed bytes and original relative order', () => {
+test('all five original workflow jobs retain reviewed bytes and order except the exact peer-pin upgrade', () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  (?:[a-z-]+:|#)|$(?![\s\S]))/gm)];
     const receipts = [
         ['paired-chrome', '804ad3202df17883340f7790dadf5d86e73d8120cbe73f6a22c05856b4c40e52'],
         ['favorite-lifecycle', '7ef8bd8269d3951bcbbb3c6720d6ac7d25b19fd82b54f7c4936734ccc700f131'],
         ['appearance-actions', '0622e759d781ee59f367c5aeee5738601a629bb0471bf9966d7d300bf827d229'],
-        ['native-split', 'e84564f44460142644c4bfa54d0e3818b004b82ec7d9f54e6dcb23356c7774c4']
+        ['native-split', 'e84564f44460142644c4bfa54d0e3818b004b82ec7d9f54e6dcb23356c7774c4'],
+        ['recovery-actions', 'ef0ee6ab8d6275b1509f56446bc011c1e10b99c968b459ec8997f2f0ab328c5f']
     ];
-    assert.deepEqual(jobs.slice(0, 4).map(match => [match[1], digest(match[0].trimEnd())]), receipts);
-    assert.equal(jobs[4][1], 'recovery-actions');
+    // Only this exact reviewed companion upgrade is excluded from legacy bytes.
+    const legacyPinBytes = source => source.replaceAll('6379d3a22608507a4865bb44d17344ef8ea1eff6', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
+    assert.deepEqual(jobs.slice(0, 5).map(match => [match[1], digest(legacyPinBytes(match[0].trimEnd()))]), receipts);
+    assert.equal(jobs[5][1], 'extended-actions');
     // No shared conditions or workflow event/security changes can hide a job.
     assert.equal(workflow.match(/^permissions:\n  contents: read$/gm)?.length, 1);
     assert.doesNotMatch(workflow, /pull_request_target:|\bneeds:|continue-on-error:|fail-fast:|strategy:|secrets\.|permissions:\s*write|concurrency:/);
@@ -433,4 +451,16 @@ test('shared step gates, recovery/sidebar evidence and final failure handling pr
     }
     assert.match(smoke, /process.env.GITHUB_ACTIONS !== 'true' \|\| process.env.CI !== 'true'/);
     assert.match(smoke, /if \(process.getuid\?\.\(\) === 0\) throw new Error/);
+});
+
+
+test('extended-actions requires exactly setup and both new cases without changing existing scope', () => {
+    const report = createPairedChromeRunReport(names, 'extended-actions');
+    assert.equal(report.expectedCaseCount, 5);
+    assert.deepEqual(indices(report), extendedActionsOrder);
+    assert.match(report.scope, /Supplemental fresh-profile Spotlight Space navigation and tab-command/);
+    assert.match(report.scope, /not a full-suite, recovery or appearance result/);
+    assert.deepEqual(JSON.parse(JSON.stringify(report)), report);
+    assert.match(report.expectedCases[3].name, /genuine destination pickers/);
+    assert.match(report.expectedCases[4].name, /tab commands preserve exact live and saved identities/);
 });

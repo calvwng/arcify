@@ -25,10 +25,16 @@ requires the same action case after setup, appearance, theme, options and recove
 0–2/48/49 on a fresh profile without preceding theme cases; all five outcomes
 remain mandatory.
 
-The runner and all five workflow jobs pin reviewed, published Spotlight commit
-`9c4462fb0f3cbfe2585757c43f34398e9c906fde`. Recovery and action evidence remain
+The runner and all six workflow jobs pin reviewed integrated Spotlight commit
+`6379d3a22608507a4865bb44d17344ef8ea1eff6`. Recovery and action evidence remain
 separate in the report. The action case receives the current options realms
 after the witnessed recovery reloads, not stale pre-reload Page objects.
+
+The [extended-actions job](extended-actions-paired-ci.md) independently runs
+setup 0–2 and navigation/tab cases 50–51. The initial action oracle retains its
+legacy folder/settings-only helper default; this integrated runner explicitly
+requires those rows plus Switch Space, with Move/pin/remove/tab commands still
+excluded. No other initial action check or case order changes.
 
 The entry point takes these existing harness adapters:
 

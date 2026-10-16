@@ -272,8 +272,8 @@ export class SpaceStore {
         this.restoredMetadata = (this.restoredMetadata || []).filter(record => record.tabId !== tabId);
         this.restoreQueue = (this.restoreQueue || []).filter(record => record.tabId !== tabId);
     }
-    async readTodayPlacement() {
-        this.todayOrderInverted = await getTodayOrderInverted();
+    async readTodayPlacement({ getOrder = getTodayOrderInverted } = {}) {
+        this.todayOrderInverted = await getOrder();
         const [setting, bindings] = await Promise.all([
             chrome.storage.sync.get({ todayNewTabsAtTop: true }), chrome.storage.local.get('pinnedTabStatesById')
         ]);

@@ -19,6 +19,15 @@ const exact = (nodes, id) => { const found = nodes.filter(node => node.id === id
 const snapshots = value => Object.fromEntries(Object.entries(value).map(([id, { capturedAt, ...state }]) => [id, state]));
 const canonical = state => ({ ...state, snapshots: snapshots(state.snapshots) });
 
+// The initial peer exposes exactly folder/settings; the reviewed extended peer
+// adds only Switch Space. Neither helper surface can acquire a source-tab action.
+export function assertSpotlightHelperActionRows(rows, { helperNavigation = false } = {}) {
+    assert.equal(typeof helperNavigation, 'boolean');
+    assert.deepEqual(rows.filter(row => row.type === 'arcify-space-action').map(row => row.title).sort(),
+        [SPACE_ACTION_TITLES.createSpaceFolder, SPACE_ACTION_TITLES.openSettings, ...(helperNavigation ? ['Switch Space'] : [])].sort());
+    assert(!rows.some(row => row.type === 'arcify-tab-action'), 'A helper cannot borrow a previous native tab for tab commands.');
+}
+
 export function assertSpotlightActionEnvironment(env = process.env, uid = process.getuid?.()) {
     assert.equal(env.GITHUB_ACTIONS, 'true', 'Space-action acceptance runs only in the dedicated hosted job.');
     assert.equal(env.CI, 'true'); assert.notEqual(uid, 0, 'Never launch a browser or disable its sandbox for root.');
@@ -283,8 +292,9 @@ export function assertSpotlightSettingsOpened(before, after, { context, arcifyId
  * newTabPage/openSavedPage attest Chrome's exact created ID before attaching.
  * No adapter may fabricate action responses or mutate a renderer's controller.
  */
-export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newTabPage, openSavedPage, pageForUrl, ui, screenshot, snapshot, bridge, external, poll, fixture, arcifyId, spotlightId, search, record = async () => {} }) {
+export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newTabPage, openSavedPage, pageForUrl, ui, screenshot, snapshot, bridge, external, poll, fixture, arcifyId, spotlightId, search, helperNavigation = false, record = async () => {} }) {
     assertSpotlightActionEnvironment();
+    assert.equal(typeof helperNavigation, 'boolean');
     for (const adapter of [newTabPage, openSavedPage, pageForUrl, ui, screenshot, snapshot, bridge, external, poll, search]) assert.equal(typeof adapter, 'function', 'All hosted action adapters are mandatory.');
     const nonce = randomBytes(16).toString('hex'), url = `${fixture.base}/spotlight-actions/${nonce}/source`, windowId = fixture.windowA;
     const initial = await snapshot(windowId), initialB = await snapshot(fixture.windowB), source = exact(initial.spaces, fixture.spaces.work);
@@ -447,7 +457,7 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
         await commit(sourcePage, 'createSpaceFolder', removedContext, { title: `Overlay folder ${nonce}`, keyboard: true });
         await commit(sourcePage, 'openSettings', removedContext, { keyboard: true });
         await activate(sourceTab.id); await closeOverlay();
-        // Both the exact extension URL and the browser alias must have folder/settings only.
+        // Both owned and browser-alias helpers retain the exact reviewed peer action set.
         for (const requestedUrl of [`chrome-extension://${spotlightId}/newtab.html`, 'chrome://newtab/']) {
             await reset(); helper = await newTabPage(requestedUrl, windowId); owned.push(helper.tab.id);
             await helper.page.waitForSelector('[data-testid="spotlight-input"]', { visible: true });
@@ -455,7 +465,7 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
             const helperContext = await context(helper.tab.id, null);
             await search(helper.page, '');
             const rows = await poll(() => helper.page.evaluate(readSpotlightRows), rows => rows.some(row => row.title === SPACE_ACTION_TITLES.createSpaceFolder), 'helper exposes selected-Space actions');
-            assert.deepEqual(rows.filter(row => row.type === 'arcify-space-action').map(row => row.title).sort(), [SPACE_ACTION_TITLES.createSpaceFolder, SPACE_ACTION_TITLES.openSettings].sort());
+            assertSpotlightHelperActionRows(rows, { helperNavigation });
             for (const query of ['pin curent tab', 'remvoe pin']) {
                 await search(helper.page, query); const filtered = await helper.page.evaluate(readSpotlightRows);
                 assert(!filtered.some(row => row.type === 'arcify-space-action' && [SPACE_ACTION_TITLES.pinCurrentTab, SPACE_ACTION_TITLES.removeCurrentPin].includes(row.title)));

@@ -9,6 +9,22 @@ on:
       - 'scripts/paired-chrome-smoke.mjs'
       - 'scripts/paired-chrome-overlay-recovery.mjs'
       - 'scripts/paired-chrome-spotlight-actions.mjs'
+      - 'scripts/paired-chrome-spotlight-navigation.mjs'
+      - 'scripts/paired-chrome-spotlight-tabs.mjs'
+      - 'scripts/check-spotlight-pair.mjs'
+      - 'scripts/lib/spotlight-pair-extended-*.mjs'
+      - 'scripts/test-spotlight-pair-contract.mjs'
+      - 'tests/unit/paired-chrome-spotlight-navigation.test.js'
+      - 'tests/unit/paired-chrome-spotlight-tabs.test.js'
+      - 'tests/unit/paired-chrome-extended-wiring.test.js'
+      - 'docs/spotlight-navigation-paired-ci.md'
+      - 'docs/spotlight-tab-commands-hosted.md'
+      - 'docs/extended-actions-paired-ci.md'
+      - 'spotlight-space-navigation.js'
+      - 'spotlight-tab-actions.js'
+      - 'spotlight-action-guards.js'
+      - 'tests/unit/spotlight-space-navigation*.test.js'
+      - 'tests/unit/spotlight-tab-actions*.test.js'
       - 'tests/unit/paired-chrome-overlay-recovery.test.js'
       - 'tests/unit/paired-chrome-spotlight-actions.test.js'
       - 'tests/unit/paired-chrome-spotlight-wiring.test.js'
@@ -197,7 +213,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
+          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -266,7 +282,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
+          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -335,7 +351,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
+          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -403,7 +419,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
+          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -481,7 +497,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
+          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -526,5 +542,73 @@ jobs:
         with:
           name: paired-chrome-recovery-actions-${{ github.run_id }}-${{ github.run_attempt }}
           path: arcify/test-results/paired-chrome-recovery-actions/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Supplemental mandatory outcome on its own fresh runner/profile; no dependency.
+  extended-actions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: extended-actions
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise Spotlight navigation and tab commands in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-extended-actions
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-extended-actions/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-extended-actions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-extended-actions/
           if-no-files-found: warn
           retention-days: 14

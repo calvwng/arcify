@@ -7,10 +7,12 @@ import { Utils } from './utils.js';
 import { projectTabTitle } from './tab-title-projection.js';
 import { SIDEBAR_COMMAND_TYPE, createSidebarCommandHandler } from './sidebar-command.js';
 import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
+import { readSpaceNavigationContext, runSpaceNavigation } from './spotlight-space-navigation.js';
+import { readTabActionContext, runTabAction } from './spotlight-tab-actions.js';
 import { readSpaceActionContext, runSpaceAction } from './spotlight-space-actions.js';
-import { SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
+import { SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
-const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', ...SPACE_ACTION_COMMANDS];
+const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
 const JOURNAL_KEY = 'spotlightBridgeRequests';
 
 // Only reads Arcify's authoritative model. Group IDs/names never enter the protocol.
@@ -159,11 +161,18 @@ export function createSpotlightBridge(store) {
         };
         if (!trustedSender(sender, peerId)) throw bridgeError('UNAUTHORIZED', 'This extension is not paired with Arcify.');
         validateRequest(request, COMMANDS);
-        const readOnly = ['hello', 'snapshot', 'actionContext'].includes(request.command);
+        const readOnly = ['hello', 'snapshot', 'actionContext', 'tabActionContext', 'navigationContext'].includes(request.command);
         const spaceAction = SPACE_ACTION_COMMANDS.includes(request.command);
+        const tabAction = TAB_ACTION_COMMANDS.includes(request.command);
+        const navigation = SPACE_NAVIGATION_COMMANDS.includes(request.command);
+        const contextualAction = spaceAction || tabAction || navigation;
+        if ((navigation || request.command === 'navigationContext') && !request.supportedFeatures?.includes(SPACE_NAVIGATION_FEATURE))
+            throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate Space navigation before sending this request.');
+        if ((tabAction || request.command === 'tabActionContext') && !request.supportedFeatures?.includes(TAB_ACTIONS_FEATURE))
+            throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate tab actions before sending this request.');
         if ((spaceAction || request.command === 'actionContext') && !request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE))
             throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate Space actions before sending this request.');
-        if (spaceAction && request.context.pairingGeneration !== (generation ?? null))
+        if (contextualAction && request.context.pairingGeneration !== (generation ?? null))
             throw bridgeError('UNAUTHORIZED', 'The companion pairing changed. Refresh Spotlight.');
         const requireFeatures = async () => {
             if (!request.supportedFeatures?.includes(GLOBAL_FAVORITES_FEATURE)
@@ -188,14 +197,18 @@ export function createSpotlightBridge(store) {
             }
             throw bridgeError('UNCERTAIN_RESULT', 'The previous action may have completed. Refresh before trying again.');
         }
-        const snapshot = spaceAction ? null : await getBridgeSnapshot(store, request.windowId);
+        const snapshot = contextualAction ? null : await getBridgeSnapshot(store, request.windowId);
         await checkPairing();
         if (readOnly) {
+            const navigationContext = request.command === 'navigationContext' ? await store.run(() => readSpaceNavigationContext(store, request,
+                { pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : null;
             const actionContext = request.command === 'actionContext' ? await store.run(() => readSpaceActionContext(store, request,
+                { pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : undefined;
+            const tabActionContext = request.command === 'tabActionContext' ? await store.run(() => readTabActionContext(store, request,
                 { pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : undefined;
             await checkPairing();
             return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot,
-                ...(actionContext ? { actionContext } : {}), ...(commandCapabilities(request, chrome, store)) });
+                ...(actionContext ? { actionContext } : {}), ...(tabActionContext ? { tabActionContext } : {}), ...(navigationContext || {}), ...(commandCapabilities(request, chrome, store)) });
         }
         const entry = { key, fingerprint: JSON.stringify(request) };
         const next = [...journal.slice(-99), entry];
@@ -204,13 +217,15 @@ export function createSpotlightBridge(store) {
             await checkPairing();
             await requireFeatures();
             // Serialize with native tab events and sidebar writes; validate again at execution.
-            const snapshot = spaceAction ? null : await readBridgeSnapshot(store, request.windowId);
-            const beforeMutation = async () => { await checkPairing(); await requireFeatures(); };
+            const snapshot = contextualAction ? null : await readBridgeSnapshot(store, request.windowId);
+            // Capability checks may await storage too. Pairing must be the last
+            // persisted authority read before the caller's mutation boundary.
+            const beforeMutation = async () => { await requireFeatures(); await checkPairing(); };
             await beforeMutation();
-            return spaceAction ? runSpaceAction(store, request, { beforeMutation })
+            return navigation ? runSpaceNavigation(store, request, { beforeMutation }) : tabAction ? runTabAction(store, request, { beforeMutation }) : spaceAction ? runSpaceAction(store, request, { beforeMutation })
                 : runBridgeAction(store, request, snapshot, { beforeMutation });
         });
-        if (spaceAction) {
+        if (contextualAction) {
             // Record a confirmed commit before the ancillary UI snapshot. Never
             // turn a refresh failure into permission to recreate a folder/pin.
             try {
@@ -275,6 +290,8 @@ function commandCapabilities(request, browser, store) {
     return request.command === 'hello' ? { capabilities: [
         ...(typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : []),
         ...(request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE) ? [SPACE_ACTIONS_FEATURE] : []),
+        ...(request.supportedFeatures?.includes(SPACE_NAVIGATION_FEATURE) ? [SPACE_NAVIGATION_FEATURE] : []),
+        ...(request.supportedFeatures?.includes(TAB_ACTIONS_FEATURE) ? [TAB_ACTIONS_FEATURE] : []),
         ...(store.favoriteStore ? ['persistentFavorites'] : []),
         ...(typeof store.favoriteStore?.requiresOrdinaryCapability === 'function' ? [GLOBAL_FAVORITES_FEATURE] : [])
     ] } : {};

@@ -5,8 +5,12 @@ export const PEER_KEY = 'arcifyBridgePeerId';
 export const PAIRING_GENERATION_KEY = 'arcifyBridgePairingGeneration';
 export const GLOBAL_FAVORITES_FEATURE = 'globalFavoritesV1';
 export const SPACE_ACTIONS_FEATURE = 'spaceActionsV1';
+export const TAB_ACTIONS_FEATURE = 'tabActionsV1';
+export const TAB_ACTION_COMMANDS = ['renameCurrentTab', 'editCurrentPinUrl', 'duplicateCurrentTab', 'copyCurrentLink', 'setCurrentTabMuted'];
 export const SPACE_ACTION_COMMANDS = ['openSettings', 'createSpaceFolder', 'pinCurrentTab', 'removeCurrentPin'];
-const supportedFeatures = [GLOBAL_FAVORITES_FEATURE, SPACE_ACTIONS_FEATURE];
+export const SPACE_NAVIGATION_FEATURE = 'spaceNavigationV1';
+export const SPACE_NAVIGATION_COMMANDS = ['switchSpace', 'moveCurrentTodayTab'];
+const supportedFeatures = [GLOBAL_FAVORITES_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE];
 export const isExtensionId = value => typeof value === 'string' && /^[a-p]{32}$/.test(value);
 export const isWindowId = value => Number.isSafeInteger(value) && value > 0;
 const isId = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
@@ -34,7 +38,11 @@ const commandFields = {
     openTab: ['url', 'spaceId'], navigateTab: ['tabId', 'url'],
     openBookmark: ['spaceId', 'bookmarkId'], openFavorite: ['favoriteId'], launch: ['mode'], startupSuggestion: ['tabId'],
     actionContext: ['tabId'], openSettings: ['context'], createSpaceFolder: ['context', 'title'],
-    pinCurrentTab: ['context'], removeCurrentPin: ['context', 'confirmed']
+    pinCurrentTab: ['context'], removeCurrentPin: ['context', 'confirmed'],
+    navigationContext: ['tabId'], switchSpace: ['context', 'destination', 'sourceUrl'],
+    moveCurrentTodayTab: ['context', 'destination', 'sourceUrl', 'inverted'],
+    tabActionContext: ['tabId'], renameCurrentTab: ['context', 'title'], editCurrentPinUrl: ['context', 'url'],
+    duplicateCurrentTab: ['context'], copyCurrentLink: ['context'], setCurrentTabMuted: ['context', 'muted']
 };
 const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
@@ -52,6 +60,30 @@ export function isSpaceActionContext(value) {
     return exactKeys(bookmark, ['id', 'parentId', 'title', 'url']) && isId(bookmark.id) && isId(bookmark.parentId)
         && boundedText(bookmark.title, 1024) && isSafeUrl(bookmark.url);
 }
+export function isTabActionContext(value) {
+    if (!value || !Object.hasOwn(value, 'tab')) return false;
+    if (value.tab === null) return isSpaceActionContext(value);
+    const tab = value.tab;
+    if (!exactKeys(tab, ['id', 'url', 'title', 'section', 'bookmark', 'alias', 'muted'])
+        || !boundedText(tab.alias, 1024) || typeof tab.muted !== 'boolean'
+        || tab.section === 'saved' && tab.alias !== '') return false;
+    const { alias, muted, ...baseTab } = tab;
+    return isSpaceActionContext({ ...value, tab: baseTab });
+}
+export function normalizeTabActionUrl(value) {
+    if (!isSafeUrl(value) || /[\s\u0000-\u0020\u007f\\]/.test(value)
+        || value !== 'about:blank' && !/^(?:https?|file|chrome):\/\//i.test(value)) return null;
+    try {
+        const url = new URL(value);
+        // Chromium treats chrome: as a standard hierarchical scheme. WHATWG
+        // URL does not add its empty path slash or lowercase that host for us.
+        if (url.protocol === 'chrome:') { url.hostname = url.hostname.toLowerCase(); if (!url.pathname) url.pathname = '/'; }
+        return url.href;
+    } catch { return null; }
+}
+export function isTabActionUrl(value) {
+    return typeof value === 'string' && normalizeTabActionUrl(value) === value;
+}
 export function validateRequest(message, commands) {
     if (!message || typeof message !== 'object' || Array.isArray(message) || message.type !== BRIDGE_TYPE)
         throw bridgeError('INVALID_REQUEST', 'Invalid bridge message.');
@@ -68,7 +100,7 @@ export function validateRequest(message, commands) {
         throw bridgeError('INVALID_REQUEST', 'Invalid supported feature marker.');
     if (['activateSpace', 'openBookmark'].includes(message.command) && !isId(message.spaceId)
         || message.command === 'openTab' && message.spaceId !== undefined && !isId(message.spaceId)
-        || ['activateTab', 'navigateTab', 'startupSuggestion', 'actionContext'].includes(message.command) && !isTabId(message.tabId)
+        || ['activateTab', 'navigateTab', 'startupSuggestion', 'actionContext', 'tabActionContext', 'navigationContext'].includes(message.command) && !isTabId(message.tabId)
         || ['openTab', 'navigateTab'].includes(message.command) && !isSafeUrl(message.url)
         || message.command === 'openBookmark' && !isId(message.bookmarkId)
         || message.command === 'openFavorite' && !isId(message.favoriteId)
@@ -80,6 +112,21 @@ export function validateRequest(message, commands) {
         || message.command === 'pinCurrentTab' && message.context.tab?.section !== 'today'
         || message.command === 'removeCurrentPin' && (message.context.tab?.section !== 'saved' || message.confirmed !== true)))
         throw bridgeError('INVALID_REQUEST', 'Invalid Space action context.');
+    if (TAB_ACTION_COMMANDS.includes(message.command) && (!isTabActionContext(message.context)
+        || message.context.windowId !== message.windowId || !message.context.tab
+        || message.command === 'renameCurrentTab' && (!boundedText(message.title, 256) || message.title !== message.title.trim()
+            || message.context.tab.section === 'saved' && !message.title.trim())
+        || message.command === 'editCurrentPinUrl' && (message.context.tab.section !== 'saved' || !isTabActionUrl(message.url))
+        || message.command === 'duplicateCurrentTab' && message.context.tab.section !== 'today'
+        || message.command === 'setCurrentTabMuted' && (typeof message.muted !== 'boolean' || message.muted === message.context.tab.muted)))
+        throw bridgeError('INVALID_REQUEST', 'Invalid tab action context or value.');
+    if (SPACE_NAVIGATION_COMMANDS.includes(message.command) && (!isSpaceActionContext(message.context)
+        || message.context.windowId !== message.windowId || !boundedText(message.sourceUrl, 16384) || !message.sourceUrl
+        || !exactKeys(message.destination, ['spaceId', 'bookmarkFolderId'])
+        || !isId(message.destination.spaceId) || !isId(message.destination.bookmarkFolderId)
+        || message.destination.spaceId === message.context.spaceId || message.destination.bookmarkFolderId === message.context.bookmarkFolderId
+        || message.command === 'moveCurrentTodayTab' && (message.context.tab?.section !== 'today' || typeof message.inverted !== 'boolean')))
+        throw bridgeError('INVALID_REQUEST', 'Invalid Space navigation context or destination.');
     return message;
 }
 export function responseFor(request, role, payload = {}) {

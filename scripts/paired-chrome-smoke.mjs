@@ -14,6 +14,8 @@ import { normalizeReloadControlWindow } from './paired-chrome-control-window.mjs
 import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
 import { exerciseOverlayRecovery, overlayRecoveryFixtureResponse } from './paired-chrome-overlay-recovery.mjs';
 import { exerciseSpotlightActions, serveSpotlightActionFixture, SPOTLIGHT_ACTION_CASE_NAME } from './paired-chrome-spotlight-actions.mjs';
+import { exerciseSpotlightNavigation, serveSpotlightNavigationFixture, SPOTLIGHT_NAVIGATION_CASE_NAME } from './paired-chrome-spotlight-navigation.mjs';
+import { exerciseSpotlightTabCommands, serveSpotlightTabFixture, SPOTLIGHT_TAB_CASE_NAME } from './paired-chrome-spotlight-tabs.mjs';
 import { randomBytes } from 'node:crypto';
 import { exerciseSpaceTheme } from './paired-chrome-space-theme.mjs';
 import { exerciseSpotlightOptionsAppearance } from './paired-chrome-spotlight-appearance.mjs';
@@ -59,7 +61,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '9c4462fb0f3cbfe2585757c43f34398e9c906fde';
+const PINNED_SPOTLIGHT = '6379d3a22608507a4865bb44d17344ef8ea1eff6';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',
@@ -110,9 +112,13 @@ const stepNames = [
     'Native Space custom tint and appearance retain real named groups, readable controls and exact identities',
     'Spotlight options appearance follows System and explicit modes through real controls and first paint',
     'Native Spotlight command recovers dormant and orphaned overlays and wakes a cold worker without losing the source',
-    'Initial Spotlight actions preserve exact live and saved identities through overlay and browser New Tab input'
+    'Initial Spotlight actions preserve exact live and saved identities through overlay and browser New Tab input',
+    'Spotlight Space navigation uses genuine destination pickers and preserves exact Today/native identities',
+    'Spotlight tab commands preserve exact live and saved identities through trusted input'
 ];
 assert.equal(stepNames[49], SPOTLIGHT_ACTION_CASE_NAME, 'Initial Spotlight action case must retain its reviewed identity.');
+assert.equal(stepNames[50], SPOTLIGHT_NAVIGATION_CASE_NAME, 'Spotlight navigation case must retain its reviewed identity.');
+assert.equal(stepNames[51], SPOTLIGHT_TAB_CASE_NAME, 'Spotlight tab-command case must retain its reviewed identity.');
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
@@ -138,7 +144,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -939,6 +945,8 @@ try {
         const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two', '/today-selection-one': 'Today Selection One', '/today-selection-two': 'Today Selection Two', '/today-selection-four': 'Today Selection Four', '/today-selection-five': 'Today Selection Five', '/today-selection-six': 'Today Selection Six' };
         server = createServer((request, response) => {
             if (serveSpotlightActionFixture(request, response)) return;
+            if (serveSpotlightNavigationFixture(request, response)) return;
+            if (serveSpotlightTabFixture(request, response)) return;
             const recovery = overlayRecoveryFixtureResponse(request.url);
             if (recovery) {
                 response.writeHead(200, { 'content-type': recovery.type, 'content-security-policy': recovery.csp, 'cache-control': 'no-store' });
@@ -2260,8 +2268,20 @@ try {
     await step(stepNames[48], () => runHostedOverlayRecovery());
     await step(stepNames[49], () => exerciseSpotlightActions({ apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,
         ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,
+        helperNavigation:true,
         record:async evidence => { report.spotlightActions = evidence; await saveReport(); } }));
     } // Shared recovery/actions cases 48–49; preserve the original full order.
+
+    // These isolated modules own their fixtures, selected Spaces and settings.
+    // They cannot replace or extend the evidence scope of any existing run mode.
+    if (report.runMode === 'extended-actions') {
+    await step(stepNames[50], () => exerciseSpotlightNavigation({ browser,observePage,apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,
+        ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,
+        record:async evidence => { report.spotlightNavigation = evidence; await saveReport(); } }));
+    await step(stepNames[51], () => exerciseSpotlightTabCommands({ browser,observePage,apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,
+        ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,
+        record:async evidence => { report.spotlightTabCommands = evidence; await saveReport(); } }));
+    } // Supplemental extended-action cases 50–51; legacy plans remain unchanged.
 
     if (report.runMode === 'native-split') {
         await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,

@@ -4,6 +4,14 @@
 export const TODAY_ORDER_KEY = 'todayOrderRepresentation';
 const LOCK = 'arcify-today-order-representation';
 let fallback = Promise.resolve();
+// Read-only projection for bridge context/guards. Never initializes storage while
+// deciding whether a paired command is still authorized.
+export async function readTodayOrderInverted() {
+    const stored = (await chrome.storage.local.get(TODAY_ORDER_KEY))[TODAY_ORDER_KEY];
+    if (stored?.version === 1 && typeof stored.inverted === 'boolean') return stored.inverted;
+    if (stored !== undefined) throw new Error('Unrecognized Today ordering representation. Reload Arcify before changing tab order.');
+    return Boolean((await chrome.storage.sync.get({ invertTabOrder: true })).invertTabOrder);
+}
 export function getTodayOrderInverted() {
     const initialize = async () => {
         const stored = (await chrome.storage.local.get(TODAY_ORDER_KEY))[TODAY_ORDER_KEY];

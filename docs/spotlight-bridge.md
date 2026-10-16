@@ -329,3 +329,76 @@ adoption and profile-local durability limits.
 See [favorite-continuity.md](favorite-continuity.md) for ordinary-Favorite feature
 negotiation, authenticated Spotlight session witnessing, two-phase recovery,
 revocation guarantees, and explicit reload/restart/downgrade limits.
+
+## Optional current-tab actions (`tabActionsV1`)
+
+This separately negotiated protocol-v1 feature leaves legacy snapshots and
+`spaceActionsV1.actionContext` unchanged. `hello` advertises it only when the
+caller includes `tabActionsV1` in `supportedFeatures`. `tabActionContext` accepts
+an exact `tabId` and returns `tabActionContext` alongside the normal snapshot:
+
+```js
+{
+  windowId, spaceId, bookmarkFolderId, pairingGeneration, sourceTabId,
+  tab: null // or:
+  // { id, url, title, section: 'today' | 'saved',
+  //   bookmark: null | { id, parentId, title, url }, alias, muted }
+}
+```
+
+The source must be the exact active tab in that normal window and uniquely owned
+by its selected Space. `alias` is the raw Today override (or `''` for saved pins);
+`title` is the existing displayed-title projection; `muted` is a boolean. Helper
+and browser New Tab pages, native pins, global Favorites, split panes,
+provisional/recovery tabs and ambiguous memberships return no tab actions.
+Saved bookmark IDs referenced as a global Favorite's source are protected too.
+A distinct saved bookmark with the same URL remains a distinct, usable identity.
+
+Every mutation includes that entire immutable context:
+
+- `renameCurrentTab {context,title}` sets/clears an exact Today alias or updates
+  the exact saved bookmark title. Names are pre-trimmed, at most 256 characters,
+  without control characters; only Today accepts an empty name. The response is
+  `{tabId,bookmarkId:null|string,title}`.
+- `editCurrentPinUrl {context,url}` requires a saved pin and updates only that
+  bookmark's URL, preserving its saved title, parent and ID. Every exact live
+  binding is refreshed; no existing tab is navigated. The response is
+  `{tabId,bookmarkId,url}`. Inputs must be canonical complete HTTP(S), file,
+  chrome URLs or exact `about:blank`, without whitespace or backslashes. Use
+  `normalizeTabActionUrl` before dispatch; external requests require exact
+  canonical spelling, so Chrome's bookmark normalization cannot silently
+  disagree with the request/acknowledgement. Sidebar input policy is unchanged.
+- `duplicateCurrentTab {context}` supports Today only, returning a new `{tabId}`.
+  It uses the same canonical Today placement helper as the sidebar and transfers
+  no alias, bookmark or Favorite identity. Chrome may activate its new duplicate;
+  only that confirmed new ID can replace the source as active during completion.
+- `copyCurrentLink {context}` copies the captured live URL, including a saved
+  pin's current navigated URL. It uses Arcify's existing `clipboardWrite` and
+  offscreen document; the worker requires an affirmative acknowledgement of the
+  exact text. The response is `{tabId,copied:true,url}`. No active-tab lookup,
+  injection fallback, sidebar fallback or retry is used.
+- `setCurrentTabMuted {context,muted}` sets the requested boolean on the exact
+  source and returns `{tabId,muted}`. The requested value must differ from the
+  captured state; this is never an implicit toggle.
+
+The bridge holds `SpaceStore.run` once and calls the queue-free shared tab-menu
+core. Its guards recheck the exact window/tab/Space/root/bookmark/binding and
+persisted pairing generation after awaited reads and immediately before each
+write, including alias/binding locks and Space persistence. Saved edits guard
+all exact-linked live copies and never URL-match or modify source Favorites.
+Event fences reject a switch-away-and-back, navigation or revoke/re-pair during a
+read, while accepting only exact delayed events from confirmed own writes.
+
+The existing bounded one-shot journal covers all five actions. Unknown API
+outcomes return `UNCERTAIN_RESULT`; failure or revocation after a confirmed write
+returns `PARTIAL_COMMIT`. Neither case triggers a retry, rollback, recreation or
+fallback write. A completed result is recorded before the ancillary snapshot;
+a failed display refresh cannot authorize executing it again. Native browser
+APIs are nontransactional: a change after the final check can still race a write.
+After any ambiguous result, inspect Arcify before explicitly starting a new action.
+
+Verification: `node --test tests/unit/spotlight-tab-actions.test.js` exercises
+mocked end-to-end bridge behavior, including stale identities, exact same-URL
+separation, global Favorite source protection, delayed events, revocation,
+partial commits, clipboard acknowledgements and duplicate placement. These tests
+and `npm run test:unit` / `npm run build` do not claim real-browser QA.

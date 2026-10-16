@@ -13,6 +13,8 @@ import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY } from '../spotlight-bridge-proto
 import * as arcifyProtocol from '../spotlight-bridge-protocol.js';
 import { assertCommonV1Contract, assertInitialSpaceActionsContract } from './lib/spotlight-pair-contract.mjs';
 import { assertInitialSpaceActionRoundTrips } from './lib/spotlight-pair-actions.mjs';
+import { assertExtendedActionsContract } from './lib/spotlight-pair-extended-contract.mjs';
+import { assertExtendedActionRoundTrips } from './lib/spotlight-pair-extended-actions.mjs';
 
 if (process.argv.length !== 3) {
     console.error('Usage: node scripts/check-spotlight-pair.mjs <spotlight-checkout>');
@@ -24,6 +26,8 @@ const spotlightProtocol = await peerModule('shared/arcify-bridge-protocol.js');
 const spotlightActions = await peerModule('shared/arcify-space-actions-protocol.js');
 await assertCommonV1Contract(arcifyProtocol, spotlightProtocol);
 assertInitialSpaceActionsContract(arcifyProtocol, spotlightActions);
+const spotlightTabActions = await peerModule('shared/arcify-tab-actions-protocol.js');
+assertExtendedActionsContract(arcifyProtocol, spotlightActions, spotlightTabActions);
 
 const ARCIFY = 'a'.repeat(32);
 const SPOTLIGHT = 'b'.repeat(32);
@@ -203,8 +207,12 @@ try {
     await assertInitialSpaceActionRoundTrips({ ArcifyBridgeClient, ArcifySpaceActionsClient,
         validateActionResult: spotlightActions.validateActionResult });
 
+    const { ArcifyTabActionsClient } = await peerModule('shared/arcify-tab-actions.js');
+    await assertExtendedActionRoundTrips({ ArcifyBridgeClient, ArcifySpaceActionsClient, ArcifyTabActionsClient });
+
     console.log('PASS: mocked Arcify ↔ Spotlight contract smoke test');
     console.log('Verified exported constants/common-v1 wire contracts, initial four-action contexts/payloads/results and real client/provider round trips, real snapshot validation, hello/snapshot/openTab round trips, window isolation, bookmark warnings, version rejection on both sides, and optional saved-Favorite capability/closed snapshots/exact open reuse.');
+    console.log('Also verified additive Space-navigation/tab-action contracts and real client/provider round trips for switch, move, Today/saved rename, saved URL editing, duplicate, offscreen copy and explicit mute, preserving exact identities, window isolation and no-replay rejection.');
     console.log('Chrome transport and APIs were mocked; no browser or extension-loading verification was performed.');
 } finally {
     if (previousChrome === undefined) delete globalThis.chrome;

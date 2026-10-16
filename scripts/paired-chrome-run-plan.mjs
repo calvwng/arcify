@@ -14,25 +14,32 @@ const APPEARANCE_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 33, 46, 47, 48, 4
 // Recovery/actions own their fixtures; only native Sidebar event observation
 // needs initialization when the earlier appearance cases have not run.
 const RECOVERY_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 48, 49]);
+// Extended actions own their setup/cleanup and require no prior case mutations.
+const EXTENDED_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 50, 51]);
+const ALL_CASE_INDICES = Object.freeze([...new Set([...FULL_CASE_INDICES, ...FAVORITE_LIFECYCLE_CASE_INDICES,
+    ...NATIVE_SPLIT_CASE_INDICES, ...APPEARANCE_ACTION_CASE_INDICES, ...RECOVERY_ACTION_CASE_INDICES,
+    ...EXTENDED_ACTION_CASE_INDICES])].sort((a, b) => a - b));
 
 function caseIndicesForMode(mode) {
-    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split' || mode === 'appearance-actions' || mode === 'recovery-actions',
-        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle, native-split, appearance-actions or recovery-actions.`);
+    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split' || mode === 'appearance-actions' || mode === 'recovery-actions' || mode === 'extended-actions',
+        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle, native-split, appearance-actions, recovery-actions or extended-actions.`);
     return mode === 'full' ? FULL_CASE_INDICES : mode === 'favorite-lifecycle' ? FAVORITE_LIFECYCLE_CASE_INDICES :
-        mode === 'native-split' ? NATIVE_SPLIT_CASE_INDICES : mode === 'appearance-actions' ? APPEARANCE_ACTION_CASE_INDICES : RECOVERY_ACTION_CASE_INDICES;
+        mode === 'native-split' ? NATIVE_SPLIT_CASE_INDICES : mode === 'appearance-actions' ? APPEARANCE_ACTION_CASE_INDICES : mode === 'recovery-actions' ? RECOVERY_ACTION_CASE_INDICES : EXTENDED_ACTION_CASE_INDICES;
 }
 
 export function createPairedChromeRunReport(caseNames, mode = 'full') {
     const indices = caseIndicesForMode(mode);
-    assert(Array.isArray(caseNames) && caseNames.length === FULL_CASE_INDICES.length + 1,
-        'Every paired-Chrome case must be included in the explicit full/native run plans.');
+    assert(Array.isArray(caseNames) && caseNames.length === ALL_CASE_INDICES.length,
+        'Every paired-Chrome case must be included in an explicit run plan.');
+    assert.deepEqual(ALL_CASE_INDICES, caseNames.map((_, index) => index), 'Explicit run plans must cover every case identity without gaps.');
     assert(caseNames.every(name => typeof name === 'string' && name.trim()), 'Every case requires a name.');
     assert.equal(new Set(caseNames).size, caseNames.length, 'Case names must be unique.');
     assert.equal(caseNames[39], NATIVE_SPLIT_CASE_NAME, 'Native case 39 must retain its stable identity.');
     const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseIndex === 39 ? NATIVE_SPLIT_CASE_NAME : caseNames[caseIndex] }));
     return {
         runMode: mode,
-        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'recovery-actions' ?
+        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'extended-actions' ?
+            'Supplemental fresh-profile Spotlight Space navigation and tab-command coverage; this is not a full-suite, recovery or appearance result.' : mode === 'recovery-actions' ?
             'Supplemental fresh-profile overlay recovery and initial Spotlight actions coverage; this is not a full-suite or appearance result.' : mode === 'appearance-actions' ?
             'Supplemental fresh-profile appearance, theme, options, recovery and initial Spotlight actions coverage; this is not a full-suite result.' : mode === 'native-split' ?
             'Supplemental fresh-profile native Split View positive coverage; this is not a full-suite result.' :

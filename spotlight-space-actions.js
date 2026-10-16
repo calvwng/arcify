@@ -6,7 +6,7 @@ import { hasNativeSplit } from './native-split-safety.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { isPracticeUrl } from './tour-practice.js';
 import { saveLiveSpacePin, removeSavedSpacePin } from './space-pin-actions.js';
-import { bridgeError, isSafeUrl, isSpaceActionContext } from './spotlight-bridge-protocol.js';
+import { bridgeError, isSafeUrl, isSpaceActionContext, isTabActionContext } from './spotlight-bridge-protocol.js';
 
 const stale = () => bridgeError('STALE_CONTEXT', 'The current tab, selected Space, or saved pin changed. Refresh Spotlight before trying again.');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -14,7 +14,7 @@ const text = value => typeof value === 'string' && value.length <= 1024 && !/[\u
 const currentUrl = tab => tab?.url || tab?.pendingUrl || '';
 // Browser New Tab aliases can be Space-owned, but their renderer is a helper,
 // not a content tab to pin or infer a previous-page action from.
-const isBrowserNewTab = url => ['chrome://newtab', 'chrome://newtab/'].includes(url.split(/[?#]/)[0]);
+export const isBrowserNewTab = url => ['chrome://newtab', 'chrome://newtab/'].includes(url.split(/[?#]/)[0]);
 const safeLive = (store, tab) => tab && !tab.incognito && !tab.pinned && !hasNativeSplit(tab)
     && !store.isGlobalTab?.(tab.id) && !isStartupLauncherTab(tab) && !isPracticeUrl(currentUrl(tab))
     && !isBrowserNewTab(currentUrl(tab)) && isSafeUrl(currentUrl(tab)) && (!tab.pendingUrl || tab.pendingUrl === currentUrl(tab));
@@ -49,7 +49,7 @@ function sourceTab(store, tabs, windowId, tabId, expected) {
 // Scope the fence to one read boundary. Events arriving during awaited reads
 // invalidate it, including revoke-and-repair with the same peer. It complements
 // the persisted pairing check; it is never the source of pairing authority.
-async function fencedRead(operation, { windowId, tabIds = new Set(), ownEvent = () => false } = {}) {
+export async function fencedRead(operation, { windowId, tabIds = new Set(), ownEvent = () => false, watchTodayOrder = false } = {}) {
     let changed = false;
     const cleanups = [];
     const watch = (event, callback) => {
@@ -57,16 +57,16 @@ async function fencedRead(operation, { windowId, tabIds = new Set(), ownEvent = 
         event.addListener(callback); cleanups.push(() => event.removeListener(callback));
     };
     const change = () => { changed = true; };
-    watch(chrome.tabs?.onActivated, info => { if (info.windowId === windowId || tabIds.has(info.tabId)) change(); });
+    watch(chrome.tabs?.onActivated, info => { if ((info.windowId === windowId || tabIds.has(info.tabId)) && !ownEvent('tab', 'onActivated', info)) change(); });
     for (const name of ['onUpdated', 'onRemoved', 'onAttached', 'onDetached'])
-        watch(chrome.tabs?.[name], id => { if (tabIds.has(id)) change(); });
+        watch(chrome.tabs?.[name], (...args) => { if (tabIds.has(args[0]) && !ownEvent('tab', name, args)) change(); });
     watch(chrome.tabs?.onReplaced, (added, removed) => { if (tabIds.has(added) || tabIds.has(removed)) change(); });
     watch(chrome.windows?.onRemoved, change);
     for (const name of ['onChanged', 'onRemoved', 'onMoved', 'onCreated'])
         watch(chrome.bookmarks?.[name], (...args) => { if (!ownEvent('bookmark', name, args)) change(); });
     watch(chrome.storage?.onChanged, (changes, area) => {
-        const fields = area === 'local' ? ['arcifyBridgePeerId', 'arcifyBridgePairingGeneration', 'pinnedTabStatesById', 'tabNameOverridesById', 'spaces', 'persistentFavorites']
-            : area === 'session' ? ['activeSpaces', 'favoriteSession'] : [];
+        const fields = area === 'local' ? ['arcifyBridgePeerId', 'arcifyBridgePairingGeneration', 'pinnedTabStatesById', 'tabNameOverridesById', 'spaces', 'persistentFavorites', ...(watchTodayOrder ? ['todayOrderRepresentation'] : [])]
+            : area === 'session' ? ['activeSpaces', 'favoriteSession'] : area === 'sync' && watchTodayOrder ? ['invertTabOrder'] : [];
         for (const key of fields) if (key in changes && !same(changes[key].oldValue, changes[key].newValue)
             && !ownEvent('storage', key, changes[key])) change();
     });
@@ -76,12 +76,15 @@ async function fencedRead(operation, { windowId, tabIds = new Set(), ownEvent = 
 
 // Read-only entry, already inside SpaceStore.run(). A helper is an exact active
 // source, but never an excuse to guess the previous content tab.
-export async function readSpaceActionContext(store, { windowId, tabId }, { pairingGeneration = null, beforeReturn = async () => {} } = {}) {
+export async function readSpaceActionContext(store, { windowId, tabId }, { pairingGeneration = null, beforeReturn = async () => {}, tabDetails = false } = {}) {
     return fencedRead(async () => {
         const space = await readRoot(store, windowId);
         const states = await Utils.getPinnedTabStates(), overrides = await Utils.getTabNameOverrides();
         const binding = states[tabId];
         let bookmark = binding?.bookmarkId ? await getSpaceBookmarkById(space, binding.bookmarkId) : null;
+        const favoriteSources = tabDetails ? await chrome.storage.local.get('persistentFavorites') : {};
+        const protectedSource = tabDetails && bookmark && [...(favoriteSources.persistentFavorites || []), ...(store.favoriteStore?.items || [])]
+            .some(item => item.sourceBookmarkId === bookmark.id);
         await beforeReturn();
         const tabs = await chrome.tabs.query({});
         await beforeReturn();
@@ -90,7 +93,7 @@ export async function readSpaceActionContext(store, { windowId, tabId }, { pairi
             pairingGeneration, sourceTabId: tabId, tab: null };
         if (!isSpaceActionContext(context)) throw stale();
         const owned = locations(store, tabId);
-        if (!safeLive(store, live) || owned.length !== 1 || owned[0].space.id !== space.id
+        if (protectedSource || !safeLive(store, live) || owned.length !== 1 || owned[0].space.id !== space.id
             || store.provisional?.has(tabId) || store.recoveryCandidates?.has(tabId)) return context;
         const saved = owned[0].section === 'spaceBookmarks';
         if (saved ? !bookmark || bookmark.id !== binding?.bookmarkId || binding.pinnedUrl !== bookmark.url : Boolean(binding?.bookmarkId)) return context;
@@ -98,8 +101,9 @@ export async function readSpaceActionContext(store, { windowId, tabId }, { pairi
         const title = projectTabTitle(live, { overrides, binding, bookmark, isSpacePin: saved });
         if (!text(title) || bookmark && (!text(bookmark.title) || !isSafeUrl(bookmark.url))) return context;
         context.tab = { id: tabId, url: currentUrl(live), title, section: saved ? 'saved' : 'today',
-            bookmark: bookmark ? { id: bookmark.id, parentId: bookmark.parentId, title: bookmark.title, url: bookmark.url } : null };
-        return isSpaceActionContext(context) ? context : { ...context, tab: null };
+            bookmark: bookmark ? { id: bookmark.id, parentId: bookmark.parentId, title: bookmark.title, url: bookmark.url } : null,
+            ...(tabDetails ? { alias: saved ? '' : overrides[tabId]?.name || '', muted: Boolean(live.mutedInfo?.muted) } : {}) };
+        return (tabDetails ? isTabActionContext : isSpaceActionContext)(context) ? context : { ...context, tab: null };
     }, { windowId, tabIds: new Set([tabId]) });
 }
 
@@ -229,3 +233,6 @@ export async function runSpaceAction(store, request, { beforeMutation = async ()
     }
     throw bridgeError('INVALID_REQUEST', 'Unsupported Space action.');
 }
+
+// Internal read/guard primitives shared by the separately negotiated tab actions.
+export { readRoot, safeLive, locations, sourceTab, selectedSpace, currentUrl };

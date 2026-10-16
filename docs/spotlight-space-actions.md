@@ -127,3 +127,5 @@ guards. `favorite-continuity.test.js` checks every optional selection-checkpoint
 write boundary; existing tab-menu tests protect sidebar removal semantics.
 
 These are automated API/DOM tests, not an interactive Chrome or Helium run.
+
+The separately negotiated next slice is documented in [Space navigation](spotlight-space-navigation.md). Its new commands do not expand the meaning of `spaceActionsV1`.

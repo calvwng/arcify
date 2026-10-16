@@ -25,7 +25,12 @@ const ownsToday = (spaces, spaceId, id) => {
 // SpaceStore queue, persistence, continuity stamp and change notifications remain
 // authoritative. No URL matching, native tab activation, or bookmark writes occur.
 export function moveTodayTabsToSpace(store, request) {
-    return store.run(async () => {
+    return store.run(() => moveTodayTabsToSpaceCore(store, request));
+}
+
+// Internal only: callers already holding SpaceStore.run() may compose this core.
+// The queued public wrapper remains the sidebar/menu entry point.
+export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation = async () => {}, skipGroupSync = false, getOrder = () => Utils.getTodayOrderInverted() } = {}) {
         if (!request || typeof request !== 'object' || Array.isArray(request) ||
             Object.keys(request).some(key => !['type', 'windowId', 'spaceId', 'bookmarkFolderId', 'destinationSpaceId', 'destinationBookmarkFolderId', 'inverted', 'entries'].includes(key)) ||
             request.type !== undefined && request.type !== 'moveTodayTabsToSpace' ||
@@ -63,7 +68,7 @@ export function moveTodayTabsToSpace(store, request) {
             if (window?.id !== windowId || window.type !== 'normal' || window.incognito) throw changed();
             await getSpaceBookmarkFolder(source);
             await getSpaceBookmarkFolder(getSpaces().target);
-            if (Boolean(await Utils.getTodayOrderInverted()) !== inverted) throw changed();
+            if (Boolean(await getOrder()) !== inverted) throw changed();
             const bindings = await Utils.getPinnedTabStates();
             // One fresh native snapshot validates the complete batch. In particular,
             // a duplicate-URL neighbor can never replace a closed or moved tab ID.
@@ -77,6 +82,7 @@ export function moveTodayTabsToSpace(store, request) {
             const current = getSpaces();
             const ordered = current[owner === spaceId ? 'source' : 'target'].temporaryTabs.filter(id => selected.has(id));
             if (!sameIds(inverted ? [...ordered].reverse() : ordered, ids)) throw changed();
+            await beforeMutation({ membershipStaged: staged, writeAttempted });
             return tabs;
         }
         try {
@@ -96,7 +102,7 @@ export function moveTodayTabsToSpace(store, request) {
             for (const space of [source, target]) store.rebaseSectionRanks(space, 'temporaryTabs',
                 beforeSpaces.find(previous => previous.id === space.id).temporaryTabs);
             expectedRanks = new Map(store.restoredRanks);
-            await store.persist({ beforeWrite: async () => {
+            await store.persist({ skipGroupSync, beforeWrite: async () => {
                 // persist awaits metadata and continuity before writing. Recheck at
                 // that final boundary, not only before staging the in-memory move.
                 const fresh = await validate(destinationSpaceId);
@@ -140,7 +146,7 @@ export function moveTodayTabsToSpace(store, request) {
                         !sameIds(persistedTarget.temporaryTabs, expectedTargetIds))) batch.uncertain = true;
                     const window = await chrome.windows.get(windowId);
                     if (window?.id !== windowId || window.type !== 'normal' || window.incognito) throw changed();
-                    if (Boolean(await Utils.getTodayOrderInverted()) !== inverted) batch.uncertain = true;
+                    if (Boolean(await getOrder()) !== inverted) batch.uncertain = true;
                     const bindings = await Utils.getPinnedTabStates(), tabs = await chrome.tabs.query({});
                     for (const entry of entries) {
                         const matches = tabs.filter(tab => tab.id === entry.tabId), tab = matches[0];
@@ -165,7 +171,6 @@ export function moveTodayTabsToSpace(store, request) {
             error.batch = batch;
             throw error;
         }
-    });
 }
 
 export function registerTodayMoveMessages(store) {
