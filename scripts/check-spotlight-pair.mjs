@@ -4,25 +4,26 @@
  * Run from the Arcify checkout: node scripts/check-spotlight-pair.mjs ../arcify-spotlight
  */
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { SpaceStore, ownerOf } from '../space-store.js';
 import { FavoriteStore } from '../favorite-store.js';
 import { createSpotlightBridge, getBridgeSnapshot } from '../spotlight-bridge.js';
 import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY } from '../spotlight-bridge-protocol.js';
+import * as arcifyProtocol from '../spotlight-bridge-protocol.js';
+import { assertCommonV1Contract, assertInitialSpaceActionsContract } from './lib/spotlight-pair-contract.mjs';
+import { assertInitialSpaceActionRoundTrips } from './lib/spotlight-pair-actions.mjs';
 
 if (process.argv.length !== 3) {
     console.error('Usage: node scripts/check-spotlight-pair.mjs <spotlight-checkout>');
     process.exit(1);
 }
-const arcifyRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const spotlightRoot = resolve(process.argv[2]);
-assert.deepEqual(
-    await readFile(resolve(arcifyRoot, 'spotlight-bridge-protocol.js')),
-    await readFile(resolve(spotlightRoot, 'shared/arcify-bridge-protocol.js')),
-    'Arcify and Spotlight protocol helpers must be byte-identical.'
-);
+const peerModule = path => import(pathToFileURL(resolve(spotlightRoot, path)).href);
+const spotlightProtocol = await peerModule('shared/arcify-bridge-protocol.js');
+const spotlightActions = await peerModule('shared/arcify-space-actions-protocol.js');
+await assertCommonV1Contract(arcifyProtocol, spotlightProtocol);
+assertInitialSpaceActionsContract(arcifyProtocol, spotlightActions);
 
 const ARCIFY = 'a'.repeat(32);
 const SPOTLIGHT = 'b'.repeat(32);
@@ -196,8 +197,14 @@ try {
     validateSnapshot(replayedFavorite.snapshot, WINDOW);
     assert.equal(created, createsBeforeOpen + 1, 'Journal replay preserves the exact opened Favorite without creating a duplicate.');
 
+    // Keep every original legacy/Favorite assertion above intact. The optional
+    // action adapter uses a fresh Chrome mock and restores this one afterward.
+    const { ArcifySpaceActionsClient } = await peerModule('shared/arcify-space-actions.js');
+    await assertInitialSpaceActionRoundTrips({ ArcifyBridgeClient, ArcifySpaceActionsClient,
+        validateActionResult: spotlightActions.validateActionResult });
+
     console.log('PASS: mocked Arcify ↔ Spotlight contract smoke test');
-    console.log('Verified byte-identical protocol helpers, real snapshot validation, hello/snapshot/openTab round trips, window isolation, bookmark warnings, version rejection on both sides, and optional saved-Favorite capability/closed snapshots/exact open reuse.');
+    console.log('Verified exported constants/common-v1 wire contracts, initial four-action contexts/payloads/results and real client/provider round trips, real snapshot validation, hello/snapshot/openTab round trips, window isolation, bookmark warnings, version rejection on both sides, and optional saved-Favorite capability/closed snapshots/exact open reuse.');
     console.log('Chrome transport and APIs were mocked; no browser or extension-loading verification was performed.');
 } finally {
     if (previousChrome === undefined) delete globalThis.chrome;

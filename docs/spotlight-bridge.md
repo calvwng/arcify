@@ -265,9 +265,19 @@ Spotlight: `npm run build && npm test`
 With both checkouts present, run from Arcify:
 `node scripts/check-spotlight-pair.mjs ../arcify-spotlight`
 
-That smoke check compares the paired protocol sources byte-for-byte and routes
-real client/server modules through mocked Chrome APIs to verify snapshots,
-window-scoped opens, and version rejection.
+That smoke check imports the real modules and checks exported constants, common-v1
+request/response compatibility, and the optional initial four-action context,
+payload, and exact-result contracts. It permits the intentional split between
+Arcify's combined helper and Spotlight's separate Space-action module. It also
+routes real clients/providers through mocked Chrome APIs to verify snapshots,
+window-scoped opens, version rejection, persistent Favorites, and Settings,
+New Folder, Pin Current Tab, and Remove Current Pin (including fail-closed/no-retry
+paths). Protocol source files need not be byte-identical.
+
+Run `node scripts/test-spotlight-pair-contract.mjs ../arcify-spotlight` for focused
+checker regressions. These import the same real modules, then replace one export
+at a time to prove version/type/key, request/response, feature-marker, context,
+payload, and result-identity drift fails the contract check.
 
 These commands are builds and mocked/unit/integration tests, **not evidence of
 extensions loaded into real Chrome**.

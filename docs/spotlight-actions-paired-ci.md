@@ -74,8 +74,13 @@ separate.
   the source page and the other window's selected Space/native state intact
 - Both the literal owned New Tab URL and browser `chrome://newtab/` alias expose
   folder/settings only; neither may guess the previously active content page
-- Alias ownership needs real nonce probes and independently sent, browser-attested
-  ACKs from the exact initialized renderer; URL/title matches alone never pass
+- Alias ownership requires the exact committed action's Chrome-attested
+  `sender.tab`, extension ID, renderer URL, main frame and active document lifecycle.
+  Its envelope, command, context, source IDs and fields must match the successful
+  operation. Without `sender.tab`, real nonce probes and independently sent,
+  browser-attested ACKs from that exact renderer are mandatory. A present but
+  mismatched `sender.tab` rejects without fallback; URL/title matches alone never
+  pass. Any observed probes and ACKs are validated on either route.
 - Passive actual extension-message and native/bookmark/storage observers; no
   monkey-patched Chrome API, controller invocation, synthetic trusted flag, or
   fabricated successful bridge response
@@ -106,6 +111,12 @@ node --test tests/unit/paired-chrome-spotlight-actions.test.js tests/unit/paired
 The unit tests exercise assertion helpers with counterexamples. They are not
 browser acceptance and do not prove Chrome UI behavior. A hosted run is still
 required for the final integrated Arcify commit and exact peer pin.
+
+The alias checkpoint records `proofKind` as `browser-attested-sender-tab` or
+`nonce-challenge-ack`, with its committed request ID and observed nonces. The
+captured Chrome run supplied direct `sender.tab` attestation; it did not exercise
+the nonce fallback for this action. That fallback remains mocked/unit/integration
+coverage unless a hosted artifact actually records the nonce-and-ACK route.
 
 The helper assertion also protects a regression identified in Arcify f42c4d6:
 `chrome://newtab/` was assigned Today context even though the literal extension

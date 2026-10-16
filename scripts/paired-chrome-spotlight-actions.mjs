@@ -152,14 +152,32 @@ export function assertSpotlightActionRequest(events, command, context, spotlight
     assert(!events.some(event => event.type === 'external' && event.data.message.type === 'arcify-sidebar'), 'Space actions cannot replace or route through the physical sidebar transport.');
     return message;
 }
-export function assertSpotlightHelperProof(state, events, { spotlightId, tabId, windowId }) {
+export function assertSpotlightHelperProof(state, events, { spotlightId, arcifyId, tabId, windowId, request }) {
     assert.equal(state.url, `chrome-extension://${spotlightId}/newtab.html`); assert(['chrome://newtab', 'chrome://newtab/'].includes(state.tab.url));
     assert.equal(state.tab.id, tabId); assert.equal(state.tab.windowId, windowId); assert.equal(state.tab.active, true); assert.equal(state.tab.status, 'complete'); assert(!state.tab.pendingUrl); assert.equal(state.visibility, 'visible');
     const internal = events.filter(event => event.type === 'internal').map(event => event.data);
-    const probes = internal.filter(({ message }) => message.action === 'spotlightNewTabReuseProbe' && message.tabId === tabId);
-    assert(probes.length > 0, 'Alias ownership requires the real nonce challenge, not an alias/title match.');
+    // Bind Chrome's sender metadata to the exact action already proven committed,
+    // never an unrelated context query or a URL/title-only helper match.
+    assert.equal(request.command, 'createSpaceFolder'); assert.match(request.requestId, /^[\w.:-]{1,80}$/);
+    assert.equal(request.windowId, windowId); assert.equal(request.context.windowId, windowId);
+    assert.equal(request.context.sourceTabId, tabId); assert.equal(request.context.tab, null);
+    const actions = internal.filter(({ message }) => message.action === 'arcifySpaceAction');
+    assert.equal(actions.length, 1, 'Require exactly one internal action matching the committed alias operation.');
+    const { message: action, sender: actionSender } = actions[0];
+    assert.deepEqual(Object.keys(action).sort(), ['action', 'command', 'scope', 'fields', 'tabId'].sort());
+    assert.equal(action.command, request.command); assert.equal(action.tabId, tabId); assert.deepEqual(action.fields, { title: request.title });
+    assert.deepEqual(Object.keys(action.scope).sort(), ['peerId', 'generation', 'context'].sort());
+    assert.equal(action.scope.peerId, arcifyId); assert(action.scope.generation === null || typeof action.scope.generation === 'string' && action.scope.generation.length > 0 && action.scope.generation.length <= 200);
+    assert.deepEqual(action.scope.context, request.context);
+    assert.equal(actionSender.id, spotlightId); assert.equal(actionSender.url, state.url);
+    assert.equal(actionSender.frameId, 0); assert.equal(actionSender.documentLifecycle, 'active');
+    const direct = actionSender.tab !== null && actionSender.tab !== undefined;
+    if (direct) assert.deepEqual(actionSender.tab, { id: tabId, windowId }, 'Present sender.tab must match; it cannot fall back to a nonce.');
+    const probes = internal.filter(({ message }) => message.action === 'spotlightNewTabReuseProbe');
+    if (!direct) assert(probes.length > 0, 'Without browser-attested sender.tab, alias ownership requires the real nonce challenge.');
+    assert.equal(new Set(probes.map(({ message }) => message.nonce)).size, probes.length);
     for (const { message, sender } of probes) {
-        assert.match(message.nonce, /^[0-9a-f-]{36}$/); assert.equal(message.windowId, windowId); assert.equal(sender.id, spotlightId); assert.equal(sender.tab, null);
+        assert.match(message.nonce, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/); assert.equal(message.tabId, tabId); assert.equal(message.windowId, windowId); assert.equal(sender.id, spotlightId); assert.equal(sender.tab, null);
         assert(sender.url === null || sender.url === `chrome-extension://${spotlightId}/background.js`);
         const acknowledgements = internal.filter(item => item.message.action === 'spotlightNewTabReuseAck' && item.message.nonce === message.nonce);
         assert.equal(acknowledgements.length, 1); const ack = acknowledgements[0];
@@ -167,7 +185,9 @@ export function assertSpotlightHelperProof(state, events, { spotlightId, tabId, 
         assert.equal(ack.message.tabId, tabId); assert.equal(ack.message.windowId, windowId);
         if (ack.sender.tab) assert.deepEqual(ack.sender.tab, { id: tabId, windowId });
     }
-    return { renderer: state.url, browserUrl: state.tab.url, tabId, windowId, nonces: probes.map(item => item.message.nonce) };
+    assert.equal(internal.filter(({ message }) => message.action === 'spotlightNewTabReuseAck').length, probes.length, 'Every observed ACK must belong to exactly one verified probe.');
+    return { proofKind: direct ? 'browser-attested-sender-tab' : 'nonce-challenge-ack', requestId: request.requestId,
+        renderer: state.url, browserUrl: state.tab.url, tabId, windowId, nonces: probes.map(item => item.message.nonce) };
 }
 
 function stable(before, after) {
@@ -389,7 +409,7 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
             if (command === 'openSettings') { const created = assertSpotlightSettingsOpened(before, after, { context: sourceContext, arcifyId, events: trace.events }); assert.equal(created.id, resultId); owned.push(resultId); }
             else assertSpotlightActionCommitted(before, after, { command, context: sourceContext, resultId, title, events: trace.events, request });
             if (['createSpaceFolder', 'pinCurrentTab'].includes(command)) roots.push(resultId);
-            await checkpoint('action-committed-once', { command, before, after, rows, prompt, trace, request, resultId }); outcome = { resultId, before, after, trace };
+            await checkpoint('action-committed-once', { command, before, after, rows, prompt, trace, request, resultId }); outcome = { resultId, before, after, trace, request };
         });
         return outcome;
     };
@@ -452,9 +472,9 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
             const helperAfter = await helper.page.evaluate(readNewTabReuseState);
             assert.equal(helperAfter.tab.id, helperBefore.tab.id); assert.equal(helperAfter.tab.windowId, helperBefore.tab.windowId); assert.equal(helperAfter.tab.url, helperBefore.tab.url); assert.equal(helperAfter.url, helperBefore.url); assert.equal(helperAfter.timeOrigin, helperBefore.timeOrigin);
             if (requestedUrl === 'chrome://newtab/') {
-                const options = { spotlightId, tabId: helper.tab.id, windowId };
-                const trace = await poll(() => observed(), value => { try { assertSpotlightHelperProof(helperAfter, value.peerEvents, options); return true; } catch { return false; } }, 'all real alias challenges receive independently attested renderer acknowledgements');
-                await checkpoint('browser-alias-attested-renderer', { proof: assertSpotlightHelperProof(helperAfter, trace.peerEvents, options), trace, rows });
+                const options = { spotlightId, arcifyId, tabId: helper.tab.id, windowId, request: created.request };
+                const trace = await poll(() => observed(), value => { try { assertSpotlightHelperProof(helperAfter, value.peerEvents, options); return true; } catch { return false; } }, 'committed alias action has browser-attested source metadata or a verified nonce acknowledgement');
+                await checkpoint('browser-alias-attested-renderer', { proof: assertSpotlightHelperProof(helperAfter, trace.peerEvents, options), helperBefore, helperAfter, trace, rows });
             }
             await capture(helper.page, requestedUrl === 'chrome://newtab/' ? 'alias-folder-created' : 'owned-helper-folder-created');
             await commit(helper.page, 'openSettings', helperContext);

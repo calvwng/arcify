@@ -117,10 +117,103 @@ function helperProof() {
     const state = { url: `chrome-extension://${PEER}/newtab.html`, visibility: 'visible', tab: { id: 77, windowId: 7, active: true, status: 'complete', url: 'chrome://newtab/' } };
     const message = { nonce: '00000000-0000-0000-0000-000000000001', tabId: 77, windowId: 7 };
     const events = [{ type: 'internal', data: { message: { ...message, action: 'spotlightNewTabReuseProbe' }, sender: { id: PEER, url: `chrome-extension://${PEER}/background.js`, tab: null } } }, { type: 'internal', data: { message: { ...message, action: 'spotlightNewTabReuseAck' }, sender: { id: PEER, url: state.url, frameId: 0, documentLifecycle: 'active', tab: null } } }];
-    return { state, events, options: { spotlightId: PEER, tabId: 77, windowId: 7 } };
+    const context = { windowId: 7, spaceId: 'work', bookmarkFolderId: 'root-work', pairingGeneration: 'arcify-generation', sourceTabId: 77, tab: null };
+    const request = { type: 'arcify-bridge', version: 1, requestId: 'committed-alias-folder', command: 'createSpaceFolder',
+        windowId: 7, context, title: 'Alias folder', supportedFeatures: SPACE_ACTION_FEATURES };
+    events.push({ type: 'internal', data: { message: { action: 'arcifySpaceAction', command: request.command,
+        scope: { peerId: OWN, generation: 'spotlight-generation', context: clone(context) }, fields: { title: request.title }, tabId: 77 },
+        sender: { id: PEER, url: state.url, frameId: 0, documentLifecycle: 'active', tab: null } } });
+    return { state, events, options: { spotlightId: PEER, arcifyId: OWN, tabId: 77, windowId: 7, request } };
 }
-test('browser alias needs independently attested nonce acknowledgement from its exact renderer', () => { const s = helperProof(); assertSpotlightHelperProof(s.state, s.events, s.options); });
-for (const [name, mutate] of Object.entries({ noChallenge: s => s.events = [], noAck: s => s.events.pop(), wrongAckNonce: s => s.events[1].data.message.nonce = 'other', wrongAckTab: s => s.events[1].data.message.tabId = 88, wrongAckWindow: s => s.events[1].data.message.windowId = 8, forgedSender: s => s.events[1].data.sender.id = OWN, otherRenderer: s => s.events[1].data.sender.url = `chrome-extension://${PEER}/options.html`, subframe: s => s.events[1].data.sender.frameId = 1, inactiveDocument: s => s.events[1].data.sender.documentLifecycle = 'cached', duplicateAck: s => s.events.push(clone(s.events[1])), pendingNavigation: s => s.state.tab.pendingUrl = 'http://other/', literalUrlOnly: s => s.state.tab.url = s.state.url, previousSource: s => s.state.tab.id = 88 })) test(`alias proof rejects ${name}`, () => { const s = helperProof(); mutate(s); assert.throws(() => assertSpotlightHelperProof(s.state, s.events, s.options)); });
+test('browser alias without sender.tab needs independently attested nonce acknowledgement from its exact renderer', () => {
+    const s = helperProof(), proof = assertSpotlightHelperProof(s.state, s.events, s.options);
+    assert.equal(proof.proofKind, 'nonce-challenge-ack'); assert.equal(proof.requestId, s.options.request.requestId); assert.equal(proof.nonces.length, 1);
+});
+test('omitted sender.tab also requires the complete nonce fallback', () => {
+    const s = helperProof(); delete s.events[2].data.sender.tab;
+    assert.equal(assertSpotlightHelperProof(s.state, s.events, s.options).proofKind, 'nonce-challenge-ack');
+    s.events.splice(0, 2); assert.throws(() => assertSpotlightHelperProof(s.state, s.events, s.options));
+});
+for (const [name, mutate] of Object.entries({ noChallenge: s => s.events = [], noProbe: s => s.events.shift(), noAck: s => s.events.splice(1, 1), wrongAckNonce: s => s.events[1].data.message.nonce = 'other', wrongAckTab: s => s.events[1].data.message.tabId = 88, wrongAckWindow: s => s.events[1].data.message.windowId = 8, forgedSender: s => s.events[1].data.sender.id = OWN, otherRenderer: s => s.events[1].data.sender.url = `chrome-extension://${PEER}/options.html`, subframe: s => s.events[1].data.sender.frameId = 1, inactiveDocument: s => s.events[1].data.sender.documentLifecycle = 'cached', duplicateAck: s => s.events.push(clone(s.events[1])), pendingNavigation: s => s.state.tab.pendingUrl = 'http://other/', literalUrlOnly: s => s.state.tab.url = s.state.url, previousSource: s => s.state.tab.id = 88 })) test(`alias proof rejects ${name}`, () => { const s = helperProof(); mutate(s); assert.throws(() => assertSpotlightHelperProof(s.state, s.events, s.options)); });
+
+function directHelperProof({ withChallenge = false } = {}) {
+    const s = helperProof(); s.events[2].data.sender.tab = { id: 77, windowId: 7 };
+    if (!withChallenge) s.events.splice(0, 2);
+    return s;
+}
+for (const withChallenge of [false, true]) test(`browser alias accepts exact Chrome sender.tab bound to the committed folder action, challenge ${withChallenge}`, () => {
+    const s = directHelperProof({ withChallenge }), original = clone(s);
+    const proof = assertSpotlightHelperProof(s.state, s.events, s.options);
+    assert.equal(proof.proofKind, 'browser-attested-sender-tab'); assert.equal(proof.requestId, s.options.request.requestId);
+    assert.equal(proof.nonces.length, withChallenge ? 1 : 0); assert.deepEqual(s, original);
+});
+for (const [name, mutate] of Object.entries({
+    wrongSender: s => s.events.at(-1).data.sender.id = OWN,
+    wrongRenderer: s => s.events.at(-1).data.sender.url = `chrome-extension://${PEER}/options.html`,
+    urlSuffix: s => s.events.at(-1).data.sender.url += '?other',
+    subframe: s => s.events.at(-1).data.sender.frameId = 1,
+    missingFrame: s => delete s.events.at(-1).data.sender.frameId,
+    inactiveDocument: s => s.events.at(-1).data.sender.documentLifecycle = 'cached',
+    missingLifecycle: s => delete s.events.at(-1).data.sender.documentLifecycle,
+    wrongTab: s => s.events.at(-1).data.sender.tab.id = 88,
+    wrongWindow: s => s.events.at(-1).data.sender.tab.windowId = 8,
+    malformedTab: s => s.events.at(-1).data.sender.tab = false,
+    absentTabAndNonce: s => s.events.at(-1).data.sender.tab = null,
+    wrongMessageTab: s => s.events.at(-1).data.message.tabId = 88,
+    wrongCommand: s => s.events.at(-1).data.message.command = 'openSettings',
+    wrongContext: s => s.events.at(-1).data.message.scope.context.spaceId = 'other',
+    wrongContextTab: s => s.events.at(-1).data.message.scope.context.sourceTabId = 88,
+    wrongContextWindow: s => s.events.at(-1).data.message.scope.context.windowId = 8,
+    wrongContextGeneration: s => s.events.at(-1).data.message.scope.context.pairingGeneration = 'stale',
+    wrongPeer: s => s.events.at(-1).data.message.scope.peerId = PEER,
+    malformedGeneration: s => s.events.at(-1).data.message.scope.generation = {},
+    wrongFields: s => s.events.at(-1).data.message.fields.title = 'Unrelated folder',
+    extraFields: s => s.events.at(-1).data.message.fields.extra = true,
+    extraEnvelope: s => s.events.at(-1).data.message.extra = true,
+    extraScope: s => s.events.at(-1).data.message.scope.extra = true,
+    duplicateAction: s => s.events.push(clone(s.events.at(-1))),
+    unrelatedAction: s => { const extra = clone(s.events.at(-1)); extra.data.message.command = 'openSettings'; s.events.push(extra); },
+    onlyContextQuery: s => s.events.at(-1).data.message.action = 'arcifySpaceActionsContext',
+    missingAction: s => s.events = [],
+    missingCommittedRequest: s => delete s.options.request,
+    differentCommittedTab: s => s.options.request.context.sourceTabId = 88,
+    differentCommittedWindow: s => s.options.request.windowId = 8,
+    borrowedPreviousTab: s => s.options.request.context.tab = { id: 77 }
+})) test(`direct helper proof rejects ${name}`, () => {
+    const s = directHelperProof(); mutate(s); assert.throws(() => assertSpotlightHelperProof(s.state, s.events, s.options));
+});
+for (const [name, mutate] of Object.entries({
+    wrongDirectTab: s => s.events[2].data.sender.tab.id = 88,
+    malformedDirectTab: s => s.events[2].data.sender.tab = false,
+    wrongProbeTab: s => s.events[0].data.message.tabId = 88,
+    wrongProbeWindow: s => s.events[0].data.message.windowId = 8,
+    malformedNonce: s => s.events[0].data.message.nonce = 'bad',
+    malformedNonceShape: s => { s.events[0].data.message.nonce = '-'.repeat(36); s.events[1].data.message.nonce = '-'.repeat(36); },
+    missingAck: s => s.events.splice(1, 1),
+    duplicateAck: s => s.events.push(clone(s.events[1])),
+    duplicateProbe: s => s.events.push(clone(s.events[0])),
+    extraUnmatchedAck: s => { const extra = clone(s.events[1]); extra.data.message.nonce = '00000000-0000-0000-0000-000000000002'; s.events.push(extra); }
+})) test(`direct metadata cannot excuse invalid observed nonce proof: ${name}`, () => {
+    const s = directHelperProof({ withChallenge: true }); mutate(s); assert.throws(() => assertSpotlightHelperProof(s.state, s.events, s.options));
+});
+test('hosted alias proof receives the actual committed request and records the observed proof route', async () => {
+    const source = readFileSync(new globalThis.URL('../../scripts/paired-chrome-spotlight-actions.mjs', import.meta.url), 'utf8');
+    const start = source.indexOf("            if (requestedUrl === 'chrome://newtab/') {");
+    const end = source.indexOf('            await capture(helper.page,', start);
+    assert(start > 0 && end > start);
+    const s = directHelperProof(), records = [], created = { request: s.options.request };
+    await new vm.Script(`(async () => { ${source.slice(start, end)} })()`).runInNewContext({
+        requestedUrl: 'chrome://newtab/', spotlightId: PEER, arcifyId: OWN, windowId: 7, helper: { tab: { id: 77 } },
+        helperBefore: s.state, helperAfter: s.state, created, rows: [], observed: async () => ({ peerEvents: s.events }),
+        poll: async (read, predicate) => { const value = await read(); assert(predicate(value)); return value; },
+        assertSpotlightHelperProof: (state, events, options) => { assert.equal(options.request, created.request); return assertSpotlightHelperProof(state, events, options); },
+        checkpoint: async (phase, data) => records.push({ phase, ...data })
+    });
+    assert.equal(records.length, 1); assert.equal(records[0].phase, 'browser-alias-attested-renderer');
+    assert.equal(records[0].proof.proofKind, 'browser-attested-sender-tab'); assert.deepEqual(records[0].trace.peerEvents, s.events);
+    assert.deepEqual(records[0].helperBefore, s.state); assert.deepEqual(records[0].helperAfter, s.state);
+    assert.match(source, /outcome = \{ resultId, before, after, trace, request \}/);
+});
 
 test('Remove prompt spells out exact saved deletion, retained linked pages and safe initial focus', () => {
     const prompt = { role: 'dialog', modal: 'true', visible: true, command: 'removeCurrentPin', title: 'Remove saved Space pin?', description: 'Delete the saved bookmark “Exact pin”? Every live tab linked to this exact pin will stay open as Today. Other same-address pins are unchanged.', confirm: 'Remove saved pin', cancel: 'Cancel', cancelFocused: true, input: null };
