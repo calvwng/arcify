@@ -106,7 +106,7 @@ changed to make the signed-source route pass.
 The full 47 cases (the original 39 plus two Today Move, two Today creation-order, two saved Move and two theme cases) and fresh-profile
 Favorite lifecycle 5 cases remain mandatory, with their original order and
 assertions. The supplemental job uses
-setup cases 0–2 plus distinct case 39; its four-case pass is never a full-suite pass.
+setup cases 0–2 plus distinct sidebar case 39 and Spotlight case 54; its five-case pass is never a full-suite pass.
 
 The positive fixture creates six disposable localhost pages, including two
 same-URL pages with distinct document nonces. It preserves every exact native ID

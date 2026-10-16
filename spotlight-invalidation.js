@@ -141,11 +141,19 @@ export function registerSpotlightInvalidation(store) {
         }
         schedule();
     };
+    const onSplitUpdated = (tabId, change, tab) => {
+        if (change.splitViewId === undefined) return;
+        if (isWindowId(tab?.windowId)) pending.windows.add(tab.windowId);
+        else if (isWindowId(tabId)) pending.tabs.add(tabId);
+        schedule();
+    };
+    chrome.tabs?.onUpdated?.addListener(onSplitUpdated);
     chrome.storage.onChanged.addListener(onChanged);
     // One-shot recovery after worker suspension/restart; no polling or durable queue.
     invalidateAll();
     return { invalidateAll, dispose() {
         stopped = true; generation++; clear();
         chrome.storage.onChanged.removeListener(onChanged);
+        chrome.tabs?.onUpdated?.removeListener(onSplitUpdated);
     } };
 }

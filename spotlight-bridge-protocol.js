@@ -6,12 +6,14 @@ export const PAIRING_GENERATION_KEY = 'arcifyBridgePairingGeneration';
 export const GLOBAL_FAVORITES_FEATURE = 'globalFavoritesV1';
 export const SPACE_ACTIONS_FEATURE = 'spaceActionsV1';
 export const ARCHIVE_ACTIONS_FEATURE = 'archiveActionsV1';
+export const SPLIT_ACTIONS_FEATURE = 'splitActionsV1';
+export const SPLIT_ACTION_COMMANDS = ['createSplitView', 'endSplitView'];
 export const TAB_ACTIONS_FEATURE = 'tabActionsV1';
 export const TAB_ACTION_COMMANDS = ['renameCurrentTab', 'editCurrentPinUrl', 'duplicateCurrentTab', 'copyCurrentLink', 'setCurrentTabMuted'];
 export const SPACE_ACTION_COMMANDS = ['openSettings', 'createSpaceFolder', 'pinCurrentTab', 'removeCurrentPin'];
 export const SPACE_NAVIGATION_FEATURE = 'spaceNavigationV1';
 export const SPACE_NAVIGATION_COMMANDS = ['switchSpace', 'moveCurrentTodayTab'];
-const supportedFeatures = [GLOBAL_FAVORITES_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, ARCHIVE_ACTIONS_FEATURE];
+const supportedFeatures = [GLOBAL_FAVORITES_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, ARCHIVE_ACTIONS_FEATURE, SPLIT_ACTIONS_FEATURE];
 export const isExtensionId = value => typeof value === 'string' && /^[a-p]{32}$/.test(value);
 export const isWindowId = value => Number.isSafeInteger(value) && value > 0;
 const isId = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
@@ -35,6 +37,7 @@ export function isFavoriteUrl(value) {
     catch { return false; }
 }
 const commandFields = {
+    splitActionContext: ['tabId'], createSplitView: ['context', 'target'], endSplitView: ['context'],
     archiveContext: ['tabId'], reopenArchivedTab: ['context', 'viewId', 'entryId'],
     hello: [], snapshot: [], invalidate: [], activateSpace: ['spaceId'], activateTab: ['tabId'],
     openTab: ['url', 'spaceId'], navigateTab: ['tabId', 'url'],
@@ -49,6 +52,38 @@ const commandFields = {
 const exactKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const boundedText = (value, limit) => typeof value === 'string' && value.length <= limit && !/[\u0000-\u001f\u007f]/.test(value);
+// JSON data equality ignores object field enumeration order, while retaining
+// exact keys, primitive types and array order. Native events/storage do not
+// promise the same property insertion order as extension-created objects.
+export function sameSplitValue(a, b) {
+    if (a === b) return true;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a) && a.length !== b.length) return false;
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key) && sameSplitValue(a[key], b[key]));
+}
+// Dedicated Split descriptors never broaden the exact legacy action contexts.
+export function isSplitDescriptor(tab) {
+    return exactKeys(tab, ['id', 'url', 'title', 'index', 'groupId', 'pinned', 'splitViewId'])
+        && isTabId(tab.id) && normalizeTabActionUrl(tab.url) !== null && !['chrome://newtab', 'chrome://newtab/'].includes(tab.url.split(/[?#]/)[0]) && boundedText(tab.url, 16384)
+        && boundedText(tab.title, 1024) && Number.isSafeInteger(tab.index) && tab.index >= 0
+        && Number.isSafeInteger(tab.groupId) && tab.groupId >= -1 && tab.pinned === false
+        && Number.isSafeInteger(tab.splitViewId) && tab.splitViewId >= -1;
+}
+export function isSplitActionContext(value) {
+    if (!exactKeys(value, ['windowId', 'spaceId', 'bookmarkFolderId', 'pairingGeneration', 'sourceTabId', 'tab', 'pair'])
+        || !isWindowId(value.windowId) || !isTabId(value.sourceTabId) || !isId(value.spaceId) || !boundedText(value.spaceId, 200)
+        || !isId(value.bookmarkFolderId) || !boundedText(value.bookmarkFolderId, 200)
+        || !(value.pairingGeneration === null || isId(value.pairingGeneration) && boundedText(value.pairingGeneration, 200))
+        || !Array.isArray(value.pair)) return false;
+    if (value.tab === null) return value.pair.length === 0;
+    if (!isSplitDescriptor(value.tab) || value.tab.id !== value.sourceTabId) return false;
+    if (value.tab.splitViewId === -1) return value.pair.length === 0;
+    return value.pair.length === 2 && value.pair.every(isSplitDescriptor)
+        && value.pair[0].id !== value.pair[1].id && value.pair[1].index === value.pair[0].index + 1
+        && value.pair.every(tab => tab.splitViewId === value.tab.splitViewId && tab.groupId === value.tab.groupId)
+        && value.pair.some(tab => sameSplitValue(tab, value.tab));
+}
 export function isArchiveActionContext(value) {
     return exactKeys(value, ['windowId', 'spaceId', 'bookmarkFolderId', 'sourceTabId', 'sourceUrl', 'pairingGeneration'])
         && isWindowId(value.windowId) && isId(value.spaceId) && boundedText(value.spaceId, 200) && isId(value.bookmarkFolderId) && boundedText(value.bookmarkFolderId, 200)
@@ -108,12 +143,18 @@ export function validateRequest(message, commands) {
         throw bridgeError('INVALID_REQUEST', 'Invalid supported feature marker.');
     if (['activateSpace', 'openBookmark'].includes(message.command) && !isId(message.spaceId)
         || message.command === 'openTab' && message.spaceId !== undefined && !isId(message.spaceId)
-        || ['activateTab', 'navigateTab', 'startupSuggestion', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext'].includes(message.command) && !isTabId(message.tabId)
+        || ['activateTab', 'navigateTab', 'startupSuggestion', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext', 'splitActionContext'].includes(message.command) && !isTabId(message.tabId)
         || ['openTab', 'navigateTab'].includes(message.command) && !isSafeUrl(message.url)
         || message.command === 'openBookmark' && !isId(message.bookmarkId)
         || message.command === 'openFavorite' && !isId(message.favoriteId)
         || message.command === 'launch' && !['current-tab', 'new-tab'].includes(message.mode))
         throw bridgeError('INVALID_REQUEST', 'Invalid command payload.');
+    if (SPLIT_ACTION_COMMANDS.includes(message.command) && (!isSplitActionContext(message.context)
+        || message.context.windowId !== message.windowId || !message.context.tab
+        || message.command === 'createSplitView' && (message.context.tab.splitViewId !== -1 || !isSplitDescriptor(message.target)
+            || message.target.id === message.context.sourceTabId || message.target.index === message.context.tab.index || message.target.splitViewId !== -1 || message.target.groupId !== message.context.tab.groupId)
+        || message.command === 'endSplitView' && message.context.pair.length !== 2))
+        throw bridgeError('INVALID_REQUEST', 'Invalid exact Split View context or target.');
     if (message.command === 'reopenArchivedTab' && (!isArchiveActionContext(message.context) || message.context.windowId !== message.windowId
         || !isId(message.viewId) || !isId(message.entryId))) throw bridgeError('INVALID_REQUEST', 'Invalid exact archive action.');
     if (SPACE_ACTION_COMMANDS.includes(message.command) && (!isSpaceActionContext(message.context)

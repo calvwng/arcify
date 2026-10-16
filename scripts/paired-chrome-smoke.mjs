@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { exerciseSpotlightSplit, serveSpotlightSplitFixture, SPOTLIGHT_SPLIT_CASE_NAME } from './paired-chrome-spotlight-split.mjs';
 import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
@@ -63,7 +64,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = 'b510b3dbe8cfae6441fbc55a23ce19de30805a6d';
+const PINNED_SPOTLIGHT = 'e2ffbe0982a19eacad23cc803aa42e8e6013c6d0';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',
@@ -118,12 +119,14 @@ const stepNames = [
     'Spotlight Space navigation uses genuine destination pickers and preserves exact Today/native identities',
     'Spotlight tab commands preserve exact live and saved identities through trusted input',
     'Spotlight Open Archive requires trusted input and the existing popup in the native Side Panel',
-    'Spotlight Archive reopens exact same-address entries in their original Space and source window without replay'
+    'Spotlight Archive reopens exact same-address entries in their original Space and source window without replay',
+    'Spotlight Split and End Split keep exact left and right source panes and original documents'
 ];
 assert.equal(stepNames[49], SPOTLIGHT_ACTION_CASE_NAME, 'Initial Spotlight action case must retain its reviewed identity.');
 assert.equal(stepNames[50], SPOTLIGHT_NAVIGATION_CASE_NAME, 'Spotlight navigation case must retain its reviewed identity.');
 assert.equal(stepNames[51], SPOTLIGHT_TAB_CASE_NAME, 'Spotlight tab-command case must retain its reviewed identity.');
 assert.equal(stepNames[52], SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, 'Spotlight Archive opening case must retain its identity.');
+assert.equal(stepNames[54], SPOTLIGHT_SPLIT_CASE_NAME, 'Spotlight Split case retains its mandatory source-pane identity.');
 assert.equal(stepNames[53], SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME, 'Spotlight Archive reopen case must retain its identity.');
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
@@ -953,6 +956,7 @@ try {
             if (serveSpotlightActionFixture(request, response)) return;
             if (serveSpotlightNavigationFixture(request, response)) return;
             if (serveSpotlightTabFixture(request, response)) return;
+            if (serveSpotlightSplitFixture(request, response)) return;
             if (serveSpotlightArchiveFixture(request, response)) return;
             const recovery = overlayRecoveryFixtureResponse(request.url);
             if (recovery) {
@@ -2318,6 +2322,17 @@ try {
             },
             record:async evidence => { report.nativeSplit=evidence;await saveReport(); } }));
     }
+    if (report.runMode === 'native-split') {
+    await step(stepNames[54], () => exerciseSpotlightSplit({ browser, observePage, apiPage:arcifyOptions, spotlightOptions, ui, screenshot,
+        snapshot, external, poll, fixture, arcifyId, spotlightId, search,
+        captureNativeWindow:async ({nonce,colors}) => {
+            const filename=`${String(report.screenshots.length+1).padStart(2,'0')}-spotlight-native-split-window.png`;
+            const native=await captureNativeSplitWindow({chromePid:browser.process().pid,nonce,colors,output:resolve(OUTPUT,filename)});
+            const captured={filename,label:'Spotlight native Split View with its exact active source pane',capturedAt:new Date().toISOString(),nativeWindow:true,...native};
+            report.screenshots.push(captured);await saveReport();return captured;
+        },
+        record:async evidence => { report.spotlightSplit=evidence;await saveReport(); } }));
+    } // Mandatory Spotlight case 54 extends the existing Chrome 155 fresh-profile route.
     if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {
     await step(stepNames[36], async () => {
         await normalizeReloadControlWindow({ apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,pageForUrl,arcifyId,spotlightId,sourceWindowId:fixture.windowA,counterpartWindowId:fixture.windowB,

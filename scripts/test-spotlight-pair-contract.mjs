@@ -119,3 +119,18 @@ for (const [name, replacement] of [
 ]) test(`Archive contract detects ${name}`, () => assert.throws(() => assertArchiveActionsContract(arcify, { ...archive, ...replacement })));
 test('Archive contract detects permissive provider contexts', () => assert.throws(() => assertArchiveActionsContract({ ...arcify, isArchiveActionContext: () => true }, archive)));
 test('Archive contract detects permissive provider requests', () => assert.throws(() => assertArchiveActionsContract({ ...arcify, validateRequest: value => value }, archive)));
+
+const splitActions = await peerModule('shared/arcify-split-actions-protocol.js');
+const { assertSplitActionsContract } = await import('./lib/spotlight-pair-split-contract.mjs');
+test('additive Split pair passes both exact implementations', () => assertSplitActionsContract(arcify, splitActions));
+for (const [label, patch] of [
+    ['feature', { SPLIT_ACTIONS_FEATURE: 'wrong' }], ['commands', { SPLIT_ACTION_COMMANDS: ['endSplitView'] }],
+    ['descriptor validation', { validateSplitDescriptor: value => value }], ['context validation', { validateSplitContext: value => value }],
+    ['scope validation', { validateSplitScope: value => value }], ['payload validation', { validateSplitPayload: (command, value) => value }],
+    ['receipt validation', { validateSplitResult: (command, value) => value }], ['context identity', { sameSplitContext: () => true }]
+]) test(`Split contract detects consumer ${label} drift`, () => assert.throws(() => assertSplitActionsContract(arcify, { ...splitActions, ...patch })));
+for (const [label, patch] of [
+    ['feature', { SPLIT_ACTIONS_FEATURE: 'wrong' }], ['commands', { SPLIT_ACTION_COMMANDS: ['endSplitView'] }],
+    ['descriptor validation', { isSplitDescriptor: () => true }], ['context validation', { isSplitActionContext: () => true }],
+    ['request validation', { validateRequest: value => value }]
+]) test(`Split contract detects provider ${label} drift`, () => assert.throws(() => assertSplitActionsContract({ ...arcify, ...patch }, splitActions)));

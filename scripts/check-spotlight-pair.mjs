@@ -14,6 +14,7 @@ import * as arcifyProtocol from '../spotlight-bridge-protocol.js';
 import { assertCommonV1Contract, assertInitialSpaceActionsContract } from './lib/spotlight-pair-contract.mjs';
 import { assertInitialSpaceActionRoundTrips } from './lib/spotlight-pair-actions.mjs';
 import { assertExtendedActionsContract } from './lib/spotlight-pair-extended-contract.mjs';
+import { assertSplitActionsContract } from './lib/spotlight-pair-split-contract.mjs';
 import { assertArchiveActionsContract } from './lib/spotlight-pair-archive-contract.mjs';
 import { assertArchiveActionRoundTrips } from './lib/spotlight-pair-archive-actions.mjs';
 import { assertExtendedActionRoundTrips } from './lib/spotlight-pair-extended-actions.mjs';
@@ -32,6 +33,8 @@ const spotlightTabActions = await peerModule('shared/arcify-tab-actions-protocol
 assertExtendedActionsContract(arcifyProtocol, spotlightActions, spotlightTabActions);
 const spotlightArchive = await peerModule('shared/arcify-archive-actions-protocol.js');
 assertArchiveActionsContract(arcifyProtocol, spotlightArchive);
+const spotlightSplit = await peerModule('shared/arcify-split-actions-protocol.js');
+assertSplitActionsContract(arcifyProtocol, spotlightSplit);
 
 const ARCIFY = 'a'.repeat(32);
 const SPOTLIGHT = 'b'.repeat(32);
@@ -284,3 +287,7 @@ try {
     if (previousChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = previousChrome;
 }
+
+const { assertSplitActionRoundTrips } = await import('./lib/spotlight-pair-split-actions.mjs');
+await assertSplitActionRoundTrips(await peerModule('shared/arcify-split-actions.js'));
+console.log('Actual Split create/end round trips passed for both original source sides.');

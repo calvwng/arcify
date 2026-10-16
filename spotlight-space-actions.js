@@ -49,7 +49,7 @@ function sourceTab(store, tabs, windowId, tabId, expected) {
 // Scope the fence to one read boundary. Events arriving during awaited reads
 // invalidate it, including revoke-and-repair with the same peer. It complements
 // the persisted pairing check; it is never the source of pairing authority.
-export async function fencedRead(operation, { windowId, tabIds = new Set(), ownEvent = () => false, watchTodayOrder = false } = {}) {
+export async function fencedRead(operation, { windowId, tabIds = new Set(), ownEvent = () => false, watchTodayOrder = false, watchNativeOrder = false } = {}) {
     let changed = false;
     const cleanups = [];
     const watch = (event, callback) => {
@@ -60,6 +60,12 @@ export async function fencedRead(operation, { windowId, tabIds = new Set(), ownE
     watch(chrome.tabs?.onActivated, info => { if ((info.windowId === windowId || tabIds.has(info.tabId)) && !ownEvent('tab', 'onActivated', info)) change(); });
     for (const name of ['onUpdated', 'onRemoved', 'onAttached', 'onDetached'])
         watch(chrome.tabs?.[name], (...args) => { if (tabIds.has(args[0]) && !ownEvent('tab', name, args)) change(); });
+    if (watchNativeOrder) {
+        watch(chrome.windows?.onFocusChanged, change);
+        for (const name of ['onCreated', 'onUpdated', 'onMoved', 'onRemoved']) watch(chrome.tabGroups?.[name], change);
+        watch(chrome.tabs?.onMoved, (id, info) => { if ((info?.windowId === windowId || tabIds.has(id)) && !ownEvent('tab', 'onMoved', [id, info])) change(); });
+        watch(chrome.tabs?.onCreated, tab => { if (tab.windowId === windowId) change(); });
+    }
     watch(chrome.tabs?.onReplaced, (added, removed) => { if (tabIds.has(added) || tabIds.has(removed)) change(); });
     watch(chrome.windows?.onRemoved, change);
     for (const name of ['onChanged', 'onRemoved', 'onMoved', 'onCreated'])
@@ -70,7 +76,8 @@ export async function fencedRead(operation, { windowId, tabIds = new Set(), ownE
         for (const key of fields) if (key in changes && !same(changes[key].oldValue, changes[key].newValue)
             && !ownEvent('storage', key, changes[key])) change();
     });
-    try { const result = await operation(); if (changed) throw stale(); return result; }
+    const assertUnchanged = () => { if (changed) throw stale(); };
+    try { const result = await operation(assertUnchanged); assertUnchanged(); return result; }
     finally { cleanups.forEach(cleanup => cleanup()); }
 }
 

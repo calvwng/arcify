@@ -422,3 +422,18 @@ test('combined Space metadata and exact Tab aliases retain scoped invalidation a
     assert.equal(f.local.spaceRegistry.a.icon, 'rocket'); assert.equal(f.store.active[1], 'a');
     assert(f.sent.every(({ message }) => !JSON.stringify(message).includes('Exact window alias')));
 });
+
+test('native split creation including ID zero and End Split refresh only the exact normal window', async t => {
+    const f = await fixture(t); await f.settleStartup();
+    for (const splitViewId of [0, -1]) {
+        await chrome.tabs.onUpdated.emit(1, { splitViewId }, { ...f.tabs[0], splitViewId });
+        await f.tick(); await f.tick(); assert.deepEqual(targets(f), [1]); f.sent.length = 0;
+    }
+    await chrome.tabs.onUpdated.emit(11, { splitViewId: 8 });
+    await f.tick(); await f.tick(); assert.deepEqual(targets(f), [2]); f.sent.length = 0;
+    await chrome.tabs.onUpdated.emit(1, { title: 'Unrelated native title' }, f.tabs[0]);
+    await f.tick(); assert.deepEqual(targets(f), []);
+    f.notifier.dispose();
+    await chrome.tabs.onUpdated.emit(1, { splitViewId: -1 }, f.tabs[0]);
+    await f.tick(); assert.deepEqual(targets(f), []);
+});

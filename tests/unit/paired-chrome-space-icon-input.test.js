@@ -152,7 +152,7 @@ test('new browser entry points remain non-root CI only; validators import withou
     assert.match(source, /assertAcceptedSpaceDragover\(await page\.evaluate\(readSpaceDragObservation\), destination\)/);
     assert.match(source, /assertMarkerScreenshotPixels/); assert.match(source, /Input\.cancelDragging/);
 });
-test('emoji and icon-only proof is mandatory inside existing full case 37 with preserved full-suite coverage and 5/4 supplemental plans', () => {
+test('emoji and icon-only proof is mandatory inside existing full case 37 with preserved full-suite coverage and 5/5 supplemental plans', () => {
     const context = readSourceText(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url));
     const smoke = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
     const plan = readSourceText(new URL('../../scripts/paired-chrome-run-plan.mjs', import.meta.url));
@@ -163,7 +163,7 @@ test('emoji and icon-only proof is mandatory inside existing full case 37 with p
     assert.match(smoke, /await step\(stepNames\[37\], \(\) => exerciseSpaceContextBasics/);
     assert.match(smoke, /snapshot,poll,fixture,arcifyId,screenshotBytes:shot=>readFile\(resolve\(OUTPUT,shot\.filename\)\)/);
     assert.match(plan, /const FAVORITE_LIFECYCLE_CASE_INDICES = Object\.freeze\(\[0, 1, 2, 36, 32\]\)/);
-    assert.match(plan, /const NATIVE_SPLIT_CASE_INDICES = Object\.freeze\(\[0, 1, 2, 39\]\)/);
+    assert.match(plan, /const NATIVE_SPLIT_CASE_INDICES = Object\.freeze\(\[0, 1, 2, 39, 54\]\)/);
     for (const path of ['scripts/paired-chrome-space-icon-input.mjs', 'tests/unit/paired-chrome-space-icon-input.test.js', 'docs/space-icon-input-validation.md']) assert(workflow.includes(`- '${path}'`));
     assert.match(smoke, /IME candidate windows\/composition/); assert.match(smoke, /tooltip painting is not captured/);
 });

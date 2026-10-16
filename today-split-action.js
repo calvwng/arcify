@@ -22,7 +22,13 @@ export function nativeSplitAvailable(api = globalThis.chrome) {
 // No durable split IDs or guessed partners: native state is the session authority.
 // The same SpaceStore queue as membership writes owns the only adjacency move.
 export function runTodaySplitAction(store, request) {
-    return store.run(async () => {
+    return store.run(() => runTodaySplitActionCore(store, request));
+}
+
+// Queue-free core: the external Spotlight bridge already owns SpaceStore.run.
+// Optional guards are supplied by its exact-context adapter; sidebar callers
+// retain the same native identity checks and response shape.
+export async function runTodaySplitActionCore(store, request, { beforeBoundary = async () => {}, assertFresh = () => {}, transition = {} } = {}) {
         if (!request || typeof request !== 'object' || Array.isArray(request) ||
             Object.keys(request).some(key => !['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'entries'].includes(key)) ||
             request.type !== undefined && request.type !== 'todaySplitAction' || !['create', 'end'].includes(request.action) ||
@@ -46,13 +52,18 @@ export function runTodaySplitAction(store, request) {
             return space;
         };
         let canonical = [...getSpace().temporaryTabs], reordered = false, moveAttempted = false, nativeAttempted = false;
+        const boundary = async (expected, expectedOrder, phase) => {
+            assertFresh();
+            await beforeBoundary({ expected, expectedOrder, canonical, phase, transition });
+            assertFresh();
+        };
         async function resolve(expected = entries, expectedOrder = null, after = false) {
             const space = getSpace();
             if (!sameIds(space.temporaryTabs, canonical)) throw changed();
-            const window = await chrome.windows.get(windowId);
+            const window = await chrome.windows.get(windowId); assertFresh();
             if (!window || window.id !== windowId || window.type !== 'normal' || window.incognito) throw changed();
-            const bindings = await Utils.getPinnedTabStates();
-            const live = (await chrome.tabs.query({ windowId })).sort((a, b) => a.index - b.index);
+            const bindings = await Utils.getPinnedTabStates(); assertFresh();
+            const live = (await chrome.tabs.query({ windowId })).sort((a, b) => a.index - b.index); assertFresh();
             const pair = expected.map(entry => {
                 const matches = live.filter(tab => tab.id === entry.tabId), tab = matches[0];
                 if (matches.length !== 1 || !tab || tab.windowId !== windowId || tab.incognito || tab.pinned ||
@@ -72,6 +83,7 @@ export function runTodaySplitAction(store, request) {
             return { pair: pair.sort((a, b) => a.index - b.index), live };
         }
         try {
+            await boundary(entries, null, 'initial');
             let current = await resolve();
             let expected = entries, expectedOrder = current.live.map(tab => tab.id);
             if (action === 'create' && current.pair[1].index !== current.pair[0].index + 1) {
@@ -88,30 +100,45 @@ export function runTodaySplitAction(store, request) {
                 expectedOrder = expectedOrder.filter(id => id !== second.id);
                 expectedOrder.splice(expectedOrder.indexOf(first.id) + 1, 0, second.id);
                 expected = entries.map(entry => ({ ...entry, index: expectedOrder.indexOf(entry.tabId) }));
-                moveAttempted = true;
+                await boundary(entries, current.live.map(tab => tab.id), 'beforeMove');
+                transition.move = { tabId: second.id, windowId, fromIndex: second.index, toIndex: first.index + 1 };
+                moveAttempted = true; transition.attempted = true;
                 await chrome.tabs.move(second.id, { index: first.index + 1 });
-                reordered = true;
+                reordered = true; transition.reordered = true;
+                await boundary(expected, expectedOrder, 'afterMove');
                 await resolve(expected, expectedOrder);
                 const space = getSpace();
                 if (!sameIds(next, canonical)) {
+                    await boundary(expected, expectedOrder, 'beforeCanonical');
                     const beforeIds = canonical;
                     space.temporaryTabs = next; canonical = [...next];
                     store.rebaseSectionRanks(space, 'temporaryTabs', beforeIds);
                     // Do not let optional projection turn this single explicit move
                     // into a whole-window reorder before the native split is formed.
-                    await store.persist({ skipGroupSync: true });
+                    transition.persistenceStarted = true;
+                    await boundary(expected, expectedOrder, 'beforePersist');
+                    await store.persist({ skipGroupSync: true, ...(transition.guarded ? { beforeWrite: () => boundary(expected, expectedOrder, 'persistWrite') } : {}) });
+                    await boundary(expected, expectedOrder, 'afterPersist');
                 }
             }
             current = await resolve(expected, expectedOrder);
             if (action === 'create' && current.pair[1].index !== current.pair[0].index + 1) throw changed();
-            nativeAttempted = true;
+            await boundary(expected, expectedOrder, 'beforeNative');
+            nativeAttempted = true; transition.attempted = true; transition.nativeStarted = true;
             let resultingSplitId = -1;
+            transition.nativeIds = current.pair.map(tab => tab.id);
+            transition.resultingSplitId = action === 'end' ? -1 : null;
             if (action === 'end') await chrome.tabs.unsplit(splitId(current.pair[0]));
             else {
                 resultingSplitId = await chrome.tabs.createSplit(current.pair.map(tab => tab.id));
                 if (!Number.isSafeInteger(resultingSplitId) || resultingSplitId < 0) throw new Error('The browser did not return a valid native split identity.');
             }
-            await resolve(expected.map(entry => ({ ...entry, splitViewId: resultingSplitId })), expectedOrder, true);
+            if (transition.resultingSplitId !== null && transition.resultingSplitId !== resultingSplitId) throw new Error('The native split event and result identity disagree.');
+            transition.resultingSplitId = resultingSplitId; transition.committed = true;
+            const finalEntries = expected.map(entry => ({ ...entry, splitViewId: resultingSplitId }));
+            await boundary(finalEntries, expectedOrder, 'afterNative');
+            await resolve(finalEntries, expectedOrder, true);
+            transition.receipt = { tabIds: current.pair.map(tab => tab.id), splitViewId: resultingSplitId };
             return { reordered };
         } catch (error) {
             const prefix = reordered ? 'The tabs were placed next to each other, but Split View could not be confirmed. '
@@ -120,7 +147,6 @@ export function runTodaySplitAction(store, request) {
             if (prefix) throw new Error(`${prefix}${error.message} Arcify did not close any tabs. Nothing was retried.`);
             throw error;
         }
-    });
 }
 
 export function registerTodaySplitMessages(store) {

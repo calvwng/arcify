@@ -89,7 +89,7 @@ on another fresh profile with passive Sidebar event observation initialized.
 These supplemental outcomes do not replace any other job or establish a full pass.
 
 The runner and all eight workflow jobs pin the reviewed integrated Spotlight
-commit `b510b3dbe8cfae6441fbc55a23ce19de30805a6d`. Hosted acceptance remains pending
+commit `e2ffbe0982a19eacad23cc803aa42e8e6013c6d0`. Hosted acceptance remains pending
 for the final integrated Arcify commit; local oracle checks are not browser proof.
 
 `runHostedOverlayRecovery` creates one nonce-bearing ordinary source through its

@@ -71,7 +71,7 @@ test('both exact nonce routes execute before the generic handler and preserve CS
     }
     let handler; const noRoute = () => false;
     new vm.Script(source).runInNewContext({ createServer: value => { handler = value; }, URL, titles: {},
-        serveSpotlightArchiveFixture: noRoute, serveSpotlightActionFixture: noRoute, serveSpotlightNavigationFixture, serveSpotlightTabFixture, overlayRecoveryFixtureResponse: () => null,
+        serveSpotlightSplitFixture: noRoute, serveSpotlightArchiveFixture: noRoute, serveSpotlightActionFixture: noRoute, serveSpotlightNavigationFixture, serveSpotlightTabFixture, overlayRecoveryFixtureResponse: () => null,
         serveNativeSplitFixture: noRoute, serveTabMenuFixture: noRoute, serveTodayMoveFixture: noRoute, serveSavedMoveFixture: noRoute,
         serveTodayOrderFixture: noRoute, serveOrdinaryFavoriteFixture: noRoute, serveFavoriteIconFixture: noRoute });
     for (const kind of ['spotlight-navigation', 'spotlight-tabs']) {

@@ -36,7 +36,7 @@ It does not retry a failed case or reuse another job's mutated profile. The full
 exact integrated commit; success here cannot override another job's failure.
 
 All jobs keep exact read-only checkouts with Spotlight pinned to
-`b510b3dbe8cfae6441fbc55a23ce19de30805a6d`, production builds and the isolated driver.
+`e2ffbe0982a19eacad23cc803aa42e8e6013c6d0`, production builds and the isolated driver.
 The new job has no dependency on another job, browser update, new secret,
 permission change, security exemption or retry. Sandbox, native input, exact
 identity, window-B, screenshot, crash and page-error gates are unchanged.

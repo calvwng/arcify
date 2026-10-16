@@ -1,3 +1,5 @@
+import { nativeSplitAvailable } from './today-split-action.js';
+import { readSplitActionContext, runSplitAction } from './spotlight-split-actions.js';
 import { SpotlightArchiveActions, ARCHIVE_OPEN_TYPE } from './spotlight-archive-actions.js';
 import { normalizeSpaceColor } from './space-colors.js';
 import { createSidebarNewTabLauncher } from './sidebar-new-tab-launch.js';
@@ -11,9 +13,9 @@ import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
 import { readSpaceNavigationContext, runSpaceNavigation } from './spotlight-space-navigation.js';
 import { readTabActionContext, runTabAction } from './spotlight-tab-actions.js';
 import { readSpaceActionContext, runSpaceAction } from './spotlight-space-actions.js';
-import { ARCHIVE_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
+import { SPLIT_ACTIONS_FEATURE, SPLIT_ACTION_COMMANDS, ARCHIVE_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
-const COMMANDS = ['archiveContext', 'reopenArchivedTab', 'hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
+const COMMANDS = ['splitActionContext', ...SPLIT_ACTION_COMMANDS, 'archiveContext', 'reopenArchivedTab', 'hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
 const JOURNAL_KEY = 'spotlightBridgeRequests';
 
 // Only reads Arcify's authoritative model. Group IDs/names never enter the protocol.
@@ -173,12 +175,15 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
         };
         if (!trustedSender(sender, peerId)) throw bridgeError('UNAUTHORIZED', 'This extension is not paired with Arcify.');
         validateRequest(request, COMMANDS);
-        const readOnly = ['hello', 'snapshot', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext'].includes(request.command);
+        const readOnly = ['hello', 'snapshot', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext', 'splitActionContext'].includes(request.command);
         const spaceAction = SPACE_ACTION_COMMANDS.includes(request.command);
         const tabAction = TAB_ACTION_COMMANDS.includes(request.command);
         const navigation = SPACE_NAVIGATION_COMMANDS.includes(request.command);
+        const splitAction = SPLIT_ACTION_COMMANDS.includes(request.command);
         const archiveAction = request.command === 'reopenArchivedTab';
-        const contextualAction = spaceAction || tabAction || navigation || archiveAction;
+        const contextualAction = spaceAction || tabAction || navigation || archiveAction || splitAction;
+        if ((splitAction || request.command === 'splitActionContext') && (!request.supportedFeatures?.includes(SPLIT_ACTIONS_FEATURE) || !nativeSplitAvailable()))
+            throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate supported native Split View actions before sending this request.');
         if ((archiveAction || request.command === 'archiveContext') && (!request.supportedFeatures?.includes(ARCHIVE_ACTIONS_FEATURE) || !archiveActions.supported()))
             throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate exact archive actions before sending this request.');
         if ((navigation || request.command === 'navigationContext') && !request.supportedFeatures?.includes(SPACE_NAVIGATION_FEATURE))
@@ -215,6 +220,8 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
         const snapshot = contextualAction ? null : await getBridgeSnapshot(store, request.windowId);
         await checkPairing();
         if (readOnly) {
+            const splitContext = request.command === 'splitActionContext' ? await store.run(() => readSplitActionContext(store, request,
+                { pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : null;
             const archiveContext = request.command === 'archiveContext' ? await store.run(() => archiveActions.prepareUnlocked(request,
                 { peerId, pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : null;
             const navigationContext = request.command === 'navigationContext' ? await store.run(() => readSpaceNavigationContext(store, request,
@@ -225,7 +232,7 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
                 { pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : undefined;
             await checkPairing();
             return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot,
-                ...(archiveContext ? { archiveActions: archiveContext } : {}), ...(actionContext ? { actionContext } : {}), ...(tabActionContext ? { tabActionContext } : {}), ...(navigationContext || {}), ...(commandCapabilities(request, chrome, store)) });
+                ...(splitContext || {}), ...(archiveContext ? { archiveActions: archiveContext } : {}), ...(actionContext ? { actionContext } : {}), ...(tabActionContext ? { tabActionContext } : {}), ...(navigationContext || {}), ...(commandCapabilities(request, chrome, store)) });
         }
         const entry = { key, fingerprint: JSON.stringify(request) };
         const next = [...journal.slice(-99), entry];
@@ -239,7 +246,7 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
             // persisted authority read before the caller's mutation boundary.
             const beforeMutation = async () => { await requireFeatures(); await checkPairing(); };
             await beforeMutation();
-            return archiveAction ? archiveActions.reopenUnlocked(request, { peerId, pairingGeneration: generation ?? null, beforeMutation }) : navigation ? runSpaceNavigation(store, request, { beforeMutation }) : tabAction ? runTabAction(store, request, { beforeMutation }) : spaceAction ? runSpaceAction(store, request, { beforeMutation })
+            return splitAction ? runSplitAction(store, request, { beforeMutation }) : archiveAction ? archiveActions.reopenUnlocked(request, { peerId, pairingGeneration: generation ?? null, beforeMutation }) : navigation ? runSpaceNavigation(store, request, { beforeMutation }) : tabAction ? runTabAction(store, request, { beforeMutation }) : spaceAction ? runSpaceAction(store, request, { beforeMutation })
                 : runBridgeAction(store, request, snapshot, { beforeMutation });
         });
         if (contextualAction) {
@@ -309,6 +316,7 @@ export function registerSpotlightBridge(store) {
 function commandCapabilities(request, browser, store) {
     return request.command === 'hello' ? { capabilities: [
         ...(typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : []),
+        ...(nativeSplitAvailable(browser) && request.supportedFeatures?.includes(SPLIT_ACTIONS_FEATURE) ? [SPLIT_ACTIONS_FEATURE] : []),
         ...(store.archiveStore && request.supportedFeatures?.includes(ARCHIVE_ACTIONS_FEATURE) ? [ARCHIVE_ACTIONS_FEATURE] : []),
         ...(request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE) ? [SPACE_ACTIONS_FEATURE] : []),
         ...(request.supportedFeatures?.includes(SPACE_NAVIGATION_FEATURE) ? [SPACE_NAVIGATION_FEATURE] : []),

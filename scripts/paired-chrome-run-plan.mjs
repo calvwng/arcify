@@ -7,7 +7,7 @@ const FULL_CASE_INDICES = Object.freeze([...Array.from({ length: 32 }, (_, index
 const FAVORITE_LIFECYCLE_CASE_INDICES = Object.freeze([0, 1, 2, 36, 32]);
 // Supplemental positive capability coverage never removes full/lifecycle cases.
 export const NATIVE_SPLIT_CASE_NAME = 'Today real drag and keyboard create native Split View pairs without replacing pages';
-const NATIVE_SPLIT_CASE_INDICES = Object.freeze([0, 1, 2, 39]);
+const NATIVE_SPLIT_CASE_INDICES = Object.freeze([0, 1, 2, 39, 54]);
 // Case 33 owns its density fixtures and persists Standard/default appearance.
 // Run it unchanged before the native theme/options/recovery/initial-action cases.
 const APPEARANCE_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 33, 46, 47, 48, 49]);
@@ -48,7 +48,7 @@ export function createPairedChromeRunReport(caseNames, mode = 'full') {
             'Supplemental fresh-profile Spotlight Space navigation and tab-command coverage; this is not a full-suite, recovery or appearance result.' : mode === 'recovery-actions' ?
             'Supplemental fresh-profile overlay recovery and initial Spotlight actions coverage; this is not a full-suite or appearance result.' : mode === 'appearance-actions' ?
             'Supplemental fresh-profile appearance, theme, options, recovery and initial Spotlight actions coverage; this is not a full-suite result.' : mode === 'native-split' ?
-            'Supplemental fresh-profile native Split View positive coverage; this is not a full-suite result.' :
+            'Supplemental fresh-profile native Split View and trusted Spotlight left/right source-pane coverage; this is not a full-suite result.' :
             'Supplemental fresh-profile Favorite lifecycle coverage; this is not a full-suite result.',
         expectedCaseCount: indices.length,
         expectedCases,

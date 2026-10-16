@@ -80,7 +80,7 @@ test('independent reopen persistence failure remains fatal without retry or borr
 });
 for (const mode of oldModes) test(`${mode} cannot run or claim Archive acceptance`, async () => {
     const { report, calls, saves } = await runArchive({ mode }); assert.deepEqual(report, { runMode: mode }); assert.deepEqual(calls, []); assert.deepEqual(saves, []);
-    assert(!createPairedChromeRunReport(names, mode).expectedCases.some(item => item.caseIndex >= 52));
+    assert(!createPairedChromeRunReport(names, mode).expectedCases.some(item => [52, 53].includes(item.caseIndex)));
 });
 for (const failAt of [52, 53]) test(`Archive case ${failAt} keeps partial evidence and aborts without retry`, async () => {
     const { report, calls, saves } = await runArchive({ failAt }); assert.deepEqual(calls, failAt === 52 ? [52] : [52, 53]); assert.equal(saves.length, failAt === 52 ? 1 : 3);
@@ -95,7 +95,7 @@ test('dedicated real nonce HTTP route precedes generic handler and never serves 
     const source = runner.slice(runner.indexOf('server = createServer('), runner.indexOf('await new Promise(resolve => server.listen'));
     assert(source.includes('if (serveSpotlightArchiveFixture(request, response)) return;')); assert(source.indexOf('serveSpotlightArchiveFixture') < source.indexOf('const title = titles[path]'));
     let handler; const noRoute = () => false;
-    new vm.Script(source).runInNewContext({ createServer: value => { handler = value; }, URL, titles: {}, serveSpotlightArchiveFixture,
+    new vm.Script(source).runInNewContext({ createServer: value => { handler = value; }, URL, titles: {}, serveSpotlightSplitFixture: noRoute, serveSpotlightArchiveFixture,
         serveSpotlightActionFixture: noRoute, serveSpotlightNavigationFixture: noRoute, serveSpotlightTabFixture: noRoute, overlayRecoveryFixtureResponse: () => null,
         serveNativeSplitFixture: noRoute, serveTabMenuFixture: noRoute, serveTodayMoveFixture: noRoute, serveSavedMoveFixture: noRoute, serveTodayOrderFixture: noRoute, serveOrdinaryFavoriteFixture: noRoute, serveFavoriteIconFixture: noRoute });
     const responses = [];

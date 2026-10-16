@@ -38,7 +38,7 @@ normalization in case 36 is retained. Original job security/body receipts remain
 unchanged. The original seven jobs remain mandatory, with `archive-reopen` added
 as an eighth mandatory outcome. All eight jobs must use the same
 reviewed exact Spotlight revision, currently
-`b510b3dbe8cfae6441fbc55a23ce19de30805a6d`. This local pin does not publish it
+`e2ffbe0982a19eacad23cc803aa42e8e6013c6d0`. This local pin does not publish it
 or run a workflow.
 
 ## Case 52: native opening

@@ -16,7 +16,7 @@ const recoveryActionsOrder = [0, 1, 2, 48, 49];
 const extendedActionsOrder = [0, 1, 2, 50, 51];
 const archiveActionsOrder = [0, 1, 2, 52, 53];
 const archiveReopenOrder = [0, 1, 2, 53];
-const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder], ['archive-actions', archiveActionsOrder], ['archive-reopen', archiveReopenOrder]];
+const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39, 54]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder], ['archive-actions', archiveActionsOrder], ['archive-reopen', archiveReopenOrder]];
 const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 const indices = report => report.expectedCases.map(item => item.caseIndex);
 const stepIndices = source => [...source.matchAll(/await step\(stepNames\[(\d+)\]/g)].map(match => Number(match[1]));
@@ -135,7 +135,7 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     const lifecycle = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {");
     assert(firstFull > 0 && firstFull < firstEnd && firstEnd < appearance && appearance < appearanceEnd &&
         appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < extended && extended < extendedEnd && extendedEnd < archive && archive < archiveOpenEnd && archiveOpenEnd < archiveReopen && archiveReopen < archiveEnd && archiveEnd < lifecycle);
-    assert.deepEqual(stepIndices(smoke), [...fullOrder.slice(0, -2), 50, 51, 52, 53, ...fullOrder.slice(-2)], 'Every case definition remains single; the original full case order is unchanged.');
+    assert.deepEqual(stepIndices(smoke), [...fullOrder.slice(0, -2), 50, 51, 52, 53, 54, ...fullOrder.slice(-2)], 'Every case definition remains single; the original full case order is unchanged.');
     assert.deepEqual(stepIndices(smoke.slice(0, firstFull)), [0, 1, 2]);
     assert.deepEqual(stepIndices(smoke.slice(firstFull, firstEnd)), Array.from({ length: 29 }, (_, index) => index + 3));
     assert.deepEqual(stepIndices(smoke.slice(appearance, appearanceEnd)), [33]);
@@ -260,9 +260,9 @@ test('workflow preserves original jobs and adds independent mandatory fresh-runn
 
 test('supplemental native split mode preserves full49/lifecycle5 and requires real positive case', () => {
     const report = createPairedChromeRunReport(names, 'native-split');
-    assert.deepEqual(indices(report), [0, 1, 2, 39]);
-    assert.equal(report.expectedCaseCount, 4);
-    assert.match(report.scope, /Supplemental fresh-profile native Split View positive/);
+    assert.deepEqual(indices(report), [0, 1, 2, 39, 54]);
+    assert.equal(report.expectedCaseCount, 5);
+    assert.match(report.scope, /Supplemental fresh-profile native Split View and trusted Spotlight/);
     assert.match(report.scope, /not a full-suite result/);
     assert.match(report.expectedCases[3].name, /real drag and keyboard create native Split View/);
     assert.equal(createPairedChromeRunReport(names, 'full').expectedCaseCount, 49);
@@ -295,7 +295,7 @@ test('appearance-actions selects its exact eight setup/prerequisite/acceptance c
     assert.deepEqual(JSON.parse(JSON.stringify(report)), report);
     assert.deepEqual(indices(createPairedChromeRunReport(names, 'full')), fullOrder);
     assert.deepEqual(indices(createPairedChromeRunReport(names, 'favorite-lifecycle')), lifecycleOrder);
-    assert.deepEqual(indices(createPairedChromeRunReport(names, 'native-split')), [0, 1, 2, 39]);
+    assert.deepEqual(indices(createPairedChromeRunReport(names, 'native-split')), [0, 1, 2, 39, 54]);
     for (const caseIndex of [3, 31, 32, 34, 35, 36, 37, 38, 39, 40, 45]) {
         assert.throws(() => beginPairedChromeCase(report, names[caseIndex]), /not selected/);
     }
@@ -331,7 +331,7 @@ test('existing callbacks retain their reviewed bytes except exact additive route
             else definitions.set(definition.caseIndex, definition);
         }
     }
-    assert.deepEqual([...definitions.keys()].sort((a, b) => a - b), Array.from({ length: 54 }, (_, index) => index));
+    assert.deepEqual([...definitions.keys()].sort((a, b) => a - b), Array.from({ length: 55 }, (_, index) => index));
     // Normalize only these reviewed additive harness lines. The reviewed case 36 control-window setup
     // is retained in its new receipt; other original bodies/options/names stay unchanged. New wiring has its
     // own executable mocked-adapter tests in paired-chrome-extended-wiring.
@@ -340,11 +340,12 @@ test('existing callbacks retain their reviewed bytes except exact additive route
     const preserved = [...definitions].filter(([index]) => index < 50).sort(([a], [b]) => a - b).map(([, item]) => ({ ...item,
         callback: item.callback.replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
+            .replace('            if (serveSpotlightSplitFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
             .replace('        helperNavigation:true,\n', '') }));
     assert.equal(digest(preserved), '78ad712cf32595be32920d118d0bd7206a85713620a140afe1f83ce468ca0088');
     // Supplemental callbacks 50–53 are unchanged from a56bd14; reopening shares the exact case 53 definition.
-    assert.equal(digest([...definitions].filter(([index]) => index >= 50).sort(([a], [b]) => a - b).map(([, item]) => item)), '8f9a8a9f702230caf28fedeaf95b84cbbbc18ae15294506eb8eaf3c2f7ca0bef');
+    assert.equal(digest([...definitions].filter(([index]) => index >= 50 && index < 54).sort(([a], [b]) => a - b).map(([, item]) => item)), '8f9a8a9f702230caf28fedeaf95b84cbbbc18ae15294506eb8eaf3c2f7ca0bef');
     assert.equal(digest(names.slice(0, 50)), '82b76b57d9a4a3fcefa59ea4db2f52af9664a1d5693b2efff89405c32827c36c');
 });
 
@@ -358,16 +359,22 @@ test('all five original workflow jobs retain reviewed bytes and order except the
         ['recovery-actions', 'ef0ee6ab8d6275b1509f56446bc011c1e10b99c968b459ec8997f2f0ab328c5f']
     ];
     // Only this exact reviewed companion upgrade is excluded from legacy bytes.
-    const legacyPinBytes = source => source.replaceAll('b510b3dbe8cfae6441fbc55a23ce19de30805a6d', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
+    const legacyPinBytes = source => source.replaceAll('e2ffbe0982a19eacad23cc803aa42e8e6013c6d0', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
     assert.deepEqual(jobs.slice(0, 5).map(match => [match[1], digest(legacyPinBytes(match[0].trimEnd()))]), receipts);
     assert.equal(jobs[5][1], 'extended-actions');
     assert.equal(jobs[6][1], 'archive-actions');
     assert.equal(jobs[7][1], 'archive-reopen');
     assert.equal(jobs.length, 8);
-    // Existing supplemental jobs and all event/security configuration retain a56bd14 bytes.
-    assert.equal(digest(jobs[5][0].trimEnd()), '0d01f7440c701db284e286566d4acbd7ba3d590e52e01c8e54435a14aa92875c');
-    assert.equal(digest(jobs[6][0].trimEnd()), 'aefdebbb6af8c3c11e312ecb716bb5d7c172117a9cffd0df638e3002216b6cdc');
-    assert.equal(digest(workflow.slice(0, workflow.indexOf('jobs:'))), '1bc18e330dfd97cfdca18fa5cb05a035dd3061ed1a61e182c82019aee5d1e1d1');
+    // Existing supplemental jobs retain a56bd14 bytes except this exact peer-pin upgrade.
+    const archivePinBytes = source => source.replaceAll('e2ffbe0982a19eacad23cc803aa42e8e6013c6d0', 'b510b3dbe8cfae6441fbc55a23ce19de30805a6d');
+    assert.equal(digest(archivePinBytes(jobs[5][0].trimEnd())), '0d01f7440c701db284e286566d4acbd7ba3d590e52e01c8e54435a14aa92875c');
+    assert.equal(digest(archivePinBytes(jobs[6][0].trimEnd())), 'aefdebbb6af8c3c11e312ecb716bb5d7c172117a9cffd0df638e3002216b6cdc');
+    // Normalize only the seven reviewed additive Split watch paths; event/security configuration is unchanged.
+    const splitWatchPaths = ['scripts/paired-chrome-spotlight-split.mjs', 'spotlight-split-actions.js',
+        'tests/unit/spotlight-split-actions.test.js', 'tests/unit/paired-chrome-spotlight-split.test.js',
+        'tests/unit/paired-chrome-split-wiring.test.js', 'scripts/lib/spotlight-pair-split-*.mjs', 'docs/spotlight-split-actions.md'];
+    const originalEvents = splitWatchPaths.reduce((source, path) => source.replace(`      - '${path}'\n`, ''), workflow.slice(0, workflow.indexOf('jobs:')));
+    assert.equal(digest(originalEvents), '1bc18e330dfd97cfdca18fa5cb05a035dd3061ed1a61e182c82019aee5d1e1d1');
     // No shared conditions or workflow event/security changes can hide a job.
     assert.equal(workflow.match(/^permissions:\n  contents: read$/gm)?.length, 1);
     assert.doesNotMatch(workflow, /pull_request_target:|\bneeds:|continue-on-error:|fail-fast:|strategy:|secrets\.|permissions:\s*write|concurrency:/);
