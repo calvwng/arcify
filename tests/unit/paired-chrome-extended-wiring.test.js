@@ -47,7 +47,7 @@ test('extended case identities are explicit and execute once with exact shared a
     assert.equal(saves[0].spotlightNavigation.complete, false); assert.equal(saves[2].spotlightTabCommands.complete, false);
     assert.doesNotMatch(block, /windowIsolation|prepareRecovery|\.catch\(|retry|skipped/);
 });
-for (const mode of ['full', 'favorite-lifecycle', 'native-split', 'appearance-actions', 'recovery-actions']) test(`${mode} cannot run or claim extended-action evidence`, async () => {
+for (const mode of ['full', 'favorite-lifecycle', 'native-split', 'appearance-actions', 'recovery-actions', 'archive-actions']) test(`${mode} cannot run or claim extended-action evidence`, async () => {
     const { report, calls, saves } = await runExtended({ mode });
     assert.deepEqual(calls, []); assert.deepEqual(saves, []); assert.deepEqual(report, { runMode: mode });
 });
@@ -71,7 +71,7 @@ test('both exact nonce routes execute before the generic handler and preserve CS
     }
     let handler; const noRoute = () => false;
     new vm.Script(source).runInNewContext({ createServer: value => { handler = value; }, URL, titles: {},
-        serveSpotlightActionFixture: noRoute, serveSpotlightNavigationFixture, serveSpotlightTabFixture, overlayRecoveryFixtureResponse: () => null,
+        serveSpotlightArchiveFixture: noRoute, serveSpotlightActionFixture: noRoute, serveSpotlightNavigationFixture, serveSpotlightTabFixture, overlayRecoveryFixtureResponse: () => null,
         serveNativeSplitFixture: noRoute, serveTabMenuFixture: noRoute, serveTodayMoveFixture: noRoute, serveSavedMoveFixture: noRoute,
         serveTodayOrderFixture: noRoute, serveOrdinaryFavoriteFixture: noRoute, serveFavoriteIconFixture: noRoute });
     for (const kind of ['spotlight-navigation', 'spotlight-tabs']) {

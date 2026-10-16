@@ -16,6 +16,7 @@ registerStartupLauncher();
  * - All content script Chrome API requests must route through here via message passing
  */
 
+import { registerArchiveMessages } from './archive-store.js';
 import { SpaceStore, ownerOf } from './space-store.js';
 import { createFavoriteContinuity } from './favorite-continuity.js';
 import { FavoriteStore, registerFavoriteMessages } from './favorite-store.js';
@@ -32,6 +33,7 @@ import { createNativeSplitWriteGuard } from './native-split-safety.js';
 
 const spaceStore = new SpaceStore();
 spaceStore.install();
+registerArchiveMessages(spaceStore);
 registerTodayFolderMessages(spaceStore);
 registerTodayMoveMessages(spaceStore);
 registerSavedMoveMessages(spaceStore);
@@ -309,11 +311,9 @@ async function runAutoArchiveCheck() {
                 if (!spaceId || current.windowId !== tab.windowId || current.incognito || current.active || current.audible
                     || isStartupLauncherTab(current) || spaceStore.isGlobalTab(current)
                     || isProtectedFavorite(current, currentProtectedIds, await Utils.getPinnedTabStates(), protectedUrlKeys)) return;
-                await Utils.addArchivedTab({ url: current.url, name: current.title || current.url, spaceId });
-                // Favorite adoption cannot interleave with this final read/remove.
-                current = await chrome.tabs.get(current.id);
-                if (current.pinned || current.active || current.audible || spaceStore.isGlobalTab(current)) return;
-                await chrome.tabs.remove(current.id);
+                const space = spaceStore.spaces.find(space => space.id === spaceId);
+                await spaceStore.archiveStore.archiveUnlocked({ tabId: current.id, windowId: current.windowId,
+                    spaceId, bookmarkFolderId: space.bookmarkFolderId, url: current.url }, { automatic: true, protectedUrlKeys });
                 await removeTabLastActivity(current.id);
             });
         }

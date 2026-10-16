@@ -1,3 +1,4 @@
+import { archiveRequest } from './archive-client.js';
 import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
 import { getTodayOrderInverted } from './today-order.js';
 import { isPracticeUrl } from './tour-practice.js';
@@ -19,8 +20,6 @@ import { getSpaceTabs, spaceRequest } from './space-client.js';
 import { BookmarkUtils } from './bookmark-utils.js';
 import { Logger } from './logger.js';
 
-const MAX_ARCHIVED_TABS = 100;
-const ARCHIVED_TABS_KEY = 'archivedTabs';
 
 const Utils = {
 
@@ -304,100 +303,36 @@ const Utils = {
         return settings.autoArchiveEnabled;
     },
 
-    // Get all archived tabs
-    getArchivedTabs: async function () {
-        const result = await chrome.storage.local.get(ARCHIVED_TABS_KEY);
-        return result[ARCHIVED_TABS_KEY] || [];
+    // Existing readers retain the same array shape; migration is authoritative.
+    getArchivedTabs: async function () { return archiveRequest('list'); },
+    getArchiveView: async function (windowId) { return archiveRequest('view', { windowId }); },
+    // A full replacement requires its exact prior snapshot; a stale sidebar
+    // cannot erase concurrent manual/automatic archive additions.
+    saveArchivedTabs: async function (tabs, expected) {
+        return archiveRequest('replace', { entries: tabs, expected });
     },
-
-    // Save all archived tabs
-    saveArchivedTabs: async function (tabs) {
-        await chrome.storage.local.set({ [ARCHIVED_TABS_KEY]: tabs });
+    addArchivedTab: async function (tabData) {
+        if (!tabData?.url || !tabData.name || !tabData.spaceId || isStartupLauncherUrl(tabData.url)) return;
+        return archiveRequest('add', { entry: tabData });
     },
-
-    // Add a tab to the archive
-    addArchivedTab: async function (tabData) { // tabData = { url, name, spaceId, archivedAt }
-        if (!tabData || !tabData.url || !tabData.name || !tabData.spaceId || isStartupLauncherUrl(tabData.url)) return;
-
-        const archivedTabs = await this.getArchivedTabs();
-
-        // Check if URL already exists in archive (regardless of space)
-        const existingTab = archivedTabs.find(t => t.url === tabData.url);
-        if (existingTab) {
-            Logger.log(`Tab with URL already archived: ${tabData.name} (${tabData.url})`);
-            return; // Don't add duplicates based on URL
-        }
-
-        // Add new tab with timestamp
-        const newArchiveEntry = { ...tabData, archivedAt: Date.now() };
-        archivedTabs.push(newArchiveEntry);
-
-        // Sort by timestamp (newest first for potential slicing, though FIFO means oldest removed)
-        archivedTabs.sort((a, b) => b.archivedAt - a.archivedAt);
-
-        // Enforce limit (remove oldest if over limit - FIFO)
-        if (archivedTabs.length > MAX_ARCHIVED_TABS) {
-            archivedTabs.splice(MAX_ARCHIVED_TABS); // Remove items from the end (oldest)
-        }
-
-        await this.saveArchivedTabs(archivedTabs);
-        Logger.log(`Archived tab: ${tabData.name} from space ${tabData.spaceId}`);
-    },
-
-    // Function to archive a tab (likely called from context menu)
-    archiveTab: async function (tabId) {
-        try {
-            const tab = await chrome.tabs.get(tabId);
+    archiveTab: async function (tabId, expectedTab = null, expectedSpace = null) {
+        const tab = expectedTab || await chrome.tabs.get(tabId);
+        if (!tab || isStartupLauncherTab(tab)) return;
+        let space = expectedSpace;
+        if (!space) {
             const spaces = await spaceRequest('get');
-            const space = spaces.find(s => [...s.spaceBookmarks, ...s.temporaryTabs].includes(tabId));
-            if (!tab || !space || isStartupLauncherTab(tab)) return;
-
-            const tabData = {
-                url: tab.url,
-                name: tab.title,
-                spaceId: space.id
-            };
-
-            await this.addArchivedTab(tabData);
-            await chrome.tabs.remove(tabId); // Close the original tab
-            // Optionally: Refresh sidebar view if needed, though handleTabRemove should cover it
-
-        } catch (error) {
-            Logger.error(`Error archiving tab ${tabId}:`, error);
+            const owners = spaces.filter(space => [...space.spaceBookmarks, ...space.temporaryTabs].includes(tabId));
+            if (owners.length !== 1) throw new Error('This tab changed. Reopen its menu and try again.');
+            space = owners[0];
         }
+        return archiveRequest('archive', { tabId, windowId: tab.windowId, spaceId: space.id,
+            bookmarkFolderId: space.bookmarkFolderId, url: tab.url });
     },
-
-    // Remove a tab from the archive (e.g., after restoration)
-    removeArchivedTab: async function (url, spaceId) {
-        if (!url || !spaceId) return;
-
-        let archivedTabs = await this.getArchivedTabs();
-        archivedTabs = archivedTabs.filter(tab => !(tab.url === url && tab.spaceId === spaceId));
-        await this.saveArchivedTabs(archivedTabs);
-        Logger.log(`Removed archived tab: ${url} from space ${spaceId}`);
-    },
-
-    restoreArchivedTab: async function (archivedTabData) {
-        try {
-            // Reopen the archived URL and restore its extension-owned membership.
-            const newTab = await chrome.tabs.create({
-                url: archivedTabData.url,
-                active: true, // Make it active
-                // windowId: currentWindow.id // Ensure it's in the current window
-            });
-
-            await spaceRequest('assign', { tabId: newTab.id, spaceId: archivedTabData.spaceId });
-
-            // Remove from archive storage
-            await this.removeArchivedTab(archivedTabData.url, archivedTabData.spaceId);
-
-            // Return the created tab so caller can pin it if needed
-            return newTab;
-
-        } catch (error) {
-            Logger.error(`Error restoring archived tab ${archivedTabData.url}:`, error);
-            throw error;
-        }
+    // URL-only removal is intentionally no longer supported. Legacy objects
+    // resolve only when their complete unchanged tuple is unique.
+    removeArchivedTab: async function (expected) { return archiveRequest('remove', { expected }); },
+    restoreArchivedTab: async function (archivedTabData, { windowId, context, bookmarkFolderId, requestId = crypto.randomUUID() } = {}) {
+        return archiveRequest('reopen', { requestId, windowId, context, bookmarkFolderId, expected: archivedTabData });
     },
 
     setArchivingEnabled: async function (enabled) {

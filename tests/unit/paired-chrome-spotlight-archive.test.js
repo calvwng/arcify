@@ -1,0 +1,264 @@
+// Import-safe proof-oracle tests. Every fixture below is explicitly mocked;
+// actual native/trusted-input acceptance remains mandatory in the hosted job.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import { parseHTML } from 'linkedom';
+import { readSourceText } from '../source-text.js';
+import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
+    assertArchiveReopenRequest, waitForArchiveReopenCompletion, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation,
+    ARCHIVE_FEATURES, ARCHIVE_OPEN_TYPE, ARCHIVE_ENTRY_TYPE } from '../../scripts/paired-chrome-spotlight-archive.mjs';
+const copy = value => structuredClone(value), ARCIFY = 'a'.repeat(32), SPOTLIGHT = 'b'.repeat(32), URL = 'http://127.0.0.1:9999/same';
+const source = readSourceText(new globalThis.URL('../../scripts/paired-chrome-spotlight-archive.mjs', import.meta.url));
+const input = ({ type = ARCHIVE_OPEN_TYPE, title = 'Open Archive', entryId = null, method = 'Enter' } = {}) => ({ type: method === 'Enter' ? 'keydown' : 'click', trusted: true,
+    key: method === 'Enter' ? 'Enter' : null, button: method === 'Enter' ? null : 0, repeat: false, composing: false, shift: false, ctrl: false, alt: false, meta: false, resultType: type, title, entryId });
+const entry = { entryId: 'chosen', name: 'Original title', url: URL, spaceId: 'original', archivedAt: 1000, proof: { opaque: 'retained legacy detail' } };
+const twin = { ...copy(entry), entryId: 'twin', name: 'Other title', archivedAt: 999 };
+const context = { windowId: 7, sourceTabId: 10, sourceUrl: URL, spaceId: 'selected', bookmarkFolderId: 'selected-root', pairingGeneration: 'generation' };
+const reopen = { type: 'arcify-bridge', version: 1, command: 'reopenArchivedTab', requestId: 'request', windowId: 7, context, viewId: 'private-view', entryId: entry.entryId, supportedFeatures: [...ARCHIVE_FEATURES] };
+const external = message => ({ type: 'external', data: { message, sender: { id: SPOTLIGHT, url: `chrome-extension://${SPOTLIGHT}/background.js` } } });
+const openRequest = { type: 'arcify-archive-open', version: 1, requestId: 'open-request', token: 'one-use-token' };
+const openEvents = () => [external({ type: 'arcify-bridge', command: 'archiveContext', tabId: 10, windowId: 7 }),
+    { ...external(openRequest), data: { message: copy(openRequest), sender: { id: SPOTLIGHT, url: URL } } }];
+const native = { context: { contextId: 'native-context', documentId: 'native-document', contextType: 'SIDE_PANEL', windowId: -1 } };
+const nativeState = (open = true) => ({ url: `chrome-extension://${ARCIFY}/sidebar.html`, visibility: 'visible', selectedSpaces: [{ spaceId: 'selected', visible: true, contentHidden: open, contentVisible: !open, expanded: String(open), popupVisible: open, popupClassVisible: open }], popups: open ? [{ spaceId: 'selected', visible: true, controls: true, entries: [entry, twin].map(value => ({ entryId: value.entryId, title: value.name })), message: '' }] : [] });
+const ack = () => ({ type: 'archive.intent', data: { message: { type: 'arcifyArchiveIntent', action: 'ack', token: openRequest.token, windowId: 7, displayed: true }, sender: { id: ARCIFY, url: `chrome-extension://${ARCIFY}/sidebar.html`, documentId: native.context.documentId, tab: null } } });
+
+for (const method of ['click', 'Enter']) test(`trusted Archive ${method} oracle rejects fake, modified, repeated and wrong-ID activations`, () => {
+    const expected = { type: ARCHIVE_ENTRY_TYPE, title: 'Reopen original', entryId: 'chosen', method };
+    const good = input(expected); assertArchiveTrustedInput([good], expected);
+    for (const patch of [{ trusted: false }, ...['repeat', 'composing', 'shift', 'ctrl', 'alt', 'meta'].map(key => ({ [key]: true })), { resultType: 'search-query' }, { entryId: 'twin' }, { title: 'Different' }, ...(method === 'click' ? [{ button: 2 }] : [{ key: ' ' }])]) assert.throws(() => assertArchiveTrustedInput([{ ...good, ...patch }], expected));
+    for (const events of [[], [good, copy(good)]]) assert.throws(() => assertArchiveTrustedInput(events, expected));
+});
+
+test('native popup oracle needs the existing visible global popup with all exact IDs', () => {
+    const state = nativeState();
+    const expected = { arcifyId: ARCIFY, spaceId: 'selected', entries: [entry, twin] }; assertNativeArchivePopup(state, expected);
+    for (const change of [value => { value.url = 'https://sidebar.test/'; }, value => { value.visibility = 'hidden'; }, value => { value.popups = []; }, value => { value.popups.push(copy(value.popups[0])); },
+        value => { value.popups[0].visible = false; }, value => { value.popups[0].controls = false; }, value => { value.popups[0].spaceId = 'original'; }, value => { value.popups[0].entries.reverse(); }, value => { value.popups[0].entries[0].entryId = 'twin'; }, value => { value.popups[0].entries.pop(); }, ...['visible', 'contentHidden', 'contentVisible', 'popupVisible', 'popupClassVisible'].map(key => value => { value.selectedSpaces[0][key] = !value.selectedSpaces[0][key]; }), value => { value.selectedSpaces[0].expanded = 'false'; }, value => { value.selectedSpaces = []; }]) {
+        const bad = copy(state); change(bad); assert.throws(() => assertNativeArchivePopup(bad, expected));
+    }
+});
+
+test('Open request oracle requires direct renderer send, one token and real source context', () => {
+    const expected = { spotlightId: SPOTLIGHT, sourceTabId: 10, windowId: 7, sourceUrl: URL }; assert.deepEqual(assertArchiveOpenRequest(openEvents(), expected), openRequest);
+    for (const change of [events => events.pop(), events => events.push(copy(events[1])), events => { events[1].data.sender.id = ARCIFY; }, events => { events[1].data.sender.url = `chrome-extension://${SPOTLIGHT}/background.js`; },
+        events => { events[1].data.message.url = URL; }, events => { events[1].data.message.token = ''; }, events => { events[1].data.message.version = 2; }, events => { events[0].data.message.tabId = 11; }, events => { events[0].data.message.windowId = 8; },
+        events => events.push(external({ type: 'arcify-sidebar' }))]) { const bad = openEvents(); change(bad); assert.throws(() => assertArchiveOpenRequest(bad, expected)); }
+});
+
+test('native ACK oracle binds displayed:true to exact one-use token and native document ID', () => {
+    const expected = { arcifyId: ARCIFY, windowId: 7 }; assertArchiveNativeAck([ack()], openRequest, native, expected);
+    for (const change of [value => { value.data.message.displayed = false; }, value => { value.data.message.token = 'other-token'; }, value => { value.data.message.windowId = 8; }, value => { value.data.sender.documentId = 'normal-tab-document'; },
+        value => { value.data.sender.tab = { id: 100, windowId: 7 }; }, value => { value.data.sender.id = SPOTLIGHT; }, value => { value.data.sender.url = `chrome-extension://${ARCIFY}/options.html`; }]) { const bad = ack(); change(bad); assert.throws(() => assertArchiveNativeAck([bad], openRequest, native, expected)); }
+    assert.throws(() => assertArchiveNativeAck([ack(), ack()], openRequest, native, expected)); assert.throws(() => assertArchiveNativeAck([], openRequest, native, expected));
+});
+
+test('reopen request oracle rejects URL/full-record selection, wrong identity and duplicates', () => {
+    const expected = { spotlightId: SPOTLIGHT, sourceTabId: 10, windowId: 7, entryId: entry.entryId };
+    assert.deepEqual(assertArchiveReopenRequest([external(copy(reopen))], expected), reopen);
+    for (const patch of [{ url: URL }, { expected: entry }, { entryId: 'twin' }, { windowId: 8 }, { viewId: '' }, { context: { ...context, sourceTabId: 11 } }, { supportedFeatures: ['archiveActionsV1'] }]) assert.throws(() => assertArchiveReopenRequest([external({ ...copy(reopen), ...patch })], expected));
+    assert.throws(() => assertArchiveReopenRequest([external(reopen), external(reopen)], expected));
+});
+
+function reopenedFixture() {
+    const tabs = [
+        { id: 10, windowId: 7, index: 0, url: URL, pendingUrl: null, active: true, pinned: false },
+        { id: 20, windowId: 8, index: 0, url: URL, pendingUrl: null, active: true, pinned: false },
+        { id: 21, windowId: 8, index: 1, url: URL, pendingUrl: null, active: false, pinned: false },
+        { id: 22, windowId: 7, index: 1, url: URL, pendingUrl: null, active: false, pinned: true }
+    ];
+    const before = { tabs, windows: [{ id: 7, focused: true }, { id: 8, focused: false }], spaces: [{ id: 'selected', bookmarkFolderId: 'selected-root', temporaryTabs: [10, 20], spaceBookmarks: [21] }, { id: 'original', bookmarkFolderId: 'original-root', temporaryTabs: [], spaceBookmarks: [] }],
+        activeSpaces: { 7: 'selected', 8: 'selected' }, archivedTabs: [copy(entry), copy(twin)], claims: null, journal: [],
+        bookmarks: [{ id: 'pin', url: URL, title: 'Saved exact pin' }], bindings: { 21: { bookmarkId: 'pin', pinnedUrl: URL } }, aliases: {},
+        favorites: [{ id: 'favorite', title: 'Saved Favorite', url: URL }], favoriteSession: { bindings: [{ favoriteId: 'favorite', windowId: 7, tabId: 22 }] }, groups: [], projection: {}, pairingGeneration: 'generation', pageStates: { 10: { documentId: 'source', value: 'retained' }, 20: { documentId: 'other', value: 'retained-other' } } };
+    const after = copy(before); after.tabs[0].active = false; after.tabs.push({ id: 30, windowId: 7, index: 2, url: URL, pendingUrl: null, active: true, pinned: false }); after.spaces[1].temporaryTabs.push(30); after.activeSpaces[7] = 'original'; after.archivedTabs.shift();
+    const claim = { phase: 'consumed', entryId: entry.entryId, expected: copy(entry), windowId: 7, bookmarkFolderId: 'original-root', tabId: 30,
+        result: { entryId: entry.entryId, tabId: 30, consumed: true } };
+    after.claims = { version: 1, entries: { [entry.entryId]: copy(claim) } };
+    const events = [{ type: 'tabs.onCreated', data: [{ id: 30, windowId: 7, pendingUrl: URL, active: false }] },
+        { type: 'storage', data: { area: 'local', changes: { archivedTabs: { oldValue: copy(before.archivedTabs), newValue: copy(after.archivedTabs) }, archiveReopenClaims: { oldValue: null, newValue: copy(after.claims) } } } }];
+    const expected = { entry: { ...copy(entry), bookmarkFolderId: 'original-root' }, sourceWindowId: 7, selectedSpaceId: 'selected' };
+    return { before, after, events, expected };
+}
+test('reopen oracle requires exact native receipt, original Space, atomic consume and untouched same-URL saved identities', () => {
+    const { before, after, events, expected } = reopenedFixture(); assert.equal(assertArchiveReopened(before, after, events, expected).tabId, 30);
+});
+for (const [name, change] of [
+    ['missing native create', value => value.events.shift()], ['duplicate native create', value => value.events.push(copy(value.events[0]))],
+    ['wrong native window', value => { value.events[0].data[0].windowId = 8; }], ['URL twin reused as native identity', value => { value.events[0].data[0].id = 20; }],
+    ['other-window focus', value => { value.after.tabs[1].active = false; }], ['source navigated', value => { value.after.tabs[0].url = 'https://changed.test/'; }],
+    ['saved pin binding changed', value => { value.after.bindings[21].bookmarkId = 'wrong'; }], ['Favorite changed', value => { value.after.favorites[0].title = 'changed'; }],
+    ['chosen record remains', value => { value.after.archivedTabs.unshift(copy(entry)); }], ['same-address twin consumed too', value => { value.after.archivedTabs = []; }],
+    ['wrong original Space', value => { value.after.spaces[1].temporaryTabs = []; value.after.spaces[0].temporaryTabs.push(30); }],
+    ['duplicate membership', value => { value.after.spaces[0].temporaryTabs.push(30); }], ['changed folder identity', value => { value.after.spaces[1].bookmarkFolderId = 'replacement-root'; }],
+    ['other-window selection changed', value => { value.after.activeSpaces[8] = 'original'; }], ['document replacement', value => { value.after.pageStates[10].documentId = 'replacement'; }],
+    ['receipt lacks unknown full-record field', value => { delete value.after.claims.entries.chosen.expected.proof; }], ['unconsumed receipt', value => { value.after.claims.entries.chosen.phase = 'assigned'; }],
+    ['non-atomic receipt', value => { delete value.events[1].data.changes.archiveReopenClaims; }], ['duplicate consume event', value => { value.events.push(copy(value.events[1])); }],
+    ['unexpected bookmark write', value => value.events.push({ type: 'bookmarks.onChanged', data: ['pin', { title: 'changed' }] })]
+]) test(`reopen oracle rejects ${name}`, () => { const data = reopenedFixture(); change(data); assert.throws(() => assertArchiveReopened(data.before, data.after, data.events, data.expected)); });
+
+test('rejected/repeated/uncertain requests require no writes or native side effects', () => {
+    const before = reopenedFixture().before; assertArchiveNoMutation(before, copy(before), [external(reopen)]);
+    const bad = copy(before); bad.archivedTabs.pop(); assert.throws(() => assertArchiveNoMutation(before, bad, []));
+    for (const event of [{ type: 'tabs.onCreated', data: [{ id: 40 }] }, { type: 'tabs.onUpdated', data: { id: 10, change: { url: URL } } }, { type: 'bookmarks.onChanged', data: [] }, { type: 'windows.onFocusChanged', data: [8] }, { type: 'sidePanel.onOpened', data: [{ windowId: 7 }] },
+        { type: 'storage', data: { area: 'local', changes: { archiveReopenClaims: { oldValue: null, newValue: {} } } } }]) assert.throws(() => assertArchiveNoMutation(before, copy(before), [event]));
+});
+
+test('input and native ACK observers are passive and preserve exact browser metadata', () => {
+    const listeners = new Map(), row = { dataset: { resultType: ARCHIVE_ENTRY_TYPE, archiveEntryId: 'chosen' }, querySelector: () => ({ textContent: 'Reopen original' }) };
+    const document = { addEventListener: (type, listener) => listeners.set(type, listener), removeEventListener: type => listeners.delete(type), querySelector: () => row };
+    const realm = { document, parent: {}, globalThis: {} }; vm.runInNewContext(`(${installArchiveInputObservation})()`, realm);
+    const event = { isTrusted: true, target: { closest: () => row }, key: 'Enter', button: undefined };
+    listeners.get('keydown')(event); assert.equal(realm.parent.__archiveInputEvents[0].trusted, true); assert.equal(realm.parent.__archiveInputEvents[0].entryId, 'chosen');
+    const events = [], registrations = []; const nativeRealm = { globalThis: { __spaceActionObservation: { events } }, chrome: { runtime: { onMessage: { addListener: fn => registrations.push(fn), removeListener: fn => registrations.splice(registrations.indexOf(fn), 1) } } } };
+    vm.runInNewContext(`(${installArchiveIntentObservation})()`, nativeRealm); registrations[0](ack().data.message, ack().data.sender); assert.equal(events.length, 1); assert.equal(events[0].data.sender.documentId, native.context.documentId);
+    nativeRealm.globalThis.__archiveIntentStop(); assert.equal(registrations.length, 0); realm.globalThis.__archiveInput.stop(); assert.equal(listeners.size, 0);
+});
+
+test('hosted driver positively invokes visible UI, observes real native context and never substitutes a normal sidebar tab or transport', () => {
+    assert.match(source, /assertSpotlightActionEnvironment\(\)/); assert.match(source, /for \(const kind of \['owned-newtab', 'browser-newtab', 'overlay'\]\) for \(const method of \['click', 'Enter'\]\)/);
+    assert.match(source, /nativePanel\.capture\(eventCount/); assert.match(source, /assertNativeArchivePopup\(state/); assert.match(source, /assertArchiveNativeAck\(observed\.events/);
+    assert.match(source, /await invoke\(selected, method\)/); assert.match(source, /await input\.press\('Enter'\)/); assert.match(source, /await clickFreshResult\(/);
+    assert.match(source, /assertArchiveReopened\(before, after, observed\.events/); assert.match(source, /durable-uncertain-create-rejected/); assert.match(source, /captured-reopen-cached-receipt/);
+    assert.match(source, /stale-archive-\$\{change\}-rejected/); assert.match(source, /evaluateWithoutGesture\(session/);
+    assert.doesNotMatch(source, /\.dispatchEvent\(|\.click\(\)\s*;|Object\.defineProperty|\.sidePanel\.open\(|\.goto\([^\n]*sidebar\.html|fetch\(|setRequestInterception|mockResponse|newPage\(/);
+    assert.match(source, /await activate\(current\.tab\.id\); await local\(\{ action: 'activate', windowId, spaceId: source\.id \}\);\n        const savedFavorite/);
+    assert.match(source, /Cleanup refuses changed unrelated archive records/);
+    assert.match(source, /finishBookmarkFixture\(/); assert.match(source, /archive-cleanup-verified/); assert.match(source, /unitOnly: \['deterministic lost ACK/);
+});
+
+
+const expectedReopen = { spotlightId: SPOTLIGHT, sourceTabId: 10, windowId: 7, entryId: entry.entryId };
+function completionFixture(kind = 'overlay') {
+    const calls = [], receipt = { tabId: 30 };
+    const page = { waitForFunction: async () => { calls.push('retirement-wait'); }, evaluate: async () => { calls.push('retirement-read'); return true; } };
+    const surface = kind === 'overlay' ? { waitForFunction: () => assert.fail('Never wait on a retired overlay renderer'), $eval: () => assert.fail('Never read a retired overlay status') } : page;
+    if (kind !== 'overlay') { page.waitForFunction = async (_predicate, options, name) => { assert.equal(options.polling, 50); assert.equal(name, 'Original'); calls.push('status-wait'); };
+        page.$eval = async selector => { assert.equal(selector, '.arcify-bridge-status [role="status"]'); calls.push('status-read'); return 'Archived tab reopened in Original.'; };
+        page.evaluate = () => assert.fail('New Tab completion is a real status, not overlay retirement'); }
+    return { calls, args: { page, surface, kind, spaceName: 'Original', events: [external(copy(reopen))], expected: expectedReopen,
+        verifyCommitted: async () => { calls.push('exact-native-durable-proof'); return receipt; } }, receipt };
+}
+test('overlay reopen requires a real request and durable native commit before source overlay retirement', async () => {
+    const { calls, args, receipt } = completionFixture();
+    assert.deepEqual(await waitForArchiveReopenCompletion(args), { request: reopen, receipt, status: null, overlayRetired: true });
+    assert.deepEqual(calls, ['exact-native-durable-proof', 'retirement-wait', 'retirement-read']);
+});
+for (const failure of ['missing request', 'missing native commit', 'missing overlay retirement', 'not an isolated frame']) test(`overlay completion rejects ${failure}`, async () => {
+    const { calls, args } = completionFixture();
+    if (failure === 'missing request') args.events = [];
+    if (failure === 'missing native commit') args.verifyCommitted = async () => { throw new Error('Missing exact durable/native commit'); };
+    if (failure === 'missing overlay retirement') args.page.evaluate = async () => false;
+    if (failure === 'not an isolated frame') args.surface = args.page;
+    await assert.rejects(waitForArchiveReopenCompletion(args));
+    if (failure === 'missing request' || failure === 'missing native commit') assert.deepEqual(calls, []);
+});
+for (const kind of ['browser-newtab', 'owned-newtab']) test(`${kind} reopen still requires actual success status after exact native proof`, async () => {
+    const { calls, args } = completionFixture(kind); const result = await waitForArchiveReopenCompletion(args);
+    assert.equal(result.status, 'Archived tab reopened in Original.'); assert.equal(result.overlayRetired, false);
+    assert.deepEqual(calls, ['exact-native-durable-proof', 'status-wait', 'status-read']);
+    args.page.$eval = async () => 'Archived tab reopened in Wrong Space.'; await assert.rejects(waitForArchiveReopenCompletion(args));
+});
+function cachedFixture() {
+    const state = reopenedFixture().after;
+    const result = { entryId: entry.entryId, tabId: 30, spaceId: 'original', windowId: 7, consumed: true, status: 'reopened', warning: null };
+    const response = { type: reopen.type, version: reopen.version, requestId: reopen.requestId, role: 'arcify', ok: true, archiveResult: result, snapshot: { windowId: 7 } };
+    const cached = copy(response); delete cached.snapshot;
+    state.journal = [{ key: `${SPOTLIGHT}:generation:${reopen.requestId}`, fingerprint: JSON.stringify(reopen), response: cached }];
+    return { state, response, request: copy(reopen) };
+}
+test('same request ID replay must return its exact cached consumed native receipt', () => {
+    const { state, response, request } = cachedFixture(); assert.deepEqual(assertArchiveCachedReplay(response, request, state, { spotlightId: SPOTLIGHT }), response.archiveResult);
+    assertArchiveNoMutation(state, copy(state), [external(request)]);
+});
+for (const [name, mutate] of [
+    ['rejected instead of cached', v => { v.response.ok = false; }], ['wrong request correlation', v => { v.response.requestId = 'other'; }],
+    ['wrong created tab', v => { v.response.archiveResult.tabId = 31; }], ['wrong selected archive ID', v => { v.response.archiveResult.entryId = 'twin'; }],
+    ['wrong original Space', v => { v.response.archiveResult.spaceId = 'selected'; }], ['missing journal receipt', v => { v.state.journal = []; }],
+    ['wrong journal key', v => { v.state.journal[0].key = 'another-peer:request'; }], ['wrong cached correlation', v => { v.state.journal[0].response.requestId = 'other'; }],
+    ['wrong fingerprint', v => { v.state.journal[0].fingerprint += ' '; }], ['duplicate cached receipt', v => { v.state.journal.push(copy(v.state.journal[0])); }],
+    ['unconsumed durable claim', v => { v.state.claims.entries.chosen.phase = 'assigned'; }], ['wrong response window', v => { v.response.snapshot.windowId = 8; }]
+]) test(`cached replay rejects ${name}`, () => { const value = cachedFixture(); mutate(value); assert.throws(() => assertArchiveCachedReplay(value.response, value.request, value.state, { spotlightId: SPOTLIGHT })); });
+function pendingFixture(priorCount = 2) {
+    const before = reopenedFixture().before;
+    before.journal = Array.from({ length: priorCount }, (_, index) => ({ key: `prior-${index}`, fingerprint: `prior-fingerprint-${index}`, response: { ok: true } }));
+    const request = copy(reopen), after = copy(before);
+    after.journal = [...after.journal.slice(-99), { key: `${SPOTLIGHT}:generation:${request.requestId}`, fingerprint: JSON.stringify(request) }];
+    const events = [external(request), { type: 'storage', data: { area: 'session', changes: { spotlightBridgeRequests: { oldValue: copy(before.journal), newValue: copy(after.journal) } } } }];
+    return { before, after, events, options: { pendingRequest: request, spotlightId: SPOTLIGHT } };
+}
+for (const priorCount of [0, 2, 99, 100]) test(`rejected mutation allows only the exact pending request append with ${priorCount} prior journal entries`, () => {
+    const { before, after, events, options } = pendingFixture(priorCount); assertArchiveNoMutation(before, after, events, options);
+    assert.equal(after.journal.length, Math.min(priorCount + 1, 100));
+    assert.throws(() => assertArchiveNoMutation(before, after, events));
+});
+for (const [name, mutate] of [
+    ['missing journal addition', v => { v.after.journal = copy(v.before.journal); }], ['missing actual storage event', v => { v.events.pop(); }],
+    ['wrong request fingerprint', v => { v.after.journal.at(-1).fingerprint += ' '; }], ['wrong peer identity', v => { v.after.journal.at(-1).key = 'another-peer'; }],
+    ['success response on rejected action', v => { v.after.journal.at(-1).response = { ok: true }; }], ['modified prior journal entry', v => { v.after.journal[0].fingerprint = 'changed'; }],
+    ['extra append', v => { v.after.journal.push(copy(v.after.journal.at(-1))); }], ['changed pairing generation', v => { v.options.pendingRequest.context.pairingGeneration = 'other'; }],
+    ['wrong observed old value', v => { v.events[1].data.changes.spotlightBridgeRequests.oldValue = []; }], ['wrong observed new value', v => { v.events[1].data.changes.spotlightBridgeRequests.newValue = []; }],
+    ['extra changed session key', v => { v.events[1].data.changes.activeSpaces = { oldValue: {}, newValue: { 7: 'original' } }; }],
+    ['local write', v => { v.events[1].data.area = 'local'; }], ['extra journal write', v => { v.events.push(copy(v.events[1])); }],
+    ['native creation', v => { v.events.push({ type: 'tabs.onCreated', data: [{ id: 41 }] }); }], ['archive changed', v => { v.after.archivedTabs.pop(); }],
+    ['unbounded prior tail', v => { v.before.journal = Array.from({ length: 100 }, (_, i) => ({ key: String(i) })); v.after.journal = [...copy(v.before.journal), v.after.journal.at(-1)]; }]
+]) test(`pending-receipt exception rejects ${name}`, () => { const value = pendingFixture(); mutate(value); assert.throws(() => assertArchiveNoMutation(value.before, value.after, value.events, value.options)); });
+
+test('native closed popup oracle rejects hidden content, stale ARIA or transparent blank sidebar', () => {
+    const state = nativeState(false), expected = { arcifyId: ARCIFY, spaceId: 'selected', open: false }; assertNativeArchiveToggle(state, expected);
+    for (const mutate of [value => { value.selectedSpaces[0].contentHidden = true; }, value => { value.selectedSpaces[0].contentVisible = false; },
+        value => { value.selectedSpaces[0].expanded = 'true'; }, value => { value.selectedSpaces[0].popupVisible = true; }, value => { value.selectedSpaces[0].popupClassVisible = true; }, value => { value.popups = nativeState().popups; }]) {
+        const bad = copy(state); mutate(bad); assert.throws(() => assertNativeArchiveToggle(bad, expected));
+    }
+});
+test('native visibility measurement checks opacity, display, visibility and actual geometry', () => {
+    const { document } = parseHTML('<html><body><div id="spacesList"><section class="space active" data-space-id="selected"><button class="sidebar-button" aria-expanded="false"></button><main class="space-content"></main><aside class="archived-tabs-popup"></aside></section></div></body></html>');
+    const content = document.querySelector('.space-content'), popup = document.querySelector('.archived-tabs-popup');
+    const geometry = { x: 1, y: 1, right: 201, bottom: 201, width: 200, height: 200 };
+    for (const node of document.querySelectorAll('*')) node.getBoundingClientRect = () => geometry;
+    const normal = { display: 'flex', visibility: 'visible', opacity: '1' }, contentStyle = { ...normal };
+    const realm = { document, location: { href: `chrome-extension://${ARCIFY}/sidebar.html` }, innerWidth: 400, innerHeight: 800,
+        getComputedStyle: node => node === content ? contentStyle : node === popup ? { ...normal, opacity: '0' } : normal };
+    Object.defineProperty(document, 'visibilityState', { value: 'visible' });
+    const read = () => JSON.parse(JSON.stringify(vm.runInNewContext(`(${readNativeArchivePopup})()`, realm)));
+    assertNativeArchiveToggle(read(), { arcifyId: ARCIFY, spaceId: 'selected', open: false });
+    for (const patch of [{ opacity: '0' }, { display: 'none' }, { visibility: 'hidden' }, { visibility: 'collapse' }]) {
+        Object.assign(contentStyle, normal, patch); assert.equal(read().selectedSpaces[0].contentVisible, false);
+    }
+    Object.assign(contentStyle, normal); content.getBoundingClientRect = () => ({ ...geometry, width: 0 }); assert.equal(read().selectedSpaces[0].contentVisible, false);
+    content.getBoundingClientRect = () => ({ ...geometry, x: 500, right: 700 }); assert.equal(read().selectedSpaces[0].contentVisible, false);
+});
+function buttonFixture(fault) {
+    let open = true, input = [], clicks = 0; const checkpoints = [], before = reopenedFixture().before;
+    const page = { evaluate: async fn => {
+        if (fn === readNativeArchivePopup) { const rendered = nativeState(open); if (fault === 'blank sidebar' && !open) rendered.selectedSpaces[0].contentVisible = false; return rendered; }
+        if (fn === installArchiveButtonObservation) { input = []; return; }
+        if (fn.toString().includes('__archiveButtonInput.events')) return input;
+        assert.match(fn.toString(), /__archiveButtonInput.stop/);
+    }, click: async selector => { assert.equal(selector, '#spacesList > .space.active[data-space-id="selected"] .sidebar-button');
+        input.push({ trusted: fault !== 'untrusted click', button: 0, shift: false, ctrl: false, alt: false, meta: false, spaceId: 'selected', expandedBefore: String(open) });
+        if (fault === 'missing input') input = []; open = !open; clicks++;
+    } };
+    const args = { page, arcifyId: ARCIFY, spaceId: 'selected', entries: [entry, twin], ui: async (target, _label, action) => { assert.equal(target, page); return action(); },
+        poll: async (read, accept) => { const value = await read(); assert.equal(accept(value), true, 'Actual popup/content state must satisfy the measured condition'); return value; },
+        settle: async () => copy(before), read: async () => { const after = copy(before); if (fault === 'identity change') after.tabs[0].url = 'https://wrong.test/'; return after; },
+        reset: async () => {}, trace: async () => ({ events: fault === 'native mutation' ? [{ type: 'tabs.onCreated', data: [{ id: 40 }] }] : [] }),
+        capture: async () => ({ filename: 'native-popup.png' }), checkpoint: async (phase, value) => checkpoints.push({ phase, ...value }) };
+    return { args, checkpoints, clicks: () => clicks };
+}
+test('native popup button round trip genuinely closes and reopens, measuring both states without identity changes', async () => {
+    const value = buttonFixture(); await exerciseArchivePopupButtonRoundTrip(value.args); assert.equal(value.clicks(), 2);
+    assert.deepEqual(value.checkpoints.map(item => item.open), [false, true]); assert(value.checkpoints.every(item => item.input[0].trusted));
+});
+for (const fault of ['blank sidebar', 'untrusted click', 'missing input', 'identity change', 'native mutation']) test(`native button round trip rejects ${fault}`, async () => {
+    const value = buttonFixture(fault); await assert.rejects(exerciseArchivePopupButtonRoundTrip(value.args)); assert.equal(value.clicks(), 1); assert.deepEqual(value.checkpoints, []);
+});
+test('native button observer only captures trusted browser input and exact pre-toggle ARIA', () => {
+    const listeners = new Map(), button = { closest: () => ({ dataset: { spaceId: 'selected' } }), getAttribute: () => 'true' };
+    const realm = { globalThis: {}, document: { addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: type => listeners.delete(type) } };
+    vm.runInNewContext(`(${installArchiveButtonObservation})()`, realm);
+    listeners.get('click')({ isTrusted: true, button: 0, target: { closest: () => button } });
+    assert.deepEqual(JSON.parse(JSON.stringify(realm.globalThis.__archiveButtonInput.events)), [{ trusted: true, button: 0, shift: false, ctrl: false, alt: false, meta: false, spaceId: 'selected', expandedBefore: 'true' }]);
+    realm.globalThis.__archiveButtonInput.stop(); assert.equal(listeners.size, 0);
+});

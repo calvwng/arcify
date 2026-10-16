@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { SpaceStore, applySpacePatch, ownerOf } from '../../space-store.js';
 import { syncSpaceGroups } from '../../tab-group-sync.js';
 import { Utils } from '../../utils.js';
+import { registerArchiveMessages } from '../../archive-store.js';
 
 let local, session, sync, tabs, mutations, groups;
 const area = data => ({
@@ -192,7 +193,13 @@ test('manual archive records the stored owner without a sidebar global', async (
     const removed = [];
     chrome.tabs.get = async id => ({ ...tabs.find(t => t.id === id), title: 'Archived example' });
     chrome.tabs.remove = async id => removed.push(id);
-    chrome.runtime.sendMessage = async () => ({ success: true, spaces: local.spaces });
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    chrome.windows = { get: async id => ({ id, type: 'normal' }) };
+    chrome.bookmarks.get = async id => [{ id, parentId: 'root' }];
+    const listeners = []; chrome.runtime.id = 'arcify'; chrome.runtime.onMessage = { addListener(fn) { listeners.push(fn); } };
+    registerArchiveMessages(store);
+    chrome.runtime.sendMessage = message => message.type === 'spaceStore' ? Promise.resolve({ success: true, spaces: local.spaces })
+        : new Promise(resolve => listeners[0](message, { id: 'arcify' }, resolve));
     await Utils.archiveTab(2);
     assert.equal(local.archivedTabs[0].spaceId, 'b');
     assert.equal(local.archivedTabs[0].url, 'https://two.test/');
@@ -1055,4 +1062,31 @@ test('new legacy patch Spaces cannot bypass color validation through the initial
     assert.equal(result[0].color, 'grey'); assert.equal(result[0].customTint, null);
     const valid = applySpacePatch([], [], [{ ...next, color: 'pink', customTint: '#FfAa00' }]);
     assert.equal(valid[0].color, 'pink'); assert.equal(valid[0].customTint, '#ffaa00');
+});
+
+for (const key of ['archivedTabs', 'archiveReopenClaims']) test(`malformed ${key} refuses archive operations without blocking unrelated Space initialization`, async () => {
+    local[key] = { malformed: true };
+    const store = new SpaceStore();
+    await store.dispatch({ action: 'get' });
+    assert.equal(store.spaces.length, 2); assert.deepEqual(local[key], { malformed: true });
+    await assert.rejects(store.run(() => key === 'archivedTabs' ? store.archiveStore.listUnlocked() : store.archiveStore.claimsUnlocked()));
+});
+
+test('legacy archive Space-ID write failure cannot commit model v2 and retry preserves mapping', async () => {
+    delete local.spaceModelVersion;
+    local.spaces = [space(42, [1])]; local.spaces[0].name = 'Work';
+    local.archivedTabs = [{ url: 'https://archive.test', spaceId: 42, archivedAt: 12, extra: 'keep' }];
+    tabs[0].groupId = 42;
+    const set = chrome.storage.local.set; let refuse = true;
+    chrome.storage.local.set = async values => {
+        if (refuse && values.archivedTabs?.some(entry => entry.spaceId !== 42)) throw new Error('Archive mapping write failed');
+        return set(values);
+    };
+    const store = new SpaceStore();
+    await assert.rejects(store.dispatch({ action: 'get' }), /Archive mapping write failed/);
+    assert.equal(local.spaceModelVersion, undefined); assert.equal(local.spaces[0].id, 42); assert.equal(local.archivedTabs[0].spaceId, 42);
+    const entryId = local.archivedTabs[0].entryId;
+    refuse = false; await store.dispatch({ action: 'get' });
+    assert.equal(local.spaceModelVersion, 2); assert.equal(local.archivedTabs[0].spaceId, local.spaces[0].id);
+    assert.equal(local.archivedTabs[0].entryId, entryId); assert.equal(local.archivedTabs[0].extra, 'keep'); assert.equal(local.archivedTabs[0].archivedAt, 12);
 });

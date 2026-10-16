@@ -1,3 +1,4 @@
+import { createArchiveIntentConsumer, setArchivePopupOpen } from './archive-intent-ui.js';
 import { withSavedMoveLock, assertSavedMoveSettled } from './saved-move-lock.js';
 import { normalizeCustomTint } from './space-colors.js';
 import { applySpaceTheme, initializeSpaceColorOverrides } from './sidebar-theme.js';
@@ -467,6 +468,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     await initSidebar();
+    createArchiveIntentConsumer({ document, getState: () => ({ ready: sidebarReady && !pendingActiveSpaceId,
+        windowId: currentWindow?.id, spaceId: activeSpaceId, bookmarkFolderId: spaces.find(space => space.id === activeSpaceId)?.bookmarkFolderId }),
+        showPopup: showArchivedTabsPopup, onError: showFavoritesStatus }).start();
     await updatePinnedFavicons(); // Initial load before taking the tour baseline
     initSidebarTour().catch(error => Logger.error("Tour initialization failed:", error));
 
@@ -972,19 +976,12 @@ function createSpaceElement(space) {
 
     const popup = spaceElement.querySelector('.archived-tabs-popup');
     const archiveButton = spaceElement.querySelector('.sidebar-button');
-    const spaceContent = spaceElement.querySelector('.space-content');
 
     archiveButton.addEventListener('click', (e) => {
         e.stopPropagation(); // Prevent closing immediately if clicking outside logic exists
-        spaceContent.classList.toggle('hidden');
-        const isVisible = popup.classList.contains('visible');
-        if (isVisible) {
-            popup.classList.toggle('visible');
-        } else {
-            showArchivedTabsPopup(space.id); // Populate and show
-            popup.classList.toggle('visible');
-        }
-        archiveButton.setAttribute('aria-expanded', String(popup.classList.contains('visible')));
+        const opening = !popup.classList.contains('visible');
+        if (opening) showArchivedTabsPopup(space.id);
+        setArchivePopupOpen(spaceElement, opening);
     });
 
     // Add to DOM
@@ -2719,65 +2716,17 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
                         return;
                     }
 
-                    // Check if tab is in archive and restore it
-                    const archivedTabs = await Utils.getArchivedTabs();
-                    const archivedTab = !isPinned && archivedTabs.find(t => t.url === tabUrl);
-
+                    // A stale ordinary row may resolve only by its complete
+                    // unchanged archive tuple. URL-only guesses can select a twin.
+                    const archiveView = !isPinned ? await Utils.getArchiveView(currentWindow.id) : null;
+                    const candidates = archiveView?.entries.filter(({ entry }) => entry.url === tabUrl) || [];
                     let targetSpaceId = activeSpaceId;
                     let bookmarkTitle = tab.title || tabElement.querySelector('.tab-title-display')?.textContent || 'Bookmark';
-
-                    if (archivedTab) {
-                        Logger.log('Found archived tab, restoring from archive:', archivedTab);
-                        targetSpaceId = archivedTab.spaceId || activeSpaceId;
-                        bookmarkTitle = archivedTab.name || bookmarkTitle;
-
-                        // Restore the archived tab
-                        const restoredTab = await Utils.restoreArchivedTab(archivedTab);
-
-                        if (restoredTab) {
-                            // Pin the restored tab if it was originally pinned
-                            if (isPinned) {
-                                await chrome.tabs.update(restoredTab.id, { pinned: true });
-                            }
-
-                            // Tab is already active from restore, but ensure it's activated
-                            chrome.tabs.update(restoredTab.id, { active: true });
-                            activateTabInDOM(restoredTab.id);
-
-                            // Update space data
-                            const space = spaces.find(s => s.id === targetSpaceId);
-                            if (space) {
-                                space.lastTab = restoredTab.id;
-                                // If this was a pinned tab, ensure it's in spaceBookmarks
-                                if (isPinned) {
-                                    // Remove any stale tabId references (in case old tabId was still in array)
-                                    if (tab.id) {
-                                        space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== tab.id);
-                                    }
-                                    // Add the new restored tabId
-                                    if (!space.spaceBookmarks.includes(restoredTab.id)) {
-                                        space.spaceBookmarks.push(restoredTab.id);
-                                    }
-                                }
-                                saveSpaces();
-                            }
-
-                            // Ensure restored tab lands in correct Chrome position for this space.
-                            await persistSpaceTabOrder(targetSpaceId, { source: 'arcify', movedTabId: restoredTab.id });
-
-                            // Replace the element with the active tab element
-                            if (isPinned) {
-                                const pinnedUrl = tabElement.dataset.pinnedUrl || tabUrl;
-                                const bookmarkId = tabElement.dataset.bookmarkId || null;
-                                restoredTab.pinnedUrl = pinnedUrl;
-                                restoredTab.bookmarkId = bookmarkId;
-                                await Utils.setPinnedTabState(restoredTab.id, { pinnedUrl: pinnedUrl, bookmarkId: bookmarkId });
-                            }
-                            const updatedTabElement = await createTabElement(restoredTab, isPinned, false);
-                            tabElement.replaceWith(updatedTabElement);
-                            isOpeningBookmark = false;
-                            return;
-                        }
+                    if (candidates.length) {
+                        // An ordinary row has no archivedAt identity. Ask the user
+                        // to choose the exact archive entry rather than infer one.
+                        showFavoritesStatus('This tab is archived. Open the archive and choose its entry to reopen it.');
+                        return;
                     }
 
                     // Tab not found and not in archive, open as new bookmark

@@ -1,3 +1,4 @@
+import { ArchiveStore } from './archive-store.js';
 import { getTodayOrderInverted, getTodayInsertionIndex } from './today-order.js';
 import { mergeVisibleOrder } from './sidebar-tabs.js';
 import { normalizeSpaceIcon } from './space-icons.js';
@@ -69,7 +70,7 @@ export function applySpacePatch(current, before, after) {
 }
 
 export class SpaceStore {
-    constructor() { this.chain = Promise.resolve(); this.initialized = false; this.pendingCreations = new Set(); }
+    constructor() { this.chain = Promise.resolve(); this.initialized = false; this.pendingCreations = new Set(); this.archiveStore = new ArchiveStore(this); }
     run(operation) {
         const pending = this.chain.then(async () => {
             // Favorite initialization never enters run(): the single shared gate
@@ -147,7 +148,15 @@ export class SpaceStore {
             }
             this.spaces = migrated;
             if (migrated.length) await chrome.storage.local.set({ tabGroupImportDismissed: true });
-            if (data.archivedTabs) await chrome.storage.local.set({ archivedTabs: data.archivedTabs.map(t => ({ ...t, spaceId: idMap.get(t.spaceId) || t.spaceId })) });
+            if (data.archivedTabs) {
+                try { await this.archiveStore.migrateSpaceIdsUnlocked(idMap); }
+                catch (error) {
+                    // Never commit model v2 after a transient mapping write
+                    // failure: that would strand numeric legacy archive owners.
+                    if (error.code !== 'INVALID_ARCHIVE') throw error;
+                    console.warn('Archive migration deferred:', error.message);
+                }
+            }
             this.restoreQueue = [];
         } else if (!session.spaceSession) {
             // Exact replay requires both a proven browser epoch and a snapshot
@@ -166,6 +175,14 @@ export class SpaceStore {
             }
         } else {
             this.restoreQueue = session.spaceRestoreQueue || [];
+        }
+        try {
+            await this.archiveStore.listUnlocked();
+            await this.archiveStore.initializeClaimsUnlocked();
+        } catch (error) {
+            // Archive corruption refuses archive operations, but cannot disable
+            // unrelated Spaces. Never replace malformed data with an empty list.
+            console.warn('Archive initialization deferred:', error.message);
         }
         const restoreKeys = new Set([...this.restoreQueue.map(t => t.windowKey), ...this.restoreWindowKeys.values()]);
         this.savedWindows = this.savedWindows.filter(w => restoreKeys.has(w.key));
@@ -356,6 +373,9 @@ export class SpaceStore {
             for (const space of this.spaces) for (const key of sections) space[key] = space[key].filter(id => id !== tab.id);
             return;
         }
+        // A journaled archive create stays unowned until its exact reopen
+        // operation confirms assignment; worker restart cannot adopt it by URL.
+        if (this.archiveStore.pendingCreatedIds.has(tab.id) && !ownerOf(this.spaces, tab.id)) return;
         const existing = ownerOf(this.spaces, tab.id);
         if (existing) {
             if ((!this.provisional.has(tab.id) && !this.recoveryCandidates.has(tab.id)) || !url) return;

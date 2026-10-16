@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as arcify from '../spotlight-bridge-protocol.js';
+import { assertArchiveActionsContract } from './lib/spotlight-pair-archive-contract.mjs';
 import { assertExtendedActionsContract } from './lib/spotlight-pair-extended-contract.mjs';
 import { assertCommonV1Contract, assertInitialSpaceActionsContract } from './lib/spotlight-pair-contract.mjs';
 
@@ -107,3 +108,14 @@ for (const command of ['copyCurrentLink', 'setCurrentTabMuted']) test(`extended 
         return arcify.validateRequest(message, commands);
     } }, actions, tabActions));
 });
+
+const archive = await peerModule('shared/arcify-archive-actions-protocol.js');
+test('additive Archive contract passes actual integrated pair', () => assertArchiveActionsContract(arcify, archive));
+for (const [name, replacement] of [
+    ['feature marker', { ARCHIVE_ACTIONS_FEATURE: 'wrong' }], ['open transport', { ARCHIVE_OPEN_TYPE: 'wrong' }],
+    ['context validation', { validateArchiveContext: value => value }], ['action schema', { validateArchiveActions: value => value }],
+    ['result identity', { validateArchiveResult: value => value }], ['scope validation', { validateArchiveScope: () => { throw new Error('drift'); } }],
+    ['permissive scope validation', { validateArchiveScope: value => value }]
+]) test(`Archive contract detects ${name}`, () => assert.throws(() => assertArchiveActionsContract(arcify, { ...archive, ...replacement })));
+test('Archive contract detects permissive provider contexts', () => assert.throws(() => assertArchiveActionsContract({ ...arcify, isArchiveActionContext: () => true }, archive)));
+test('Archive contract detects permissive provider requests', () => assert.throws(() => assertArchiveActionsContract({ ...arcify, validateRequest: value => value }, archive)));

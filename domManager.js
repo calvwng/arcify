@@ -314,6 +314,10 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     if (isPinned || isBookmarkOnly) appendSavedMovePicker({ document, menu: contextMenu, actions: savedMove, close: closeMenu,
         active: () => session.active, reposition: () => Utils.adjustMenuPosition(contextMenu, x, y) });
 
+    // Capture the rendered owner before async menu work; later native moves
+    // must not silently change which Space the archive action targets.
+    const archiveOwner = (spaces || []).find(space => String(space.id) === tabElement.closest('.space')?.dataset.spaceId);
+    const archiveSource = archiveOwner ? { id: archiveOwner.id, bookmarkFolderId: archiveOwner.bookmarkFolderId } : null;
     // Archive Tab (Only for active tabs)
     if (!isBookmarkOnly && !multiple) {
         const archiveOption = document.createElement('div');
@@ -321,8 +325,8 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         archiveOption.textContent = 'Archive Tab';
         archiveOption.addEventListener('click', async () => {
             if (!session.active || !contextMenu.contains(archiveOption)) return;
-            await Utils.archiveTab(tab.id); // Use the utility function
-            closeMenu();
+            try { await Utils.archiveTab(tab.id, tab, archiveSource); closeMenu(); }
+            catch (error) { (tabActions?.report || Logger.warn)(error.message); }
         });
         contextMenu.appendChild(archiveOption);
     }
@@ -442,16 +446,19 @@ export async function showArchivedTabsPopup(activeSpaceId) {
 
     // Manual archives remain restorable even when automatic cleanup is off.
     message.style.display = 'block';
-    const allArchived = await Utils.getArchivedTabs();
+    const currentWindow = await chrome.windows.getCurrent();
+    let archiveView = await Utils.getArchiveView(currentWindow.id);
+    const allArchived = archiveView.entries;
     if (allArchived.length === 0) {
         message.textContent = 'No archived tabs.';
         list.style.display = 'none';
     } else {
         message.textContent = '';
         list.style.display = 'block';
-        allArchived.forEach(archivedTab => {
+        allArchived.forEach(({ entry: archivedTab, bookmarkFolderId }) => {
             const item = document.createElement('div');
             item.className = 'tab archived-item';
+            item.dataset.archiveEntryId = archivedTab.entryId;
             item.title = `${archivedTab.name}\n${archivedTab.url}\nArchived: ${new Date(archivedTab.archivedAt).toLocaleString()}`;
 
             const favicon = document.createElement('img');
@@ -471,15 +478,28 @@ export async function showArchivedTabsPopup(activeSpaceId) {
             restoreButton.className = 'tab-restore';
             restoreButton.setAttribute('aria-label', 'Restore archived tab');
             restoreButton.style.marginLeft = 'auto';
-            item.addEventListener('click', (e) => {
+            let restoring = false;
+            const requestId = crypto.randomUUID();
+            item.dataset.archiveEntryId = archivedTab.entryId;
+            item.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                Utils.restoreArchivedTab(archivedTab);
-                item.remove();
-                if (list.children.length === 0) {
-                    message.textContent = 'No archived tabs.';
+                if (restoring || !item.isConnected || !list.contains(item)) return;
+                restoring = true; restoreButton.disabled = true;
+                try {
+                    const result = await Utils.restoreArchivedTab(archivedTab, { windowId: currentWindow.id,
+                        context: archiveView.context, bookmarkFolderId, requestId });
+                    if (!result?.consumed) throw new Error('Reopening could not be confirmed. The entry is retained.');
+                    if (!list.contains(item)) return;
+                    item.remove();
+                    try { archiveView = await Utils.getArchiveView(currentWindow.id); } catch { /* A later click fails safely until refreshed. */ }
+                    message.textContent = result.warning || (list.children.length === 0 ? 'No archived tabs.' : '');
                     message.style.display = 'block';
-                    list.style.display = 'none';
-                }
+                    if (list.children.length === 0) list.style.display = 'none';
+                } catch (error) {
+                    if (!list.contains(item)) return;
+                    message.textContent = error.message;
+                    message.style.display = 'block';
+                } finally { restoring = false; restoreButton.disabled = false; }
             });
 
             item.appendChild(favicon);

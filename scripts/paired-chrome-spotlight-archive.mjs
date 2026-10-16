@@ -1,0 +1,560 @@
+/** Import-safe Archive acceptance. Only the sandboxed hosted runner owns Chrome. */
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { spotlightSurface } from './paired-chrome-keyboard.mjs';
+import { clickFreshResult, replaceInputText, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
+import { readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
+import { createNavigationFixturePage } from './paired-chrome-spotlight-navigation.mjs';
+import { canonicalSavedMoveBookmarks } from './paired-chrome-saved-move.mjs';
+import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
+import { assertSpotlightActionEnvironment, installSpotlightActionApiObservation, readSpotlightActionPage } from './paired-chrome-spotlight-actions.mjs';
+
+export const SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME = 'Spotlight Open Archive requires trusted input and the existing popup in the native Side Panel';
+export const SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME = 'Spotlight Archive reopens exact same-address entries in their original Space and source window without replay';
+export const ARCHIVE_FEATURES = Object.freeze(['globalFavoritesV1', 'archiveActionsV1']);
+export const ARCHIVE_OPEN_TITLE = 'Open Archive';
+export const ARCHIVE_OPEN_TYPE = 'arcify-archive-action';
+export const ARCHIVE_ENTRY_TYPE = 'arcify-archive-action';
+const OPEN_QUERY = 'open archive';
+const exact = (items, id, key = 'id') => { const found = items.filter(item => item[key] === id); assert.equal(found.length, 1, `Require exact unique ${key} ${id}.`); return found[0]; };
+const changedStorage = events => events.filter(event => event.type === 'storage' && Object.values(event.data.changes).some(value => !isDeepStrictEqual(value.oldValue, value.newValue)));
+const mutationEvents = events => events.filter(event => event.type.startsWith('bookmarks.') || /^tabs\.(?:onCreated|onRemoved|onReplaced|onAttached|onDetached|onMoved|onActivated)$/.test(event.type)
+    || event.type === 'tabs.onUpdated' && ['url', 'pendingUrl', 'pinned', 'groupId', 'mutedInfo', 'discarded'].some(key => key in event.data.change));
+
+export function serveSpotlightArchiveFixture(request, response) {
+    const match = /^\/spotlight-archive\/([a-f0-9]{32})\/([a-z-]+)$/.exec(new URL(request.url, 'http://127.0.0.1').pathname);
+    if (!match) return false;
+    const title = `Spotlight Archive ${match[2]} ${match[1]}`;
+    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-src 'none'" });
+    response.end(`<!doctype html><html><head><title>${title}</title><link rel="icon" href="data:,"></head><body data-document-id="${randomBytes(16).toString('hex')}"><h1>${title}</h1><input id="action-page-state" value="retained"></body></html>`);
+    return true;
+}
+
+export function installArchiveIntentObservation() {
+    globalThis.__archiveIntentStop?.();
+    const listener = (message, sender) => {
+        if (message?.type !== 'arcifyArchiveIntent') return;
+        globalThis.__spaceActionObservation.events.push({ type: 'archive.intent', data: { message, sender: { id: sender.id, url: sender.url || null, documentId: sender.documentId || null, tab: sender.tab || null } } });
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    globalThis.__archiveIntentStop = () => chrome.runtime.onMessage.removeListener(listener);
+}
+export function assertArchiveNativeAck(events, request, native, { arcifyId, windowId }) {
+    const acknowledgements = events.filter(event => event.type === 'archive.intent' && event.data.message.action === 'ack' && event.data.message.token === request.token);
+    assert.equal(acknowledgements.length, 1, 'Exactly one real native popup ACK must match this one-use opening token.');
+    const { message, sender } = acknowledgements[0].data;
+    assert.deepEqual(message, { type: 'arcifyArchiveIntent', action: 'ack', windowId, token: request.token, displayed: true });
+    assert.equal(sender.id, arcifyId); assert.equal(sender.url, `chrome-extension://${arcifyId}/sidebar.html`); assert.equal(sender.tab, null);
+    assert.equal(typeof native.context.documentId, 'string'); assert(native.context.documentId);
+    assert.equal(sender.documentId, native.context.documentId, 'Only the observed native SIDE_PANEL document may acknowledge its popup.');
+    return acknowledgements[0];
+}
+
+/** Passive DOM input observation survives legitimate retirement of an overlay. */
+export function installArchiveInputObservation() {
+    globalThis.__archiveInput?.stop();
+    const events = [], registrations = [];
+    for (const type of ['input', 'click', 'keydown']) {
+        const listener = event => {
+            const row = event.target.closest?.('[data-testid="spotlight-result"]') || document.querySelector('[data-testid="spotlight-result"].selected');
+            events.push({ type, trusted: event.isTrusted, key: event.key || null, button: event.button ?? null,
+                repeat: Boolean(event.repeat), composing: Boolean(event.isComposing), shift: Boolean(event.shiftKey), ctrl: Boolean(event.ctrlKey), alt: Boolean(event.altKey), meta: Boolean(event.metaKey),
+                resultType: row?.dataset.resultType || null, entryId: row?.dataset.archiveEntryId || null,
+                title: row?.querySelector('.arcify-spotlight-result-title')?.textContent || null });
+        };
+        document.addEventListener(type, listener, true); registrations.push(() => document.removeEventListener(type, listener, true));
+    }
+    globalThis.__archiveInput = { events, stop: () => registrations.forEach(remove => remove()) };
+    parent.__archiveInputEvents = events;
+}
+export function assertArchiveTrustedInput(events, { type, title, entryId = null, method }) {
+    const activations = events.filter(event => event.type === 'click' || event.type === 'keydown' && event.key === 'Enter');
+    assert.equal(activations.length, 1, 'Exactly one genuine activation must cause each measured Archive action.');
+    const event = activations[0];
+    assert.equal(event.trusted, true); assert.equal(event.type, method === 'Enter' ? 'keydown' : 'click');
+    for (const key of ['repeat', 'composing', 'shift', 'ctrl', 'alt', 'meta']) assert.equal(event[key], false);
+    if (method === 'click') assert.equal(event.button, 0);
+    assert.equal(event.resultType, type); assert.equal(event.title, title); assert.equal(event.entryId, entryId);
+}
+export function readArchiveRows() {
+    return [...document.querySelectorAll('[data-testid="spotlight-result"]')].map(row => ({ type: row.dataset.resultType,
+        entryId: row.dataset.archiveEntryId || null, title: row.querySelector('.arcify-spotlight-result-title')?.textContent,
+        selected: row.classList.contains('selected'), visible: row.getClientRects().length > 0 && getComputedStyle(row).visibility !== 'hidden' }));
+}
+export function readNativeArchivePopup() {
+    const visible = node => {
+        if (!node) return false;
+        const rect = node.getBoundingClientRect(), style = getComputedStyle(node);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse' && Number(style.opacity) > 0 && rect.width > 0 && rect.height > 0 && rect.x < innerWidth && rect.y < innerHeight && rect.right > 0 && rect.bottom > 0;
+    };
+    const popups = [...document.querySelectorAll('.archived-tabs-popup.visible')];
+    return { url: location.href, visibility: document.visibilityState, selectedSpaces: [...document.querySelectorAll('#spacesList > .space.active')].map(space => {
+        const content = space.querySelector('.space-content'), popup = space.querySelector('.archived-tabs-popup');
+        return { spaceId: space.dataset.spaceId, visible: visible(space), contentHidden: content?.classList.contains('hidden'), contentVisible: visible(content),
+            expanded: space.querySelector('.sidebar-button')?.getAttribute('aria-expanded'), popupVisible: visible(popup), popupClassVisible: popup?.classList.contains('visible') };
+    }), popups: popups.map(popup => ({ visible: visible(popup),
+        spaceId: popup.closest('.space')?.dataset.spaceId || null,
+        entries: [...popup.querySelectorAll('.archived-item')].map(row => ({ entryId: row.dataset.archiveEntryId, title: row.querySelector('.tab-title-display')?.textContent })),
+        controls: Boolean(popup.querySelector('.archiving-controls input[role="switch"]')), message: popup.querySelector('.no-archived-tabs-message')?.textContent || '' })) };
+}
+export function assertNativeArchiveToggle(rendered, { arcifyId, spaceId, open }) {
+    assert.equal(rendered.url, `chrome-extension://${arcifyId}/sidebar.html`); assert.equal(rendered.visibility, 'visible');
+    assert.deepEqual(rendered.selectedSpaces, [{ spaceId, visible: true, contentHidden: open, contentVisible: !open,
+        expanded: String(open), popupVisible: open, popupClassVisible: open }], 'Native popup, content visibility and button ARIA must agree in the exact selected Space.');
+    if (!open) assert.deepEqual(rendered.popups, [], 'Closing Archive must restore content, not leave a transparent or blank sidebar.');
+}
+export function assertNativeArchivePopup(rendered, { arcifyId, spaceId, entries }) {
+    assertNativeArchiveToggle(rendered, { arcifyId, spaceId, open: true });
+    assert.equal(rendered.popups.length, 1, 'Exactly one existing global Archive popup must be visible in the verified native panel.');
+    const popup = rendered.popups[0]; assert.equal(popup.visible, true); assert.equal(popup.spaceId, spaceId); assert.equal(popup.controls, true);
+    assert.deepEqual(popup.entries, entries.map(entry => ({ entryId: entry.entryId, title: entry.name })), 'The existing global popup must include entries from their original Spaces, not a filtered or invented list.');
+    return popup;
+}
+export function installArchiveButtonObservation() {
+    globalThis.__archiveButtonInput?.stop();
+    const events = [];
+    const listener = event => {
+        const button = event.target.closest?.('.sidebar-button');
+        events.push({ trusted: event.isTrusted, button: event.button, shift: Boolean(event.shiftKey), ctrl: Boolean(event.ctrlKey),
+            alt: Boolean(event.altKey), meta: Boolean(event.metaKey), spaceId: button?.closest('.space')?.dataset.spaceId || null,
+            expandedBefore: button?.getAttribute('aria-expanded') || null });
+    };
+    document.addEventListener('click', listener, true);
+    globalThis.__archiveButtonInput = { events, stop: () => document.removeEventListener('click', listener, true) };
+}
+export async function exerciseArchivePopupButtonRoundTrip({ page, arcifyId, spaceId, entries, ui, poll, settle, read, reset, trace, capture, checkpoint }) {
+    assert.match(spaceId, /^[a-zA-Z0-9_-]+$/, 'Require the exact safe native Space selector.');
+    return ui(page, 'Close and reopen Archive with its genuine native sidebar button', async () => {
+        const before = await settle();
+        assertNativeArchivePopup(await page.evaluate(readNativeArchivePopup), { arcifyId, spaceId, entries });
+        for (const open of [false, true]) {
+            await reset(); await page.evaluate(installArchiveButtonObservation);
+            await page.click(`#spacesList > .space.active[data-space-id="${spaceId}"] .sidebar-button`);
+            const rendered = await poll(() => page.evaluate(readNativeArchivePopup), state => {
+                try { if (open) assertNativeArchivePopup(state, { arcifyId, spaceId, entries });
+                    else assertNativeArchiveToggle(state, { arcifyId, spaceId, open }); return true; } catch { return false; }
+            }, `native Archive button ${open ? 'reopens popup' : 'restores visible Space content'}`);
+            const input = await page.evaluate(() => globalThis.__archiveButtonInput.events);
+            assert.deepEqual(input, [{ trusted: true, button: 0, shift: false, ctrl: false, alt: false, meta: false,
+                spaceId, expandedBefore: String(!open) }], 'Exactly one genuine native button click must cause this transition.');
+            const after = await read(), observed = await trace(); assertArchiveNoMutation(before, after, observed.events);
+            const screenshot = await capture(page, `native-archive-button-${open ? 'reopened' : 'closed'}`); assert(screenshot?.filename);
+            assert.deepEqual(await page.evaluate(readNativeArchivePopup), rendered);
+            assert.deepEqual(await read(), before);
+            await checkpoint('native-archive-button-round-trip', { open, before, after, rendered, input, observed, screenshot });
+        }
+        await page.evaluate(() => globalThis.__archiveButtonInput.stop());
+    });
+}
+export function assertArchiveOpenRequest(events, { spotlightId, sourceTabId, windowId, sourceUrl }) {
+    const requests = events.filter(event => event.type === 'external' && event.data.message.type === 'arcify-archive-open');
+    assert.equal(requests.length, 1, 'One trusted renderer activation sends one direct native-open request.');
+    const { message, sender } = requests[0].data;
+    assert.deepEqual(Object.keys(message).sort(), ['type', 'version', 'requestId', 'token'].sort());
+    assert.equal(message.version, 1); assert.match(message.requestId, /^[\w.:-]{1,80}$/); assert.equal(typeof message.token, 'string'); assert(message.token.length > 0);
+    assert.equal(sender.id, spotlightId);
+    assert(sender.url === `chrome-extension://${spotlightId}/newtab.html` || sender.url === sourceUrl, 'Opening must be sent directly by an authenticated visible renderer, not relayed by a worker.');
+    assert(!events.some(event => event.type === 'external' && event.data.message.type === 'arcify-sidebar'), 'Archive must not substitute the existing Sidebar command.');
+    // Source binding is separately proven by the preceding real archiveContext request.
+    const contexts = events.filter(event => event.type === 'external' && event.data.message.command === 'archiveContext');
+    assert(contexts.some(event => event.data.message.tabId === sourceTabId && event.data.message.windowId === windowId), 'Source-bound intent must come from the exact invoking native tab and window.');
+    return message;
+}
+export function assertArchiveReopenRequest(events, { spotlightId, sourceTabId, windowId, entryId }) {
+    const requests = events.filter(event => event.type === 'external' && event.data.message.command === 'reopenArchivedTab');
+    assert.equal(requests.length, 1, 'One visible entry activation sends one reopen mutation.');
+    const { message, sender } = requests[0].data;
+    assert.equal(sender.id, spotlightId); assert.equal(message.type, 'arcify-bridge'); assert.equal(message.version, 1); assert.match(message.requestId, /^[\w.:-]{1,80}$/);
+    assert.deepEqual(Object.keys(message).sort(), ['type', 'version', 'requestId', 'windowId', 'command', 'context', 'viewId', 'entryId', 'supportedFeatures'].sort());
+    assert.deepEqual(message.supportedFeatures, ARCHIVE_FEATURES); assert.equal(message.windowId, windowId); assert.equal(message.entryId, entryId);
+    assert.equal(message.context.sourceTabId, sourceTabId); assert.equal(message.context.windowId, windowId); assert.equal(typeof message.viewId, 'string'); assert(message.viewId);
+    assert(!Object.hasOwn(message, 'url') && !Object.hasOwn(message, 'expected'), 'Only an exact ID and private-view reference can select the stored record.');
+    return message;
+}
+// Native activation legitimately retires tracked overlays before their Archive
+// callback can render status. A missing renderer is never sufficient proof:
+// require the actual request and durable/native commit first, then retirement.
+export async function waitForArchiveReopenCompletion({ page, surface, kind, spaceName, events, expected, verifyCommitted }) {
+    assert(['overlay', 'browser-newtab', 'owned-newtab'].includes(kind));
+    assert.equal(typeof verifyCommitted, 'function');
+    const request = assertArchiveReopenRequest(events, expected);
+    const receipt = await verifyCommitted();
+    if (kind === 'overlay') {
+        assert.notEqual(surface, page, 'Overlay completion must belong to the isolated source frame.');
+        await page.waitForFunction(() => !document.getElementById('arcify-spotlight-host'), { polling: 50 });
+        const overlayRetired = await page.evaluate(() => !document.getElementById('arcify-spotlight-host'));
+        assert.equal(overlayRetired, true, 'The original source overlay must retire after native tab activation.');
+        return { request, receipt, status: null, overlayRetired };
+    }
+    assert.equal(surface, page, 'A New Tab helper retains its own renderer and must show real success.');
+    await surface.waitForFunction(name => document.querySelector('.arcify-bridge-status [role="status"]')?.textContent === `Archived tab reopened in ${name}.`, { polling: 50 }, spaceName);
+    const status = await surface.$eval('.arcify-bridge-status [role="status"]', node => node.textContent);
+    assert.equal(status, `Archived tab reopened in ${spaceName}.`);
+    return { request, receipt, status, overlayRetired: false };
+}
+
+export function assertArchiveNoMutation(before, after, events, { pendingRequest = null, spotlightId } = {}) {
+    const changed = changedStorage(events).filter(event => ['local', 'session'].includes(event.data.area));
+    if (pendingRequest) {
+        assert.match(spotlightId, /^[a-p]{32}$/); assert.equal(pendingRequest.command, 'reopenArchivedTab');
+        assert.equal(pendingRequest.context.pairingGeneration, before.pairingGeneration);
+        const key = `${spotlightId}:${before.pairingGeneration ? `${before.pairingGeneration}:` : ''}${pendingRequest.requestId}`;
+        const previous = before.journal || [];
+        assert(!previous.some(entry => entry.key === key), 'A new failed mutation must not replace an existing journal identity.');
+        const pending = { key, fingerprint: JSON.stringify(pendingRequest) };
+        const journal = [...previous.slice(-99), pending];
+        assert.deepEqual(after, { ...before, journal }, 'Only the exact bounded pending request receipt may change after a rejected mutation.');
+        assert.equal(changed.length, 1, 'Exactly one pending journal append, no unrelated local/session writes.');
+        assert.equal(changed[0].data.area, 'session');
+        assert.deepEqual(Object.keys(changed[0].data.changes), ['spotlightBridgeRequests']);
+        const change = changed[0].data.changes.spotlightBridgeRequests;
+        assert.deepEqual(change.oldValue || [], previous); assert.deepEqual(change.newValue, journal);
+        assert.deepEqual(Object.keys(journal.at(-1)).sort(), ['fingerprint', 'key'], 'An unconfirmed action cannot gain a success response.');
+    } else {
+        assert.deepEqual(after, before, 'Rejected/repeated Archive requests preserve the full captured native and durable state.');
+        assert.deepEqual(changed, [], 'No changed durable or session data may hide a failed action.');
+    }
+    assert.deepEqual([...mutationEvents(events), ...events.filter(event => /^(?:windows|sidePanel)\./.test(event.type))], [], 'No duplicate create, navigation, closure, focus, panel opening, reassignment or saved write is allowed.');
+}
+export function assertArchiveCachedReplay(response, request, state, { spotlightId }) {
+    assert.deepEqual(Object.keys(response).sort(), ['type', 'version', 'requestId', 'role', 'ok', 'archiveResult', 'snapshot'].sort());
+    assert.equal(response.type, request.type); assert.equal(response.version, request.version); assert.equal(response.requestId, request.requestId);
+    assert.equal(response.role, 'arcify'); assert.equal(response.ok, true);
+    assert.match(spotlightId, /^[a-p]{32}$/); assert.equal(request.context.pairingGeneration, state.pairingGeneration);
+    const key = `${spotlightId}:${state.pairingGeneration ? `${state.pairingGeneration}:` : ''}${request.requestId}`;
+    const entries = state.journal.filter(entry => entry.key === key);
+    assert.equal(entries.length, 1, 'The cached acknowledgement must match one exact original request.');
+    assert.equal(entries[0].fingerprint, JSON.stringify(request));
+    const { snapshot, ...cached } = response; assert.deepEqual(cached, entries[0].response);
+    const claim = state.claims?.entries?.[request.entryId]; assert.equal(claim?.phase, 'consumed');
+    assert.deepEqual(response.archiveResult, { entryId: request.entryId, tabId: claim.tabId, spaceId: claim.expected.spaceId,
+        windowId: request.windowId, consumed: true, status: 'reopened', warning: null });
+    assert.equal(response.snapshot.windowId, request.windowId);
+    return response.archiveResult;
+}
+export function assertArchiveReopened(before, after, events, { entry, sourceWindowId, selectedSpaceId }) {
+    const created = events.filter(event => event.type === 'tabs.onCreated'); assert.equal(created.length, 1, 'A single exact archived-entry activation creates precisely one native tab.');
+    const native = created[0].data[0]; assert(Number.isSafeInteger(native.id) && native.id > 0);
+    assert.equal(native.windowId, sourceWindowId); assert.equal(native.pendingUrl || native.url, entry.url);
+    const tab = exact(after.tabs, native.id); assert.equal(tab.windowId, sourceWindowId); assert.equal(tab.url, entry.url); assert.equal(tab.pinned, false); assert.equal(tab.active, true);
+    assert(!before.tabs.some(tab => tab.id === native.id));
+    assert.deepEqual(after.tabs.map(tab => tab.id).sort((a, b) => a - b), [...before.tabs.map(tab => tab.id), native.id].sort((a, b) => a - b));
+    for (const previous of before.tabs) {
+        const current = exact(after.tabs, previous.id);
+        assert.deepEqual({ ...current, active: previous.active }, previous, 'Reopen cannot navigate, close, pin, move or replace a pre-existing native ID.');
+        if (previous.windowId !== sourceWindowId) assert.deepEqual(current, previous, 'Other-window active tabs remain untouched.');
+    }
+    assert.notEqual(entry.spaceId, selectedSpaceId, 'The acceptance fixture must distinguish the original destination from the currently selected Space.');
+    const memberships = after.spaces.flatMap(space => ['temporaryTabs', 'spaceBookmarks'].flatMap(section => space[section].filter(id => id === native.id).map(() => ({ id: space.id, folder: space.bookmarkFolderId, section }))));
+    assert.deepEqual(memberships, [{ id: entry.spaceId, folder: entry.bookmarkFolderId, section: 'temporaryTabs' }]);
+    for (const previous of before.spaces) {
+        const current = exact(after.spaces, previous.id);
+        assert.equal(current.bookmarkFolderId, previous.bookmarkFolderId);
+        assert.deepEqual(current.spaceBookmarks, previous.spaceBookmarks);
+        assert.deepEqual(current.temporaryTabs.filter(id => id !== native.id), previous.temporaryTabs);
+    }
+    assert.equal(after.activeSpaces[sourceWindowId], entry.spaceId);
+    for (const [windowId, spaceId] of Object.entries(before.activeSpaces)) if (Number(windowId) !== sourceWindowId) assert.equal(after.activeSpaces[windowId], spaceId);
+    for (const key of ['bookmarks', 'bindings', 'aliases', 'favorites', 'favoriteSession', 'groups', 'projection', 'pairingGeneration', 'pageStates', 'windows']) assert.deepEqual(after[key], before[key], `${key} is unchanged by restoring an archive entry.`);
+    assert.deepEqual(after.archivedTabs, before.archivedTabs.filter(value => value.entryId !== entry.entryId), 'Consume only the chosen full record; preserve every same-address twin.');
+    const claim = after.claims?.entries?.[entry.entryId]; assert(claim); assert.equal(claim.phase, 'consumed'); assert.equal(claim.tabId, native.id);
+    assert.equal(claim.windowId, sourceWindowId); assert.equal(claim.bookmarkFolderId, entry.bookmarkFolderId);
+    const expected = { ...entry }; delete expected.bookmarkFolderId;
+    assert.deepEqual(claim.expected, expected, 'The durable receipt retains the complete exact record snapshot.');
+    assert.equal(claim.result.consumed, true); assert.equal(claim.result.entryId, entry.entryId); assert.equal(claim.result.tabId, native.id);
+    const consumes = changedStorage(events).filter(event => event.data.area === 'local' && event.data.changes.archivedTabs?.oldValue?.some(value => value.entryId === entry.entryId)
+        && !event.data.changes.archivedTabs?.newValue?.some(value => value.entryId === entry.entryId));
+    assert.equal(consumes.length, 1, 'Exactly one observable durable consume commit.');
+    assert.deepEqual(consumes[0].data.changes.archiveReopenClaims?.newValue?.entries?.[entry.entryId], claim, 'Receipt and exact removal must share the same storage commit.');
+    assert(!events.some(event => event.type.startsWith('bookmarks.')));
+    return { tabId: native.id, claim, consumedCommit: consumes[0] };
+}
+
+/** Own only disposable records and native IDs; positive actions never use these setup adapters. */
+async function archiveFixture(adapters, run) {
+    assertSpotlightActionEnvironment();
+    const { browser, observePage, apiPage, spotlightOptions, newTabPage, openSavedPage, ui, screenshot, snapshot, external, poll, fixture, arcifyId, spotlightId, search, record = async () => {} } = adapters;
+    for (const fn of [observePage, newTabPage, openSavedPage, ui, screenshot, snapshot, external, poll, search]) assert.equal(typeof fn, 'function');
+    const windowId = fixture.windowA, otherWindow = fixture.windowB, nonce = randomBytes(16).toString('hex');
+    const original = await apiPage.evaluate(async () => ({ tabs: await chrome.tabs.query({}), windows: await chrome.windows.getAll(),
+        local: await chrome.storage.local.get(['archivedTabs', 'archiveReopenClaims']), sync: await chrome.storage.sync.get(['syncTabGroups']),
+        session: await chrome.storage.session.get(['activeSpaces', 'archiveBrowserSession']) }));
+    const owned = [], roots = [], spaceRoots = [], pages = new Map(), favoriteIds = [];
+    const evidence = { nonce, checkpoints: [], matrix: [], complete: false, unitOnly: ['deterministic lost ACK or response', 'mid-storage-callback revocation', 'worker/browser crash during native create', 'Helium and physical keyboard'] };
+    let source, target, entries, overlayPage, revoked = false, primaryError;
+    const checkpoint = async (phase, data = {}) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
+    const local = async message => { const result = await apiPage.evaluate(message => chrome.runtime.sendMessage({ type: 'spaceStore', ...message }), message); assert.equal(result?.success, true, JSON.stringify(result)); return result; };
+    const archive = async message => { const reply = await apiPage.evaluate(message => chrome.runtime.sendMessage({ type: 'archiveStore', ...message }), message); assert.equal(reply?.success, true, JSON.stringify(reply)); return reply.result; };
+    const favorite = async message => { const reply = await apiPage.evaluate(message => chrome.runtime.sendMessage({ type: 'favoriteStore', ...message }), message); assert.equal(reply?.success, true, JSON.stringify(reply)); return reply; };
+    const activate = async tabId => apiPage.evaluate(async tabId => { const tab = await chrome.tabs.update(tabId, { active: true }); await chrome.windows.update(tab.windowId, { focused: true }); }, tabId);
+    const option = async value => {
+        await ui(apiPage, 'Set isolated Archive fixture group-sync option', async () => { if (await apiPage.$eval('#syncTabGroups', node => node.checked) !== value) await apiPage.click('label.toggle-label[for="syncTabGroups"]'); });
+        await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('syncTabGroups')), settings => Boolean(settings.syncTabGroups) === value, 'Archive fixture group-sync setting saved');
+    };
+    const read = async () => {
+        await local({ action: 'get' });
+        const state = await apiPage.evaluate(async () => {
+            const local = await chrome.storage.local.get(['spaces', 'archivedTabs', 'archiveReopenClaims', 'pinnedTabStatesById', 'tabNameOverridesById', 'persistentFavorites', 'arcifyBridgePairingGeneration']);
+            const session = await chrome.storage.session.get(['activeSpaces', 'favoriteSession', 'spaceGroupProjection', 'spotlightBridgeRequests']);
+            return { tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, pinned, incognito, active, groupId, splitViewId }) => ({ id, windowId, index, url, pendingUrl: pendingUrl || null, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1 })).sort((a, b) => a.id - b.id),
+                windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, state }) => ({ id, type, incognito, focused, state })).sort((a, b) => a.id - b.id),
+                spaces: local.spaces || [], archivedTabs: local.archivedTabs || [], claims: local.archiveReopenClaims || null,
+                bookmarks: await chrome.bookmarks.getTree(), bindings: local.pinnedTabStatesById || {}, aliases: local.tabNameOverridesById || {}, favorites: local.persistentFavorites || [],
+                journal: session.spotlightBridgeRequests || [], activeSpaces: session.activeSpaces || {}, favoriteSession: session.favoriteSession || null, projection: session.spaceGroupProjection || {},
+                groups: (await chrome.tabGroups.query({})).sort((a, b) => a.id - b.id), pairingGeneration: local.arcifyBridgePairingGeneration ?? null };
+        });
+        state.bookmarks = canonicalSavedMoveBookmarks(state.bookmarks);
+        state.pageStates = Object.fromEntries(await Promise.all([...pages].map(async ([id, page]) => [id, await page.evaluate(readSpotlightActionPage)])));
+        return state;
+    };
+    const settle = async () => { let previous, since; return poll(read, state => { const next = JSON.stringify(state); if (next !== previous) { previous = next; since = Date.now(); return false; } return Date.now() - since >= 400; }, 'stable Archive native/store state before measurement'); };
+    const reset = async () => { await apiPage.evaluate(() => { globalThis.__spaceActionObservation.events.length = 0; }); await spotlightOptions.evaluate(() => { globalThis.__spaceActionObservation.events.length = 0; }); };
+    const trace = async page => ({ events: await apiPage.evaluate(() => globalThis.__spaceActionObservation.events), peerEvents: await spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events), input: page ? await page.evaluate(() => globalThis.__archiveInputEvents || []) : [] });
+    const capture = (page, label) => screenshot(page, `archive-${label}`, true, { fullPage: false });
+    const closeOverlay = async () => {
+        if (!overlayPage || overlayPage.isClosed() || !await overlayPage.evaluate(() => Boolean(document.getElementById('arcify-spotlight-host')))) return;
+        const surface = await spotlightSurface(overlayPage);
+        await ui(overlayPage, 'Dismiss Archive overlay', async () => { const input = await surface.$('[data-testid="spotlight-input"]'); assert(input); try { await input.press('Escape'); } finally { await input.dispose(); } });
+        await overlayPage.waitForFunction(() => !document.getElementById('arcify-spotlight-host'));
+    };
+    const sourcePage = async (kind, sourceRecord) => {
+        await closeOverlay(); await activate(sourceRecord.tab.id); await local({ action: 'activate', windowId, spaceId: source.id });
+        await settle(); await reset();
+        if (kind !== 'overlay') {
+            const helper = await newTabPage(kind === 'browser-newtab' ? 'chrome://newtab/' : `chrome-extension://${spotlightId}/newtab.html`, windowId); owned.push(helper.tab.id);
+            await helper.page.waitForSelector('[data-testid="spotlight-input"]', { visible: true });
+            await poll(() => apiPage.evaluate(id => chrome.tabs.get(id), helper.tab.id), tab => tab.status === 'complete' && !tab.pendingUrl, 'settled exact Archive New Tab helper');
+            return { ...helper, kind };
+        }
+        overlayPage = sourceRecord.page;
+        const launched = await external(apiPage, spotlightId, 'launch', { windowId, mode: 'new-tab' }); assert.equal(launched?.ok, true, JSON.stringify(launched));
+        await overlayPage.waitForFunction(() => document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('dialog')?.open);
+        const surface = await spotlightSurface(overlayPage); assert.notEqual(surface, overlayPage);
+        return { ...sourceRecord, kind };
+    };
+    const ready = async (page, { entryId = null, title = ARCHIVE_OPEN_TITLE } = {}) => {
+        await search(page, entryId ? title.replace(/^Reopen /, '') : OPEN_QUERY); const surface = await spotlightSurface(page);
+        const type = entryId ? ARCHIVE_ENTRY_TYPE : ARCHIVE_OPEN_TYPE;
+        const rows = await poll(() => surface.evaluate(readArchiveRows), rows => rows.some(row => row.type === type && row.entryId === entryId && row.title === title && row.visible), 'exact visible Archive action result');
+        if (!entryId) assertMatchedActionFirst(await surface.evaluate(readSpotlightRows), { type, title, query: OPEN_QUERY });
+        else {
+            const input = await surface.$('[data-testid="spotlight-input"]'); assert(input);
+            try { await selectResultWithKeyboard(input, () => surface.evaluate(readArchiveRows), row => row.type === type && row.entryId === entryId); } finally { await input.dispose(); }
+        }
+        await surface.evaluate(installArchiveInputObservation);
+        return { surface, rows, type, title, entryId };
+    };
+    const invoke = async (current, method) => {
+        const { surface, type, title, entryId } = current;
+        if (method === 'Enter') { const input = await surface.$('[data-testid="spotlight-input"]'); assert(input); try { await input.press('Enter'); } finally { await input.dispose(); } }
+        else await clickFreshResult(async timeout => {
+            await surface.waitForSelector(`[data-result-type="${type}"]`, { visible: true, timeout });
+            const handle = await surface.evaluateHandle(({ type, title, entryId }) => {
+                const found = [...document.querySelectorAll('[data-testid="spotlight-result"]')].filter(row => row.dataset.resultType === type && (row.dataset.archiveEntryId || null) === entryId && row.querySelector('.arcify-spotlight-result-title')?.textContent === title);
+                if (found.length !== 1) throw new Error('Require exact unique Archive result identity.'); return found[0];
+            }, { type, title, entryId }); assert(handle.asElement()); return handle.asElement();
+        }, observation => checkpoint('fresh-archive-result-click', { type, entryId, observation }));
+    };
+    try {
+        await option(false); await apiPage.evaluate(installSpotlightActionApiObservation); await spotlightOptions.evaluate(installSpotlightActionApiObservation);
+        const root = await apiPage.evaluate(async () => { const roots = (await chrome.bookmarks.search({ title: 'Arcify' })).filter(node => !node.url); if (roots.length !== 1) throw new Error('Require one exact Arcify root.'); return roots[0]; });
+        for (const name of ['Selected', 'Original']) { const folder = await apiPage.evaluate(options => chrome.bookmarks.create(options), { parentId: root.id, title: `Archive ${name} ${nonce}` }); spaceRoots.push(folder.id); }
+        const discovered = await local({ action: 'get' }); [source, target] = spaceRoots.map(id => exact(discovered.spaces, id, 'bookmarkFolderId'));
+        const seed = async (role, spaceId = source.id, atWindow = windowId, url = `${fixture.base}/spotlight-archive/${nonce}/${role}`) => {
+            const result = await createNavigationFixturePage({ browser, apiPage, observePage, poll, windowId: atWindow, url }); owned.push(result.tab.id); pages.set(result.tab.id, result.page);
+            await result.page.waitForSelector('#action-page-state'); await local({ action: 'assign', tabId: result.tab.id, spaceId });
+            await ui(result.page, 'Preserve exact existing Archive fixture document state', () => result.page.type('#action-page-state', `-${result.tab.id}`)); return result;
+        };
+        const current = await seed('source');
+        const sameUrl = `${fixture.base}/spotlight-archive/${nonce}/same-address`;
+        const decoy = await seed('same-address', source.id, otherWindow, sameUrl);
+        const pin = await apiPage.evaluate(options => chrome.bookmarks.create(options), { parentId: source.bookmarkFolderId, title: `Saved archive twin ${nonce}`, url: sameUrl }); roots.push(pin.id);
+        const pinned = await openSavedPage({ windowId: otherWindow, spaceId: source.id, bookmarkId: pin.id, url: sameUrl }); owned.push(pinned.tab.id); pages.set(pinned.tab.id, pinned.page); await pinned.page.waitForSelector('#action-page-state');
+        await activate(current.tab.id); await local({ action: 'activate', windowId, spaceId: source.id });
+        const savedFavorite = await favorite({ action: 'addBookmark', windowId, spaceId: source.id, bookmarkFolderId: source.bookmarkFolderId, bookmarkId: pin.id, parentId: source.bookmarkFolderId });
+        const item = savedFavorite.favorites.filter(item => item.sourceBookmarkId === pin.id); assert.equal(item.length, 1); favoriteIds.push(item[0].id); owned.push(savedFavorite.tab.id);
+        const now = Date.now();
+        entries = [
+            { entryId: `archive-first-${nonce}`, name: `Archive first twin ${nonce}`, url: sameUrl, spaceId: target.id, archivedAt: now, proof: { nonce, identity: 'first' } },
+            { entryId: `archive-second-${nonce}`, name: `Archive second twin ${nonce}`, url: sameUrl, spaceId: target.id, archivedAt: now - 1, proof: { nonce, identity: 'second' } },
+            { entryId: `archive-uncertain-${nonce}`, name: `Archive uncertain ${nonce}`, url: sameUrl, spaceId: target.id, archivedAt: now - 2, proof: { nonce, identity: 'uncertain' } }
+        ];
+        // Legacy same-address records are seeded through the sole store's exact
+        // compare-and-replace API. No runtime outcome or response is fabricated.
+        const beforeEntries = await archive({ action: 'list' });
+        await archive({ action: 'replace', expected: beforeEntries, entries: [...entries, ...beforeEntries] });
+        await activate(current.tab.id); await local({ action: 'activate', windowId, spaceId: source.id }); await settle();
+        await checkpoint('owned-archive-fixture', { source, target, entries, sourceTabId: current.tab.id, decoyTabId: decoy.tab.id, savedPinTabId: pinned.tab.id, bookmarkId: pin.id, favoriteId: item[0].id });
+        await run({ ...adapters, windowId, otherWindow, nonce, source, target, entries, current, evidence, checkpoint, local, archive, read, settle, reset, trace, capture, activate, sourcePage, ready, invoke, owned,
+            markRevoked: () => { revoked = true; } });
+        evidence.complete = true; await checkpoint('archive-case-complete'); return evidence;
+    } catch (error) { primaryError = error; await checkpoint('archive-case-failed', { error: { message: error.message, stack: error.stack }, owned, roots }).catch(() => {}); throw error; }
+    finally {
+        await finishBookmarkFixture([
+            async () => { if (revoked) { await ui(apiPage, 'Restore exact Archive fixture pairing', async () => { const field = await apiPage.$('#bridgePeerId'); assert(field); try { await replaceInputText(apiPage, field, spotlightId); } finally { await field.dispose(); } await apiPage.click('#bridgeSave'); }); await apiPage.waitForSelector('#bridgeStatus[data-state="connected"]'); } },
+            async () => { if (adapters.nativePanel && (await adapters.nativePanel.state()).contexts.length) await adapters.nativePanel.close(); },
+            closeOverlay,
+            async () => { for (const id of favoriteIds) await favorite({ action: 'remove', windowId, favoriteId: id }); },
+            async () => { for (const tab of original.tabs.filter(tab => tab.active)) await apiPage.evaluate(id => chrome.tabs.update(id, { active: true }), tab.id); for (const [id, spaceId] of Object.entries(original.session.activeSpaces || {})) await local({ action: 'activate', windowId: Number(id), spaceId }); },
+            () => apiPage.evaluate(async ids => { const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); const present = [...new Set(ids)].filter(id => live.has(id)); if (present.length) await chrome.tabs.remove(present); }, owned),
+            async () => { const existing = await archive({ action: 'list' }); await archive({ action: 'replace', expected: existing, entries: existing.filter(entry => !entries?.some(owned => owned.entryId === entry.entryId)) }); },
+            () => apiPage.evaluate(async ({ original, ids }) => { const claims = (await chrome.storage.local.get('archiveReopenClaims')).archiveReopenClaims; if (claims?.entries) { const kept = Object.fromEntries(Object.entries(claims.entries).filter(([id]) => !ids.includes(id))); const previous = original.archiveReopenClaims; if (JSON.stringify(kept) !== JSON.stringify(previous?.entries || {})) throw new Error('Cleanup refuses changed unrelated archive claims.'); if (Object.hasOwn(original, 'archiveReopenClaims')) await chrome.storage.local.set({ archiveReopenClaims: previous }); else await chrome.storage.local.remove('archiveReopenClaims'); } const archived = (await chrome.storage.local.get('archivedTabs')).archivedTabs || []; if (JSON.stringify(archived) !== JSON.stringify(original.archivedTabs || [])) throw new Error('Cleanup refuses changed unrelated archive records.'); if (!Object.hasOwn(original, 'archivedTabs')) await chrome.storage.local.remove('archivedTabs'); }, { original: original.local, ids: entries?.map(entry => entry.entryId) || [] }),
+            () => apiPage.evaluate(async original => { if (Object.hasOwn(original, 'archiveBrowserSession')) await chrome.storage.session.set({ archiveBrowserSession: original.archiveBrowserSession }); else await chrome.storage.session.remove('archiveBrowserSession'); }, original.session),
+            () => apiPage.evaluate(async ids => { for (const id of ids) { const [node] = await chrome.bookmarks.get(id); if (!node?.url) throw new Error('Cleanup refuses unexpected folder.'); await chrome.bookmarks.remove(id); } }, roots),
+            async () => { const state = await local({ action: 'get' }); for (const space of state.spaces.filter(space => spaceRoots.includes(space.bookmarkFolderId))) { assert([...space.temporaryTabs, ...space.spaceBookmarks].every(id => owned.includes(id)), 'Cleanup refuses unowned membership.'); await local({ action: 'delete', spaceId: space.id }); } },
+            () => apiPage.evaluate(async ids => { for (const id of ids) { let nodes; try { nodes = await chrome.bookmarks.getSubTree(id); } catch { continue; } const [node] = nodes; if (!node || node.url || node.children?.length) throw new Error('Cleanup refuses unexpected nonempty Space root.'); await chrome.bookmarks.removeTree(id); } }, spaceRoots),
+            () => option(Boolean(original.sync.syncTabGroups)),
+            () => apiPage.evaluate(async original => { if (!Object.hasOwn(original, 'syncTabGroups')) await chrome.storage.sync.remove('syncTabGroups'); }, original.sync),
+            async () => { const focused = original.windows.find(window => window.focused); if (focused) await apiPage.evaluate(id => chrome.windows.update(id, { focused: true }), focused.id); },
+            async () => { await local({ action: 'get' }); const final = await apiPage.evaluate(async () => ({ tabs: await chrome.tabs.query({}), local: await chrome.storage.local.get(['archivedTabs', 'archiveReopenClaims']), session: await chrome.storage.session.get('activeSpaces') })); assert.deepEqual(final.local, original.local); assert.deepEqual(final.session.activeSpaces, original.session.activeSpaces); assert.deepEqual(final.tabs.map(tab => tab.id).sort((a, b) => a - b), original.tabs.map(tab => tab.id).sort((a, b) => a - b)); for (const tab of original.tabs) { const kept = exact(final.tabs, tab.id); for (const key of ['windowId', 'url', 'pinned', 'incognito', 'active', 'splitViewId']) assert.equal(kept[key], tab[key]); } await checkpoint('archive-cleanup-verified', { final }); }
+        ], primaryError);
+    }
+}
+
+export async function exerciseSpotlightArchiveOpen(adapters) {
+    for (const name of ['prepare', 'state', 'capture', 'resolve', 'close']) assert.equal(typeof adapters.nativePanel?.[name], 'function');
+    return archiveFixture(adapters, async ({ nativePanel, apiPage, spotlightOptions, arcifyId, spotlightId, current, source, entries, windowId, evidence,
+        checkpoint, sourcePage, ready, invoke, read, settle, trace, capture, ui, poll, external, reset }) => {
+        await nativePanel.prepare(); await apiPage.evaluate(installArchiveIntentObservation); assert.deepEqual((await nativePanel.state()).contexts, []);
+        for (const kind of ['owned-newtab', 'browser-newtab', 'overlay']) for (const method of ['click', 'Enter']) {
+            const origin = await sourcePage(kind, current), selected = await ready(origin.page);
+            await ui(origin.page, `Open Archive with trusted ${method} from ${kind}`, async () => {
+                const before = await settle(), sourceNative = exact(before.tabs, origin.tab.id);
+                const documentBefore = await origin.page.evaluate(() => ({ url: document.URL, timeOrigin: performance.timeOrigin }));
+                const eventCount = (await nativePanel.state()).events.length;
+                const preparation = await trace(); await reset();
+                await capture(origin.page, `${kind}-${method}-open-selected`);
+                await invoke(selected, method);
+                // The established adapter proves SIDE_PANEL context, native onOpened,
+                // no regular sidebar tab, nontrivial viewport and exact PNG pixels.
+                const native = await nativePanel.capture(eventCount, `Archive ${kind} ${method} native Side Panel`);
+                const { page } = await nativePanel.resolve();
+                const popup = await poll(() => page.evaluate(readNativeArchivePopup), state => {
+                    try { assertNativeArchivePopup(state, { arcifyId, spaceId: source.id, entries: before.archivedTabs }); return true; } catch { return false; }
+                }, 'existing global Archive popup visible inside the actual native Side Panel');
+                await selected.surface.waitForFunction(() => document.querySelector('.arcify-bridge-status [role="status"]')?.textContent === 'Arcify Archive opened.', { polling: 50 });
+                const status = await selected.surface.$eval('.arcify-bridge-status [role="status"]', node => node.textContent);
+                const after = await read(), observed = await trace(origin.page);
+                observed.events.unshift(...preparation.events.filter(event => event.type === 'external' && event.data.message.command === 'archiveContext'));
+                assert.deepEqual(after, before, 'Opening Archive must preserve every original native, saved and archived identity.');
+                assert.deepEqual(mutationEvents(observed.events), []);
+                assertArchiveTrustedInput(observed.input, { type: ARCHIVE_OPEN_TYPE, title: ARCHIVE_OPEN_TITLE, method });
+                const request = assertArchiveOpenRequest(observed.events, { spotlightId, sourceTabId: origin.tab.id, windowId, sourceUrl: sourceNative.url });
+                const nativeAck = assertArchiveNativeAck(observed.events, request, native, { arcifyId, windowId });
+                assert.deepEqual(await origin.page.evaluate(() => ({ url: document.URL, timeOrigin: performance.timeOrigin })), documentBefore);
+                const popupScreenshot = await capture(page, `${kind}-${method}-native-archive-popup`); assert(popupScreenshot?.filename);
+                const popupAfterCapture = await page.evaluate(readNativeArchivePopup); assert.deepEqual(popupAfterCapture, popup);
+                evidence.matrix.push({ kind, method, sourceTabId: origin.tab.id, nativeContextId: native.context.contextId, entryIds: popup.popups[0].entries.map(entry => entry.entryId) });
+                await checkpoint('trusted-native-archive-open', { kind, method, before, after, documentBefore, observed, request, native, nativeAck, popup, popupAfterCapture, status, popupScreenshot });
+                if (kind === 'owned-newtab' && method === 'click') await exerciseArchivePopupButtonRoundTrip({ page, arcifyId, spaceId: source.id,
+                    entries: before.archivedTabs, ui, poll, settle, read, reset, trace, capture, checkpoint });
+            });
+            await nativePanel.close();
+        }
+        // A real same-extension renderer with a fresh source-bound intent still
+        // cannot turn a non-gesture protocol send into an accepted native open.
+        const origin = await sourcePage('owned-newtab', current); await ready(origin.page);
+        const context = await external(spotlightOptions, arcifyId, 'archiveContext', { windowId, tabId: origin.tab.id, supportedFeatures: ARCHIVE_FEATURES });
+        assert.equal(context?.ok, true); assert.equal(typeof context.archiveActions?.openIntent, 'string');
+        const before = await settle(); await reset(); const eventCount = (await nativePanel.state()).events.length;
+        const session = await origin.page.createCDPSession();
+        let response;
+        try { response = await evaluateWithoutGesture(session, `chrome.runtime.sendMessage(${JSON.stringify(arcifyId)}, ${JSON.stringify({ type: 'arcify-archive-open', version: 1, requestId: `archive-no-gesture-${evidence.nonce}`, token: context.archiveActions.openIntent })})`); }
+        finally { await session.detach(); }
+        assert.equal(response?.ok, false); assert.notEqual(response?.displayed, true);
+        const after = await read(), observed = await trace(); assertArchiveNoMutation(before, after, observed.events);
+        assert.deepEqual((await nativePanel.state()).contexts, []); assert.equal((await nativePanel.state()).events.length, eventCount);
+        await checkpoint('non-gesture-archive-open-rejected', { before, after, response, observed });
+        assert.equal(evidence.matrix.length, 6);
+    });
+}
+
+export async function exerciseSpotlightArchiveReopen(adapters) {
+    return archiveFixture(adapters, async ({ apiPage, spotlightOptions, arcifyId, spotlightId, current, source, target, entries, windowId, evidence, owned,
+        checkpoint, local, sourcePage, ready, invoke, read, settle, trace, capture, ui, poll, external, reset, markRevoked }) => {
+        const requests = [];
+        // Same URL and original Space are deliberate twins; each activation must
+        // consume only its exact durable record while preserving the other.
+        for (const [entry, kind, method] of [[entries[1], 'browser-newtab', 'Enter'], [entries[0], 'overlay', 'click']]) {
+            const origin = await sourcePage(kind, current), title = `Reopen ${entry.name}`;
+            const selected = await ready(origin.page, { entryId: entry.entryId, title });
+            await ui(origin.page, `Reopen exact archived twin with trusted ${method}`, async () => {
+                const before = await settle(); await reset();
+                await capture(origin.page, `${kind}-exact-entry-selected`);
+                await invoke(selected, method);
+                const after = await poll(read, state => state.claims?.entries?.[entry.entryId]?.phase === 'consumed' && !state.archivedTabs.some(item => item.entryId === entry.entryId)
+                    && state.tabs.some(tab => tab.id === state.claims.entries[entry.entryId].tabId && tab.active && tab.url === entry.url && !tab.pendingUrl), 'exact archive consumption and known created native ID active');
+                const observed = await trace(origin.page);
+                assertArchiveTrustedInput(observed.input, { type: ARCHIVE_ENTRY_TYPE, title, entryId: entry.entryId, method });
+                const { request, receipt, status, overlayRetired } = await waitForArchiveReopenCompletion({ page: origin.page, surface: selected.surface, kind, spaceName: target.name,
+                    events: observed.events, expected: { spotlightId, sourceTabId: origin.tab.id, windowId, entryId: entry.entryId },
+                    verifyCommitted: () => { const receipt = assertArchiveReopened(before, after, observed.events, { entry: { ...entry, bookmarkFolderId: target.bookmarkFolderId }, sourceWindowId: windowId, selectedSpaceId: source.id }); owned.push(receipt.tabId); return receipt; } });
+                requests.push(request);
+                evidence.matrix.push({ kind, method, entryId: entry.entryId, tabId: receipt.tabId, sourceTabId: origin.tab.id, originalSpaceId: target.id });
+                await checkpoint('exact-archive-entry-reopened', { kind, method, before, after, observed, request, receipt, status, overlayRetired, screenshot: await capture(origin.page, `${kind}-exact-entry-reopened`) });
+            });
+            // Repeating a captured real request exercises the actual receiver;
+            // it cannot create or consume a URL twin, even after source activation changed.
+            const request = requests.at(-1), before = await settle(); await reset();
+            const replay = await external(spotlightOptions, arcifyId, request.command,
+                Object.fromEntries(Object.entries(request).filter(([key]) => !['type', 'version', 'requestId', 'command'].includes(key))), request.requestId);
+            assertArchiveCachedReplay(replay, request, before, { spotlightId });
+            const after = await read(), observed = await trace(); assertArchiveNoMutation(before, after, observed.events);
+            await checkpoint('captured-reopen-cached-receipt', { before, after, replay, observed });
+            // A different request ID cannot reuse the already-consumed private
+            // view. Its exact pending journal receipt is the only allowed write.
+            await reset();
+            const rejected = await external(spotlightOptions, arcifyId, request.command,
+                Object.fromEntries(Object.entries(request).filter(([key]) => !['type', 'version', 'requestId', 'command'].includes(key))));
+            assert.equal(rejected?.ok, false); assert.equal(rejected.error?.code, 'STALE_ARCHIVE');
+            const afterFresh = await read(), freshObserved = await trace();
+            const freshRequest = assertArchiveReopenRequest(freshObserved.events, { spotlightId, sourceTabId: request.context.sourceTabId, windowId, entryId: entry.entryId });
+            assert.notEqual(freshRequest.requestId, request.requestId);
+            assertArchiveNoMutation(after, afterFresh, freshObserved.events, { pendingRequest: freshRequest, spotlightId });
+            await checkpoint('consumed-archive-view-rejected', { before: after, after: afterFresh, rejected, request: freshRequest, observed: freshObserved });
+        }
+        assert.notEqual(evidence.matrix[0].tabId, evidence.matrix[1].tabId, 'Same-address archive entries must never collapse distinct newly created identities.');
+
+        // Seed only the documented durable crash boundary in this disposable
+        // fixture; all subsequent requests, rejection and native read-back are real.
+        const uncertain = entries[2];
+        const durable = await apiPage.evaluate(async () => ({ sessionId: (await chrome.storage.session.get('archiveBrowserSession')).archiveBrowserSession,
+            claims: (await chrome.storage.local.get('archiveReopenClaims')).archiveReopenClaims }));
+        assert.equal(typeof durable.sessionId, 'string'); assert(durable.sessionId);
+        const claim = { entryId: uncertain.entryId, expected: uncertain, requestId: `uncertain-fixture-${evidence.nonce}`, windowId,
+            bookmarkFolderId: target.bookmarkFolderId, sessionId: durable.sessionId, phase: 'creating', tabId: null };
+        await apiPage.evaluate(({ claims, entryId, claim }) => chrome.storage.local.set({ archiveReopenClaims: { ...claims, entries: { ...claims.entries, [entryId]: claim } } }), { claims: durable.claims, entryId: uncertain.entryId, claim });
+        for (const method of ['click', 'Enter']) {
+            const origin = await sourcePage('owned-newtab', current), title = `Reopen ${uncertain.name}`;
+            const selected = await ready(origin.page, { entryId: uncertain.entryId, title });
+            await ui(origin.page, 'Refuse a duplicate after an uncertain earlier native create', async () => {
+                const before = await settle(); await reset(); await invoke(selected, method);
+                await selected.surface.waitForFunction(() => { const node = document.querySelector('.arcify-bridge-status'); return node?.textContent?.includes('earlier reopen') || node?.textContent?.includes('could not be confirmed'); }, { polling: 50 });
+                const status = await selected.surface.$eval('.arcify-bridge-status', node => node.textContent);
+                const after = await read(), observed = await trace(origin.page);
+                assertArchiveTrustedInput(observed.input, { type: ARCHIVE_ENTRY_TYPE, title, entryId: uncertain.entryId, method });
+                const request = assertArchiveReopenRequest(observed.events, { spotlightId, sourceTabId: origin.tab.id, windowId, entryId: uncertain.entryId });
+                assertArchiveNoMutation(before, after, observed.events, { pendingRequest: request, spotlightId }); assert.deepEqual(after.claims.entries[uncertain.entryId], claim);
+                await checkpoint('durable-uncertain-create-rejected', { method, before, after, observed, status, screenshot: await capture(origin.page, `uncertain-${method}-error`) });
+            });
+        }
+        // Real receiver stale-view probes do not fake UI contexts or acknowledgements.
+        // They are separate from the genuine positive keyboard/click evidence.
+        for (const change of ['selected-space', 'pairing']) {
+            const origin = await sourcePage('owned-newtab', current);
+            const context = await external(spotlightOptions, arcifyId, 'archiveContext', { windowId, tabId: origin.tab.id, supportedFeatures: ARCHIVE_FEATURES });
+            assert.equal(context?.ok, true); const scope = context.archiveActions;
+            if (change === 'selected-space') await local({ action: 'activate', windowId, spaceId: target.id });
+            else { await ui(apiPage, 'Revoke exact paired peer before stale Archive request', () => apiPage.click('#bridgeDisconnect')); markRevoked(); await apiPage.waitForSelector('#bridgeStatus[data-state="disabled"]'); }
+            const before = await settle(); await reset();
+            const rejection = await external(spotlightOptions, arcifyId, 'reopenArchivedTab', { windowId, context: scope.context, viewId: scope.viewId, entryId: uncertain.entryId, supportedFeatures: ARCHIVE_FEATURES });
+            assert.equal(rejection?.ok, false); assert(['STALE_CONTEXT', 'STALE_ARCHIVE', 'STALE_VIEW', 'UNAUTHORIZED', 'DISCONNECTED'].includes(rejection.error?.code), JSON.stringify(rejection));
+            const after = await read(), observed = await trace();
+            const request = assertArchiveReopenRequest(observed.events, { spotlightId, sourceTabId: origin.tab.id, windowId, entryId: uncertain.entryId });
+            assertArchiveNoMutation(before, after, observed.events, change === 'selected-space' ? { pendingRequest: request, spotlightId } : {});
+            await checkpoint(`stale-archive-${change}-rejected`, { before, after, rejection, observed });
+        }
+        assert.equal(evidence.matrix.length, 2);
+    });
+}

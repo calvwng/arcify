@@ -1,3 +1,4 @@
+import { SpotlightArchiveActions, ARCHIVE_OPEN_TYPE } from './spotlight-archive-actions.js';
 import { normalizeSpaceColor } from './space-colors.js';
 import { createSidebarNewTabLauncher } from './sidebar-new-tab-launch.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
@@ -10,9 +11,9 @@ import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
 import { readSpaceNavigationContext, runSpaceNavigation } from './spotlight-space-navigation.js';
 import { readTabActionContext, runTabAction } from './spotlight-tab-actions.js';
 import { readSpaceActionContext, runSpaceAction } from './spotlight-space-actions.js';
-import { SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
+import { ARCHIVE_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
-const COMMANDS = ['hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
+const COMMANDS = ['archiveContext', 'reopenArchivedTab', 'hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
 const JOURNAL_KEY = 'spotlightBridgeRequests';
 
 // Only reads Arcify's authoritative model. Group IDs/names never enter the protocol.
@@ -149,7 +150,7 @@ export async function runBridgeAction(store, request, snapshot, { beforeMutation
     return { tabId: await focus(tab.id) };
 }
 
-export function createSpotlightBridge(store) {
+export function createSpotlightBridge(store, archiveActions = new SpotlightArchiveActions(store)) {
     let chain = Promise.resolve();
     const handle = async (request, sender) => {
         const initialPairing = await chrome.storage.local.get([PEER_KEY, PAIRING_GENERATION_KEY]);
@@ -161,11 +162,14 @@ export function createSpotlightBridge(store) {
         };
         if (!trustedSender(sender, peerId)) throw bridgeError('UNAUTHORIZED', 'This extension is not paired with Arcify.');
         validateRequest(request, COMMANDS);
-        const readOnly = ['hello', 'snapshot', 'actionContext', 'tabActionContext', 'navigationContext'].includes(request.command);
+        const readOnly = ['hello', 'snapshot', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext'].includes(request.command);
         const spaceAction = SPACE_ACTION_COMMANDS.includes(request.command);
         const tabAction = TAB_ACTION_COMMANDS.includes(request.command);
         const navigation = SPACE_NAVIGATION_COMMANDS.includes(request.command);
-        const contextualAction = spaceAction || tabAction || navigation;
+        const archiveAction = request.command === 'reopenArchivedTab';
+        const contextualAction = spaceAction || tabAction || navigation || archiveAction;
+        if ((archiveAction || request.command === 'archiveContext') && (!request.supportedFeatures?.includes(ARCHIVE_ACTIONS_FEATURE) || !archiveActions.supported()))
+            throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate exact archive actions before sending this request.');
         if ((navigation || request.command === 'navigationContext') && !request.supportedFeatures?.includes(SPACE_NAVIGATION_FEATURE))
             throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate Space navigation before sending this request.');
         if ((tabAction || request.command === 'tabActionContext') && !request.supportedFeatures?.includes(TAB_ACTIONS_FEATURE))
@@ -200,6 +204,8 @@ export function createSpotlightBridge(store) {
         const snapshot = contextualAction ? null : await getBridgeSnapshot(store, request.windowId);
         await checkPairing();
         if (readOnly) {
+            const archiveContext = request.command === 'archiveContext' ? await store.run(() => archiveActions.prepareUnlocked(request,
+                { peerId, pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : null;
             const navigationContext = request.command === 'navigationContext' ? await store.run(() => readSpaceNavigationContext(store, request,
                 { pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : null;
             const actionContext = request.command === 'actionContext' ? await store.run(() => readSpaceActionContext(store, request,
@@ -208,7 +214,7 @@ export function createSpotlightBridge(store) {
                 { pairingGeneration: generation ?? null, beforeReturn: checkPairing })) : undefined;
             await checkPairing();
             return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot,
-                ...(actionContext ? { actionContext } : {}), ...(tabActionContext ? { tabActionContext } : {}), ...(navigationContext || {}), ...(commandCapabilities(request, chrome, store)) });
+                ...(archiveContext ? { archiveActions: archiveContext } : {}), ...(actionContext ? { actionContext } : {}), ...(tabActionContext ? { tabActionContext } : {}), ...(navigationContext || {}), ...(commandCapabilities(request, chrome, store)) });
         }
         const entry = { key, fingerprint: JSON.stringify(request) };
         const next = [...journal.slice(-99), entry];
@@ -222,7 +228,7 @@ export function createSpotlightBridge(store) {
             // persisted authority read before the caller's mutation boundary.
             const beforeMutation = async () => { await requireFeatures(); await checkPairing(); };
             await beforeMutation();
-            return navigation ? runSpaceNavigation(store, request, { beforeMutation }) : tabAction ? runTabAction(store, request, { beforeMutation }) : spaceAction ? runSpaceAction(store, request, { beforeMutation })
+            return archiveAction ? archiveActions.reopenUnlocked(request, { peerId, pairingGeneration: generation ?? null, beforeMutation }) : navigation ? runSpaceNavigation(store, request, { beforeMutation }) : tabAction ? runTabAction(store, request, { beforeMutation }) : spaceAction ? runSpaceAction(store, request, { beforeMutation })
                 : runBridgeAction(store, request, snapshot, { beforeMutation });
         });
         if (contextualAction) {
@@ -257,10 +263,12 @@ export function createSpotlightBridge(store) {
 
 export function registerSpotlightBridge(store) {
     const invalidation = registerSpotlightInvalidation(store);
-    const handle = createSpotlightBridge(store);
+    const archiveActions = new SpotlightArchiveActions(store);
+    const handle = createSpotlightBridge(store, archiveActions);
     const handleSidebar = createSidebarCommandHandler();
     const launchNewTab = createSidebarNewTabLauncher(store);
     chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => {
+        if (request?.type === ARCHIVE_OPEN_TYPE) return archiveActions.open(request, sender, sendResponse);
         if (request?.type === SIDEBAR_COMMAND_TYPE) return handleSidebar(request, sender, sendResponse);
         handle(request, sender).then(sendResponse);
         return true;
@@ -283,12 +291,14 @@ export function registerSpotlightBridge(store) {
         })().catch(error => sendResponse({ ok: false, error: { code: error.code || 'FAILED', message: error.message } }));
         return true;
     });
+    archiveActions.install();
     return invalidation;
 }
 
 function commandCapabilities(request, browser, store) {
     return request.command === 'hello' ? { capabilities: [
         ...(typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : []),
+        ...(store.archiveStore && request.supportedFeatures?.includes(ARCHIVE_ACTIONS_FEATURE) ? [ARCHIVE_ACTIONS_FEATURE] : []),
         ...(request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE) ? [SPACE_ACTIONS_FEATURE] : []),
         ...(request.supportedFeatures?.includes(SPACE_NAVIGATION_FEATURE) ? [SPACE_NAVIGATION_FEATURE] : []),
         ...(request.supportedFeatures?.includes(TAB_ACTIONS_FEATURE) ? [TAB_ACTIONS_FEATURE] : []),

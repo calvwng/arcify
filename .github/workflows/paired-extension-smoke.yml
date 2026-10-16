@@ -13,8 +13,22 @@ on:
       - 'scripts/paired-chrome-spotlight-tabs.mjs'
       - 'scripts/paired-chrome-action-surface.mjs'
       - 'scripts/paired-chrome-helper-origin.mjs'
+      - 'scripts/paired-chrome-spotlight-archive.mjs'
+      - 'tests/unit/paired-chrome-spotlight-archive.test.js'
+      - 'tests/unit/paired-chrome-archive-wiring.test.js'
+      - 'docs/archive-actions-paired-ci.md'
+      - 'spotlight-archive-actions.js'
+      - 'archive-store.js'
+      - 'archive-client.js'
+      - 'archive-intent-ui.js'
+      - 'tests/unit/archive-intent-ui.test.js'
+      - 'tests/unit/archive-popup.test.js'
+      - 'docs/archive-operations.md'
+      - 'tests/unit/spotlight-archive*.test.js'
+      - 'tests/unit/archive-store*.test.js'
       - 'scripts/check-spotlight-pair.mjs'
       - 'scripts/lib/spotlight-pair-extended-*.mjs'
+      - 'scripts/lib/spotlight-pair-archive-*.mjs'
       - 'scripts/test-spotlight-pair-contract.mjs'
       - 'tests/unit/paired-chrome-spotlight-navigation.test.js'
       - 'tests/unit/paired-chrome-spotlight-tabs.test.js'
@@ -218,7 +232,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 7e19bc21906ba241308f766e551874419eb60287
+          ref: b510b3dbe8cfae6441fbc55a23ce19de30805a6d
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -287,7 +301,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 7e19bc21906ba241308f766e551874419eb60287
+          ref: b510b3dbe8cfae6441fbc55a23ce19de30805a6d
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -356,7 +370,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 7e19bc21906ba241308f766e551874419eb60287
+          ref: b510b3dbe8cfae6441fbc55a23ce19de30805a6d
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -424,7 +438,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 7e19bc21906ba241308f766e551874419eb60287
+          ref: b510b3dbe8cfae6441fbc55a23ce19de30805a6d
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -502,7 +516,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 7e19bc21906ba241308f766e551874419eb60287
+          ref: b510b3dbe8cfae6441fbc55a23ce19de30805a6d
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -570,7 +584,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 7e19bc21906ba241308f766e551874419eb60287
+          ref: b510b3dbe8cfae6441fbc55a23ce19de30805a6d
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -615,5 +629,72 @@ jobs:
         with:
           name: paired-chrome-extended-actions-${{ github.run_id }}-${{ github.run_attempt }}
           path: arcify/test-results/paired-chrome-extended-actions/
+          if-no-files-found: warn
+          retention-days: 14
+
+  archive-actions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: archive-actions
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: b510b3dbe8cfae6441fbc55a23ce19de30805a6d
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise Spotlight Archive native opening and exact entry reopening in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-archive-actions
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-archive-actions/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-archive-actions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-archive-actions/
           if-no-files-found: warn
           retention-days: 14

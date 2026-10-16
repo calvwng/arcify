@@ -14,6 +14,8 @@ import * as arcifyProtocol from '../spotlight-bridge-protocol.js';
 import { assertCommonV1Contract, assertInitialSpaceActionsContract } from './lib/spotlight-pair-contract.mjs';
 import { assertInitialSpaceActionRoundTrips } from './lib/spotlight-pair-actions.mjs';
 import { assertExtendedActionsContract } from './lib/spotlight-pair-extended-contract.mjs';
+import { assertArchiveActionsContract } from './lib/spotlight-pair-archive-contract.mjs';
+import { assertArchiveActionRoundTrips } from './lib/spotlight-pair-archive-actions.mjs';
 import { assertExtendedActionRoundTrips } from './lib/spotlight-pair-extended-actions.mjs';
 
 if (process.argv.length !== 3) {
@@ -28,6 +30,8 @@ await assertCommonV1Contract(arcifyProtocol, spotlightProtocol);
 assertInitialSpaceActionsContract(arcifyProtocol, spotlightActions);
 const spotlightTabActions = await peerModule('shared/arcify-tab-actions-protocol.js');
 assertExtendedActionsContract(arcifyProtocol, spotlightActions, spotlightTabActions);
+const spotlightArchive = await peerModule('shared/arcify-archive-actions-protocol.js');
+assertArchiveActionsContract(arcifyProtocol, spotlightArchive);
 
 const ARCIFY = 'a'.repeat(32);
 const SPOTLIGHT = 'b'.repeat(32);
@@ -210,9 +214,13 @@ try {
     const { ArcifyTabActionsClient } = await peerModule('shared/arcify-tab-actions.js');
     await assertExtendedActionRoundTrips({ ArcifyBridgeClient, ArcifySpaceActionsClient, ArcifyTabActionsClient });
 
+    const { ArcifyArchiveActionsClient } = await peerModule('shared/arcify-archive-actions.js');
+    await assertArchiveActionRoundTrips({ ArcifyBridgeClient, ArcifyArchiveActionsClient });
+
     console.log('PASS: mocked Arcify ↔ Spotlight contract smoke test');
     console.log('Verified exported constants/common-v1 wire contracts, initial four-action contexts/payloads/results and real client/provider round trips, real snapshot validation, hello/snapshot/openTab round trips, window isolation, bookmark warnings, version rejection on both sides, and optional saved-Favorite capability/closed snapshots/exact open reuse.');
     console.log('Also verified additive Space-navigation/tab-action contracts and real client/provider round trips for switch, move, Today/saved rename, saved URL editing, duplicate, offscreen copy and explicit mute, preserving exact identities, window isolation and no-replay rejection.');
+    console.log('Also verified optional Archive strict contracts and exact same-URL reopening through the real client/provider/store, durable consume receipts, lost response/no duplicate and untouched saved pins/other window.');
     console.log('Chrome transport and APIs were mocked; no browser or extension-loading verification was performed.');
 } finally {
     if (previousChrome === undefined) delete globalThis.chrome;

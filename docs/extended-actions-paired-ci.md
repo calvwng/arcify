@@ -30,13 +30,13 @@ retries, isolated-case exemptions, upstream job dependencies or allowed failures
 
 ## Exact peer compatibility and preservation
 
-All six jobs check out exact read-only Arcify/Spotlight revisions and use the
+All seven jobs check out exact read-only Arcify/Spotlight revisions and use the
 shared mandatory sandbox, runtime, ordinary Developer Mode UI, identity,
 window-isolation, crash/error and evidence guards. The new job uses its own fresh
 runner/profile, the installed Chrome package, the existing 20-minute timeout,
 and no package-update path. No browser, workflow or publication is performed by
 local assertion tests. The reviewed local Spotlight candidate
-`7e19bc21906ba241308f766e551874419eb60287` is pinned in the runner and all six
+`b510b3dbe8cfae6441fbc55a23ce19de30805a6d` is pinned in the runner and all seven
 workflow checkouts. This preparation does not publish it or run any workflow.
 
 The initial action module's default helper oracle still requires exactly Create

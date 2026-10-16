@@ -926,3 +926,64 @@ test('custom Space tints keep the exact v1 snapshot shape and named native group
     store.spaces[0].color = 'var(--untrusted)';
     assert.equal((await getBridgeSnapshot(store, 1)).spaces[0].color, 'grey');
 });
+
+test('optional archive capabilities stay out of legacy hello and exact actions require negotiation', async () => {
+    const store = await makeStore(), bridge = createSpotlightBridge(store);
+    const legacy = await bridge(request('hello'), SENDER); assert(!legacy.capabilities.includes('archiveActionsV1'));
+    const hello = await bridge(request('hello', { supportedFeatures: ['globalFavoritesV1', 'archiveActionsV1'] }), SENDER); assert(hello.capabilities.includes('archiveActionsV1'));
+    assertError(await bridge(request('archiveContext', { tabId: 1 }), SENDER), 'UNSUPPORTED_FEATURE');
+});
+test('real bridge restores one exact same-URL archive in original Space and source window, with one durable create', async () => {
+    const store = await makeStore(), bridge = createSpotlightBridge(store);
+    local.archivedTabs = [{ entryId: 'archived-first', name: 'First archived twin', url: DUPLICATE_URL, spaceId: 'b', archivedAt: 1, legacy: 'retain' },
+        { entryId: 'archived-second', name: 'Second archived twin', url: DUPLICATE_URL, spaceId: 'a', archivedAt: 2, legacy: 'retain-too' }];
+    const beforeNodes = clone(nodes), beforeBindings = clone(local.pinnedTabStatesById), beforeOtherWindow = session.activeSpaces[2];
+    const features = ['globalFavoritesV1', 'archiveActionsV1'];
+    const prepared = await bridge(request('archiveContext', { tabId: 1, supportedFeatures: features }), SENDER);
+    assert.equal(prepared.ok, true, JSON.stringify(prepared)); assert.equal(prepared.archiveActions.entries.length, 2);
+    const { context, viewId } = prepared.archiveActions;
+    const restore = request('reopenArchivedTab', { context, viewId, entryId: 'archived-first', supportedFeatures: features });
+    const response = await bridge(restore, SENDER); assert.equal(response.ok, true, JSON.stringify(response));
+    assert.equal(response.archiveResult.entryId, 'archived-first'); assert.equal(response.archiveResult.spaceId, 'b'); assert.equal(response.archiveResult.consumed, true);
+    assert.equal(response.snapshot.tabs.find(tab => tab.id === response.archiveResult.tabId).spaceId, 'b');
+    assert.equal(writes('tab.create').length, 1); assert.equal(writes('tab.create')[0][1].windowId, 1);
+    assert.equal(local.archivedTabs.length, 1); assert.equal(local.archivedTabs[0].entryId, 'archived-second');
+    assert.deepEqual(nodes, beforeNodes); assert.deepEqual(local.pinnedTabStatesById, beforeBindings); assert.equal(session.activeSpaces[2], beforeOtherWindow);
+    assert.equal(local.archiveReopenClaims.entries['archived-first'].phase, 'consumed');
+    const replay = await bridge(restore, SENDER); assert.equal(replay.ok, true); assert.equal(writes('tab.create').length, 1);
+    assertError(await bridge({ ...restore, requestId: 'new-request' }, SENDER), 'STALE_ARCHIVE');
+});
+test('changed private archive record refuses exact bridge action, including unknown legacy field changes', async () => {
+    const store = await makeStore(), bridge = createSpotlightBridge(store);
+    local.archivedTabs = [{ entryId: 'archived', name: 'Archived', url: DUPLICATE_URL, spaceId: 'b', archivedAt: 1, legacy: 'old' }];
+    const features = ['globalFavoritesV1', 'archiveActionsV1'];
+    const prepared = await bridge(request('archiveContext', { tabId: 1, supportedFeatures: features }), SENDER);
+    local.archivedTabs[0].legacy = 'changed';
+    assertError(await bridge(request('reopenArchivedTab', { context: prepared.archiveActions.context, viewId: prepared.archiveActions.viewId, entryId: 'archived', supportedFeatures: features }), SENDER), 'STALE_ARCHIVE');
+    assert.equal(writes('tab.create').length, 0); assert.equal(local.archivedTabs[0].legacy, 'changed');
+});
+
+for (const phase of ['assignment', 'selection']) test(`Archive ${phase} persist refusal reloads durable state before a later native-event persist`, async () => {
+    const store = await makeStore(), bridge = createSpotlightBridge(store);
+    local.archivedTabs = [{ entryId: 'archive-refusal', name: 'Archived', url: DUPLICATE_URL, spaceId: 'b', archivedAt: 1 }];
+    const features = ['globalFavoritesV1', 'archiveActionsV1'];
+    const prepared = await bridge(request('archiveContext', { tabId: 1, supportedFeatures: features }), SENDER);
+    const persist = store.persist.bind(store); let rejected = false;
+    store.persist = async options => {
+        const selectedPhase = options?.beforeWrite && (phase === 'assignment' ? options.skipGroupSync === true : !options.skipGroupSync);
+        if (!rejected && selectedPhase) { rejected = true; local[PEER_KEY] = 'c'.repeat(32); }
+        return persist(options);
+    };
+    const result = await bridge(request('reopenArchivedTab', { context: prepared.archiveActions.context, viewId: prepared.archiveActions.viewId,
+        entryId: 'archive-refusal', supportedFeatures: features }), SENDER);
+    assert.equal(result.ok, false); assert.equal(rejected, true); assert.equal(store.initialized, false);
+    assert.equal(session.activeSpaces[1], 'a'); assert.equal(writes('tab.create').length, 1);
+    const created = tabs.find(tab => tab.id === 100);
+    await store.run(() => store.persist());
+    assert.equal(store.initialized, true); assert.equal(session.activeSpaces[1], 'a');
+    const owners = store.spaces.filter(space => space.temporaryTabs.includes(created.id));
+    assert.deepEqual(owners.map(space => space.id), phase === 'assignment' ? [] : ['b']);
+    assert.equal(local.archivedTabs.length, phase === 'assignment' ? 1 : 0);
+    assert.equal(local.archiveReopenClaims.entries['archive-refusal'].phase, phase === 'assignment' ? 'created' : 'consumed');
+    assert.equal(writes('tab.create').length, 1);
+});
