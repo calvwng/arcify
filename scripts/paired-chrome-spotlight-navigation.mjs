@@ -12,7 +12,7 @@ import { projectTabTitle } from '../tab-title-projection.js';
 import { isStartupLauncherTab } from '../startup-launcher-tab.js';
 import { readNewTabReuseState } from './paired-chrome-newtab.mjs';
 import { assertSpotlightActionEnvironment, installSpotlightActionApiObservation, readSpotlightActionPage,
-    assertSpotlightActionContext, assertSpotlightActionUnchanged, assertSpotlightActionNoWrites } from './paired-chrome-spotlight-actions.mjs';
+    assertSpotlightActionContext, assertSpotlightActionUnchanged, assertSpotlightActionNoWrites, readSpotlightActionReadiness } from './paired-chrome-spotlight-actions.mjs';
 
 export const SPOTLIGHT_NAVIGATION_CASE_NAME = 'Spotlight Space navigation uses genuine destination pickers and preserves exact Today/native identities';
 export const NAVIGATION_FEATURES = Object.freeze(['globalFavoritesV1', 'spaceActionsV1', 'spaceNavigationV1']);
@@ -26,6 +26,35 @@ const identity = space => ({ spaceId: space.id, bookmarkFolderId: space.bookmark
 const canonSnapshots = values => Object.fromEntries(Object.entries(values).map(([key, { capturedAt, ...value }]) => [key, value]));
 const active = (state, windowId) => { const tabs = state.tabs.filter(tab => tab.windowId === windowId && tab.active); assert.equal(tabs.length, 1); return tabs[0].id; };
 const changedStorage = events => events.filter(event => event.type === 'storage' && Object.values(event.data.changes).some(value => JSON.stringify(value.oldValue) !== JSON.stringify(value.newValue)));
+
+export function spotlightNavigationReadinessMatches(observation, command) {
+    const rows = observation?.rows, first = observation?.first;
+    return Boolean(Object.hasOwn(NAVIGATION_TITLES, command) && Array.isArray(rows) &&
+        rows[0]?.type === 'arcify-space-action' && rows[0]?.title === NAVIGATION_TITLES[command] && rows[0]?.selected === true &&
+        rows.findIndex(row => row.type === 'search-query' && row.title?.includes(NAVIGATION_QUERIES[command])) > 0 &&
+        first?.connected === true && first.current === true && first.width > 0 && first.height > 0 && first.visibility !== 'hidden');
+}
+
+export async function waitForSpotlightNavigationReadiness({ surface, command, poll, record = async () => {} }) {
+    assert(Object.hasOwn(NAVIGATION_TITLES, command), 'Require one known navigation action.');
+    let last = null, attempts = 0, observation;
+    try {
+        // Progressive/live result refresh replaces row nodes. Observe exact identity,
+        // selection, retained search and visibility in one DOM turn, never by a
+        // separately acquired row handle. Keep the caller's original poll deadline.
+        observation = await poll(async () => {
+            attempts++;
+            return last = await surface.evaluate(readSpotlightActionReadiness);
+        }, value => spotlightNavigationReadinessMatches(value, command), 'visible fuzzy navigation action selected above preserved web search');
+        assertMatchedActionFirst(observation.rows, { type: 'arcify-space-action', title: NAVIGATION_TITLES[command], query: NAVIGATION_QUERIES[command] });
+        assert.equal(spotlightNavigationReadinessMatches(observation, command), true, 'The exact selected navigation action must be a current painted row.');
+    } catch (error) {
+        try { await record({ status: 'failed', command, attempts, observation: last, error: { message: error.message, stack: error.stack } }); } catch {}
+        throw error;
+    }
+    await record({ status: 'ready', command, attempts, observation });
+    return observation;
+}
 
 // Decide from exact pre-action native membership, never from a detached-frame
 // exception or an outcome that could hide the wrong destination activation.
@@ -348,9 +377,8 @@ export async function exerciseSpotlightNavigation({ browser, observePage, apiPag
     };
     const ready = async (page, command) => {
         await search(page, NAVIGATION_QUERIES[command]); const surface = await spotlightSurface(page);
-        const rows = await poll(() => surface.evaluate(readSpotlightRows), rows => rows[0]?.type === 'arcify-space-action' && rows[0]?.title === NAVIGATION_TITLES[command] && rows[0].selected, 'fuzzy navigation action selected above preserved web search');
-        assertMatchedActionFirst(rows, { type: 'arcify-space-action', title: NAVIGATION_TITLES[command], query: NAVIGATION_QUERIES[command] });
-        assert.equal(await surface.$eval('[data-testid="spotlight-result"]', node => node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden'), true);
+        const { rows } = await waitForSpotlightNavigationReadiness({ surface, command, poll,
+            record: observation => checkpoint('navigation-readiness-observed', observation) });
         await surface.evaluate(installNavigationInputObservation, { retainInParent: surface !== page }); return { surface, rows, inputOwner: page };
     };
     const invoke = async (surface, command, method) => {

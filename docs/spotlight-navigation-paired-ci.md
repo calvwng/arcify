@@ -53,6 +53,15 @@ same-address decoy. All positive actions come from genuine visible result rows,
 Enter/primary clicks, a real native select driven by keyboard, and a separate
 picker submission. No positive navigation command is sent directly.
 
+Pre-input navigation readiness samples the exact first action, selection, retained
+web search, connected/current row and nonzero visible bounds in one synchronous
+DOM evaluation. Progressive search and passive refresh can replace row nodes, so
+the harness does not combine a row-list observation with a later element-handle
+visibility check. Only these read-only observations repeat under the existing
+20-second polling deadline; search input, picker invocation and stale-state
+mutations are not replayed. `navigation-readiness-observed` retains the accepted
+sample or last failed sample and attempt count.
+
 - Genuine isolated overlay iframe and both literal owned New Tab and browser
   `chrome://newtab/` helper surfaces
 - Fuzzy discovery ranked first with web search retained and manually selectable
@@ -116,6 +125,11 @@ its naturally new generation, never by restoring an old grant token.
 
 `tests/unit/paired-chrome-spotlight-navigation.test.js` is assertion-counterexample
 evidence only. It does not prove real trusted Chrome input or browser behavior.
+`tests/unit/paired-chrome-navigation-readiness.test.js` executes the real readiness
+helper and serialized DOM reader against DOM-contract fixtures. It covers delayed
+visibility and row replacement, rejects detached/hidden/unselected/wrong rows or
+missing original web search, and preserves the existing timeout and failure. Its
+modeled layout is not painted-pixel or hosted acceptance evidence.
 `tests/unit/spotlight-space-navigation-source-races.test.js` runs the real backend
 handler with mocked browser APIs: closed/moved exact sources cannot borrow an
 active same-URL twin; restoring the old source then replaying the same request ID
@@ -134,7 +148,7 @@ Run locally without any browser launch:
 
 ```
 node --check scripts/paired-chrome-spotlight-navigation.mjs
-node --test tests/unit/paired-chrome-spotlight-navigation.test.js tests/unit/spotlight-space-navigation-source-races.test.js
+node --test tests/unit/paired-chrome-navigation-readiness.test.js tests/unit/paired-chrome-spotlight-navigation.test.js tests/unit/spotlight-space-navigation-source-races.test.js
 npm run test:unit
 npm run build
 ```
