@@ -227,6 +227,61 @@ export async function waitForArchiveReopenCompletion({ page, surface, kind, spac
     return { request, receipt, status, overlayRetired: false };
 }
 
+/** Read-only destination evidence; the original source can legitimately be hidden. */
+export function readArchiveDestinationDocument() {
+    return { url: location.href, visibility: document.visibilityState, focused: document.hasFocus(), readyState: document.readyState,
+        documentId: document.body?.dataset.documentId || null, timeOrigin: performance.timeOrigin,
+        width: innerWidth, height: innerHeight };
+}
+export async function captureArchiveReopenedDestination({ browser, apiPage, observePage, poll, beforeTargets, before, receipt, windowId, url, capture, settle, read, trace, label }) {
+    assert(beforeTargets instanceof Set); assert(Number.isSafeInteger(receipt.tabId) && receipt.tabId > 0);
+    assert.equal(receipt.claim?.phase, 'consumed'); assert.equal(receipt.claim.tabId, receipt.tabId);
+    assert.equal(receipt.claim.windowId, windowId); assert.equal(receipt.claim.expected.url, url);
+    const beforeIds = before.tabs.map(tab => tab.id);
+    assert(!beforeIds.includes(receipt.tabId), 'Destination must be the exact newly created native ID.');
+    const baseline = await settle();
+    assert.deepEqual(baseline.tabs.filter(tab => !beforeIds.includes(tab.id)).map(tab => tab.id), [receipt.tabId], 'One reopen must produce exactly one new native ID.');
+    assert.deepEqual(baseline.claims?.entries?.[receipt.claim.entryId], receipt.claim, 'The exact consumed receipt must remain unchanged before capture.');
+    assert.equal(baseline.activeSpaces[windowId], receipt.claim.expected.spaceId);
+    const observedBefore = await trace();
+    const freshTargets = () => browser.targets().filter(target => target.type() === 'page' && !beforeTargets.has(target));
+    const target = await poll(() => {
+        const fresh = freshTargets();
+        assert(fresh.length <= 1, 'Ambiguous fresh destination targets cannot be selected by same URL.');
+        return fresh.length === 1 && fresh[0].url() === url ? fresh[0] : null;
+    }, Boolean, `one fresh destination target for reopened native tab ${receipt.tabId}`);
+    const page = await observePage(await target.page());
+    const native = () => apiPage.evaluate(async ({ tabId, windowId, beforeIds }) => {
+        const tabs = await chrome.tabs.query({}), tab = tabs.find(tab => tab.id === tabId), window = await chrome.windows.get(windowId);
+        return { tab: tab ? { id: tab.id, windowId: tab.windowId, url: tab.url, pendingUrl: tab.pendingUrl || null,
+            active: tab.active, pinned: tab.pinned, incognito: tab.incognito, status: tab.status } : null,
+            window: { id: window.id, type: window.type, incognito: window.incognito, focused: window.focused },
+            newTabIds: tabs.filter(tab => !beforeIds.includes(tab.id)).map(tab => tab.id),
+            activeTabIds: tabs.filter(tab => tab.windowId === windowId && tab.active).map(tab => tab.id) };
+    }, { tabId: receipt.tabId, windowId, beforeIds });
+    const verify = (nativeState, documentState) => {
+        const fresh = freshTargets(); assert.equal(fresh.length, 1);
+        assert.equal(fresh[0], target, 'The exact single fresh target identity must survive capture.');
+        assert.equal(page.target(), target); assert.equal(target.url(), url); assert.equal(page.url(), url);
+        assert.deepEqual(nativeState, { tab: { id: receipt.tabId, windowId, url, pendingUrl: null, active: true,
+            pinned: false, incognito: false, status: 'complete' }, window: { id: windowId, type: 'normal', incognito: false, focused: true },
+            newTabIds: [receipt.tabId], activeTabIds: [receipt.tabId] });
+        assert.equal(documentState.url, url); assert.equal(documentState.visibility, 'visible'); assert.equal(documentState.focused, true);
+        assert.equal(documentState.readyState, 'complete'); assert.match(documentState.documentId, /^[a-f0-9]{32}$/);
+        assert(Number.isFinite(documentState.timeOrigin) && documentState.timeOrigin > 0);
+        assert(documentState.width > 0 && documentState.height > 0);
+    };
+    const nativeBefore = await native(), documentBefore = await page.evaluate(readArchiveDestinationDocument);
+    verify(nativeBefore, documentBefore);
+    const screenshot = await capture(page, label); assert(screenshot?.filename); assert.equal(screenshot.url, url);
+    const documentAfter = await page.evaluate(readArchiveDestinationDocument), nativeAfter = await native();
+    verify(nativeAfter, documentAfter); assert.deepEqual(documentAfter, documentBefore, 'Capture must retain the same visible destination document.');
+    const after = await read(), observedAfter = await trace();
+    assert.deepEqual(observedAfter.events.slice(0, observedBefore.events.length), observedBefore.events, 'Capture cannot erase prior action observations.');
+    assertArchiveNoMutation(baseline, after, observedAfter.events.slice(observedBefore.events.length));
+    return { tabId: receipt.tabId, windowId, url, nativeBefore, nativeAfter, documentBefore, documentAfter, before: baseline, after, screenshot };
+}
+
 export function assertArchiveNoMutation(before, after, events, { pendingRequest = null, spotlightId } = {}) {
     const changed = changedStorage(events).filter(event => ['local', 'session'].includes(event.data.area));
     if (pendingRequest) {
@@ -587,7 +642,7 @@ export async function exerciseSpotlightArchiveOpen(adapters) {
 }
 
 export async function exerciseSpotlightArchiveReopen(adapters) {
-    return archiveFixture(adapters, async ({ apiPage, spotlightOptions, arcifyId, spotlightId, current, source, target, entries, windowId, evidence, owned,
+    return archiveFixture(adapters, async ({ browser, observePage, apiPage, spotlightOptions, arcifyId, spotlightId, current, source, target, entries, windowId, evidence, owned,
         checkpoint, local, sourcePage, ready, invoke, read, settle, trace, capture, ui, poll, external, reset, markRevoked }) => {
         const requests = [];
         // Same URL and original Space are deliberate twins; each activation must
@@ -598,6 +653,7 @@ export async function exerciseSpotlightArchiveReopen(adapters) {
             await ui(origin.page, `Reopen exact archived twin with trusted ${method}`, async () => {
                 const before = await settle(); await reset();
                 await capture(origin.page, `${kind}-exact-entry-selected`);
+                const beforeTargets = new Set(browser.targets());
                 await invoke(selected, method);
                 const after = await poll(read, state => state.claims?.entries?.[entry.entryId]?.phase === 'consumed' && !state.archivedTabs.some(item => item.entryId === entry.entryId)
                     && state.tabs.some(tab => tab.id === state.claims.entries[entry.entryId].tabId && tab.active && tab.url === entry.url && !tab.pendingUrl), 'exact archive consumption and known created native ID active');
@@ -608,7 +664,10 @@ export async function exerciseSpotlightArchiveReopen(adapters) {
                     verifyCommitted: () => { const receipt = assertArchiveReopened(before, after, observed.events, { entry: { ...entry, bookmarkFolderId: target.bookmarkFolderId }, sourceWindowId: windowId, selectedSpaceId: source.id }); owned.push(receipt.tabId); return receipt; } });
                 requests.push(request);
                 evidence.matrix.push({ kind, method, entryId: entry.entryId, tabId: receipt.tabId, sourceTabId: origin.tab.id, originalSpaceId: target.id });
-                await checkpoint('exact-archive-entry-reopened', { kind, method, before, after, observed, request, receipt, status, overlayRetired, screenshot: await capture(origin.page, `${kind}-exact-entry-reopened`) });
+                await checkpoint('exact-archive-entry-reopened', { kind, method, before, after, observed, request, receipt, status, overlayRetired });
+                const destination = await captureArchiveReopenedDestination({ browser, apiPage, observePage, poll, beforeTargets, before, receipt, windowId, url: entry.url,
+                    capture, settle, read, trace, label: `${kind}-exact-reopened-destination` });
+                await checkpoint('exact-reopened-destination-captured', { kind, method, entryId: entry.entryId, destination });
             });
             // Repeating a captured real request exercises the actual receiver;
             // it cannot create or consume a URL twin, even after source activation changed.

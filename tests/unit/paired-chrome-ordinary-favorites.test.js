@@ -12,6 +12,23 @@ const source = { id: 'source-1', parentId: 'folder-1', index: 0, title: 'Ordinar
 const record = { id: 'saved-1', title: source.title, url: source.url, sourceBookmarkId: source.id };
 const target = { favoriteId: record.id, tabId: 33, windowId: 10, url: source.url };
 const ids = { arcifyId, spotlightId };
+
+test('paired Spotlight Favorite click reacquires only its exact row through the bounded real-input helper', () => {
+    const source = readFileSync(new URL('../../scripts/paired-chrome-ordinary-favorites.mjs', import.meta.url), 'utf8');
+    assert.match(source, /import \{ clickFreshResult \} from '\.\/paired-chrome-ui\.mjs';/);
+    const start = source.indexOf('const resultSelector =');
+    const end = source.indexOf("await checkpoint('paired-spotlight-reuses-same-global-reference')", start);
+    assert(start >= 0 && end > start);
+    const selection = source.slice(start, end);
+    assert(selection.includes('const resultSelector = `[data-result-type="arcify-favorite"][data-favorite-id="${favorite.id}"]`;'));
+    assert.match(selection, /await ui\(helper\.page, 'Select exact ordinary Favorite from paired Spotlight', \(\) => clickFreshResult\(/);
+    assert.match(selection, /timeout => helper\.page\.waitForSelector\(resultSelector, \{ visible: true, timeout \}\)/);
+    assert.match(selection, /observation => checkpoint\('fresh-ordinary-favorite-result-click', \{ favoriteId: favorite\.id, observation \}\)/);
+    assert.doesNotMatch(selection, /helper\.page\.click\(/);
+    assert.match(selection, /assertOrdinaryFavoriteState\(searchAfter/);
+    assert.match(selection, /assert\.deepEqual\(identities\(searchAfter\.tabs\), identities\(searchBefore\.tabs\.filter\(item => item\.id !== helper\.tab\.id\)\)\)/);
+});
+
 function state() {
     const live = { id: 33, windowId: 10, url: source.url, pinned: false, incognito: false, groupId: -1, index: 0, active: true, status: 'complete' };
     const other = { id: 44, windowId: 20, url: 'http://127.0.0.1/other', pinned: false, incognito: false, groupId: 8, index: 0, active: true, status: 'complete' };

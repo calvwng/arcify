@@ -8,7 +8,7 @@ import { readSourceText } from '../source-text.js';
 import { registerFavoriteMessages } from '../../favorite-store.js';
 import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
 import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
-    assertArchiveReopenRequest, waitForArchiveReopenCompletion, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation,
+    assertArchiveReopenRequest, waitForArchiveReopenCompletion, readArchiveDestinationDocument, captureArchiveReopenedDestination, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation,
     readArchiveDocumentStatus, collectArchiveOpenFailure, withArchiveFailureEvidence,
     readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
     ARCHIVE_FEATURES, ARCHIVE_OPEN_TYPE, ARCHIVE_ENTRY_TYPE } from '../../scripts/paired-chrome-spotlight-archive.mjs';
@@ -502,4 +502,126 @@ test('hosted Archive failure boundary saves observations before outer cleanup wi
     assert.match(source, /failure => checkpoint\('archive-open-attempt-failed', \{ kind, method, sourceTabId: origin\.tab\.id, baseline: attempt\.baseline \|\| null, \.\.\.failure \}\)\);\n            await nativePanel\.close\(\)/);
     const diagnostics = source.slice(source.indexOf('export function readArchiveDocumentStatus'), source.indexOf('export function readNativeArchivePopup'));
     assert.doesNotMatch(diagnostics, /runtime\.sendMessage|sidePanel\.open|tabs\.(?:update|create|remove)|\.focus\(|bringToFront|\.click\(|\.wheel\(|setTimeout|setInterval|waitFor|poll\(|nativePanel\.(?:resolve|close|capture)/);
+});
+
+function destinationCaptureFixture({ before = () => {}, during = () => {} } = {}) {
+    const data = reopenedFixture(), receipt = assertArchiveReopened(data.before, data.after, data.events, data.expected);
+    const state = { authoritative: copy(data.after), tabs: data.after.tabs.map(tab => ({ ...copy(tab), incognito: false, status: 'complete' })),
+        window: { id: 7, type: 'normal', incognito: false, focused: true }, events: [{ type: 'external', data: { message: reopen } }],
+        document: { url: URL, visibility: 'visible', focused: true, readyState: 'complete', documentId: 'd'.repeat(32), timeOrigin: 100, width: 1050, height: 804 },
+        targetUrl: URL, pageUrl: URL, pageTarget: null, captures: 0, calls: [], page: null };
+    const old = { type: () => 'page', url: () => URL, page: () => assert.fail('An older same-address tab must never be selected.') };
+    const target = { type: () => 'page', url: () => state.targetUrl, page: async () => state.page };
+    state.targets = [old, target]; state.pageTarget = target;
+    state.page = { target: () => state.pageTarget, url: () => state.pageUrl,
+        evaluate: async callback => { assert.equal(callback, readArchiveDestinationDocument); state.calls.push('document'); return copy(state.document); } };
+    const args = { browser: { targets: () => state.targets }, apiPage: { evaluate: async (callback, args) => {
+        state.calls.push('native');
+        return copy(await vm.runInNewContext(`(${callback})(args)`, { args, chrome: { tabs: { query: async () => copy(state.tabs) }, windows: { get: async id => { assert.equal(id, 7); return copy(state.window); } } } }));
+    } }, observePage: async page => { assert.equal(page, state.page); state.calls.push('observe'); return page; },
+    poll: async (read, predicate) => { const value = await read(); assert(predicate(value), 'No exact fresh target'); return value; },
+    beforeTargets: new Set([old]), before: data.before, receipt, windowId: 7, url: URL,
+    settle: async () => copy(state.authoritative), read: async () => copy(state.authoritative), trace: async () => ({ events: copy(state.events) }),
+    capture: async (page, label) => { assert.equal(page, state.page); assert.equal(label, 'overlay-exact-reopened-destination'); state.captures++; state.calls.push('capture');
+        await during(state); return { filename: 'exact-reopened-destination.png', url: URL }; }, label: 'overlay-exact-reopened-destination' };
+    before(state, args, target, old);
+    return { state, args, target, old, run: () => captureArchiveReopenedDestination(args) };
+}
+test('destination capture correlates one fresh target with the exact active native ID and never captures equal-URL predecessors', async () => {
+    const fixture = destinationCaptureFixture(), result = await fixture.run();
+    assert.equal(result.tabId, 30); assert.equal(result.windowId, 7); assert.equal(result.url, URL);
+    assert.equal(result.screenshot.filename, 'exact-reopened-destination.png'); assert.equal(fixture.state.captures, 1);
+    assert.deepEqual(result.nativeBefore, result.nativeAfter); assert.deepEqual(result.documentBefore, result.documentAfter);
+    assert.deepEqual(result.before, result.after); assert.deepEqual(fixture.state.calls, ['observe', 'native', 'document', 'capture', 'document', 'native']);
+});
+for (const [name, before] of [
+    ['reused native ID', (_s, args) => { args.receipt.tabId = 20; }],
+    ['extra new native ID', s => { s.authoritative.tabs.push({ id: 31 }); }],
+    ['unconsumed receipt', (_s, args) => { args.receipt.claim.phase = 'assigned'; }],
+    ['changed receipt', s => { s.authoritative.claims.entries.chosen.expected.name = 'Changed'; }],
+    ['different selected Space', s => { s.authoritative.activeSpaces[7] = 'selected'; }],
+    ['multiple fresh same-address targets', (s, _args, target) => { s.targets.push({ ...target }); }],
+    ['only an older same-address target', (s, _args, _target, old) => { s.targets = [old]; }],
+    ['wrong fresh target URL', s => { s.targetUrl = 'https://wrong.test/'; }],
+    ['wrong page URL', s => { s.pageUrl = 'https://wrong.test/'; }],
+    ['wrong page target', (s, _args, _target, old) => { s.pageTarget = old; }],
+    ['wrong native window', s => { s.tabs.at(-1).windowId = 8; }],
+    ['inactive destination', s => { s.tabs.at(-1).active = false; }],
+    ['another active source', s => { s.tabs[0].active = true; }],
+    ['extra native tab at capture', s => { s.tabs.push({ id: 31, windowId: 7 }); }],
+    ['unfocused destination window', s => { s.window.focused = false; }],
+    ['private native window', s => { s.window.incognito = true; }],
+    ['wrong native URL', s => { s.tabs.at(-1).url = 'https://wrong.test/'; }],
+    ['pending navigation', s => { s.tabs.at(-1).pendingUrl = URL; }],
+    ['native page loading', s => { s.tabs.at(-1).status = 'loading'; }],
+    ['pinned target', s => { s.tabs.at(-1).pinned = true; }],
+    ['hidden document', s => { s.document.visibility = 'hidden'; }],
+    ['unfocused document', s => { s.document.focused = false; }],
+    ['loading document', s => { s.document.readyState = 'loading'; }],
+    ['wrong document URL', s => { s.document.url = 'https://wrong.test/'; }],
+    ['missing document identity', s => { s.document.documentId = null; }],
+    ['missing time origin', s => { s.document.timeOrigin = 0; }],
+    ['empty viewport', s => { s.document.width = 0; }]
+]) test(`destination capture rejects ${name} before taking a screenshot`, async () => {
+    const fixture = destinationCaptureFixture({ before }); await assert.rejects(fixture.run()); assert.equal(fixture.state.captures, 0);
+});
+for (const [name, during] of [
+    ['document replacement', s => { s.document.documentId = 'e'.repeat(32); }],
+    ['same-URL document reload', s => { s.document.timeOrigin++; }],
+    ['hidden document', s => { s.document.visibility = 'hidden'; }],
+    ['native activation lost', s => { s.tabs.at(-1).active = false; }],
+    ['window focus lost', s => { s.window.focused = false; }],
+    ['native URL changed', s => { s.tabs.at(-1).url = 'https://wrong.test/'; }],
+    ['extra same-address target', s => { s.targets.push({ ...s.targets.at(-1) }); }],
+    ['original target retired', s => { s.targets.pop(); }],
+    ['same-shaped target replacement', s => { s.targets[s.targets.length - 1] = { ...s.targets.at(-1) }; }],
+    ['bookmark mutation', s => { s.authoritative.bookmarks[0].title = 'Changed'; }],
+    ['journal mutation', s => { s.authoritative.journal.push({ key: 'unexpected' }); }],
+    ['transient native activation', s => { s.events.push({ type: 'tabs.onActivated', data: [{ tabId: 10, windowId: 7 }] }); }],
+    ['transient durable mutation', s => { s.events.push({ type: 'storage', data: { area: 'local', changes: { spaces: { oldValue: [], newValue: [{}] } } } }); }],
+    ['observation erasure', s => { s.events = []; }],
+    ['required capture failure', () => { throw new Error('Required capture failed'); }]
+]) test(`destination capture rejects ${name} without retrying the screenshot or action`, async () => {
+    const fixture = destinationCaptureFixture({ during }); await assert.rejects(fixture.run()); assert.equal(fixture.state.captures, 1);
+});
+for (const result of [undefined, {}, { filename: 'wrong.png', url: 'https://wrong.test/' }]) test(`missing or mislabeled required destination capture is fatal: ${JSON.stringify(result)}`, async () => {
+    const fixture = destinationCaptureFixture(); fixture.args.capture = async () => result; await assert.rejects(fixture.run());
+});
+test('destination document reader only records real visibility, focus and stable document metadata', () => {
+    const state = destinationCaptureFixture().state.document;
+    const actual = vm.runInNewContext(`(${readArchiveDestinationDocument})()`, { location: { href: URL }, document: {
+        visibilityState: 'visible', hasFocus: () => true, readyState: 'complete', body: { dataset: { documentId: state.documentId } } },
+        performance: { timeOrigin: 100 }, innerWidth: 1050, innerHeight: 804 });
+    assert.deepEqual(copy(actual), state);
+    const helper = source.slice(source.indexOf('export function readArchiveDestinationDocument'), source.indexOf('export function assertArchiveNoMutation'));
+    assert.doesNotMatch(helper, /bringToFront|tabs\.(?:update|create|remove)|windows\.update|\.focus\(|\.click\(|\.goto\(|waitForTimeout|setTimeout|timeout:|retry|ui\(/);
+});
+
+for (const captureFailure of [false, true]) test(`real reopen wiring persists action proof before required destination capture${captureFailure ? ' failure' : ''}`, async () => {
+    const start = source.indexOf('                const before = await settle(); await reset();', source.indexOf('export async function exerciseSpotlightArchiveReopen'));
+    const end = source.indexOf('\n            });', start), code = source.slice(start, end);
+    const data = reopenedFixture(), origin = { page: {}, tab: { id: 10 } }, oldTarget = {}, freshTarget = {}, calls = [], checkpoints = [], requests = [], evidence = { matrix: [] }, owned = [];
+    let invoked = false;
+    const params = { browser: { targets: () => invoked ? [oldTarget, freshTarget] : [oldTarget] }, observePage: {}, apiPage: {},
+        origin, selected: { surface: {} }, kind: 'overlay', method: 'click', title: `Reopen ${entry.name}`, entry,
+        source: { id: 'selected' }, target: { id: 'original', name: 'Original', bookmarkFolderId: 'original-root' }, windowId: 7, spotlightId: SPOTLIGHT,
+        settle: async () => data.before, reset: async () => {}, capture: async (page, label) => { assert.equal(page, origin.page); assert.equal(label, 'overlay-exact-entry-selected'); calls.push('selected'); },
+        invoke: async () => { invoked = true; calls.push('trusted-input'); }, read: async () => data.after,
+        poll: async (read, predicate) => { const value = await read(); assert(predicate(value)); return value; },
+        trace: async () => ({ events: [...data.events, external(copy(reopen))], input: [input({ type: ARCHIVE_ENTRY_TYPE, title: `Reopen ${entry.name}`, entryId: entry.entryId, method: 'click' })] }),
+        assertArchiveTrustedInput, ARCHIVE_ENTRY_TYPE, assertArchiveReopened, owned, requests, evidence,
+        waitForArchiveReopenCompletion: async args => ({ request: reopen, receipt: await args.verifyCommitted(), status: null, overlayRetired: true }),
+        checkpoint: async (phase, proof) => { calls.push(phase); checkpoints.push({ phase, ...proof }); },
+        captureArchiveReopenedDestination: async args => {
+            assert.deepEqual([...args.beforeTargets], [oldTarget]); assert.equal(args.receipt.tabId, 30);
+            assert.equal(args.label, 'overlay-exact-reopened-destination'); assert.equal(args.url, URL);
+            assert.equal(checkpoints.length, 1); assert.equal(checkpoints[0].overlayRetired, true);
+            assert.deepEqual(checkpoints[0].after, data.after); calls.push('required-destination');
+            if (captureFailure) throw new Error('Required destination capture failed');
+            return { screenshot: { filename: 'destination.png', url: URL }, tabId: 30 };
+        } };
+    const run = new (Object.getPrototypeOf(async function () {}).constructor)(...Object.keys(params), code);
+    if (captureFailure) await assert.rejects(run(...Object.values(params)), /Required destination capture failed/); else await run(...Object.values(params));
+    assert.deepEqual(calls, ['selected', 'trusted-input', 'exact-archive-entry-reopened', 'required-destination', ...(!captureFailure ? ['exact-reopened-destination-captured'] : [])]);
+    assert.equal(checkpoints[0].receipt.tabId, 30); assert.equal(evidence.matrix.length, 1); assert.deepEqual(owned, [30]);
 });

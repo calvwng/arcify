@@ -6,6 +6,7 @@ import { FAVORITE_FAVICON_PATH, waitForRetainedFavoriteIcon } from './paired-chr
 import { requestScopedFavorite } from './paired-chrome-favorites-restart.mjs';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
 import { clickExactSpaceChip } from './paired-chrome-space-click.mjs';
+import { clickFreshResult } from './paired-chrome-ui.mjs';
 import { readExpectedXvfbPid, probeNativeCloseTarget, sendOneNativeClose } from './paired-chrome-native-close.mjs';
 
 const sorted = values => [...values].sort((a, b) => a - b);
@@ -540,7 +541,9 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
         assert.equal(rows.filter(row => row.type === 'arcify-favorite' && row.favoriteId === favorite.id).length, 1);
         assert(rows.some(row => row.type === 'bookmark' && row.title === source.title), 'Original source remains independently searchable');
         const searchBefore = await read(favorite.id);
-        await ui(helper.page, 'Select exact ordinary Favorite from paired Spotlight', () => helper.page.click(resultSelector));
+        await ui(helper.page, 'Select exact ordinary Favorite from paired Spotlight', () => clickFreshResult(
+            timeout => helper.page.waitForSelector(resultSelector, { visible: true, timeout }),
+            observation => checkpoint('fresh-ordinary-favorite-result-click', { favoriteId: favorite.id, observation })));
         const searchAfter = await poll(() => read(favorite.id), value => !value.tabs.some(item => item.id === helper.tab.id)
             && value.tabs.some(item => item.id === reopenedTab.id && item.active), 'Spotlight activates existing exact ordinary Favorite and closes its helper');
         assertOrdinaryFavoriteState(searchAfter, { favoriteId: favorite.id, tabId: reopenedTab.id, windowId, url: source.url,

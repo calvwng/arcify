@@ -223,6 +223,23 @@ for (const [name, makeError, status] of [
     assert.deepEqual(h.records,[{ attempt:1,status,error:error.message },{ attempt:2,status:'clicked' }]);
     assert.deepEqual(h.budgets,[20000,19950]);
 });
+test('Favorite result viewport detachment is reacquired before one mouse dispatch', async () => {
+    const error = detachedError([
+        `    at CdpElementHandle.assertConnectedElement (${elementHandleSource}:1314:23)`,
+        `    at async CdpElementHandle.isIntersectingViewport (${elementHandleSource}:1339:17)`,
+        `    at async CdpElementHandle.<anonymous> (${elementHandleSource}:119:20)`,
+        `    at async CdpElementHandle.scrollIntoViewIfNeeded (${elementHandleSource}:1321:17)`,
+        `    at async CdpElementHandle.click (${elementHandleSource}:722:13)`
+    ].join('\n'));
+    const h = clickHarness([error]);
+    await clickFreshResult(h.locate, item => h.records.push(item), h.options);
+    assert.deepEqual(h.state(), { lookups: 2, dispatched: 1, disposals: 2 });
+    assert.deepEqual(h.records, [
+        { attempt: 1, status: 'detached-before-input', error: error.message },
+        { attempt: 2, status: 'clicked' }
+    ]);
+    assert.deepEqual(h.budgets, [20000, 19950]);
+});
 for (const [name,error] of [
     ['text without assertion stack',new Error('Node is detached from document')],
     ['assertion without scrolling',detachedError('    at CdpElementHandle.assertConnectedElement (ElementHandle.js:1:1)')],

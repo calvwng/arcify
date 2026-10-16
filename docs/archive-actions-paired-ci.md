@@ -107,6 +107,19 @@ ordinary overlay uses a genuine click to reopen the first. Each must yield:
 - A durable consumed claim retaining the full original record, native ID and
   original folder, in the same observed storage change as the exact removal
 
+Each positive action keeps its selected-before screenshot and its original
+source-status or overlay-retirement proof. The complete exact request, native
+create and consumed receipt checkpoint is saved before the required after-shot.
+That after-shot shows the newly active reopened destination. A target set taken
+before trusted input must yield exactly one fresh page target, correlated with
+exactly one new native ID from the original tab baseline. Existing same-URL tabs
+cannot be selected. Before and after capture, the native tab must remain active
+in its focused source window, the target and document URLs must match, and the
+same visible, focused, fully loaded document must retain its identity. Full
+native/durable state and intervening mutation observations must remain unchanged.
+Capture never activates or navigates a tab; a missing or failed screenshot still
+fails the case without retrying the action or the capture.
+
 The two new native IDs must differ. Re-sending each captured real request ID through
 actual Chrome extension transport must return its exact cached consumed result
 without a second create, archive consume or storage/native mutation. A new request
@@ -178,3 +191,15 @@ update, activation, removal, replacement, bookmark, storage and pairing change
 retains its existing fail-closed guard. No mutation is retried. This fixes the
 reproduced defect; attributing the historical hosted failure to it remains an
 inference until new exact-pair hosted evidence is reviewed.
+
+
+## Reopened destination screenshot evidence
+
+Hosted Arcify `7706e1aa5b75b6a1b90e424df5a1916f0112c6a0` with the same exact
+Spotlight peer reached both genuine Enter/click reopen proofs, including exact
+consumed receipts, active created native tabs and overlay retirement. The run
+then failed its required after-shot on the now-background overlay source page;
+its later replay/rejection checks did not complete. The harness now captures
+the verified active reopened destination as described above and persists the
+action proof before that required capture. This capture correction is pending
+fresh hosted verification; the earlier failed run is not an acceptance pass.
