@@ -18,15 +18,17 @@ const RECOVERY_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 48, 49]);
 const EXTENDED_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 50, 51]);
 // Archive needs independent native-host and exact-entry evidence, never a Sidebar substitute.
 const ARCHIVE_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 52, 53]);
+// Reopen owns its fixtures; native-popup failure must not suppress exact-entry evidence.
+const ARCHIVE_REOPEN_CASE_INDICES = Object.freeze([0, 1, 2, 53]);
 const ALL_CASE_INDICES = Object.freeze([...new Set([...FULL_CASE_INDICES, ...FAVORITE_LIFECYCLE_CASE_INDICES,
     ...NATIVE_SPLIT_CASE_INDICES, ...APPEARANCE_ACTION_CASE_INDICES, ...RECOVERY_ACTION_CASE_INDICES,
-    ...EXTENDED_ACTION_CASE_INDICES, ...ARCHIVE_ACTION_CASE_INDICES])].sort((a, b) => a - b));
+    ...EXTENDED_ACTION_CASE_INDICES, ...ARCHIVE_ACTION_CASE_INDICES, ...ARCHIVE_REOPEN_CASE_INDICES])].sort((a, b) => a - b));
 
 function caseIndicesForMode(mode) {
-    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split' || mode === 'appearance-actions' || mode === 'recovery-actions' || mode === 'extended-actions' || mode === 'archive-actions',
-        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle, native-split, appearance-actions, recovery-actions, extended-actions or archive-actions.`);
+    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split' || mode === 'appearance-actions' || mode === 'recovery-actions' || mode === 'extended-actions' || mode === 'archive-actions' || mode === 'archive-reopen',
+        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle, native-split, appearance-actions, recovery-actions, extended-actions, archive-actions or archive-reopen.`);
     return mode === 'full' ? FULL_CASE_INDICES : mode === 'favorite-lifecycle' ? FAVORITE_LIFECYCLE_CASE_INDICES :
-        mode === 'native-split' ? NATIVE_SPLIT_CASE_INDICES : mode === 'appearance-actions' ? APPEARANCE_ACTION_CASE_INDICES : mode === 'recovery-actions' ? RECOVERY_ACTION_CASE_INDICES : mode === 'extended-actions' ? EXTENDED_ACTION_CASE_INDICES : ARCHIVE_ACTION_CASE_INDICES;
+        mode === 'native-split' ? NATIVE_SPLIT_CASE_INDICES : mode === 'appearance-actions' ? APPEARANCE_ACTION_CASE_INDICES : mode === 'recovery-actions' ? RECOVERY_ACTION_CASE_INDICES : mode === 'extended-actions' ? EXTENDED_ACTION_CASE_INDICES : mode === 'archive-actions' ? ARCHIVE_ACTION_CASE_INDICES : ARCHIVE_REOPEN_CASE_INDICES;
 }
 
 export function createPairedChromeRunReport(caseNames, mode = 'full') {
@@ -40,7 +42,8 @@ export function createPairedChromeRunReport(caseNames, mode = 'full') {
     const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseIndex === 39 ? NATIVE_SPLIT_CASE_NAME : caseNames[caseIndex] }));
     return {
         runMode: mode,
-        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'archive-actions' ?
+        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'archive-reopen' ?
+            'Supplemental fresh-profile Spotlight Archive exact-entry reopen coverage; this is not native-panel opening, archive-actions or full-suite acceptance.' : mode === 'archive-actions' ?
             'Supplemental fresh-profile Spotlight Archive native-panel and exact-entry reopen coverage; this is not a full-suite or extended-actions result.' : mode === 'extended-actions' ?
             'Supplemental fresh-profile Spotlight Space navigation and tab-command coverage; this is not a full-suite, recovery or appearance result.' : mode === 'recovery-actions' ?
             'Supplemental fresh-profile overlay recovery and initial Spotlight actions coverage; this is not a full-suite or appearance result.' : mode === 'appearance-actions' ?

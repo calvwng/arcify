@@ -21,7 +21,7 @@ retry a failed full-run case or reuse that run's mutated profile.
 The full **49**, Favorite lifecycle **5**, and native Split View **4** jobs remain
 unchanged mandatory workflow outcomes. The separate
 [recovery/actions job](recovery-actions-paired-ci.md) requires five cases and
-provides no theme/appearance acceptance. All seven jobs use exact read-only
+provides no theme/appearance acceptance. All eight jobs use exact read-only
 checkouts and Spotlight `b510b3dbe8cfae6441fbc55a23ce19de30805a6d`, production
 builds, and the existing isolated driver. The new job has no dependency on the
 full job, browser update, new secret, security-setting change or error exemption.
@@ -36,6 +36,6 @@ labels the eight-case result supplemental rather than a full-suite result.
 
 Local unit/source-orchestration checks, syntax checks and builds do not establish
 real browser acceptance. This new job's real hosted outcome is unverified until
-it runs on the exact combined commit; all five job results remain required.
+it runs on the exact combined commit; all eight job results remain required.
 The existing physical keyboard/OS appearance, native color-picker and Helium
 limitations still apply. No browser or native helper is run locally.

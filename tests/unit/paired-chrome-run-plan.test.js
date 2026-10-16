@@ -15,7 +15,8 @@ const appearanceActionsOrder = [0, 1, 2, 33, 46, 47, 48, 49];
 const recoveryActionsOrder = [0, 1, 2, 48, 49];
 const extendedActionsOrder = [0, 1, 2, 50, 51];
 const archiveActionsOrder = [0, 1, 2, 52, 53];
-const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder], ['archive-actions', archiveActionsOrder]];
+const archiveReopenOrder = [0, 1, 2, 53];
+const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder], ['archive-actions', archiveActionsOrder], ['archive-reopen', archiveReopenOrder]];
 const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 const indices = report => report.expectedCases.map(item => item.caseIndex);
 const stepIndices = source => [...source.matchAll(/await step\(stepNames\[(\d+)\]/g)].map(match => Number(match[1]));
@@ -128,10 +129,12 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     const extended = smoke.indexOf("    if (report.runMode === 'extended-actions') {");
     const extendedEnd = smoke.indexOf('    } // Supplemental extended-action cases 50–51;');
     const archive = smoke.indexOf("    if (report.runMode === 'archive-actions') {");
+    const archiveOpenEnd = smoke.indexOf('    } // Native Archive opening remains mandatory in archive-actions.');
+    const archiveReopen = smoke.indexOf("    if (report.runMode === 'archive-actions' || report.runMode === 'archive-reopen') {");
     const archiveEnd = smoke.indexOf('    } // Supplemental Archive cases 52–53;');
     const lifecycle = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {");
     assert(firstFull > 0 && firstFull < firstEnd && firstEnd < appearance && appearance < appearanceEnd &&
-        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < extended && extended < extendedEnd && extendedEnd < archive && archive < archiveEnd && archiveEnd < lifecycle);
+        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < extended && extended < extendedEnd && extendedEnd < archive && archive < archiveOpenEnd && archiveOpenEnd < archiveReopen && archiveReopen < archiveEnd && archiveEnd < lifecycle);
     assert.deepEqual(stepIndices(smoke), [...fullOrder.slice(0, -2), 50, 51, 52, 53, ...fullOrder.slice(-2)], 'Every case definition remains single; the original full case order is unchanged.');
     assert.deepEqual(stepIndices(smoke.slice(0, firstFull)), [0, 1, 2]);
     assert.deepEqual(stepIndices(smoke.slice(firstFull, firstEnd)), Array.from({ length: 29 }, (_, index) => index + 3));
@@ -142,6 +145,8 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     assert.deepEqual(stepIndices(smoke.slice(recovery, recoveryEnd)), [48, 49]);
     assert.deepEqual(stepIndices(smoke.slice(extended, extendedEnd)), [50, 51]);
     assert.deepEqual(stepIndices(smoke.slice(archive, archiveEnd)), [52, 53]);
+    assert.deepEqual(stepIndices(smoke.slice(archive, archiveOpenEnd)), [52]);
+    assert.deepEqual(stepIndices(smoke.slice(archiveReopen, archiveEnd)), [53]);
     assert.deepEqual(stepIndices(smoke.slice(lifecycle)), [36, 32]);
     assert.match(smoke, /createPairedChromeRunReport\(stepNames, process\.env\.ARCIFY_PAIRED_RUN_MODE\)/);
     assert.match(smoke, /const check = beginPairedChromeCase\(report, name\)/);
@@ -204,10 +209,10 @@ for (const [mode, order] of allPlans) for (const caseIndex of order) {
 
 test('workflow preserves original jobs and adds independent mandatory fresh-runner acceptance', () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  [a-z-]+:\n|$(?![\s\S]))/gm)];
-    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split', 'recovery-actions', 'extended-actions', 'archive-actions']);
-    const full = jobs[0][2], lifecycle = jobs[1][2], appearanceActions = jobs[2][2], nativeSplit = jobs[3][2], recoveryActions = jobs[4][2], extendedActions = jobs[5][2], archiveActions = jobs[6][2];
+    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split', 'recovery-actions', 'extended-actions', 'archive-actions', 'archive-reopen']);
+    const full = jobs[0][2], lifecycle = jobs[1][2], appearanceActions = jobs[2][2], nativeSplit = jobs[3][2], recoveryActions = jobs[4][2], extendedActions = jobs[5][2], archiveActions = jobs[6][2], archiveReopen = jobs[7][2];
     const peerPin = smoke.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
-    for (const job of [full, lifecycle, appearanceActions, nativeSplit, recoveryActions, extendedActions, archiveActions]) {
+    for (const job of [full, lifecycle, appearanceActions, nativeSplit, recoveryActions, extendedActions, archiveActions, archiveReopen]) {
         assert.match(job, /runs-on: ubuntu-24\.04/);
         assert.match(job, /CI: 'true'/);
         assert.match(job, /ARCIFY_TEST_HEAD: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/);
@@ -336,6 +341,8 @@ test('existing callbacks retain their reviewed bytes except exact additive route
             .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
             .replace('        helperNavigation:true,\n', '') }));
     assert.equal(digest(preserved), 'b7f1addd2dca0e23e437a6ff6035dbfeec8f06e9a6aa843f5b726d31016e6107');
+    // Supplemental callbacks 50–53 are unchanged from a56bd14; reopening shares the exact case 53 definition.
+    assert.equal(digest([...definitions].filter(([index]) => index >= 50).sort(([a], [b]) => a - b).map(([, item]) => item)), '8f9a8a9f702230caf28fedeaf95b84cbbbc18ae15294506eb8eaf3c2f7ca0bef');
     assert.equal(digest(names.slice(0, 50)), '82b76b57d9a4a3fcefa59ea4db2f52af9664a1d5693b2efff89405c32827c36c');
 });
 
@@ -353,6 +360,12 @@ test('all five original workflow jobs retain reviewed bytes and order except the
     assert.deepEqual(jobs.slice(0, 5).map(match => [match[1], digest(legacyPinBytes(match[0].trimEnd()))]), receipts);
     assert.equal(jobs[5][1], 'extended-actions');
     assert.equal(jobs[6][1], 'archive-actions');
+    assert.equal(jobs[7][1], 'archive-reopen');
+    assert.equal(jobs.length, 8);
+    // Existing supplemental jobs and all event/security configuration retain a56bd14 bytes.
+    assert.equal(digest(jobs[5][0].trimEnd()), '0d01f7440c701db284e286566d4acbd7ba3d590e52e01c8e54435a14aa92875c');
+    assert.equal(digest(jobs[6][0].trimEnd()), 'aefdebbb6af8c3c11e312ecb716bb5d7c172117a9cffd0df638e3002216b6cdc');
+    assert.equal(digest(workflow.slice(0, workflow.indexOf('jobs:'))), '1bc18e330dfd97cfdca18fa5cb05a035dd3061ed1a61e182c82019aee5d1e1d1');
     // No shared conditions or workflow event/security changes can hide a job.
     assert.equal(workflow.match(/^permissions:\n  contents: read$/gm)?.length, 1);
     assert.doesNotMatch(workflow, /pull_request_target:|\bneeds:|continue-on-error:|fail-fast:|strategy:|secrets\.|permissions:\s*write|concurrency:/);

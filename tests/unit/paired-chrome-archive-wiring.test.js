@@ -13,6 +13,7 @@ const oldModes = ['full', 'favorite-lifecycle', 'native-split', 'appearance-acti
 async function runArchive({ mode = 'archive-actions', failAt, saveFailure } = {}) {
     const dependencies = Object.fromEntries(['browser', 'observePage', 'arcifyOptions', 'spotlightOptions', 'newTabPage', 'openSavedMovePage', 'ui', 'screenshot', 'snapshot', 'external', 'poll', 'fixture', 'arcifyId', 'spotlightId', 'search'].map(name => [name, { name }]));
     const native = Object.fromEntries(['prepareRecoverySidebarObservation', 'nativePanelState', 'captureNativeSidebar', 'resolveNativeSidebarTarget', 'closeNativeSidebar'].map(name => [name, { name }]));
+    const selected = createPairedChromeRunReport(names, mode).expectedCases.filter(item => item.caseIndex >= 52);
     const report = { runMode: mode }, calls = [], saves = [], error = new Error('exact Archive failure');
     const exercise = (index, field) => async adapters => {
         calls.push(index);
@@ -29,7 +30,7 @@ async function runArchive({ mode = 'archive-actions', failAt, saveFailure } = {}
     const result = new vm.Script(`(async () => { ${block} })()`).runInNewContext({ ...dependencies, ...native, report, stepNames: names,
         saveReport: async () => { if (saveFailure) throw error; saves.push(JSON.parse(JSON.stringify(report))); },
         exerciseSpotlightArchiveOpen: exercise(52, 'spotlightArchiveOpen'), exerciseSpotlightArchiveReopen: exercise(53, 'spotlightArchiveReopen'),
-        step: async (name, callback, ...options) => { assert.deepEqual(options, [], 'Archive cannot gain a window-isolation or skip exemption.'); assert.equal(name, names[calls.length ? 53 : 52]); return callback(); }
+        step: async (name, callback, ...options) => { assert.deepEqual(options, [], 'Archive cannot gain a window-isolation or skip exemption.'); assert.equal(name, selected[calls.length].name); return callback(); }
     });
     if (failAt !== undefined || saveFailure) await assert.rejects(result, actual => actual === error); else await result;
     return { report, calls, saves };
@@ -45,6 +46,37 @@ test('archive-actions mandates setup and both stable new cases, exactly once', a
     assert.equal(report.spotlightArchiveOpen.complete, true); assert.equal(report.spotlightArchiveReopen.complete, true);
     assert.equal(saves[0].spotlightArchiveOpen.complete, false); assert.equal(saves[2].spotlightArchiveReopen.complete, false);
     assert.doesNotMatch(block, /windowIsolation|\.catch\(|retry|skipped|nativeTodayMoveSidebar/);
+});
+test('archive-reopen mandates fresh setup and the unchanged exact-entry case without opening the panel', async () => {
+    const plan = createPairedChromeRunReport(names, 'archive-reopen');
+    assert.deepEqual(plan.expectedCases.map(item => item.caseIndex), [0, 1, 2, 53]); assert.equal(plan.expectedCaseCount, 4);
+    assert.equal(plan.expectedCases[3].name, SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME);
+    assert.match(plan.scope, /Supplemental fresh-profile Spotlight Archive exact-entry reopen/);
+    assert.match(plan.scope, /not native-panel opening, archive-actions or full-suite acceptance/);
+    const { report, calls, saves } = await runArchive({ mode: 'archive-reopen' });
+    assert.deepEqual(calls, [53]); assert.equal(saves.length, 2);
+    assert.equal(report.spotlightArchiveOpen, undefined); assert.equal(report.spotlightArchiveReopen.complete, true);
+    assert.equal(saves[0].spotlightArchiveReopen.complete, false); assert.equal(saves[1].spotlightArchiveReopen.complete, true);
+    assert(saves.every(saved => saved.spotlightArchiveOpen === undefined));
+    const fixture = readSourceText(new URL('../../scripts/paired-chrome-spotlight-archive.mjs', import.meta.url));
+    const reopen = fixture.slice(fixture.indexOf('export async function exerciseSpotlightArchiveReopen('));
+    assert.match(reopen, /return archiveFixture\(adapters,/);
+    assert.doesNotMatch(reopen, /nativePanel|exerciseSpotlightArchiveOpen|prepareRecoverySidebarObservation/);
+    const setup = fixture.slice(fixture.indexOf('async function archiveFixture('), fixture.indexOf('export async function exerciseSpotlightArchiveOpen('));
+    assert.match(setup, /await option\(false\); await apiPage.evaluate\(installSpotlightActionApiObservation\); await spotlightOptions.evaluate\(installSpotlightActionApiObservation\)/);
+    assert.match(setup, /fixtureApi = await createNavigationFixturePage\(/);
+    assert.match(setup, /owned-archive-fixture/);
+    assert.match(setup, /finishBookmarkFixture\(/);
+});
+test('independent reopen failure retains partial evidence and cannot borrow native-opening evidence', async () => {
+    const { report, calls, saves } = await runArchive({ mode: 'archive-reopen', failAt: 53 });
+    assert.deepEqual(calls, [53]); assert.equal(saves.length, 1);
+    assert.equal(report.spotlightArchiveOpen, undefined); assert.equal(report.spotlightArchiveReopen.complete, false);
+});
+test('independent reopen persistence failure remains fatal without retry or borrowed evidence', async () => {
+    const { report, calls, saves } = await runArchive({ mode: 'archive-reopen', saveFailure: true });
+    assert.deepEqual(calls, [53]); assert.deepEqual(saves, []);
+    assert.equal(report.spotlightArchiveOpen, undefined); assert.equal(report.spotlightArchiveReopen.complete, false);
 });
 for (const mode of oldModes) test(`${mode} cannot run or claim Archive acceptance`, async () => {
     const { report, calls, saves } = await runArchive({ mode }); assert.deepEqual(report, { runMode: mode }); assert.deepEqual(calls, []); assert.deepEqual(saves, []);
@@ -74,14 +106,14 @@ test('dedicated real nonce HTTP route precedes generic handler and never serves 
     for (const path of ['/spotlight-archive/short/source', `/spotlight-archive/${'a'.repeat(32)}/<script>`, `/spotlight-archive/${'a'.repeat(32)}/source/extra`]) assert.equal(serveSpotlightArchiveFixture({ url: path }, { writeHead: () => assert.fail('No invalid route response'), end: () => assert.fail('No invalid route response') }), false);
 });
 
-test('one isolated mandatory Archive job preserves all sandbox and exact-head gates', () => {
+for (const mode of ['archive-actions', 'archive-reopen']) test(`${mode} remains an isolated mandatory Archive job with all sandbox and exact-head gates`, () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  [a-z-]+:\n|$(?![\s\S]))/gm)];
-    assert.equal(jobs.length, 7); const selected = jobs.filter(job => job[1] === 'archive-actions'); assert.equal(selected.length, 1); const job = selected[0][2];
-    assert.match(job, /ARCIFY_PAIRED_RUN_MODE: archive-actions/); assert.match(job, /timeout-minutes: 20\n/); assert.match(job, /CI: 'true'/);
+    assert.equal(jobs.length, 8); const selected = jobs.filter(job => job[1] === mode); assert.equal(selected.length, 1); const job = selected[0][2];
+    assert(job.includes(`ARCIFY_PAIRED_RUN_MODE: ${mode}\n`)); assert.match(job, /timeout-minutes: 20\n/); assert.match(job, /CI: 'true'/);
     assert.match(job, /persist-credentials: false/); assert.match(job, /npm test --prefix arcify\/scripts\/paired-chrome-runtime/); assert.match(job, /set -o pipefail/);
-    assert.match(job, /tee test-results\/paired-chrome-archive-actions\/runner\.log/); assert.match(job, /name: paired-chrome-archive-actions-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
-    assert.match(job, /path: arcify\/test-results\/paired-chrome-archive-actions\//); assert.match(job, /if: always\(\)/);
+    assert(job.includes(`tee test-results/paired-chrome-${mode}/runner.log`)); assert(job.includes(`name: paired-chrome-${mode}-` + '${{ github.run_id }}-${{ github.run_attempt }}'));
+    assert(job.includes(`path: arcify/test-results/paired-chrome-${mode}/`)); assert.match(job, /if: always\(\)/);
     assert.doesNotMatch(job, /vendor-update|native-split-update|needs:|continue-on-error:|strategy:|secrets\.|no-sandbox|disable-web-security|retry|if: (?!always\(\))/);
-    assert.match(runner, /report\.runMode === 'archive-actions' \? 'test-results\/paired-chrome-archive-actions'/);
+    assert(runner.includes(`report.runMode === '${mode}' ? 'test-results/paired-chrome-${mode}'`));
     for (const path of ['scripts/paired-chrome-spotlight-archive.mjs', 'tests/unit/paired-chrome-spotlight-archive.test.js', 'tests/unit/paired-chrome-archive-wiring.test.js', 'docs/archive-actions-paired-ci.md', 'spotlight-archive-actions.js', 'archive-store.js', 'archive-client.js', 'archive-intent-ui.js', 'tests/unit/archive-intent-ui.test.js', 'tests/unit/archive-popup.test.js', 'docs/archive-operations.md', 'tests/unit/spotlight-archive*.test.js', 'tests/unit/archive-store*.test.js', 'scripts/lib/spotlight-pair-archive-*.mjs']) assert(workflow.includes(`- '${path}'`), path);
 });

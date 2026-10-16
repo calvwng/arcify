@@ -12,7 +12,7 @@ on a fresh profile and never replaces those outcomes. The separate
 provides no theme/appearance acceptance. Missing, failed, skipped,
 incomplete or extra evidence fails the existing strict run-plan gates.
 
-All seven jobs and the runner pin Spotlight to reviewed integrated candidate
+All eight jobs and the runner pin Spotlight to reviewed integrated candidate
 `b510b3dbe8cfae6441fbc55a23ce19de30805a6d`. After verifying that exact checkout,
 case 47 imports and executes its unchanged
 `test/e2e/options-appearance-evidence.js`. Missing collector code is a failure.

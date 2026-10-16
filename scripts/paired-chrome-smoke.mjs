@@ -149,7 +149,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -2294,6 +2294,8 @@ try {
         ui,screenshot,snapshot,external,poll,fixture,arcifyId,spotlightId,search,
         nativePanel:{ prepare:prepareRecoverySidebarObservation, state:nativePanelState, capture:captureNativeSidebar, resolve:resolveNativeSidebarTarget, close:closeNativeSidebar },
         record:async evidence => { report.spotlightArchiveOpen = evidence; await saveReport(); } }));
+    } // Native Archive opening remains mandatory in archive-actions.
+    if (report.runMode === 'archive-actions' || report.runMode === 'archive-reopen') {
     await step(stepNames[53], () => exerciseSpotlightArchiveReopen({ browser,observePage,apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,
         ui,screenshot,snapshot,external,poll,fixture,arcifyId,spotlightId,search,
         record:async evidence => { report.spotlightArchiveReopen = evidence; await saveReport(); } }));

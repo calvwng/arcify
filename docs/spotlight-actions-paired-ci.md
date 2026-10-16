@@ -25,7 +25,7 @@ requires the same action case after setup, appearance, theme, options and recove
 0–2/48/49 on a fresh profile without preceding theme cases; all five outcomes
 remain mandatory.
 
-The runner and all seven workflow jobs pin reviewed integrated Spotlight commit
+The runner and all eight workflow jobs pin reviewed integrated Spotlight commit
 `b510b3dbe8cfae6441fbc55a23ce19de30805a6d`. Recovery and action evidence remain
 separate in the report. The action case receives the current options realms
 after the witnessed recovery reloads, not stale pre-reload Page objects.

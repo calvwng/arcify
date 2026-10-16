@@ -9,6 +9,7 @@ import { registerFavoriteMessages } from '../../favorite-store.js';
 import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
 import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
     assertArchiveReopenRequest, waitForArchiveReopenCompletion, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation,
+    readArchiveDocumentStatus, collectArchiveOpenFailure, withArchiveFailureEvidence,
     readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
     ARCHIVE_FEATURES, ARCHIVE_OPEN_TYPE, ARCHIVE_ENTRY_TYPE } from '../../scripts/paired-chrome-spotlight-archive.mjs';
 const copy = value => structuredClone(value), ARCIFY = 'a'.repeat(32), SPOTLIGHT = 'b'.repeat(32), URL = 'http://127.0.0.1:9999/same';
@@ -401,7 +402,7 @@ function archiveRevealFixture(fault = null, alreadyVisible = false) {
     assert(begin > 0 && end > begin);
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     const run = new AsyncFunction('nativePanel', 'poll', 'arcifyId', 'windowId', 'source', 'kind', 'method', 'eventCount', 'checkpoint', 'revealNativeSidebarSpace',
-        `${source.slice(begin, end)}; return { page, native };`);
+        `const attempt = {}; ${source.slice(begin, end)}; return { page, native };`);
     return { calls, checkpoints, planned, page, native,
         run: () => run(nativePanel, poll, ARCIFY, 7, { id: 'selected' }, 'owned-newtab', 'click', 17, checkpoint, revealNativeSidebarSpace) };
 }
@@ -429,4 +430,76 @@ test('Archive reveal cannot turn failed native capture into success or retry it'
     const value = archiveRevealFixture('capture rejected'); await assert.rejects(value.run(), /Native capture failed/);
     assert.equal(value.calls.filter(([type]) => type === 'capture').length, 1);
     assert.equal(value.calls.filter(([type]) => type === 'wheel').length, 1);
+});
+
+
+test('failure document read retains real status/error text and existing input without synthesizing success', () => {
+    const { document } = parseHTML('<html><body><div class="arcify-bridge-status"><span id="archive-error" role="alert">Arcify did not confirm that the archive was displayed.</span></div><div id="favoritesDropStatus" role="status">Source changed</div></body></html>');
+    for (const [key, value] of Object.entries({ URL: `chrome-extension://${SPOTLIGHT}/newtab.html`, visibilityState: 'visible', readyState: 'complete' })) Object.defineProperty(document, key, { value });
+    document.hasFocus = () => false;
+    const realm = { document, performance: { timeOrigin: 123 }, globalThis: { __archiveInputEvents: [input()] } };
+    const state = copy(vm.runInNewContext(`(${readArchiveDocumentStatus})()`, realm));
+    assert.equal(state.url, `chrome-extension://${SPOTLIGHT}/newtab.html`); assert.equal(state.hasFocus, false); assert.equal(state.timeOrigin, 123);
+    assert.deepEqual(state.statuses.map(({ id, role, text }) => ({ id, role, text })), [
+        { id: 'archive-error', role: 'alert', text: 'Arcify did not confirm that the archive was displayed.' },
+        { id: 'favoritesDropStatus', role: 'status', text: 'Source changed' }]);
+    assert.deepEqual(state.archiveInput, [input()]); assert(state.statuses.every(item => item.connected));
+});
+function failureDiagnosticFixture(fault = null, nativePresent = true) {
+    const calls = [], values = { observed: { events: [{ type: 'archive.intent', data: { message: { action: 'register' } } }], peerEvents: [], input: [] },
+        source: { url: URL, visibility: 'visible' }, spotlight: { statuses: [{ role: 'alert', text: 'Original backend error' }] },
+        nativeState: { contexts: [native.context], events: [{ type: 'opened', windowId: 7 }] },
+        status: { statuses: [{ role: 'status', text: 'Native failure' }] }, hosting: { tab: null, windowId: 7 }, readiness: { selectedVisible: true }, popup: nativeState(false) };
+    const read = key => { calls.push(key); if (fault === key) throw new Error(`Read failed: ${key}`); return copy(values[key]); };
+    const args = { sourcePage: { evaluate: async fn => { assert.equal(fn, readArchiveDocumentStatus); return read('source'); } },
+        sourceSurface: { evaluate: async fn => { assert.equal(fn, readArchiveDocumentStatus); return read('spotlight'); } },
+        nativePanel: { state: async () => read('nativeState'), resolve: () => assert.fail('Never resolve or poll a new target during failure capture'), close: () => assert.fail('Never close before diagnostics') },
+        trace: async () => read('observed'), nativePage: nativePresent ? { evaluate: async fn => {
+            if (fn === readArchiveDocumentStatus) return read('status');
+            if (fn === readNativeArchivePopup) return read('popup');
+            if (fn.name === 'readNativeSidebarRender') return read('readiness');
+            assert.match(fn.toString(), /chrome\.tabs\.getCurrent/); assert.match(fn.toString(), /chrome\.windows\.getCurrent/); return read('hosting');
+        } } : null };
+    return { args, calls, values };
+}
+test('failure diagnostics preserve passive trace, source status and exact already-resolved native context before cleanup', async () => {
+    const f = failureDiagnosticFixture(), result = await collectArchiveOpenFailure(f.args);
+    for (const key of ['observed', 'source', 'spotlight', 'nativeState']) assert.deepEqual(result[key], { ok: true, value: f.values[key] });
+    for (const key of ['status', 'hosting', 'readiness', 'popup']) assert.deepEqual(result.native[key], { ok: true, value: f.values[key] });
+    assert.deepEqual(f.calls, ['observed', 'source', 'spotlight', 'nativeState', 'status', 'hosting', 'readiness', 'popup']);
+});
+for (const key of ['observed', 'source', 'spotlight', 'nativeState', 'status', 'hosting', 'readiness', 'popup']) test(`failure diagnostics retain ${key} read errors without discarding other observations`, async () => {
+    const f = failureDiagnosticFixture(key), result = await collectArchiveOpenFailure(f.args);
+    const record = result[key] || result.native[key]; assert.equal(record.ok, false); assert.equal(record.error.message, `Read failed: ${key}`);
+    assert.equal(f.calls.length, 8); assert.equal(result.native.popup.ok, key !== 'popup');
+});
+test('missing native target stays explicitly unavailable without trying to resolve, open or fabricate one', async () => {
+    const f = failureDiagnosticFixture(null, false), result = await collectArchiveOpenFailure(f.args);
+    assert.deepEqual(result.native, { unavailable: 'No native document was resolved before the original failure.' });
+    assert.deepEqual(f.calls, ['observed', 'source', 'spotlight', 'nativeState']);
+});
+for (const fault of [null, 'diagnose', 'record']) test(`original frozen action failure survives ${fault || 'successful diagnostics'} and is never retried`, async () => {
+    const original = Object.freeze(new Error('Original popup timeout')), calls = [], records = [];
+    const operation = async () => { calls.push('action'); throw original; };
+    const diagnose = async () => { calls.push('diagnose'); if (fault === 'diagnose') throw new Error('Detached renderer'); return { native: { popup: { ok: true, value: nativeState(false) } } }; };
+    const record = async value => { calls.push('record'); records.push(value); if (fault === 'record') throw new Error('Evidence write failed'); };
+    let caught;
+    try { await withArchiveFailureEvidence(operation, diagnose, record); } catch (error) { caught = error; } finally { calls.push('cleanup'); }
+    assert.equal(caught, original); assert.deepEqual(calls, ['action', 'diagnose', 'record', 'cleanup']);
+    assert.equal(records[0].error.message, original.message); assert.equal(records[0].error.stack, original.stack);
+    if (fault === 'diagnose') assert.equal(records[0].observations.diagnosticError.message, 'Detached renderer');
+});
+test('successful actions receive no diagnostic reads or additional interaction', async () => {
+    let calls = 0;
+    assert.equal(await withArchiveFailureEvidence(async () => { calls++; return 'actual result'; }, () => assert.fail('No diagnostics on success'), () => assert.fail('No failure record on success')), 'actual result');
+    assert.equal(calls, 1);
+});
+test('hosted Archive failure boundary saves observations before outer cleanup without changing transport or authority', () => {
+    assert.match(source, /await withArchiveFailureEvidence\(\(\) => ui\(origin\.page/);
+    assert.match(source, /attempt\.baseline = \{ before, documentBefore, eventCount, preparation \};/);
+    assert.match(source, /attempt\.nativePage = page;\n                const reveal = await revealNativeSidebarSpace/);
+    assert.match(source, /nativePage: attempt\.nativePage, nativePanel, trace: \(\) => trace\(\) \}\)/);
+    assert.match(source, /failure => checkpoint\('archive-open-attempt-failed', \{ kind, method, sourceTabId: origin\.tab\.id, baseline: attempt\.baseline \|\| null, \.\.\.failure \}\)\);\n            await nativePanel\.close\(\)/);
+    const diagnostics = source.slice(source.indexOf('export function readArchiveDocumentStatus'), source.indexOf('export function readNativeArchivePopup'));
+    assert.doesNotMatch(diagnostics, /runtime\.sendMessage|sidePanel\.open|tabs\.(?:update|create|remove)|\.focus\(|bringToFront|\.click\(|\.wheel\(|setTimeout|setInterval|waitFor|poll\(|nativePanel\.(?:resolve|close|capture)/);
 });

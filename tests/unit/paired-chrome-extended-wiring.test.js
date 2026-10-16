@@ -47,7 +47,7 @@ test('extended case identities are explicit and execute once with exact shared a
     assert.equal(saves[0].spotlightNavigation.complete, false); assert.equal(saves[2].spotlightTabCommands.complete, false);
     assert.doesNotMatch(block, /windowIsolation|prepareRecovery|\.catch\(|retry|skipped/);
 });
-for (const mode of ['full', 'favorite-lifecycle', 'native-split', 'appearance-actions', 'recovery-actions', 'archive-actions']) test(`${mode} cannot run or claim extended-action evidence`, async () => {
+for (const mode of ['full', 'favorite-lifecycle', 'native-split', 'appearance-actions', 'recovery-actions', 'archive-actions', 'archive-reopen']) test(`${mode} cannot run or claim extended-action evidence`, async () => {
     const { report, calls, saves } = await runExtended({ mode });
     assert.deepEqual(calls, []); assert.deepEqual(saves, []); assert.deepEqual(report, { runMode: mode });
 });

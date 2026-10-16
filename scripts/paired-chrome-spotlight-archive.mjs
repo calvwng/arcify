@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { spotlightSurface } from './paired-chrome-keyboard.mjs';
 import { clickFreshResult, replaceInputText, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
-import { readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture, revealNativeSidebarSpace } from './paired-chrome-sidebar.mjs';
+import { readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture, revealNativeSidebarSpace, readNativeSidebarRender } from './paired-chrome-sidebar.mjs';
 import { createNavigationFixturePage } from './paired-chrome-spotlight-navigation.mjs';
 import { canonicalSavedMoveBookmarks } from './paired-chrome-saved-move.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
@@ -82,6 +82,39 @@ export function readArchiveRows() {
         entryId: row.dataset.archiveEntryId || null, title: row.querySelector('.arcify-spotlight-result-title')?.textContent,
         selected: row.classList.contains('selected'), visible: row.getClientRects().length > 0 && getComputedStyle(row).visibility !== 'hidden' }));
 }
+/** Passive failure-only reads; never send a request, focus, retry or render UI. */
+export function readArchiveDocumentStatus() {
+    return { url: document.URL, visibility: document.visibilityState, hasFocus: document.hasFocus(), readyState: document.readyState,
+        timeOrigin: performance.timeOrigin, statuses: [...document.querySelectorAll('[role="status"], [role="alert"]')].map(node => ({
+            id: node.id || null, role: node.getAttribute('role'), text: node.textContent, hidden: node.hidden,
+            className: node.className, connected: node.isConnected })), archiveInput: globalThis.__archiveInputEvents || [] };
+}
+const archiveFailureError = error => ({ name: error?.name || 'Error', message: error?.message || String(error), stack: error?.stack || null });
+export async function collectArchiveOpenFailure({ sourcePage, sourceSurface, nativePage, nativePanel, trace }) {
+    const read = async operation => { try { return { ok: true, value: await operation() }; }
+        catch (error) { return { ok: false, error: archiveFailureError(error) }; } };
+    // Do not resolve a new target or poll on failure: inspect only the source and
+    // native document already observed by this exact attempted activation.
+    const observations = { observed: await read(trace), source: await read(() => sourcePage.evaluate(readArchiveDocumentStatus)),
+        spotlight: await read(() => sourceSurface.evaluate(readArchiveDocumentStatus)), nativeState: await read(() => nativePanel.state()) };
+    observations.native = nativePage ? {
+        status: await read(() => nativePage.evaluate(readArchiveDocumentStatus)),
+        hosting: await read(() => nativePage.evaluate(async () => ({ tab: await chrome.tabs.getCurrent() || null, windowId: (await chrome.windows.getCurrent()).id }))),
+        readiness: await read(() => nativePage.evaluate(readNativeSidebarRender)),
+        popup: await read(() => nativePage.evaluate(readNativeArchivePopup))
+    } : { unavailable: 'No native document was resolved before the original failure.' };
+    return observations;
+}
+export async function withArchiveFailureEvidence(operation, diagnose, record) {
+    try { return await operation(); }
+    catch (error) {
+        let observations;
+        try { observations = await diagnose(); } catch (diagnosticError) { observations = { diagnosticError: archiveFailureError(diagnosticError) }; }
+        try { await record({ error: archiveFailureError(error), observations }); } catch { /* Preserve the original failure even if evidence persistence fails. */ }
+        throw error;
+    }
+}
+
 export function readNativeArchivePopup() {
     const visible = node => {
         if (!node) return false;
@@ -492,18 +525,20 @@ export async function exerciseSpotlightArchiveOpen(adapters) {
         checkpoint, sourcePage, ready, invoke, read, settle, trace, capture, ui, poll, external, reset }) => {
         await nativePanel.prepare(); await apiPage.evaluate(installArchiveIntentObservation); assert.deepEqual((await nativePanel.state()).contexts, []);
         for (const kind of ['owned-newtab', 'browser-newtab', 'overlay']) for (const method of ['click', 'Enter']) {
-            const origin = await sourcePage(kind, current), selected = await ready(origin.page);
-            await ui(origin.page, `Open Archive with trusted ${method} from ${kind}`, async () => {
+            const origin = await sourcePage(kind, current), selected = await ready(origin.page), attempt = {};
+            await withArchiveFailureEvidence(() => ui(origin.page, `Open Archive with trusted ${method} from ${kind}`, async () => {
                 const before = await settle(), sourceNative = exact(before.tabs, origin.tab.id);
                 const documentBefore = await origin.page.evaluate(() => ({ url: document.URL, timeOrigin: performance.timeOrigin }));
                 const eventCount = (await nativePanel.state()).events.length;
                 const preparation = await trace(); await reset();
+                attempt.baseline = { before, documentBefore, eventCount, preparation };
                 await capture(origin.page, `${kind}-${method}-open-selected`);
                 await invoke(selected, method);
                 // An explicit fixture interaction reveals the already-selected
                 // long Space chip. The shared helper proves one trusted wheel
                 // and unchanged native selection/ownership; capture stays read-only.
                 const { page } = await nativePanel.resolve();
+                attempt.nativePage = page;
                 const reveal = await revealNativeSidebarSpace({ page, poll, extensionId: arcifyId, windowId, spaceId: source.id });
                 await checkpoint('native-archive-selected-space-revealed', { kind, method, reveal });
                 // The established adapter proves SIDE_PANEL context, native onOpened,
@@ -528,7 +563,9 @@ export async function exerciseSpotlightArchiveOpen(adapters) {
                 await checkpoint('trusted-native-archive-open', { kind, method, before, after, documentBefore, observed, request, native, nativeAck, popup, popupAfterCapture, status, popupScreenshot });
                 if (kind === 'owned-newtab' && method === 'click') await exerciseArchivePopupButtonRoundTrip({ page, arcifyId, spaceId: source.id,
                     entries: before.archivedTabs, ui, poll, settle, read, reset, trace, capture, checkpoint });
-            });
+            }), () => collectArchiveOpenFailure({ sourcePage: origin.page, sourceSurface: selected.surface,
+                nativePage: attempt.nativePage, nativePanel, trace: () => trace() }),
+            failure => checkpoint('archive-open-attempt-failed', { kind, method, sourceTabId: origin.tab.id, baseline: attempt.baseline || null, ...failure }));
             await nativePanel.close();
         }
         // A real same-extension renderer with a fresh source-bound intent still

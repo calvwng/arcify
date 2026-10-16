@@ -88,7 +88,7 @@ same-profile retry or window-B exemption satisfies the full report. The
 on another fresh profile with passive Sidebar event observation initialized.
 These supplemental outcomes do not replace any other job or establish a full pass.
 
-The runner and all seven workflow jobs pin the reviewed integrated Spotlight
+The runner and all eight workflow jobs pin the reviewed integrated Spotlight
 commit `b510b3dbe8cfae6441fbc55a23ce19de30805a6d`. Hosted acceptance remains pending
 for the final integrated Arcify commit; local oracle checks are not browser proof.
 

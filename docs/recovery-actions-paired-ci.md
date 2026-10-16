@@ -32,7 +32,7 @@ This supplemental result isolates recovery/actions from unrelated cumulative or
 theme fixture failures. It provides no appearance/theme or full-suite acceptance.
 It does not retry a failed case or reuse another job's mutated profile. The full
 **49**, Favorite lifecycle **5**, native Split View **4**, and appearance/actions
-**8** jobs remain unchanged mandatory outcomes. All seven jobs must pass on the
+**8** jobs remain unchanged mandatory outcomes. All eight jobs must pass on the
 exact integrated commit; success here cannot override another job's failure.
 
 All jobs keep exact read-only checkouts with Spotlight pinned to

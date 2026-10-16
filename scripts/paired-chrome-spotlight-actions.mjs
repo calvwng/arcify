@@ -19,6 +19,54 @@ const exact = (nodes, id) => { const found = nodes.filter(node => node.id === id
 const snapshots = value => Object.fromEntries(Object.entries(value).map(([id, { capturedAt, ...state }]) => [id, state]));
 const canonical = state => ({ ...state, snapshots: snapshots(state.snapshots) });
 
+/** One synchronous DOM observation: never measure a retained Puppeteer row handle. */
+export function readSpotlightActionReadiness() {
+    const nodes = [...document.querySelectorAll('[data-testid="spotlight-result"]')];
+    const rows = nodes.map(node => ({
+        type: node.dataset.resultType,
+        favoriteId: node.dataset.favoriteId || null,
+        title: node.querySelector('.arcify-spotlight-result-title')?.textContent,
+        selected: node.classList.contains('selected'),
+        space: node.querySelector('.arcify-space-chip')?.getAttribute('title') || null,
+        icon: node.querySelector('.arcify-spotlight-result-favicon')?.getAttribute('src')
+    }));
+    const first = nodes[0], rect = first?.getBoundingClientRect();
+    return { rows, first: first ? {
+        connected: first.isConnected,
+        current: first === document.querySelector('[data-testid="spotlight-result"]'),
+        width: rect.width, height: rect.height, visibility: getComputedStyle(first).visibility
+    } : null };
+}
+
+export function spotlightActionReadinessMatches(observation, command) {
+    const rows = observation?.rows, first = observation?.first;
+    return Boolean(Object.hasOwn(SPACE_ACTION_TITLES, command) && Array.isArray(rows) &&
+        rows[0]?.type === 'arcify-space-action' && rows[0]?.title === SPACE_ACTION_TITLES[command] && rows[0]?.selected === true &&
+        rows.findIndex(row => row.type === 'search-query' && row.title?.includes(SPACE_ACTION_QUERIES[command])) > 0 &&
+        first?.connected === true && first.current === true && first.width > 0 && first.height > 0 && first.visibility !== 'hidden');
+}
+
+export async function waitForSpotlightActionReadiness({ surface, command, poll, record = async () => {} }) {
+    assert(Object.hasOwn(SPACE_ACTION_TITLES, command), 'Require one known Space action.');
+    let last = null, attempts = 0, observation;
+    try {
+        // Reuse the caller's original polling interval/deadline. Each read observes
+        // selection, retained web search and painted bounds in the same DOM turn.
+        observation = await poll(async () => {
+            attempts++;
+            return last = await surface.evaluate(readSpotlightActionReadiness);
+        }, value => spotlightActionReadinessMatches(value, command), `visible fuzzy ${command} wins while retaining web search`);
+        assertMatchedActionFirst(observation.rows, { type: 'arcify-space-action', title: SPACE_ACTION_TITLES[command], query: SPACE_ACTION_QUERIES[command] });
+        assert.equal(spotlightActionReadinessMatches(observation, command), true, 'The exact selected action must be a current painted row.');
+    } catch (error) {
+        // Preserve an observation/transport failure even if saving its evidence fails.
+        try { await record({ status: 'failed', command, attempts, observation: last, error: { message: error.message, stack: error.stack } }); } catch {}
+        throw error;
+    }
+    await record({ status: 'ready', command, attempts, observation });
+    return observation;
+}
+
 // The initial peer exposes exactly folder/settings; the reviewed extended peer
 // adds only Switch Space. Neither helper surface can acquire a source-tab action.
 export function assertSpotlightHelperActionRows(rows, { helperNavigation = false } = {}) {
@@ -361,10 +409,8 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
     };
     const ready = async (page, command) => {
         await search(page, SPACE_ACTION_QUERIES[command]); const surface = await spotlightSurface(page);
-        const rows = await poll(() => surface.evaluate(readSpotlightRows), rows => rows[0]?.type === 'arcify-space-action' && rows[0]?.title === SPACE_ACTION_TITLES[command] && rows[0].selected, `visible fuzzy ${command} wins while retaining web search`);
-        assertMatchedActionFirst(rows, { type: 'arcify-space-action', title: SPACE_ACTION_TITLES[command], query: SPACE_ACTION_QUERIES[command] });
-        // Inspect the actual painted row, not just an in-memory action result.
-        assert.equal(await surface.$eval('[data-testid="spotlight-result"]', node => node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0 && getComputedStyle(node).visibility !== 'hidden'), true);
+        const { rows } = await waitForSpotlightActionReadiness({ surface, command, poll,
+            record: observation => checkpoint('action-readiness-observed', observation) });
         const retainInParent = command === 'openSettings' && surface !== page;
         await surface.evaluate(installSpotlightActionInputObservation, { retainInParent });
         return { surface, rows, inputOwner: retainInParent ? page : surface };
