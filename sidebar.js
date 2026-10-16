@@ -89,6 +89,8 @@ const spaceTemplate = document.getElementById('spaceTemplate');
 // Global state
 let spaces = [];
 let activeSpaceId = null;
+let archiveDisplayRevision = 0, archiveIntentConsumer = null;
+const invalidateArchiveDisplay = () => { archiveDisplayRevision++; archiveIntentConsumer?.invalidate(); };
 // Session selection may arrive before the selected bookmark-space is adopted.
 // Keep the intent separate so missing metadata cannot erase it via fallback.
 let pendingActiveSpaceId = null;
@@ -468,9 +470,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     await initSidebar();
-    createArchiveIntentConsumer({ document, getState: () => ({ ready: sidebarReady && !pendingActiveSpaceId,
-        windowId: currentWindow?.id, spaceId: activeSpaceId, bookmarkFolderId: spaces.find(space => space.id === activeSpaceId)?.bookmarkFolderId }),
-        showPopup: showArchivedTabsPopup, onError: showFavoritesStatus }).start();
+    archiveIntentConsumer = createArchiveIntentConsumer({ document, getState: () => ({ ready: sidebarReady && !pendingActiveSpaceId,
+        revision: archiveDisplayRevision, windowId: currentWindow?.id, spaceId: activeSpaceId, bookmarkFolderId: spaces.find(space => space.id === activeSpaceId)?.bookmarkFolderId }),
+        showPopup: showArchivedTabsPopup, onError: showFavoritesStatus });
+    archiveIntentConsumer.start();
     await updatePinnedFavicons(); // Initial load before taking the tour baseline
     initSidebarTour().catch(error => Logger.error("Tour initialization failed:", error));
 
@@ -633,6 +636,7 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
     for (const space of old) {
         if (!spaces.some(s => s.id === space.id)) {
             const element = getSpaceElement(space.id);
+            if (space.id === activeSpaceId) invalidateArchiveDisplay();
             disposeEditorsInElement(element);
             element?.remove();
         }
@@ -662,6 +666,7 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
         const previous = oldMetadata.get(space.id);
         if (!previous || previous.name !== space.name || previous.icon !== space.icon) {
             const element = getSpaceElement(space.id);
+            if (space.id === activeSpaceId) invalidateArchiveDisplay();
             disposeEditorsInElement(element);
             element?.remove();
             createSpaceElement(space);
@@ -670,10 +675,11 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
     restoreViewport();
     if (pendingActiveSpaceId && spaces.some(space => space.id === pendingActiveSpaceId)) {
         needsRender ||= activeSpaceId !== pendingActiveSpaceId;
+        invalidateArchiveDisplay();
         activeSpaceId = pendingActiveSpaceId;
         pendingActiveSpaceId = null;
     }
-    if (!spaces.some(s => s.id === activeSpaceId)) activeSpaceId = spaces[0]?.id;
+    if (!spaces.some(s => s.id === activeSpaceId)) { invalidateArchiveDisplay(); activeSpaceId = spaces[0]?.id; }
     // A metadata replacement may remove the button's parent. Reattach only to
     // that same visible Space here; a different active view commits after its
     // async render so a newly opened editor can still defer the switch.
@@ -746,9 +752,11 @@ async function initSidebar() {
                 tabContextMenuRequest++; closeTabContextMenu();
                 bookmarkSelection.clear();
                 if (spaces.some(space => space.id === nextId)) {
+                    invalidateArchiveDisplay();
                     activeSpaceId = nextId;
                     pendingActiveSpaceId = null;
                 } else {
+                    invalidateArchiveDisplay();
                     pendingActiveSpaceId = nextId;
                 }
                 refreshCoordinator.invalidateActiveView();
@@ -1230,6 +1238,7 @@ async function setActiveSpace(spaceId, updateTab = true) {
         if (activeEditor && document.activeElement !== newTabBtn) document.activeElement.blur();
         editorSessions.dispose('folder-pending', activeSpaceId);
     }
+    if (activeSpaceId !== spaceId || pendingActiveSpaceId) invalidateArchiveDisplay();
     pendingActiveSpaceId = null;
     activeSpaceId = spaceId;
     await pendingSpaceSaves;
@@ -3253,6 +3262,7 @@ function handleTabActivated(activeInfo) {
         if (!pendingActiveSpaceId && spaceWithTab && spaceWithTab.id !== activeSpaceId) {
             // Switch to the space containing the tab
             tabContextMenuRequest++; closeTabContextMenu();
+            invalidateArchiveDisplay();
             activeSpaceId = spaceWithTab.id;
             // Session and tab events can arrive in either order. Queue a view
             // change independently of the metadata projection, and let the same

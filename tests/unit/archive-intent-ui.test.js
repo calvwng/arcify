@@ -3,54 +3,147 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
 import { createArchiveIntentConsumer, setArchivePopupOpen } from '../../archive-intent-ui.js';
-const context = { windowId: 10, spaceId: 'source', bookmarkFolderId: 'folder', sourceTabId: 1, sourceUrl: 'https://source.test/', pairingGeneration: 'g' };
-function fixture() {
-    const { document } = parseHTML('<html><body><section class="space" data-space-id="source"><button class="sidebar-button"></button><div class="space-content">Today tabs</div><div class="archived-tabs-popup"><button>Restore</button></div></section></body></html>');
-    const state = { ready: true, windowId: 10, spaceId: 'source', bookmarkFolderId: 'folder' }, calls = [], errors = [], listeners = [], hooks = {};
-    let available = true;
-    const api = { windows: { getCurrent: async () => ({ id: state.windowId }) }, runtime: { onMessage: { addListener: listener => listeners.push(listener), removeListener: listener => listeners.splice(listeners.indexOf(listener), 1) },
-        async sendMessage(request) { calls.push(request); if (request.action === 'register') return { success: true, result: { registered: true } }; if (request.action === 'take') { if (!available) return { success: true, result: null }; available = false; return { success: true, result: { token: 'one', context } }; }
-            await hooks.ack?.(); return hooks.badAck ? { success: false, error: 'Source changed' } : { success: true, result: { displayed: request.displayed } }; } } };
-    const popup = document.querySelector('.archived-tabs-popup');
-    const consumer = createArchiveIntentConsumer({ api, document, getState: () => state, showPopup: async () => { await hooks.render?.(); }, onError: error => errors.push(error) });
-    const drain = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
-    return { document, state, calls, errors, listeners, hooks, popup, consumer, drain };
+import { fixture, own, context } from './helpers/archive-display-fixture.js';
+
+async function uiFixture(t, options = {}) {
+    const f = fixture(t, options);
+    const { document, window } = parseHTML('<html><body><section class="space" data-space-id="source"><button class="sidebar-button"></button><div class="space-content">Today tabs</div><div class="archived-tabs-popup"><button>Restore</button></div></section></body></html>');
+    window.top = window; window.location = { href: `chrome-extension://${own}/sidebar.html` };
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: true, configurable: true });
+    const state = { ready: true, windowId: 10, spaceId: 'source', bookmarkFolderId: 'source-folder', revision: 0 }, errors = [], hooks = {};
+    const popup = document.querySelector('.archived-tabs-popup'), space = popup.closest('.space');
+    let renders = 0, focuses = 0;
+    popup.querySelector('button').focus = () => { focuses++; };
+    const consumer = createArchiveIntentConsumer({ api: f.browser, document, getState: () => state,
+        showPopup: async () => { renders++; await hooks.render?.(); }, onError: error => errors.push(error) });
+    t.after(() => consumer.dispose());
+    const scope = await f.prepare();
+    const run = async () => { f.open(scope); await f.drain(); consumer.start(); await f.drain(); await f.drain(); };
+    return { ...f, uiState: state, document, window, popup, space, consumer, errors, hooks, scope, run,
+        get renders() { return renders; }, get focuses() { return focuses; },
+        requests: () => f.state.messages.filter(item => item.direction === 'request').map(item => item.message) };
 }
-test('only initialized matching sidebar renders existing popup and ACKs its visible state', async () => {
-    const f = fixture(); f.consumer.start(); await f.drain();
-    assert(f.popup.classList.contains('visible')); assert(f.document.querySelector('.space-content').classList.contains('hidden')); assert.equal(f.calls[2].action, 'ack'); assert.equal(f.calls[2].displayed, true);
-    assert.equal(f.document.querySelector('.sidebar-button').getAttribute('aria-expanded'), 'true');
-    f.listeners[0]({ type: 'arcifyArchiveAvailable', windowId: 10 }); await f.drain(); assert.equal(f.calls.filter(call => call.action === 'ack').length, 1);
+test('actual worker + renderer modules accept captured null documentId and ACK only the shared visible popup', async t => {
+    const f = await uiFixture(t); await f.run();
+    assert(f.popup.classList.contains('visible')); assert(f.space.querySelector('.space-content').classList.contains('hidden'));
+    assert.equal(f.space.querySelector('.sidebar-button').getAttribute('aria-expanded'), 'true');
+    assert.deepEqual(f.requests().map(message => message.action), ['register', 'take', 'validate', 'ack']);
+    assert.equal(f.state.responses[0].displayed, true); assert.equal(f.focuses, 0); assert.equal(f.state.effects.length, 0);
+    assert.equal(f.state.ports[0].worker.sender.documentId, null);
+    f.browser.runtime.onMessage.emit({ type: 'arcifyArchiveAvailable', windowId: 10 }); await f.drain();
+    assert.equal(f.requests().filter(message => message.action === 'ack').length, 1);
 });
-for (const change of ['space', 'window', 'folder', 'hidden', 'detached', 'render-change', 'dispose']) test(`changed ${change} never acknowledges a visible popup`, async () => {
-    const f = fixture();
-    if (change === 'space') f.state.spaceId = 'other'; if (change === 'window') f.state.windowId = 20; if (change === 'folder') f.state.bookmarkFolderId = 'other';
-    if (change === 'hidden') Object.defineProperty(f.document, 'visibilityState', { value: 'hidden' });
-    if (change === 'detached') f.hooks.render = async () => f.popup.remove();
-    if (change === 'render-change') f.hooks.render = async () => { f.state.spaceId = 'other'; };
-    if (change === 'dispose') f.hooks.render = async () => f.consumer.dispose();
-    f.consumer.start(); await f.drain();
-    assert(!f.popup.classList.contains('visible')); assert(!f.calls.some(call => call.action === 'ack' && call.displayed));
+for (const kind of ['tab-hosted', 'iframe', 'wrong-page', 'query', 'offscreen', 'incognito', 'wrong-window', 'popup-window', 'unfocused'])
+    test(`${kind} renderer cannot register or display even with own-extension API access`, async t => {
+        const f = await uiFixture(t);
+        if (kind === 'tab-hosted') f.state.rendererTab = { id: 30, windowId: 10 };
+        if (kind === 'iframe') f.window.top = {};
+        if (kind === 'wrong-page') f.window.location.href = f.browser.runtime.getURL('options.html');
+        if (kind === 'query') f.window.location.href += '?native=1';
+        if (kind === 'offscreen') f.document.visibilityState = 'hidden';
+        if (kind === 'incognito') f.browser.extension.inIncognitoContext = true;
+        if (kind === 'wrong-window') f.state.currentWindow = 20;
+        if (kind === 'popup-window') f.state.windows.get(10).type = 'popup';
+        if (kind === 'unfocused') f.state.windows.get(10).focused = false;
+        await f.run();
+        assert.equal(f.state.ports.length, 0); assert.equal(f.renders, 0); assert(!f.popup.classList.contains('visible'));
+        assert(!f.state.responses.some(response => response.ok));
+    });
+for (const kind of ['space', 'folder', 'window', 'hidden', 'detached', 'dispose', 'same-space-new-revision', 'source-away-back'])
+    test(`changed ${kind} during popup read never acknowledges display`, async t => {
+        const f = await uiFixture(t);
+        f.hooks.render = async () => {
+            if (kind === 'space') f.uiState.spaceId = 'other'; if (kind === 'folder') f.uiState.bookmarkFolderId = 'other';
+            if (kind === 'window') f.uiState.windowId = 20;
+            if (kind === 'hidden') { f.document.visibilityState = 'hidden'; f.document.dispatchEvent(new f.window.Event('visibilitychange')); }
+            if (kind === 'detached') f.popup.remove(); if (kind === 'dispose') f.consumer.dispose();
+            if (kind === 'same-space-new-revision') { f.uiState.revision++; f.consumer.invalidate(); }
+            if (kind === 'source-away-back') { f.browser.tabs.onUpdated.emit(1, { url: 'https://away.test/' }); f.browser.tabs.onUpdated.emit(1, { url: context.sourceUrl }); }
+        };
+        await f.run(); assert(!f.popup.classList.contains('visible'));
+        assert(!f.requests().some(message => message.action === 'ack' && message.displayed));
+        assert(!f.state.responses.some(response => response.ok)); assert.equal(f.focuses, 0);
+    });
+test('already-open popup is idempotent and retains its live focused controls on success', async t => {
+    const f = await uiFixture(t), button = f.popup.querySelector('button'); setArchivePopupOpen(f.space, true);
+    await f.run(); assert.equal(f.renders, 0); assert.equal(f.popup.querySelector('button'), button);
+    assert(f.popup.classList.contains('visible')); assert.equal(f.state.responses[0].displayed, true); assert.equal(f.focuses, 0);
 });
-test('negative authoritative ACK closes only newly opened popup and reports failure', async () => {
-    const f = fixture(); f.hooks.badAck = true; f.consumer.start(); await f.drain();
-    assert(!f.popup.classList.contains('visible')); assert(!f.document.querySelector('.space-content').classList.contains('hidden')); assert.equal(f.document.querySelector('.sidebar-button').getAttribute('aria-expanded'), 'false'); assert.equal(f.errors[0], 'Source changed');
-    const old = fixture(); old.popup.classList.add('visible'); old.hooks.badAck = true; old.consumer.start(); await old.drain(); assert(old.popup.classList.contains('visible'));
+for (const initiallyOpen of [false, true]) test(`late rejected ACK preserves ${initiallyOpen ? 'existing' : 'newly owned'} popup ownership`, async t => {
+    const f = await uiFixture(t); if (initiallyOpen) setArchivePopupOpen(f.space, true);
+    f.state.contextRead = async () => { if ([...f.actions.intents.values()].some(intent => intent.phase === 'validated')) throw new Error('Source changed'); };
+    await f.run(); assert.equal(f.popup.classList.contains('visible'), initiallyOpen);
+    assert.equal(f.state.responses[0].ok, false); assert.equal(f.focuses, 0);
 });
-test('uninitialized sidebar and cross-window hints cannot take an intent', async () => {
-    const f = fixture(); f.state.ready = false; f.consumer.start(); await f.drain(); assert.equal(f.calls.length, 0);
-    f.state.ready = true; f.listeners[0]({ type: 'arcifyArchiveAvailable', windowId: 20 }); await f.drain(); assert.equal(f.calls.length, 0);
-    f.listeners[0]({ type: 'arcifyArchiveAvailable', windowId: 10 }); await f.drain(); assert.equal(f.calls.length, 3);
-});
+for (const kind of ['hide/show', 'revision away/back', 'newer manual close/reopen', 'newer input', 'detach', 'replace same Space', 'transient Space hide', 'detach/reinsert', 'replace content'])
+    test(`${kind} while worker ACK read waits cancels externally and preserves newer UI`, async t => {
+        const f = await uiFixture(t);
+        f.state.contextRead = async () => {
+            if (![...f.actions.intents.values()].some(intent => intent.phase === 'validated')) return;
+            f.state.contextRead = null;
+            if (kind === 'hide/show') { f.document.visibilityState = 'hidden'; f.document.dispatchEvent(new f.window.Event('visibilitychange')); f.document.visibilityState = 'visible'; }
+            if (kind === 'revision away/back') { f.uiState.revision++; f.consumer.invalidate(); }
+            if (kind === 'newer manual close/reopen') { setArchivePopupOpen(f.space, false); setArchivePopupOpen(f.space, true); }
+            if (kind === 'newer input') f.document.dispatchEvent(new f.window.Event('pointerdown', { bubbles: true }));
+            if (kind === 'detach') f.popup.remove();
+            if (kind === 'replace same Space') f.space.replaceWith(f.space.cloneNode(true));
+            if (kind === 'transient Space hide') { f.space.style.display = 'none'; f.space.style.display = ''; }
+            if (kind === 'detach/reinsert') { f.popup.remove(); f.space.appendChild(f.popup); }
+            if (kind === 'replace content') { const content = f.space.querySelector('.space-content'); content.replaceWith(content.cloneNode(true)); }
+            await f.drain();
+        };
+        await f.run();
+        assert(f.requests().some(message => message.action === 'cancel'), 'Local invalidation must reach the worker before pending ACK completes');
+        assert.equal(f.state.responses[0].ok, false);
+        assert.equal(f.popup.classList.contains('visible'), kind.startsWith('newer') || ['detach', 'replace same Space', 'transient Space hide', 'detach/reinsert', 'replace content'].includes(kind));
+        assert.equal(f.focuses, 0); assert.equal(f.state.effects.length, 0);
+    });
 
-test('Spotlight open and native button close/reopen share explicit complete popup state', async () => {
-    const f = fixture(); f.consumer.start(); await f.drain(); const space = f.document.querySelector('.space'), content = space.querySelector('.space-content');
-    setArchivePopupOpen(space, !f.popup.classList.contains('visible'));
-    assert(!f.popup.classList.contains('visible')); assert(!content.classList.contains('hidden')); assert.equal(space.querySelector('button').getAttribute('aria-expanded'), 'false');
-    setArchivePopupOpen(space, !f.popup.classList.contains('visible'));
-    assert(f.popup.classList.contains('visible')); assert(content.classList.contains('hidden')); assert.equal(space.querySelector('button').getAttribute('aria-expanded'), 'true');
+test('unchanged sidebar refresh class/style writes during ACK do not cancel current display', async t => {
+    const f = await uiFixture(t);
+    f.space.classList.add('active'); f.space.style.display = 'block';
+    f.state.contextRead = async () => {
+        if (![...f.actions.intents.values()].some(intent => intent.phase === 'validated')) return;
+        f.state.contextRead = null;
+        f.space.setAttribute('class', f.space.getAttribute('class'));
+        f.space.setAttribute('style', f.space.getAttribute('style'));
+        f.popup.setAttribute('class', f.popup.getAttribute('class'));
+        await f.drain();
+    };
+    await f.run();
+    assert.equal(f.state.responses[0].displayed, true); assert(f.popup.classList.contains('visible'));
+    assert(!f.requests().some(message => message.action === 'cancel')); assert.equal(f.focuses, 0);
 });
-
+test('newer input while take is awaiting source read wins over the late delivery', async t => {
+    const f = await uiFixture(t);
+    f.state.contextRead = async () => { f.state.contextRead = null; f.document.dispatchEvent(new f.window.Event('keydown', { bubbles: true })); };
+    await f.run(); assert.equal(f.renders, 0); assert(!f.popup.classList.contains('visible'));
+    assert.equal(f.state.responses[0].ok, false);
+});
+test('already-running eligible panel consumes a fresh command without another onOpened receipt', async t => {
+    const f = await uiFixture(t); f.state.skipOpened = true;
+    f.consumer.start(); await f.drain(); assert.equal(f.requests().at(-1).action, 'take');
+    f.open(f.scope); await f.drain(); assert.equal(f.state.responses[0].displayed, true); assert.equal(f.actions.openedWindows.size, 0);
+});
+test('Port loss during render burns invocation; fresh user command reconnects with a new session', async t => {
+    const f = await uiFixture(t); let oldSession;
+    f.hooks.render = async () => { oldSession = [...f.actions.panels][0].session; f.state.ports[0].client.disconnect(); await f.drain(); };
+    await f.run(); assert.equal(f.state.responses[0].ok, false); assert(!f.popup.classList.contains('visible'));
+    f.hooks.render = null;
+    const fresh = await f.prepare(); f.open(fresh); await f.drain();
+    assert.equal(f.state.responses[1].displayed, true); assert.notEqual([...f.actions.panels][0].session, oldSession);
+    assert.equal(f.state.opened.length, 2); assert.equal(f.state.effects.length, 0);
+});
+test('uninitialized sidebar and cross-window hint do not connect or claim', async t => {
+    const f = await uiFixture(t); f.uiState.ready = false; f.consumer.start(); await f.drain(); assert.equal(f.state.ports.length, 0);
+    f.uiState.ready = true; f.browser.runtime.onMessage.emit({ type: 'arcifyArchiveAvailable', windowId: 20 }); await f.drain(); assert.equal(f.state.ports.length, 0);
+    f.open(f.scope); await f.drain(); assert.equal(f.state.responses[0].displayed, true);
+});
+test('native button close/reopen retains explicit shared popup state after Spotlight display', async t => {
+    const f = await uiFixture(t); await f.run();
+    setArchivePopupOpen(f.space, false); assert(!f.popup.classList.contains('visible')); assert(!f.space.querySelector('.space-content').classList.contains('hidden'));
+    setArchivePopupOpen(f.space, true); assert(f.popup.classList.contains('visible')); assert.equal(f.space.querySelector('.sidebar-button').getAttribute('aria-expanded'), 'true');
+});
 for (const initiallyOpen of [false, true]) test(`actual sidebar Archive callback survives template insertion (${initiallyOpen ? 'already open' : 'closed'})`, () => {
     const { document, window } = parseHTML(readFileSync(new URL('../../sidebar.html', import.meta.url), 'utf8'));
     const source = readFileSync(new URL('../../sidebar.js', import.meta.url), 'utf8');

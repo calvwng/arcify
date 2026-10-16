@@ -369,11 +369,12 @@ test('all five original workflow jobs retain reviewed bytes and order except the
     const archivePinBytes = source => source.replaceAll('e2ffbe0982a19eacad23cc803aa42e8e6013c6d0', 'b510b3dbe8cfae6441fbc55a23ce19de30805a6d');
     assert.equal(digest(archivePinBytes(jobs[5][0].trimEnd())), '0d01f7440c701db284e286566d4acbd7ba3d590e52e01c8e54435a14aa92875c');
     assert.equal(digest(archivePinBytes(jobs[6][0].trimEnd())), 'aefdebbb6af8c3c11e312ecb716bb5d7c172117a9cffd0df638e3002216b6cdc');
-    // Normalize only the seven reviewed additive Split watch paths; event/security configuration is unchanged.
-    const splitWatchPaths = ['scripts/paired-chrome-spotlight-split.mjs', 'spotlight-split-actions.js',
+    // Normalize only the reviewed additive Split/display watch paths; event/security configuration is unchanged.
+    const addedWatchPaths = ['archive-display-session.js', 'tests/unit/helpers/archive-display-fixture.js',
+        'scripts/paired-chrome-spotlight-split.mjs', 'spotlight-split-actions.js',
         'tests/unit/spotlight-split-actions.test.js', 'tests/unit/paired-chrome-spotlight-split.test.js',
         'tests/unit/paired-chrome-split-wiring.test.js', 'scripts/lib/spotlight-pair-split-*.mjs', 'docs/spotlight-split-actions.md'];
-    const originalEvents = splitWatchPaths.reduce((source, path) => source.replace(`      - '${path}'\n`, ''), workflow.slice(0, workflow.indexOf('jobs:')));
+    const originalEvents = addedWatchPaths.reduce((source, path) => source.replace(`      - '${path}'\n`, ''), workflow.slice(0, workflow.indexOf('jobs:')));
     assert.equal(digest(originalEvents), '1bc18e330dfd97cfdca18fa5cb05a035dd3061ed1a61e182c82019aee5d1e1d1');
     // No shared conditions or workflow event/security changes can hide a job.
     assert.equal(workflow.match(/^permissions:\n  contents: read$/gm)?.length, 1);

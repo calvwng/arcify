@@ -58,8 +58,18 @@ page's isolated overlay iframe. Every invocation requires:
   Space rendering, and matching PNG dimensions
 - Exactly one visible existing `.archived-tabs-popup.visible`, its normal archive
   controls, and the full global archive list with stable entry IDs and titles
-- One actual `arcifyArchiveIntent` ACK with `displayed:true`, the invocation's
-  token, and the same native `documentId`; ordinary sidebar tabs cannot ACK
+- One actual own-extension `arcify-archive-display-v1` Port connection observed
+  passively in the same real background worker, with exact own-sidebar sender
+  URL/origin, no ordinary tab and no reported child frame/inactive lifecycle
+- Real ordered `arcifyArchiveDisplay` register/take/validate/ACK requests on that
+  physical Port, unique request IDs, one worker session, exact source window and
+  invocation token, and `displayed:true`; a matching cancellation or disconnect
+  before ACK fails. Earlier empty take requests caused by startup hints are
+  allowed, but no claimed intent can be replayed
+- Independent native SIDE_PANEL/context/hosting evidence and visible popup proof.
+  Port `sender.documentId` is recorded when Chrome provides it; it is not required
+  to exist or asserted equal to the native context's document ID. This route trusts
+  Arcify's own exact sidebar renderer and does not claim native-context attestation
 - The real renderer status “Arcify Archive opened.”, retained source document
   identity, and unchanged tabs, saved state, archive records and Space membership
 
@@ -72,12 +82,43 @@ checks include computed opacity, display, visibility and viewport geometry.
 This round trip cannot be satisfied by closing the whole Side Panel or changing
 DOM state in the driver.
 
-The panel is closed between positive combinations so each requires a fresh real
-opening receipt. An additional fresh-token non-gesture send uses explicitly
+After that first round trip, one additional genuine Enter action runs from the
+same original source with the panel left open. Returning focus refreshes the
+source's consumed intent through Spotlight's existing focus lifecycle. The action
+must carry a different request ID and one-use token, reuse the same observed Port
+and session, retain the exact native context/document/window, and leave the real
+`onOpened` observations unchanged. A fresh required native capture is tied to the
+original real opening receipt, followed by an unchanged visible popup capture.
+A passive MutationObserver requires a newly written successful renderer status;
+the previous identical success text cannot satisfy the new action. This extra
+reuse proof does not replace any of the six fresh-opening combinations.
+
+Before positive acceptance, a disposable ordinary `sidebar.html` tab sends real
+same-window and other-window registration probes. Both must be disconnected by
+the unchanged production receiver without a reply, popup or native/store change.
+The worker observer records each actual browser-supplied tab sender. The disposable
+tab is removed and its retirement verified before any positive native screenshot.
+The other-window claim is a tab-sender rejection test, not evidence for a native
+wrong-window receiver race.
+
+The panel is closed between the six original positive combinations so each
+requires a fresh real opening receipt. An additional fresh-token non-gesture send
+uses explicitly
 `userGesture:false` DevTools evaluation and must fail without a panel, native
 mutation or state change. It is a negative protocol probe, never positive input.
-Already-open panel reuse and worker-epoch/cold-open races remain separate runtime
-unit coverage; this case does not manufacture new native events for them.
+The observer adds listeners to the existing background Port endpoint only; it
+never creates a receiver connection, sends a reply, wraps a Chrome API or grants
+authority. It retains its original worker object and observation identity for the
+whole case and fails if either disappears. Teardown removes only its own listeners,
+and never attaches to or wakes a replacement worker. Worker replies are not
+visible from this endpoint: the recorded inbound ACK is combined with the actual
+renderer success and independent native/popup evidence, not presented as a
+captured reply envelope.
+
+Native wrong-window/ambiguous-receiver races and cold-worker/reconnect/reload
+boundaries remain actual-module tests under simulated lifecycles for this change.
+This hosted case does not terminate/reload workers or manufacture native opening
+events to claim those real-browser outcomes.
 
 ## Case 53: exact reopen and rejection
 
@@ -155,9 +196,12 @@ selected cases and records `spotlightArchiveReopen`; it contains no
 `spotlightArchiveOpen` acceptance. Evidence-save and screenshot failures fail the
 case in either plan.
 
-Deterministic lost ACK, response tampering, mid-callback pairing/selection races,
-and worker/browser crash boundaries remain unit/mock coverage. Physical keyboard,
-Helium behavior and the actual hosted result remain unverified until separately
+Deterministic lost ACK, response tampering, cancellation, mid-callback
+pairing/selection races, ambiguous/wrong-window receivers, and worker/browser
+crash or reload boundaries remain actual-module/unit coverage. Fixture tests run
+the passive observer, worker ownership/teardown, negative registration probe and
+existing-panel orchestration against explicit mocks; they do not supply real
+browser acceptance. Physical keyboard, Helium behavior and the actual hosted result remain unverified until separately
 run and reviewed. All eight exact-head jobs must pass; independent reopen success
 cannot override another job's failure. A passing Archive plan does not claim full-suite, extended,
 recovery, appearance, Favorite lifecycle or native Split View acceptance.

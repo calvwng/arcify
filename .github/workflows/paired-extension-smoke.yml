@@ -28,6 +28,8 @@ on:
       - 'archive-store.js'
       - 'archive-client.js'
       - 'archive-intent-ui.js'
+      - 'archive-display-session.js'
+      - 'tests/unit/helpers/archive-display-fixture.js'
       - 'tests/unit/archive-intent-ui.test.js'
       - 'tests/unit/archive-popup.test.js'
       - 'docs/archive-operations.md'

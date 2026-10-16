@@ -2,6 +2,7 @@
 import { PEER_KEY, PAIRING_GENERATION_KEY, bridgeError, isArchiveActionContext, isWindowId, normalizeTabActionUrl } from './spotlight-bridge-protocol.js';
 import { validateSidebarSender } from './sidebar-command.js';
 import { isReopenableArchiveUrl, fencedArchiveRead } from './archive-store.js';
+import { ARCHIVE_DISPLAY_PORT, ARCHIVE_DISPLAY_TYPE, observeArchiveDisplayChanges } from './archive-display-session.js';
 export const ARCHIVE_OPEN_TYPE = 'arcify-archive-open';
 const copy = value => structuredClone(value);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -19,7 +20,8 @@ const validDescriptor = entry => id(entry.entryId) && id(entry.spaceId) && id(en
 export class SpotlightArchiveActions {
     constructor(store, browser = globalThis.chrome, { ttlMs = 300000, ackMs = 8000, maxViews = 64, now = Date.now } = {}) {
         Object.assign(this, { store, browser, ttlMs, ackMs, maxViews, now });
-        this.views = new Map(); this.intents = new Map(); this.panels = new Map(); this.openedWindows = new Set();
+        this.views = new Map(); this.intents = new Map(); this.panels = new Set(); this.openedWindows = new Set();
+        this.stopObserving = () => {};
         browser.sidePanel?.onOpened?.addListener(info => {
             if (!isWindowId(info.windowId) || !['sidebar.html', '/sidebar.html'].includes(info.path)) return;
             this.openedWindows.add(info.windowId);
@@ -28,13 +30,15 @@ export class SpotlightArchiveActions {
         });
         browser.sidePanel?.onClosed?.addListener(info => {
             this.openedWindows.delete(info.windowId);
-            for (const [documentId, windowId] of this.panels) if (windowId === info.windowId) this.panels.delete(documentId);
-            for (const intent of this.intents.values()) if (intent.context.windowId === info.windowId && intent.finish)
-                intent.finish(bridgeError('OPEN_FAILED', 'The native sidebar closed before its archive display was confirmed.'));
+            for (const panel of this.panels) if (panel.windowId === info.windowId) panel.close();
+            for (const intent of this.intents.values()) if (intent.context.windowId === info.windowId && intent.phase !== 'prepared') {
+                intent.invalidated = true;
+                intent.finish?.(bridgeError('OPEN_FAILED', 'The native sidebar closed before its archive display was confirmed.'));
+            }
         });
     }
     supported() { return Boolean(this.store.archiveStore); }
-    canOpen() { return typeof this.browser.sidePanel?.open === 'function' && typeof this.browser.runtime?.getContexts === 'function'
+    canOpen() { return typeof this.browser.sidePanel?.open === 'function' && typeof this.browser.runtime?.onConnect?.addListener === 'function'
         && typeof this.browser.sidePanel?.onOpened?.addListener === 'function' && typeof this.browser.sidePanel?.onClosed?.addListener === 'function'; }
     prune() {
         for (const [key, view] of this.views) if (view.expires <= this.now()) this.views.delete(key);
@@ -80,12 +84,14 @@ export class SpotlightArchiveActions {
                 ? String(result.warning || 'This archived entry was consumed, but its current tab could not be confirmed. Check Arcify before trying again.').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 2048) : null } };
     }
     async checkIntent(intent) {
-        if (!intent || intent.expires <= this.now()) stale();
+        if (!intent || intent.invalidated || this.intents.get(intent.token) !== intent || intent.expires <= this.now()) stale();
         return fencedArchiveRead({ windowId: intent.context.windowId, context: intent.context }, async () => {
         const stored = await this.browser.storage.local.get([PEER_KEY, PAIRING_GENERATION_KEY]);
         if (stored[PEER_KEY] !== intent.peerId || (stored[PAIRING_GENERATION_KEY] ?? null) !== intent.pairingGeneration)
             throw bridgeError('UNAUTHORIZED', 'The Arcify connection changed.');
         await this.store.archiveStore.contextUnlocked(intent.context.windowId, withoutGeneration(intent.context));
+        await this.normalWindow(intent.context.windowId, true);
+        if (intent.invalidated || this.intents.get(intent.token) !== intent) stale();
         });
     }
     open(request, sender, respond) {
@@ -119,11 +125,14 @@ export class SpotlightArchiveActions {
                     let settled = false;
                     intent.finish = error => {
                         if (settled) return; settled = true; clearTimeout(intent.timer); this.intents.delete(intent.token);
+                        if (error && intent.panel) this.sendPanel(intent.panel, { event: 'cancel', session: intent.session,
+                            token: intent.token, code: error.code || 'OPEN_FAILED', error: error.message });
                         if (error) reject(error); else response({ ok: true, displayed: true });
                     };
                     intent.timer = setTimeout(() => intent.finish(bridgeError('UNCERTAIN_RESULT', 'Arcify did not confirm that the archive was displayed. Check its sidebar before trying again.')), this.ackMs);
                     Promise.resolve(opening).then(() => {
                         if (settled) return;
+                        if (intent.invalidated) { intent.finish(bridgeError('STALE_ARCHIVE', 'The archive source changed.')); return; }
                         intent.phase = 'pending';
                         // Sidebar startup also polls once after its normal init.
                         // Notifications are hints, not authority or success proof.
@@ -137,52 +146,131 @@ export class SpotlightArchiveActions {
         } catch (error) { reject(error); }
         return true;
     }
-    async nativeSidebar(sender, windowId) {
-        const url = this.browser.runtime.getURL('sidebar.html');
-        if (sender?.id !== this.browser.runtime.id || sender.url !== url || sender.origin !== url.slice(0, -'/sidebar.html'.length)
-            || !id(sender.documentId) || !isWindowId(windowId)) throw bridgeError('UNAUTHORIZED', 'Only the native Arcify sidebar can consume an archive intent.');
-        const contexts = await this.browser.runtime.getContexts({ contextTypes: ['SIDE_PANEL'], documentIds: [sender.documentId] });
-        if (!contexts.some(context => context.contextType === 'SIDE_PANEL' && context.documentId === sender.documentId
-            && context.documentUrl === url && context.incognito !== true && [windowId, -1].includes(context.windowId))) throw bridgeError('UNAUTHORIZED', 'The archive sidebar context changed.');
+    async normalWindow(windowId, focused = false) {
+        const window = await this.browser.windows.get(windowId, { populate: false });
+        if (window?.id !== windowId || window.type !== 'normal' || window.incognito || focused && window.focused !== true) stale();
     }
-    install() {
-        const listener = (request, sender, respond) => {
-            if (request?.type !== 'arcifyArchiveIntent') return;
+    sendPanel(panel, payload) {
+        if (!panel.live) return;
+        try { panel.port.postMessage({ type: ARCHIVE_DISPLAY_TYPE, ...payload }); }
+        catch { panel.close(); }
+    }
+    uniquePanel(panel) {
+        return panel.live && panel.registered && this.panels.has(panel)
+            && [...this.panels].filter(other => other.live && other.windowId === panel.windowId).length === 1;
+    }
+    // Authenticates only Arcify's packaged sidebar UI. Chrome 155 omits the
+    // native sidebar sender documentId; a Port does NOT prove SIDE_PANEL.
+    // Renderer eligibility comes from that trusted code, not caller assertions
+    // accepted from websites, other extensions, or arbitrary runtime messages.
+    connectPanel(port) {
+        if (port.name !== ARCHIVE_DISPLAY_PORT) return;
+        const sender = port.sender, url = this.browser.runtime.getURL('sidebar.html');
+        if (sender?.id !== this.browser.runtime.id || sender.url !== url || sender.origin !== url.slice(0, -'/sidebar.html'.length)
+            || sender.tab != null || sender.incognito === true || sender.frameId != null && sender.frameId !== 0
+            || sender.documentLifecycle != null && sender.documentLifecycle !== 'active') {
+            port.disconnect(); return;
+        }
+        if (this.panels.size >= 64) { port.disconnect(); return; }
+        const panel = { port, live: true, registered: false, windowId: null, session: crypto.randomUUID(), seen: new Set() };
+        const close = () => {
+            if (!panel.live) return;
+            panel.live = false; this.panels.delete(panel);
+            port.onMessage.removeListener(listener); port.onDisconnect.removeListener(close);
+            for (const intent of this.intents.values()) if (intent.panel === panel) {
+                intent.invalidated = true;
+                intent.finish?.(bridgeError('OPEN_FAILED', 'The archive display connection closed. Choose Open Archive again.'));
+            }
+            try { port.disconnect(); } catch { /* Already disconnected. */ }
+        };
+        panel.close = close;
+
+        const listener = request => {
             (async () => {
                 try {
-                    const keys = ['take', 'register'].includes(request.action) ? ['type', 'action', 'windowId'] : ['type', 'action', 'windowId', 'token', 'displayed'];
-                    if (!['register', 'take', 'ack'].includes(request.action) || !exact(request, keys) || request.action === 'ack' && (!id(request.token) || typeof request.displayed !== 'boolean'))
-                        throw bridgeError('INVALID_REQUEST', 'Invalid archive intent request.');
-                    await this.nativeSidebar(sender, request.windowId);
+                    const base = ['type', 'requestId', 'action', 'windowId'];
+                    const keys = request?.action === 'register' ? base : [...base, 'session',
+                        ...(['validate', 'ack', 'cancel'].includes(request?.action) ? ['token'] : []), ...(request?.action === 'ack' ? ['displayed'] : [])];
+                    if (request?.type !== ARCHIVE_DISPLAY_TYPE || !['register', 'take', 'validate', 'ack', 'cancel'].includes(request.action)
+                        || !exact(request, keys) || !id(request.requestId) || !isWindowId(request.windowId)
+                        || panel.seen.has(request.requestId) || panel.seen.size >= 4096
+                        || request.action !== 'register' && request.session !== panel.session
+                        || ['validate', 'ack', 'cancel'].includes(request.action) && !id(request.token)
+                        || request.action === 'ack' && typeof request.displayed !== 'boolean')
+                        throw bridgeError('INVALID_REQUEST', 'Invalid archive display request.');
+                    panel.seen.add(request.requestId);
                     if (request.action === 'register') {
-                        // SIDE_PANEL.windowId is -1 on Chromium. Only our native
-                        // sidebar can register its browser-derived current window,
-                        // corroborated by a real onOpened in this worker epoch.
-                        if (!this.openedWindows.has(request.windowId)) throw bridgeError('PANEL_UNVERIFIED', 'Open Arcify’s sidebar once to verify this window.');
-                        this.panels.set(sender.documentId, request.windowId);
-                        while (this.panels.size > 64) this.panels.delete(this.panels.keys().next().value);
-                        respond({ success: true, result: { registered: true } }); return;
+                        if (panel.windowId !== null) throw bridgeError('INVALID_REQUEST', 'This archive display connection is already registered.');
+                        panel.windowId = request.windowId;
+                        this.panels.add(panel);
+                        if ([...this.panels].filter(other => other.live && other.windowId === panel.windowId).length !== 1) {
+                            for (const intent of this.intents.values()) if (intent.context.windowId === panel.windowId && intent.phase !== 'prepared')
+                                intent.finish?.(bridgeError('PANEL_AMBIGUOUS', 'More than one Arcify archive display is registered for this window.'));
+                            throw bridgeError('PANEL_AMBIGUOUS', 'More than one Arcify archive display is registered for this window.');
+                        }
+                        await this.normalWindow(panel.windowId);
+                        panel.registered = true;
+                        if (!this.uniquePanel(panel)) stale();
+                        this.sendPanel(panel, { requestId: request.requestId, success: true, result: { registered: true, session: panel.session } });
+                        return;
                     }
-                    if (this.panels.get(sender.documentId) !== request.windowId || !this.openedWindows.has(request.windowId))
-                        throw bridgeError('PANEL_UNVERIFIED', 'The native sidebar window must be verified before opening its archive.');
+                    if (request.windowId !== panel.windowId || !this.uniquePanel(panel))
+                        throw bridgeError('PANEL_UNVERIFIED', 'The archive display connection changed or is ambiguous.');
+                    if (request.action === 'cancel') {
+                        // Process renderer invalidation immediately, even while
+                        // an older validate/ACK awaits the SpaceStore queue.
+                        const intent = this.intents.get(request.token);
+                        if (!intent || intent.panel !== panel || intent.session !== panel.session) stale();
+                        intent.invalidated = true;
+                        intent.finish(bridgeError('STALE_ARCHIVE', 'The archive display was interrupted by a newer UI action.'));
+                        this.sendPanel(panel, { requestId: request.requestId, success: true, result: { cancelled: true } });
+                        return;
+                    }
                     const result = await this.store.run(async () => {
                         const intent = request.action === 'take'
-                            ? [...this.intents.values()].find(value => value.phase === 'pending' && value.context.windowId === request.windowId)
+                            ? [...this.intents.values()].find(value => value.phase === 'pending' && value.context.windowId === panel.windowId)
                             : this.intents.get(request.token);
-                        if (!intent) return null;
-                        if (request.action === 'ack' && (intent.phase !== 'claimed' || intent.documentId !== sender.documentId || intent.context.windowId !== request.windowId)) stale();
+                        if (!intent && request.action === 'take') return null;
+                        if (!intent || request.action !== 'take' && (intent.panel !== panel || intent.session !== panel.session
+                            || intent.context.windowId !== panel.windowId
+                            || (request.action === 'validate' ? intent.phase !== 'claimed'
+                                : request.displayed ? intent.phase !== 'validated' : !['claimed', 'validated'].includes(intent.phase)))) stale();
                         await this.checkIntent(intent);
-                        if (!this.intents.has(intent.token) || this.panels.get(sender.documentId) !== request.windowId || !this.openedWindows.has(request.windowId)) stale();
-                        if (request.action === 'take') { intent.phase = 'claimed'; intent.documentId = sender.documentId; return { token: intent.token, context: copy(intent.context) }; }
+                        if (!this.uniquePanel(panel) || !this.intents.has(intent.token)) stale();
+                        if (request.action === 'take') {
+                            intent.phase = 'claimed'; intent.panel = panel; intent.session = panel.session;
+                            return { token: intent.token, context: copy(intent.context) };
+                        }
+                        if (request.action === 'validate') { intent.phase = 'validated'; return { valid: true }; }
                         intent.finish(request.displayed ? null : bridgeError('OPEN_FAILED', 'The archive popup was not displayed.'));
                         return { displayed: request.displayed };
                     });
-                    respond({ success: true, result });
-                } catch (error) { respond({ success: false, error: error.message, code: error.code || 'FAILED' }); }
+                    this.sendPanel(panel, { requestId: request.requestId, success: true, result });
+                } catch (error) {
+                    // A failed claimed operation burns that invocation. It never
+                    // turns a stale render or rejected ACK into a retry.
+                    for (const intent of this.intents.values()) if (intent.panel === panel)
+                        intent.finish?.(error);
+                    this.sendPanel(panel, { requestId: request?.requestId, success: false, error: error.message, code: error.code || 'FAILED' });
+                }
             })();
-            return true;
         };
-        this.browser.runtime.onMessage.addListener(listener);
-        return () => this.browser.runtime.onMessage.removeListener(listener);
+        this.panels.add(panel);
+        port.onMessage.addListener(listener); port.onDisconnect.addListener(close);
+    }
+    install() {
+        if (!this.browser.runtime.onConnect?.addListener) return () => {};
+        this.stopObserving = observeArchiveDisplayChanges(this.browser,
+            () => [...this.intents.values()].filter(intent => intent.phase !== 'prepared'), intent => {
+                intent.invalidated = true;
+                intent.finish?.(bridgeError('STALE_ARCHIVE', 'The source, selected Space, or browser focus changed. Choose Open Archive again.'));
+            });
+        const listener = port => this.connectPanel(port);
+        this.browser.runtime.onConnect.addListener(listener);
+        return () => {
+            this.browser.runtime.onConnect.removeListener(listener);
+            this.stopObserving();
+            for (const panel of this.panels) panel.close();
+        };
     }
 }

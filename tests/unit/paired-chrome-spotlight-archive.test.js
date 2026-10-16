@@ -9,7 +9,7 @@ import { finishBookmarkFixture } from '../../scripts/paired-chrome-bookmark-sele
 import { registerFavoriteMessages } from '../../favorite-store.js';
 import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
 import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
-    assertArchiveReopenRequest, waitForArchiveReopenCompletion, readArchiveDestinationDocument, captureArchiveReopenedDestination, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation,
+    assertArchiveReopenRequest, waitForArchiveReopenCompletion, readArchiveDestinationDocument, captureArchiveReopenedDestination, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation, readArchiveIntentObservation, observeArchiveDisplayWorker, probeArchiveDisplayRegistration, exerciseArchiveExistingPanel, installArchiveStatusObservation,
     readArchiveDocumentStatus, collectArchiveOpenFailure, readArchiveReopenJournal, collectArchiveReopenFailure, withArchiveFailureEvidence,
     readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
     ARCHIVE_FEATURES, ARCHIVE_OPEN_TYPE, ARCHIVE_ENTRY_TYPE } from '../../scripts/paired-chrome-spotlight-archive.mjs';
@@ -25,9 +25,14 @@ const external = message => ({ type: 'external', data: { message, sender: { id: 
 const openRequest = { type: 'arcify-archive-open', version: 1, requestId: 'open-request', token: 'one-use-token' };
 const openEvents = () => [external({ type: 'arcify-bridge', command: 'archiveContext', tabId: 10, windowId: 7 }),
     { ...external(openRequest), data: { message: copy(openRequest), sender: { id: SPOTLIGHT, url: URL } } }];
-const native = { context: { contextId: 'native-context', documentId: 'native-document', contextType: 'SIDE_PANEL', windowId: -1 } };
+const native = { context: { contextId: 'native-context', documentId: 'native-document', documentUrl: `chrome-extension://${ARCIFY}/sidebar.html`, contextType: 'SIDE_PANEL', windowId: -1 }, hosting: { tab: null, windowId: 7 } };
 const nativeState = (open = true) => ({ url: `chrome-extension://${ARCIFY}/sidebar.html`, visibility: 'visible', selectedSpaces: [{ spaceId: 'selected', visible: true, contentHidden: open, contentVisible: !open, expanded: String(open), popupVisible: open, popupClassVisible: open }], popups: open ? [{ spaceId: 'selected', visible: true, controls: true, entries: [entry, twin].map(value => ({ entryId: value.entryId, title: value.name })), message: '' }] : [] });
-const ack = () => ({ type: 'archive.intent', data: { message: { type: 'arcifyArchiveIntent', action: 'ack', token: openRequest.token, windowId: 7, displayed: true }, sender: { id: ARCIFY, url: `chrome-extension://${ARCIFY}/sidebar.html`, documentId: native.context.documentId, tab: null } } });
+const portMessage = (action, fields = {}) => ({ type: 'archive.port-message', data: { portId: 'observer:1', message: {
+    type: 'arcifyArchiveDisplay', action, requestId: action, windowId: 7, ...(action === 'register' ? {} : { session: 'worker-session' }), ...fields } } });
+const ack = () => portMessage('ack', { token: openRequest.token, displayed: true });
+const displayEvents = () => [{ type: 'archive.port-connect', data: { portId: 'observer:1', name: 'arcify-archive-display-v1', sender: {
+    id: ARCIFY, url: `chrome-extension://${ARCIFY}/sidebar.html`, origin: `chrome-extension://${ARCIFY}`, documentId: null, frameId: 0, documentLifecycle: 'active', tab: null } } },
+    portMessage('register'), portMessage('take'), portMessage('validate', { token: openRequest.token }), ack()];
 
 for (const method of ['click', 'Enter']) test(`trusted Archive ${method} oracle rejects fake, modified, repeated and wrong-ID activations`, () => {
     const expected = { type: ARCHIVE_ENTRY_TYPE, title: 'Reopen original', entryId: 'chosen', method };
@@ -52,11 +57,62 @@ test('Open request oracle requires direct renderer send, one token and real sour
         events => events.push(external({ type: 'arcify-sidebar' }))]) { const bad = openEvents(); change(bad); assert.throws(() => assertArchiveOpenRequest(bad, expected)); }
 });
 
-test('native ACK oracle binds displayed:true to exact one-use token and native document ID', () => {
-    const expected = { arcifyId: ARCIFY, windowId: 7 }; assertArchiveNativeAck([ack()], openRequest, native, expected);
-    for (const change of [value => { value.data.message.displayed = false; }, value => { value.data.message.token = 'other-token'; }, value => { value.data.message.windowId = 8; }, value => { value.data.sender.documentId = 'normal-tab-document'; },
-        value => { value.data.sender.tab = { id: 100, windowId: 7 }; }, value => { value.data.sender.id = SPOTLIGHT; }, value => { value.data.sender.url = `chrome-extension://${ARCIFY}/options.html`; }]) { const bad = ack(); change(bad); assert.throws(() => assertArchiveNativeAck([bad], openRequest, native, expected)); }
-    assert.throws(() => assertArchiveNativeAck([ack(), ack()], openRequest, native, expected)); assert.throws(() => assertArchiveNativeAck([], openRequest, native, expected));
+test('internal ACK oracle requires an ordered one-Port session and independent native hosting without claiming document-ID attestation', () => {
+    const expected = { arcifyId: ARCIFY, windowId: 7 }, events = displayEvents();
+    const proof = assertArchiveNativeAck(events, openRequest, native, expected);
+    assert.equal(proof.acknowledgement, events.at(-1)); assert.equal(proof.connection.data.sender.documentId, null);
+    assert.match(proof.evidenceModel, /independent native hosting/);
+    for (const documentId of [null, 'independently-reported-document']) {
+        const value = displayEvents(); value[0].data.sender.documentId = documentId;
+        assertArchiveNativeAck(value, openRequest, native, expected);
+    }
+    const omitted = displayEvents(); delete omitted[0].data.sender.frameId; delete omitted[0].data.sender.documentLifecycle;
+    assertArchiveNativeAck(omitted, openRequest, native, expected);
+    // Availability hints can cause an earlier empty take without consuming an intent.
+    const withEmptyTake = displayEvents(); withEmptyTake.splice(2, 0, portMessage('take', { requestId: 'earlier-empty-take' }));
+    assertArchiveNativeAck(withEmptyTake, openRequest, native, expected);
+});
+for (const [name, change] of [
+    ['display refusal', events => { events.at(-1).data.message.displayed = false; }],
+    ['wrong token', events => { events.at(-1).data.message.token = 'other-token'; }],
+    ['wrong window', events => { events.at(-1).data.message.windowId = 8; }],
+    ['missing session', events => { delete events.at(-1).data.message.session; }],
+    ['changed session', events => { events.at(-1).data.message.session = 'different'; }],
+    ['unexpected ACK field', events => { events.at(-1).data.message.context = context; }],
+    ['ordinary sidebar tab', events => { events[0].data.sender.tab = { id: 100, windowId: 7 }; }],
+    ['other extension', events => { events[0].data.sender.id = SPOTLIGHT; }],
+    ['options URL', events => { events[0].data.sender.url = `chrome-extension://${ARCIFY}/options.html`; }],
+    ['child frame', events => { events[0].data.sender.frameId = 1; }],
+    ['inactive document', events => { events[0].data.sender.documentLifecycle = 'prerender'; }],
+    ['cancelled intent', events => { events.splice(4, 0, portMessage('cancel', { token: openRequest.token })); }],
+    ['other origin', events => { events[0].data.sender.origin = `chrome-extension://${SPOTLIGHT}`; }],
+    ['different channel', events => { events[0].data.name = 'other'; }],
+    ['unobserved Port', events => { events.at(-1).data.portId = 'observer:2'; }],
+    ['ambiguous Port identity', events => { events.unshift(copy(events[0])); }],
+    ['missing registration', events => { events.splice(1, 1); }],
+    ['wrong registration window', events => { events[1].data.message.windowId = 8; }],
+    ['missing claim request', events => { events.splice(2, 1); }],
+    ['claim from other session', events => { events[2].data.message.session = 'other'; }],
+    ['missing validation', events => { events.splice(3, 1); }],
+    ['validation from other token', events => { events[3].data.message.token = 'other'; }],
+    ['validation from other Port', events => { events[3].data.portId = 'observer:2'; }],
+    ['validation before take', events => { [events[2], events[3]] = [events[3], events[2]]; }],
+    ['reused request ID', events => { events.at(-1).data.message.requestId = 'validate'; }],
+    ['disconnected Port', events => { events.splice(4, 0, { type: 'archive.port-disconnect', data: { portId: 'observer:1' } }); }],
+    ['duplicate ACK', events => { events.push(ack()); }],
+    ['missing ACK', events => { events.pop(); }],
+    ['connection after ACK', events => { events.push(events.shift()); }]
+]) test(`internal ACK oracle rejects ${name}`, () => {
+    const events = displayEvents(); change(events); assert.throws(() => assertArchiveNativeAck(events, openRequest, native, { arcifyId: ARCIFY, windowId: 7 }));
+});
+for (const [name, change] of [
+    ['no real context identity', value => { value.context.documentId = null; }],
+    ['ordinary native context', value => { value.context.contextType = 'TAB'; }],
+    ['wrong native URL', value => { value.context.documentUrl = 'https://wrong.test/'; }],
+    ['ordinary native tab', value => { value.hosting.tab = { id: 9, windowId: 7 }; }],
+    ['other native window', value => { value.hosting.windowId = 8; }]
+]) test(`independent native proof rejects ${name} even with a valid internal Port ACK`, () => {
+    const value = copy(native); change(value); assert.throws(() => assertArchiveNativeAck(displayEvents(), openRequest, value, { arcifyId: ARCIFY, windowId: 7 }));
 });
 
 test('reopen request oracle rejects URL/full-record selection, wrong identity and duplicates', () => {
@@ -110,15 +166,13 @@ test('rejected/repeated/uncertain requests require no writes or native side effe
         { type: 'storage', data: { area: 'local', changes: { archiveReopenClaims: { oldValue: null, newValue: {} } } } }]) assert.throws(() => assertArchiveNoMutation(before, copy(before), [event]));
 });
 
-test('input and native ACK observers are passive and preserve exact browser metadata', () => {
+test('input observer passively retains trusted browser metadata', () => {
     const listeners = new Map(), row = { dataset: { resultType: ARCHIVE_ENTRY_TYPE, archiveEntryId: 'chosen' }, querySelector: () => ({ textContent: 'Reopen original' }) };
     const document = { addEventListener: (type, listener) => listeners.set(type, listener), removeEventListener: type => listeners.delete(type), querySelector: () => row };
     const realm = { document, parent: {}, globalThis: {} }; vm.runInNewContext(`(${installArchiveInputObservation})()`, realm);
     const event = { isTrusted: true, target: { closest: () => row }, key: 'Enter', button: undefined };
     listeners.get('keydown')(event); assert.equal(realm.parent.__archiveInputEvents[0].trusted, true); assert.equal(realm.parent.__archiveInputEvents[0].entryId, 'chosen');
-    const events = [], registrations = []; const nativeRealm = { globalThis: { __spaceActionObservation: { events } }, chrome: { runtime: { onMessage: { addListener: fn => registrations.push(fn), removeListener: fn => registrations.splice(registrations.indexOf(fn), 1) } } } };
-    vm.runInNewContext(`(${installArchiveIntentObservation})()`, nativeRealm); registrations[0](ack().data.message, ack().data.sender); assert.equal(events.length, 1); assert.equal(events[0].data.sender.documentId, native.context.documentId);
-    nativeRealm.globalThis.__archiveIntentStop(); assert.equal(registrations.length, 0); realm.globalThis.__archiveInput.stop(); assert.equal(listeners.size, 0);
+    realm.globalThis.__archiveInput.stop(); assert.equal(listeners.size, 0);
 });
 
 test('hosted driver positively invokes visible UI, observes real native context and never substitutes a normal sidebar tab or transport', () => {
@@ -783,3 +837,173 @@ test('Archive cleanup records secondary failures without replacing the original 
     assert.equal(value.primaryError.message, 'Original acceptance failure'); assert.deepEqual(value.primaryError.cleanupErrors, ['Cleanup option failure']);
     assert.equal(value.evidence.checkpoints.at(-1).phase, 'archive-cleanup-failed');
 });
+
+function archiveObserverFixture() {
+    const emitter = () => { const listeners = new Set(); return { listeners, addListener: value => listeners.add(value), removeListener: value => listeners.delete(value), emit: (...args) => [...listeners].map(listener => listener(...args)) }; };
+    const onConnect = emitter(), realm = { structuredClone, location: { href: `chrome-extension://${ARCIFY}/background.js` },
+        chrome: { runtime: { id: ARCIFY, onConnect } } };
+    const context = vm.createContext(realm);
+    const evaluate = async (fn, arg) => copy(await vm.runInContext(`(${fn.toString()})(${JSON.stringify(arg)})`, context));
+    const makePort = (sender = displayEvents()[0].data.sender, name = 'arcify-archive-display-v1') => ({ sender: copy(sender), name, onMessage: emitter(), onDisconnect: emitter(),
+        postMessage: () => assert.fail('Observation must never respond.'), disconnect: () => assert.fail('Observation must never retire a production Port.') });
+    return { onConnect, context, realm, evaluate, makePort };
+}
+test('worker observer only adds passive listeners to the actual Port and retains immutable sender/message snapshots', async () => {
+    const f = archiveObserverFixture(); const identity = await f.evaluate(installArchiveIntentObservation, 'observer');
+    assert.deepEqual(identity, { observerId: 'observer', extensionId: ARCIFY, workerUrl: `chrome-extension://${ARCIFY}/background.js` });
+    const port = f.makePort(); assert.deepEqual(f.onConnect.emit(port), [undefined]);
+    const message = ack().data.message; assert.deepEqual(port.onMessage.emit(message), [undefined]);
+    message.token = 'mutated-later'; port.sender.url = 'https://changed.test/';
+    const observed = await f.evaluate(readArchiveIntentObservation, 'observer');
+    assert.equal(observed.events.length, 2); assert.equal(observed.events[0].data.sender.documentId, null);
+    assert.equal(observed.events[0].data.sender.url, `chrome-extension://${ARCIFY}/sidebar.html`);
+    assert.equal(observed.events[1].data.message.token, openRequest.token); assert.equal(observed.events[1].data.portId, observed.events[0].data.portId);
+    assert.deepEqual(port.onDisconnect.emit(), [undefined]); assert.equal(port.onMessage.listeners.size, 0); assert.equal(port.onDisconnect.listeners.size, 0);
+    assert.equal((await f.evaluate(readArchiveIntentObservation, 'observer')).events.at(-1).type, 'archive.port-disconnect');
+    await f.evaluate(() => globalThis.__archiveIntentStop()); assert.equal(f.onConnect.listeners.size, 0);
+    await assert.rejects(f.evaluate(readArchiveIntentObservation, 'observer'), /original Archive worker observation was lost/);
+    const helper = source.slice(source.indexOf('export function installArchiveIntentObservation'), source.indexOf('export function readArchiveIntentObservation'));
+    assert.doesNotMatch(helper, /\.connect\(|\.postMessage\(|\.disconnect\(|sendMessage|sendResponse|respond\(|getContexts|sidePanel|Object\.defineProperty/);
+});
+test('worker observation ignores other Port names and teardown removes all owned listeners without disconnecting receivers', async () => {
+    const f = archiveObserverFixture(); await f.evaluate(installArchiveIntentObservation, 'first');
+    const ignored = f.makePort(undefined, 'other'), first = f.makePort(), second = f.makePort();
+    f.onConnect.emit(ignored); assert.equal(ignored.onMessage.listeners.size, 0);
+    f.onConnect.emit(first); f.onConnect.emit(second); assert.equal(first.onMessage.listeners.size, 1); assert.equal(second.onMessage.listeners.size, 1);
+    const snapshot = await f.evaluate(readArchiveIntentObservation, 'first'); assert.notEqual(snapshot.events[0].data.portId, snapshot.events[1].data.portId);
+    await f.evaluate(installArchiveIntentObservation, 'second'); assert.equal(first.onMessage.listeners.size, 0); assert.equal(second.onDisconnect.listeners.size, 0);
+    assert.equal(f.onConnect.listeners.size, 1); await assert.rejects(f.evaluate(readArchiveIntentObservation, 'first'), /observation was lost/);
+    assert.deepEqual((await f.evaluate(readArchiveIntentObservation, 'second')).events, []);
+    await f.evaluate(() => globalThis.__archiveIntentStop());
+});
+function observedWorkerFixture() {
+    const f = archiveObserverFixture(), calls = [], worker = { evaluate: async (...args) => { calls.push(args[0].name || 'teardown'); return f.evaluate(...args); } };
+    const target = { type: () => 'service_worker', url: () => `chrome-extension://${ARCIFY}/background.js`, worker: async () => { calls.push('existing-worker'); return worker; } };
+    const state = { targets: [target] }, browser = { targets: () => state.targets };
+    return { ...f, calls, worker, target, state, browser, start: () => observeArchiveDisplayWorker({ browser, arcifyId: ARCIFY, observerId: 'observer' }) };
+}
+test('worker observer uses one existing target and exact realm for its entire lifetime', async () => {
+    const f = observedWorkerFixture(), observer = await f.start(); await observer.read(); assert.deepEqual(await observer.stop(), { stopped: true });
+    assert.deepEqual(f.calls, ['existing-worker', 'installArchiveIntentObservation', 'readArchiveIntentObservation', 'teardown']);
+    assert.equal(f.onConnect.listeners.size, 0);
+});
+for (const replacement of [false, true]) test(`retired worker observation fails without attaching, waking or adopting ${replacement ? 'a replacement' : 'a missing worker'}`, async () => {
+    const f = observedWorkerFixture(), observer = await f.start();
+    f.state.targets = replacement ? [{ ...f.target, worker: () => assert.fail('Must not adopt a replacement worker') }] : [];
+    await assert.rejects(observer.read(), /original Archive worker retired/); assert.deepEqual(await observer.stop(), { retired: true });
+    assert.deepEqual(f.calls, ['existing-worker', 'installArchiveIntentObservation']);
+});
+for (const count of [0, 2]) test(`worker observer rejects ${count} matching existing workers`, async () => {
+    const f = observedWorkerFixture(); f.state.targets = count ? [f.target, { ...f.target }] : [];
+    await assert.rejects(f.start(), /exactly one existing real background worker/); assert.deepEqual(f.calls, []);
+});
+test('observer identity loss in the same target is not silently reinstalled', async () => {
+    const f = observedWorkerFixture(), observer = await f.start(); await f.evaluate(() => delete globalThis.__archiveDisplayObservation);
+    await assert.rejects(observer.read(), /original Archive worker observation was lost/); await assert.rejects(observer.stop(), /ownership changed/);
+    assert.equal(f.calls.filter(name => name === 'installArchiveIntentObservation').length, 1);
+});
+for (const invalid of ['extensionId', 'workerUrl']) test(`worker observer refuses incorrect ${invalid} before using its snapshots`, async () => {
+    const f = observedWorkerFixture(); f.worker.evaluate = async () => ({ observerId: 'observer', extensionId: ARCIFY, workerUrl: `chrome-extension://${ARCIFY}/background.js`, [invalid]: 'wrong' });
+    await assert.rejects(f.start());
+});
+
+test('ordinary-tab probe uses the actual registration transport, consumes lastError and cleans only its own test Port listeners', async () => {
+    const f = archiveObserverFixture(), port = f.makePort(), messages = [], timers = [];
+    f.realm.chrome.runtime.connect = options => { assert.deepEqual(copy(options), { name: 'arcify-archive-display-v1' }); return port; };
+    f.realm.chrome.runtime.lastError = { message: 'Receiving end does not exist.' };
+    f.realm.setTimeout = fn => { timers.push(fn); return 1; }; f.realm.clearTimeout = id => { assert.equal(id, 1); timers.length = 0; };
+    port.postMessage = value => { messages.push(copy(value)); queueMicrotask(() => port.onDisconnect.emit()); };
+    const result = await f.evaluate(probeArchiveDisplayRegistration, { windowId: 8, requestId: 'ordinary-wrong-window' });
+    assert.deepEqual(result, { disconnected: true, error: 'Receiving end does not exist.', messages: [] });
+    assert.deepEqual(messages, [{ type: 'arcifyArchiveDisplay', action: 'register', requestId: 'ordinary-wrong-window', windowId: 8 }]);
+    assert.equal(port.onMessage.listeners.size, 0); assert.equal(port.onDisconnect.listeners.size, 0); assert.equal(timers.length, 0);
+});
+test('an ordinary-tab Port left alive fails its bounded negative probe rather than reporting refusal', async () => {
+    const f = archiveObserverFixture(), port = f.makePort(); let expire, disconnected = 0;
+    f.realm.chrome.runtime.connect = () => port; f.realm.setTimeout = fn => { expire = fn; return 1; }; f.realm.clearTimeout = () => {};
+    port.postMessage = () => {}; port.disconnect = () => { disconnected++; };
+    const pending = f.evaluate(probeArchiveDisplayRegistration, { windowId: 7, requestId: 'ordinary' }); expire();
+    await assert.rejects(pending, /retained an unauthorized Archive display Port/); assert.equal(disconnected, 1); assert.equal(port.onMessage.listeners.size, 0);
+});
+test('hosted ordinary-tab negative retires its disposable tab before six native positives and does not turn another-window claims into native proof', () => {
+    const block = source.slice(source.indexOf('export async function exerciseSpotlightArchiveOpen'), source.indexOf('export async function exerciseSpotlightArchiveReopen'));
+    assert.match(block, /for \(const claimedWindow of \[windowId, otherWindow\]\)/);
+    assert.match(block, /ordinary\.page\.evaluate\(probeArchiveDisplayRegistration/); assert.match(block, /assertArchiveNoMutation\(before, after, observed\.events\)/);
+    assert.match(block, /response\.disconnected, true/); assert.match(block, /response\.messages, \[\]/);
+    assert.match(block, /connections\.length, 1/); assert.match(block, /finally \{ await apiPage\.evaluate\(id => chrome\.tabs\.remove\(id\), ordinary\.tab\.id\); \}/);
+    assert(block.indexOf('The rejection-only ordinary sidebar tab must be retired') < block.indexOf("for (const kind of ['owned-newtab'"));
+    assert.match(block, /exerciseArchiveExistingPanel\(/); assert.match(block, /evidence\.matrix\.length, 6/);
+});
+
+test('status observer is passive and distinguishes identical old text from a newly written success', async () => {
+    const label = { textContent: 'Arcify Archive opened.', isConnected: true }, observers = [];
+    class MutationObserver { constructor(callback) { this.callback = callback; observers.push(this); } observe(node, options) { assert.equal(node, label); assert.deepEqual(copy(options), { childList: true, characterData: true, subtree: true }); } disconnect() { this.disconnected = true; } }
+    const realm = vm.createContext({ document: { querySelector: selector => { assert.equal(selector, '.arcify-bridge-status [role="status"]'); return label; } }, MutationObserver });
+    vm.runInContext(`(${installArchiveStatusObservation})()`, realm);
+    assert.deepEqual(copy(realm.__archiveStatusObservation.events), [], 'Reading old success text cannot create new response evidence.');
+    observers[0].callback(); assert.deepEqual(copy(realm.__archiveStatusObservation.events), [{ text: 'Arcify Archive opened.', connected: true }]);
+    vm.runInContext(`(${installArchiveStatusObservation})()`, realm); assert.equal(observers[0].disconnected, true); assert.deepEqual(copy(realm.__archiveStatusObservation.events), []);
+    realm.__archiveStatusObservation.stop(); assert.equal(observers[1].disconnected, true);
+});
+function existingPanelFixture(fault) {
+    const before = reopenedFixture().before, previousEvents = displayEvents(), previousAck = assertArchiveNativeAck(previousEvents, openRequest, native, { arcifyId: ARCIFY, windowId: 7 });
+    const request = { ...openRequest, requestId: 'reuse-open-request', token: 'new-one-use-token' }, calls = [], checkpoints = [];
+    const state = { invoked: false, label: { textContent: 'Arcify Archive opened.', isConnected: true }, statusWrites: [{ text: 'Arcify Archive opened.', connected: true }],
+        panel: { contexts: [copy(native.context)], events: [{ type: 'opened', windowId: 7 }] }, native: copy(native), popup: nativeState(), after: copy(before),
+        events: [...previousEvents, portMessage('take', { requestId: 'take-reuse' }), portMessage('validate', { requestId: 'validate-reuse', token: request.token }),
+            portMessage('ack', { requestId: 'ack-reuse', token: request.token, displayed: true })], document: { url: URL, timeOrigin: 123 } };
+    const realm = vm.createContext({ document: { URL, querySelector: () => state.label }, performance: { timeOrigin: 123 }, MutationObserver: class { constructor() {} observe() {} disconnect() { calls.push('stop-status'); } } });
+    const sourcePage = { evaluate: async fn => copy(await vm.runInContext(`(${fn.toString()})()`, realm)),
+        waitForFunction: async fn => { assert.equal(vm.runInContext(`(${fn.toString()})()`, realm), true, 'New status is required'); },
+        $eval: async () => state.label.textContent };
+    const nativePage = { evaluate: async fn => { assert.equal(fn, readNativeArchivePopup); return copy(state.popup); } };
+    const args = { nativePanel: { state: async () => copy(state.panel), capture: async (eventCount, label) => {
+        assert.equal(eventCount, 0, 'Capture retains the original genuine opening receipt'); assert.equal(label, 'Archive existing native Side Panel reuse'); calls.push('native-capture'); return copy(state.native);
+    }, resolve: async () => ({ page: nativePage }) }, origin: { page: sourcePage, tab: { id: 10 } }, previousRequest: openRequest, previousAck, previousNative: native,
+        openingEventCount: 0, arcifyId: ARCIFY, spotlightId: SPOTLIGHT, source: { id: 'selected' },
+        ready: async page => { assert.equal(page, sourcePage); calls.push('ready-original-source'); return { surface: sourcePage }; },
+        invoke: async (_selected, method) => {
+            assert.equal(method, 'Enter'); state.invoked = true; calls.push('trusted-input');
+            if (fault === 'new-opening') state.panel.events.push({ type: 'opened', windowId: 7 });
+            if (fault === 'replacement-context') state.panel.contexts[0].documentId = 'new-document';
+            if (fault === 'different-capture-document') state.native.context.documentId = 'new-document';
+            if (fault === 'different-capture-window') state.native.hosting.windowId = 8;
+            if (fault === 'source-reload') realm.performance.timeOrigin++;
+            if (fault === 'native-state-mutation') state.after.tabs[0].url = 'https://changed.test/';
+            if (fault === 'hidden-popup') state.popup.popups[0].visible = false;
+            if (fault === 'stale-status-only') state.statusWrites = [];
+            if (fault === 'duplicate-status') state.statusWrites.push(copy(state.statusWrites[0]));
+            if (fault === 'disconnected-status') state.statusWrites[0].connected = false;
+            if (fault === 'replayed-token') { request.token = openRequest.token; for (const event of state.events.slice(-2)) event.data.message.token = request.token; }
+            if (fault === 'new-session') for (const event of state.events.slice(-3)) event.data.message.session = 'other-session';
+            if (fault === 'different-Port') for (const event of state.events.slice(-3)) event.data.portId = 'other-port';
+            if (fault === 'cancelled-intent') state.events.splice(-1, 0, portMessage('cancel', { requestId: 'cancel', token: request.token }));
+            realm.__archiveStatusObservation.events.push(...copy(state.statusWrites));
+        }, settle: async () => copy(before), read: async () => copy(state.after), reset: async () => {},
+        trace: async () => state.invoked ? { events: [{ type: 'external', data: { message: copy(request), sender: { id: SPOTLIGHT, url: URL } } }, ...copy(state.events)], input: [input()] }
+            : { events: [external({ type: 'arcify-bridge', command: 'archiveContext', tabId: 10, windowId: 7 }), ...copy(previousEvents)] },
+        capture: async (page, label) => {
+            calls.push(label);
+            if (label === 'existing-panel-native-archive-popup') {
+                assert.equal(page, nativePage); if (fault === 'screenshot-fails') throw new Error('Required popup capture failed');
+                if (fault === 'changed-after-capture') state.panel.events.push({ type: 'closed', windowId: 7 });
+            } else assert.equal(page, sourcePage);
+            return { filename: `${label}.png` };
+        }, checkpoint: async (phase, proof) => checkpoints.push({ phase, ...copy(proof) }), ui: async (page, _label, callback) => { assert.equal(page, sourcePage); return callback(); },
+        poll: async (read, accept) => { const value = await read(); assert(accept(value)); return value; }, windowId: 7 };
+    return { run: () => exerciseArchiveExistingPanel(args), calls, checkpoints, state, request };
+}
+test('already-open execution uses a fresh genuine action on the original source and captures the unchanged real native document', async () => {
+    const f = existingPanelFixture(); await f.run();
+    assert.deepEqual(f.calls, ['ready-original-source', 'existing-panel-open-selected', 'trusted-input', 'stop-status', 'native-capture', 'existing-panel-native-archive-popup']);
+    assert.equal(f.checkpoints.length, 1); const proof = f.checkpoints[0]; assert.equal(proof.phase, 'trusted-existing-native-archive-open');
+    assert.deepEqual(proof.panelAfter, proof.panelBefore); assert.deepEqual(proof.native.context, native.context);
+    assert.equal(proof.request.token, f.request.token); assert.notEqual(proof.request.token, openRequest.token);
+    assert.deepEqual(proof.statusWrites, [{ text: 'Arcify Archive opened.', connected: true }]); assert.deepEqual(proof.before, proof.after);
+});
+for (const fault of ['new-opening', 'replacement-context', 'different-capture-document', 'different-capture-window', 'source-reload', 'native-state-mutation',
+    'hidden-popup', 'stale-status-only', 'duplicate-status', 'disconnected-status', 'replayed-token', 'new-session', 'different-Port', 'cancelled-intent', 'screenshot-fails', 'changed-after-capture'])
+    test(`already-open execution fails closed without repeating trusted input for ${fault}`, async () => {
+        const f = existingPanelFixture(fault); await assert.rejects(f.run()); assert.equal(f.calls.filter(value => value === 'trusted-input').length, 1);
+        assert.equal(f.calls.filter(value => value === 'stop-status').length, 1); assert.deepEqual(f.checkpoints, []);
+    });
