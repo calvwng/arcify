@@ -6,6 +6,12 @@ import { normalizeSidebarAppearance } from '../sidebar-appearance.js';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
 import { selectResultWithKeyboard } from './paired-chrome-ui.mjs';
 
+export function assertFrozenTodayRowOrder(before, after, inverted) {
+    assert.equal(before.inverted, String(inverted));
+    assert.equal(after.inverted, String(inverted));
+    assert.deepEqual(after.todayIds, before.todayIds, 'Changing saved pin order cannot reorder Today.');
+}
+
 // Read-only layout evidence from the actual native panel, never a replacement tab.
 export function readTodayNewTabRow() {
     const box = node => { const r = node?.getBoundingClientRect(); return r ? { x: r.x, y: r.y, width: r.width, height: r.height, bottom: r.bottom } : null; };
@@ -129,7 +135,10 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
     ui, search, activate, screenshot, record }) {
     const initial = await snapshot(), settings = await apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder'));
     const appearance = normalizeSidebarAppearance(await apiPage.evaluate(async () => (await chrome.storage.local.get('sidebarAppearance')).sidebarAppearance));
-    const evidence = { nativePanel: true, layouts: [], reuse: [] };
+    const representation = await apiPage.evaluate(async () => (await chrome.storage.local.get('todayOrderRepresentation')).todayOrderRepresentation);
+    assert.equal(representation?.version, 1); assert.equal(typeof representation.inverted, 'boolean');
+    const inverted = representation.inverted;
+    const evidence = { nativePanel: true, todayOrderRepresentation: representation, layouts: [], reuse: [] };
     let folder, fallback, disconnected = false, primaryError;
     const read = () => apiPage.evaluate(async () => ({ tabs: (await chrome.tabs.query({})).map(({ id, windowId, url, pinned, incognito, active }) =>
         ({ id, windowId, url, pinned, incognito, active })).sort((a, b) => a.id - b.id),
@@ -143,10 +152,10 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
     };
     const focusWindow = () => apiPage.evaluate(windowId => chrome.windows.update(windowId, { focused: true }), windowId);
     const option = async value => {
-        await ui(apiPage, 'Set Today order for New Tab row proof', async () => {
+        await ui(apiPage, 'Set saved pin order for New Tab row independence proof', async () => {
             if (await apiPage.$eval('#invertTabOrder', node => node.checked) !== value) await apiPage.click('label.toggle-label[for="invertTabOrder"]');
         });
-        await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), state => Boolean(state.invertTabOrder) === value, 'persisted Today order');
+        await poll(() => apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder')), state => Boolean(state.invertTabOrder) === value, 'persisted saved pin order');
         await focusWindow();
     };
     const compact = async (favoritesLayout, spaceHeaderSize) => {
@@ -164,10 +173,10 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
         }, `native New Tab row layout: ${label}`);
         const shot = await screenshot(page, `native-new-tab-row-${label}`, true, { fullPage: false });
         assert(shot?.filename, 'Native row evidence requires a screenshot.');
-        evidence.layouts.push({ label, ...state, screenshot: shot.filename }); await record(structuredClone(evidence));
+        evidence.layouts.push({ label, ...state, screenshot: shot.filename }); await record(structuredClone(evidence)); return state;
     };
-    const settled = text => page.waitForFunction(text => document.querySelector('#newTabBtn')?.getAttribute('aria-busy') === 'false' &&
-        document.querySelector('#spotlightStatus')?.textContent === text, { polling: 50 }, text);
+    const settled = () => page.waitForFunction(() => document.querySelector('#newTabBtn')?.getAttribute('aria-busy') === 'false' &&
+        document.querySelector('#spotlightStatus')?.textContent === '', { polling: 50 });
     const reconnect = async () => {
         await ui(apiPage, 'Restore exact Spotlight pairing after fallback proof', async () => {
             await apiPage.type('#bridgePeerId', spotlightId); await apiPage.click('#bridgeSave');
@@ -176,9 +185,10 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
     };
     try {
         await page.evaluate(installNewTabRowTrace);
-        await option(false); await layout('normal', initial.activeSpaceId, false);
-        await option(true); await layout('inverted', initial.activeSpaceId, true);
-        await compact('compact', 12); await layout('compact-inverted', initial.activeSpaceId, true);
+        await option(false); const firstLayout = await layout('saved-normal', initial.activeSpaceId, inverted);
+        await option(true); const secondLayout = await layout('saved-inverted', initial.activeSpaceId, inverted);
+        assertFrozenTodayRowOrder(firstLayout, secondLayout, inverted);
+        await compact('compact', 12); await layout('compact-saved-inverted', initial.activeSpaceId, inverted);
         await search(helper.page, 'retained native New Tab draft');
         await poll(() => helper.page.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'search-query' && row.title === 'Search for "retained native New Tab draft"'), 'draft search result rendered');
         const field = await helper.page.$('[data-testid="spotlight-input"]');
@@ -203,7 +213,7 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
                     await tabToSelector(page, '#newTabBtn'); await page.keyboard.press('Enter');
                 }
             });
-            await settled('Spotlight opened.');
+            await settled();
             const after = await helper.page.evaluate(readNewTabReuseState), afterIds = (await read()).tabs.map(tab => tab.id);
             assertRowDraftPreserved(before, after, beforeIds, afterIds, spotlightId);
             const trace = await page.evaluate(start => globalThis.__newTabRowTrace.events.slice(start), traceStart);
@@ -227,14 +237,14 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
         await page.waitForSelector(`#spaceSwitcher > button[data-space-id="${folder.spaceId}"]`);
         await input('Select genuinely empty Space', () => page.click(`#spaceSwitcher > button[data-space-id="${folder.spaceId}"]`));
         await poll(snapshot, state => state.activeSpaceId === folder.spaceId, 'empty current Space');
-        await layout('empty-inverted', folder.spaceId, true);
+        await layout('empty-saved-inverted', folder.spaceId, inverted);
         await option(false);
         await input('Keep empty Space selected after returning from options', () => page.click(`#spaceSwitcher > button[data-space-id="${folder.spaceId}"]`));
         await poll(snapshot, state => state.activeSpaceId === folder.spaceId, 'empty current Space after options');
-        await layout('empty-normal', folder.spaceId, false);
+        await layout('empty-saved-normal', folder.spaceId, inverted);
         await apiPage.evaluate(id => chrome.bookmarks.update(id, { title: 'New Tab row renamed fixture' }), folder.folderId);
         await page.waitForFunction(spaceId => document.querySelector(`.space[data-space-id="${spaceId}"] .space-name`)?.value === 'New Tab row renamed fixture', { polling: 50 }, folder.spaceId);
-        await layout('empty-after-metadata-repaint', folder.spaceId, false);
+        await layout('empty-after-metadata-repaint', folder.spaceId, inverted);
         await ui(apiPage, 'Disconnect companion through real Arcify options', async () => {
             await apiPage.click('#bridgeDisconnect'); await apiPage.waitForSelector('#bridgeStatus[data-state="disabled"]');
         }); disconnected = true;
@@ -243,7 +253,7 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
         await poll(read, state => state.activeSpaces[windowId] === folder.spaceId, 'empty current Space after disconnect');
         const beforeFallback = await read();
         await input('Open one ordinary New Tab while companion is disconnected', () => page.click('#newTabBtn'));
-        await settled('Opened a new tab. Spotlight is unavailable.');
+        await settled();
         const afterFallback = await poll(read, state => state.tabs.length === beforeFallback.tabs.length + 1 &&
             state.tabs.some(tab => !beforeFallback.tabs.some(old => old.id === tab.id) && ['chrome://newtab', 'chrome://newtab/'].includes(tab.url)), 'one ordinary browser New Tab');
         fallback = { tabId: afterFallback.tabs.find(tab => !beforeFallback.tabs.some(old => old.id === tab.id)).id };
@@ -254,16 +264,16 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
         const providerContext = await poll(() => peerPage.evaluate(async id => (await chrome.runtime.getContexts({ contextTypes: ['TAB'] })).find(context => context.tabId === id), fallback.tabId),
             context => context?.documentUrl === `chrome-extension://${spotlightId}/newtab.html`, 'installed provider handling the browser New Tab');
         evidence.fallback = { ...fallback, actualPairingDisconnected: true, existingNewTabOverridePreserved: true, providerContext, before: beforeFallback, after: afterFallback };
-        await layout('fallback-complete', folder.spaceId, false, false, fallback.tabId);
+        await layout('fallback-complete', folder.spaceId, inverted, false, fallback.tabId);
         const reconnectDraft = await helper.page.evaluate(readNewTabReuseState);
         await reconnect(); await activate(helper.tab.id);
         await poll(snapshot, state => state.activeSpaceId === initial.activeSpaceId, 'original helper Space after reconnect');
-        await layout('reconnected-original-space', initial.activeSpaceId, false);
-        await settled('Opened a new tab. Spotlight is unavailable.');
+        await layout('reconnected-original-space', initial.activeSpaceId, inverted);
+        await settled();
         const stable = await read();
         assert.equal(stable.tabs.length, afterFallback.tabs.length, 'Reconnecting must not replay an old fallback.');
         await input('Reuse existing draft after reconnect', () => page.click('#newTabBtn'));
-        await settled('Spotlight opened.');
+        await settled();
         const afterReconnect = await read(), retainedDraft = await helper.page.evaluate(readNewTabReuseState);
         assert.deepEqual(afterReconnect.tabs.map(tab => tab.id), stable.tabs.map(tab => tab.id), 'A later successful launch cannot add a stale fallback.');
         assertRowDraftPreserved(reconnectDraft, retainedDraft, stable.tabs.map(tab => tab.id), afterReconnect.tabs.map(tab => tab.id), spotlightId);

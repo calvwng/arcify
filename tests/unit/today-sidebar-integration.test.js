@@ -776,7 +776,8 @@ test('real sidebar single/multi picker dispatches visible order once and adopts 
     };
     try {
         for (const inverted of [false, true]) for (const ids of [[301], [302, 301]]) {
-            clear(); settings.invertTabOrder = inverted;
+            clear(); settings.invertTabOrder = !inverted;
+            local.todayOrderRepresentation = { version: 1, inverted };
             const source = storedSpaces.find(space => space.id === 'alpha'), target = storedSpaces.find(space => space.id === 'move-dest');
             source.temporaryTabs = source.temporaryTabs.filter(id => ![301, 302].includes(id)).concat([301, 302]); target.temporaryTabs = [];
             await publishSpaces(); await refresh();
@@ -794,7 +795,7 @@ test('real sidebar single/multi picker dispatches visible order once and adopts 
             assert.deepEqual(tabs, beforeNative); assert.deepEqual(bookmarks, beforeBookmarks); assert.deepEqual(mutations, beforeMutations);
             assert.match(document.getElementById('favoritesDropNotice').textContent, /still in the current Space/);
         }
-    } finally { beforeTodayMoveRequest = null; settings.invertTabOrder = false; }
+    } finally { beforeTodayMoveRequest = null; settings.invertTabOrder = false; local.todayOrderRepresentation = { version: 1, inverted: false }; }
 });
 
 test('real sidebar rejects stale Today row instead of falling back to legacy move', async () => {

@@ -110,7 +110,7 @@ export function createSidebarNewTabLauncher(store, { api = globalThis.chrome, se
                     if (!isWindowId(tab?.id) || tab.windowId !== windowId) throw changed();
                     await check();
                     assertUnchanged();
-                    await store.applyAction({ action: 'assign', tabId: tab.id, spaceId, pinned: false });
+                    await store.applyAction({ action: 'assign', tabId: tab.id, spaceId, pinned: false, newTodayTab: true });
                     await check();
                     assertUnchanged();
                     await api.tabs.update(tab.id, { active: true });

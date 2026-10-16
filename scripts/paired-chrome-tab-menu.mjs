@@ -78,7 +78,7 @@ export function assertTabMenuMuted(before, after, { tabId, muted }) {
     assert.deepEqual(after.tabs, expected, 'Mute changes only the clicked live tab’s muted state.');
 }
 
-export function assertTabMenuDuplicated(before, after, { sourceId, windowId, spaceId }) {
+export function assertTabMenuDuplicated(before, after, { sourceId, windowId, spaceId, inverted = false }) {
     same(before, after, ['bookmarks', 'bindings', 'aliases', 'favorites', 'activeSpaceId', 'pageStates']);
     const additions = after.tabs.filter(tab => !before.tabs.some(prior => prior.id === tab.id));
     assert.equal(additions.length, 1, 'Duplicate must create exactly one new native identity.');
@@ -95,7 +95,7 @@ export function assertTabMenuDuplicated(before, after, { sourceId, windowId, spa
         if (id !== windowId) assert.deepEqual(after.tabs.filter(tab => tab.windowId === id), before.tabs.filter(tab => tab.windowId === id));
     }
     const original = findSpace(before, spaceId), updated = findSpace(after, spaceId), expectedOrder = [...original.temporaryTabs];
-    assert(expectedOrder.includes(sourceId)); expectedOrder.splice(expectedOrder.indexOf(sourceId) + 1, 0, duplicate.id);
+    assert(expectedOrder.includes(sourceId)); expectedOrder.splice(expectedOrder.indexOf(sourceId) + (inverted ? 0 : 1), 0, duplicate.id);
     assert.deepEqual(updated, { ...original, temporaryTabs: expectedOrder });
     assert.deepEqual(after.spaces.filter(space => space.id !== spaceId), before.spaces.filter(space => space.id !== spaceId));
     assert.equal(after.bindings[duplicate.id], undefined); assert.equal(after.aliases[duplicate.id], undefined);
@@ -179,6 +179,8 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
     const base = `${fixture.base}/tab-menu/${nonce}`, alias = `MenuAlias ${nonce}`, renamedPin = `Saved Menu Pin ${nonce}`;
     const evidence = { nonce, surface: 'regular sidebar.html tab', nativePanel: false, realMouseKeyboard: true, checkpoints: [], screenshots: [] };
     const ownedTabs = new Set(), pageStates = new Map(); let sidebar, spotlight, folderId, staleBookmarkId, outsideWindow, outsidePage, primaryError;
+    const representation = await apiPage.evaluate(async () => (await chrome.storage.local.get('todayOrderRepresentation')).todayOrderRepresentation);
+    assert.equal(representation?.version, 1); assert.equal(typeof representation.inverted, 'boolean');
     const settings = await apiPage.evaluate(() => chrome.storage.sync.get(['invertTabOrder', 'syncTabGroups']));
     const checkpoint = async (phase, data) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
     const capture = async label => {
@@ -392,8 +394,8 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
                 if (tab.url === `${base}/ordinary` && tab.windowId === windowId) ownedTabs.add(tab.id);
             }
             return value;
-        }, value => { try { assertTabMenuDuplicated(beforeDuplicate, value, { sourceId: ordinary.id, windowId, spaceId: space.id }); return true; } catch { return false; } }, 'one unbound duplicate in the current Today order');
-        const duplicateId = assertTabMenuDuplicated(beforeDuplicate, afterDuplicate, { sourceId: ordinary.id, windowId, spaceId: space.id }); ownedTabs.add(duplicateId);
+        }, value => { try { assertTabMenuDuplicated(beforeDuplicate, value, { sourceId: ordinary.id, windowId, spaceId: space.id, inverted: representation.inverted }); return true; } catch { return false; } }, 'one unbound duplicate in the current Today order');
+        const duplicateId = assertTabMenuDuplicated(beforeDuplicate, afterDuplicate, { sourceId: ordinary.id, windowId, spaceId: space.id, inverted: representation.inverted }); ownedTabs.add(duplicateId);
         await ui(sidebar.page, 'Confirm exact duplicate is a Today row', () => sidebar.page.waitForSelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${duplicateId}"]`, { visible: true }));
         await capture('tab-menu-duplicate-ordinary-identity'); await checkpoint('duplicate', { before: beforeDuplicate, after: afterDuplicate, duplicateId });
 
@@ -441,7 +443,7 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             // A moved stale fixture can be outside its root if failure interrupted
             // the intentional external race. Delete only its recorded exact ID.
             async () => { if (staleBookmarkId) await apiPage.evaluate(async id => { const exists = await chrome.bookmarks.get(id).catch(() => []); if (exists.length) await chrome.bookmarks.remove(id); }, staleBookmarkId); },
-            () => setOption('invertTabOrder', Boolean(settings.invertTabOrder)),
+            () => setOption('invertTabOrder', settings.invertTabOrder !== false),
             () => setOption('syncTabGroups', Boolean(settings.syncTabGroups))
         ], primaryError, record);
     }

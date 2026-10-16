@@ -1,3 +1,5 @@
+import { getTodayOrderInverted, getTodayInsertionIndex } from './today-order.js';
+import { mergeVisibleOrder } from './sidebar-tabs.js';
 import { normalizeSpaceIcon } from './space-icons.js';
 import { SPACE_COLORS } from './space-colors.js';
 import { createFolder } from './folder-policy.js';
@@ -38,6 +40,15 @@ export function applySpacePatch(current, before, after) {
             const oldIds = prev?.[key] || [];
             const newIds = next[key] || [];
             if (JSON.stringify(oldIds) === JSON.stringify(newIds)) continue;
+            const oldSet = new Set(oldIds);
+            if (key === 'temporaryTabs' && oldSet.size === oldIds.length && newIds.length === oldIds.length
+                && new Set(newIds).size === newIds.length && newIds.every(id => oldSet.has(id))) {
+                // A stale drag only rearranges its surviving captured IDs. Keep
+                // concurrent creations and other uncaptured IDs in their current
+                // slots, and never resurrect a tab closed or moved in the meantime.
+                target[key] = mergeVisibleOrder(target[key], newIds.filter(id => target[key].includes(id)));
+                continue;
+            }
             const deleted = oldIds.filter(id => !newIds.includes(id));
             const added = newIds.filter(id => !oldIds.includes(id));
             for (const id of added) {
@@ -53,7 +64,7 @@ export function applySpacePatch(current, before, after) {
 }
 
 export class SpaceStore {
-    constructor() { this.chain = Promise.resolve(); this.initialized = false; }
+    constructor() { this.chain = Promise.resolve(); this.initialized = false; this.pendingCreations = new Set(); }
     run(operation) {
         const pending = this.chain.then(async () => {
             // Favorite initialization never enters run(): the single shared gate
@@ -74,6 +85,7 @@ export class SpaceStore {
     async initialize() {
         if (this.initialized) return;
         if (this.favoriteStore) { await this.favoriteStore.initialize(); await this.favoriteStore.reconcile({ updateSpaces: false }); }
+        await this.readTodayPlacement();
         const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', 'spaceRankCheckpoint', SPACE_CONTINUITY_KEY]);
         const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'spaceRecoveryCandidates']);
         this.spaces = data.spaces || [];
@@ -91,7 +103,7 @@ export class SpaceStore {
         this.restoredRanks = new Map(rankCheckpoint ?? session.restoredTabRanks ?? []);
         this.active = session.activeSpaces || {};
         this.defaultSpaceName = (await chrome.storage.sync.get('defaultSpaceName')).defaultSpaceName || 'Home';
-        const live = await chrome.tabs.query({});
+        let live = await chrome.tabs.query({});
         this.liveTabs = new Map(live.map(t => [t.id, t]));
         if (data.spaceModelVersion !== 2) {
             const idMap = new Map();
@@ -143,12 +155,33 @@ export class SpaceStore {
         if (!session.spaceSession && this.favoriteStore?.ownershipPersistence?.recoverSelection) {
             this.active = await this.favoriteStore.ownershipPersistence.recoverSelection(this.spaces);
         }
+        if (this.pendingCreations.size) {
+            // Initialization may await bookmark/recovery I/O after its first
+            // settings and native reads. Resolve pending creations at the same
+            // fresh boundary as a warm onCreated event.
+            await this.readTodayPlacement();
+            live = await chrome.tabs.query({});
+            this.liveTabs = new Map(live.map(tab => [tab.id, tab]));
+        }
         const valid = new Set(live.map(t => t.id));
         for (const space of this.spaces) for (const key of sections) space[key] = (space[key] || []).filter(id => valid.has(id));
-        for (const tab of live) this.track(tab);
+        // An onCreated event can wake a cold worker whose initial query already
+        // contains that tab. Adopt/restore older tabs first, then consume the
+        // exact creation intent once; real restoration still takes precedence.
+        for (const tab of live.filter(tab => !this.pendingCreations.has(tab.id))) this.track(tab, { nativeTabs: live });
+        // Creation arrival order is intentional even if Chrome enumerates its
+        // native strip differently (or places each new native tab at index 0).
+        const initializedCreations = [...this.pendingCreations];
+        for (const id of initializedCreations) {
+            const tab = this.liveTabs.get(id);
+            if (tab) this.track(tab, { nativeTabs: live, created: true });
+            else this.pendingCreations.delete(id);
+        }
         this.initialized = true;
-        try { await this.persist(); }
-        catch (error) { this.initialized = false; throw error; }
+        try {
+            await this.persist();
+            for (const id of initializedCreations) this.pendingCreations.delete(id);
+        } catch (error) { this.initialized = false; throw error; }
     }
     async readSameSessionSnapshot(data) {
         const continuity = this.favoriteStore?.ownershipPersistence;
@@ -216,7 +249,80 @@ export class SpaceStore {
         this.restoredMetadata = (this.restoredMetadata || []).filter(record => record.tabId !== tabId);
         this.restoreQueue = (this.restoreQueue || []).filter(record => record.tabId !== tabId);
     }
-    track(tab, { nativeTabs = null } = {}) {
+    async readTodayPlacement() {
+        this.todayOrderInverted = await getTodayOrderInverted();
+        const [setting, bindings] = await Promise.all([
+            chrome.storage.sync.get({ todayNewTabsAtTop: true }), chrome.storage.local.get('pinnedTabStatesById')
+        ]);
+        this.todayNewTabsAtTop = setting.todayNewTabsAtTop !== false;
+        this.todayPinnedBindings = bindings.pinnedTabStatesById || {};
+    }
+    exactTodayOpener(tab, nativeTabs, openerTabId = tab.openerTabId) {
+        const opener = nativeTabs?.find(item => item.id === openerTabId);
+        if (!opener || opener.windowId !== tab.windowId || opener.incognito || opener.pinned || this.isGlobalTab(opener)
+            || this.todayPinnedBindings?.[opener.id]?.bookmarkId
+            || this.provisional?.has(opener.id) || this.recoveryCandidates?.has(opener.id) || isStartupLauncherTab(opener)) return null;
+        const owners = this.spaces.flatMap(space => sections.flatMap(section =>
+            (space[section] || []).filter(id => id === opener.id).map(() => ({ space, section }))));
+        return owners.length === 1 && owners[0].section === 'temporaryTabs' ? { tab: opener, space: owners[0].space } : null;
+    }
+    insertCreatedToday(space, tab, { nativeTabs = [], openerTabId = null } = {}) {
+        const before = [...space.temporaryTabs];
+        const opener = this.exactTodayOpener(tab, nativeTabs, openerTabId);
+        const validOpener = opener?.space === space ? opener.tab : null;
+        let insertAt = getTodayInsertionIndex(before, { inverted: this.todayOrderInverted,
+            newTabsAtTop: this.todayNewTabsAtTop, openerTabId: validOpener?.id });
+        if (hasNativeSplit(validOpener)) {
+            const peers = nativeTabs.filter(item => item.windowId === tab.windowId && hasNativeSplit(item)
+                && item.splitViewId === validOpener.splitViewId);
+            const indices = peers.map(item => before.indexOf(item.id));
+            const intact = peers.length === 2 && indices.every(index => index >= 0) && Math.abs(indices[0] - indices[1]) === 1
+                && peers.every(item => this.exactTodayOpener(tab, nativeTabs, item.id)?.space === space
+                    && item.groupId === validOpener.groupId && item.pinned === validOpener.pinned)
+                && Number.isInteger(peers[0].index) && Number.isInteger(peers[1].index) && Math.abs(peers[0].index - peers[1].index) === 1;
+            // Never insert between a verified pair; uncertainty means standalone.
+            insertAt = intact ? this.todayOrderInverted ? Math.min(...indices) : Math.max(...indices) + 1
+                : getTodayInsertionIndex(before, { inverted: this.todayOrderInverted, newTabsAtTop: this.todayNewTabsAtTop });
+        }
+        space.temporaryTabs.splice(insertAt, 0, tab.id);
+        this.rebaseSectionRanks(space, 'temporaryTabs', before);
+        // Cold initialization must retain exact intent until its first write is
+        // confirmed. A rejected/uncertain write re-reads durable membership;
+        // an already persisted ID is adopted without inserting it again.
+        if (this.initialized) this.pendingCreations.delete(tab.id);
+    }
+    rebaseSectionRanks(space, section, beforeIds = space[section]) {
+        this.restoredRanks ||= new Map();
+        const pending = (this.restoreQueue || []).filter(record => record.spaceId === space.id && record.section === section)
+            .sort((a, b) => a.order - b.order);
+        const ids = space[section];
+        if (!pending.length) {
+            for (const id of new Set([...beforeIds, ...ids])) this.restoredRanks.delete(id);
+            return;
+        }
+        // Keep unresolved records beside their previous surviving anchors while
+        // giving the actual live order authority. Late restoration only inserts
+        // its new ID and can never sort an intentional live order back to old ranks.
+        const ranks = new Map(beforeIds.map((id, index) => [id, this.restoredRanks.get(id)
+            ?? (this.snapshotByTab?.get(id)?.spaceId === space.id && this.snapshotByTab.get(id).section === section
+                ? this.snapshotByTab.get(id).order : index)]));
+        const slots = Array.from({ length: ids.length + 1 }, () => []);
+        for (const record of pending) {
+            const next = beforeIds.find(id => ids.includes(id) && ranks.get(id) > record.order);
+            const previous = beforeIds.filter(id => ids.includes(id) && ranks.get(id) <= record.order).at(-1);
+            const slot = next !== undefined ? ids.indexOf(next) : previous !== undefined ? ids.indexOf(previous) + 1
+                : this.todayOrderInverted && section === 'temporaryTabs' ? 0 : ids.length;
+            slots[slot].push(record);
+        }
+        let order = 0;
+        for (let index = 0; index <= ids.length; index++) {
+            for (const record of slots[index]) record.order = order++;
+            if (index < ids.length) this.restoredRanks.set(ids[index], order++);
+        }
+        for (const id of beforeIds) if (!ids.includes(id)) this.restoredRanks.delete(id);
+    }
+    track(tab, { nativeTabs = null, created = false } = {}) {
+        if (created && this.initialized) this.pendingCreations.delete(tab.id);
         this.liveTabs.set(tab.id, tab);
         const url = tab.url || tab.pendingUrl;
         if (tab.pinned || this.isGlobalTab(tab) || isStartupLauncherTab(tab)) {
@@ -247,7 +353,7 @@ export class SpaceStore {
         // Chrome can attach the current tab as opener even for Cmd/Ctrl+T.
         // A blank new-tab page belongs to the selected space, not that incidental opener.
         const isNewTabPage = !url || /^(chrome:\/\/(newtab|new-tab-page)\/?|about:blank)$/.test(url);
-        const openerSpace = isNewTabPage ? null : ownerOf(this.spaces, tab.openerTabId);
+        const openerSpace = isNewTabPage ? null : this.exactTodayOpener(tab, nativeTabs, tab.openerTabId)?.space;
         const space = this.spaces.find(s => s.id === restored?.spaceId) || openerSpace
             || this.spaces.find(s => s.id === this.active[tab.windowId])
             || this.spaces.find(s => s.name === this.defaultSpaceName) || this.spaces[0];
@@ -258,28 +364,17 @@ export class SpaceStore {
             // Preserve extension order when Chrome restores tabs in a different order.
             this.restoredRanks ||= new Map();
             this.restoredRanks.set(tab.id, restored.order);
-            space[key].push(tab.id);
-            space[key].sort((a, b) => (this.restoredRanks.get(a) ?? Infinity) - (this.restoredRanks.get(b) ?? Infinity));
+            const insertAt = space[key].findIndex(id => (this.restoredRanks.get(id) ?? Infinity) > restored.order);
+            space[key].splice(insertAt < 0 ? space[key].length : insertAt, 0, tab.id);
+        } else if (created) {
+            this.insertCreatedToday(space, tab, { nativeTabs: nativeTabs || [], openerTabId: isNewTabPage ? null : tab.openerTabId });
         } else {
-            const openerIndex = space[key].indexOf(tab.openerTabId);
-            let insertAt = openerIndex < 0 ? space[key].length : openerIndex + 1;
-            const opener = nativeTabs ? nativeTabs.find(item => item.id === tab.openerTabId) : this.liveTabs.get(tab.openerTabId);
-            if (openerIndex >= 0 && (hasNativeSplit(opener) || nativeTabs && !opener)) {
-                // New browser-created children must not split an intact canonical
-                // pair. Only a fresh exact native pair proves its insertion edge;
-                // an uncertain opener appends without repairing browser state.
-                const peers = nativeTabs?.filter(item => item.windowId === tab.windowId &&
-                    hasNativeSplit(item) && item.splitViewId === opener?.splitViewId) || [];
-                const indices = peers.map(item => space[key].indexOf(item.id));
-                const intact = opener?.windowId === tab.windowId && peers.length === 2 && peers.some(item => item.id === tab.openerTabId) &&
-                    indices.every(index => index >= 0) && Math.abs(indices[0] - indices[1]) === 1 &&
-                    peers.every(item => !item.incognito && item.groupId === opener.groupId && item.pinned === opener.pinned) &&
-                    Math.abs(peers[0].index - peers[1].index) === 1;
-                insertAt = intact ? Math.max(...indices) + 1 : space[key].length;
-            }
-            space[key].splice(insertAt, 0, tab.id);
+            // Initialization, attachment, Favorite release and URL updates adopt
+            // membership without applying the prospective new-tab placement.
+            space[key].push(tab.id);
         }
     }
+
     async persist({ skipGroupSync = false, beforeWrite = null } = {}) {
         const tabs = new Map((await chrome.tabs.query({})).map(t => [t.id, t]));
         this.liveTabs = tabs;
@@ -367,13 +462,12 @@ export class SpaceStore {
             case 'patch': {
                 const nextSpaces = applySpacePatch(this.spaces, message.before, message.after);
                 assertNativeSplitMembershipPreserved(this.spaces, nextSpaces, await chrome.tabs.query({}));
-                for (const next of message.after) {
-                    const prev = message.before.find(s => s.id === next.id);
-                    for (const key of sections) if (JSON.stringify(next[key]) !== JSON.stringify(prev?.[key])) {
-                        for (const id of next[key] || []) this.restoredRanks.delete(id);
-                    }
-                }
+                const previous = this.spaces;
                 this.spaces = nextSpaces;
+                for (const next of nextSpaces) for (const key of sections) {
+                    const before = previous.find(space => space.id === next.id)?.[key] || [];
+                    if (JSON.stringify(next[key]) !== JSON.stringify(before)) this.rebaseSectionRanks(next, key, before);
+                }
                 if (!this.spaces.length) this.spaces.push(await this.makeSpace(this.defaultSpaceName));
                 break;
             }
@@ -428,11 +522,16 @@ export class SpaceStore {
                 if (this.isGlobalTab(message.tabId)) break;
                 const target = this.spaces.find(s => s.id === message.spaceId);
                 if (target) {
-                    assertNotNativeSplit((await chrome.tabs.query({})).find(tab => tab.id === message.tabId));
+                    if (message.newTodayTab === true && !message.pinned) await this.readTodayPlacement();
+                    const nativeTabs = await chrome.tabs.query({});
+                    const tab = nativeTabs.find(tab => tab.id === message.tabId);
+                    assertNotNativeSplit(tab);
                     this.provisional.delete(message.tabId);
                     this.recoveryCandidates.delete(message.tabId);
                     for (const space of this.spaces) for (const key of sections) space[key] = space[key].filter(id => id !== message.tabId);
-                    target[message.pinned ? 'spaceBookmarks' : 'temporaryTabs'].push(message.tabId);
+                    if (message.newTodayTab === true && !message.pinned && tab && !tab.pinned && !tab.incognito) {
+                        this.insertCreatedToday(target, tab);
+                    } else target[message.pinned ? 'spaceBookmarks' : 'temporaryTabs'].push(message.tabId);
                 }
                 break;
             }
@@ -488,37 +587,50 @@ export class SpaceStore {
     }
     install() {
         const handle = operation => this.run(async () => { await operation(); await this.persist(); }).catch(console.error);
-        chrome.tabs.onCreated.addListener(tab => handle(async () => {
-            if (!tab.openerTabId) return this.track(tab);
-            let nativeTabs;
-            try { nativeTabs = (await chrome.tabs.query({ windowId: tab.windowId })).filter(item => item.windowId === tab.windowId); }
-            catch { nativeTabs = []; }
-            this.track(nativeTabs.find(item => item.id === tab.id) || tab, { nativeTabs });
-        }));
+        chrome.tabs.onCreated.addListener(tab => {
+            this.pendingCreations.add(tab.id);
+            handle(async () => {
+                await this.readTodayPlacement();
+                let nativeTabs;
+                try { nativeTabs = (await chrome.tabs.query({ windowId: tab.windowId })).filter(item => item.windowId === tab.windowId); }
+                catch { nativeTabs = []; }
+                const current = nativeTabs.find(item => item.id === tab.id);
+                this.track(current || tab, { nativeTabs: current ? nativeTabs : [], created: this.pendingCreations.has(tab.id) });
+            });
+        });
         chrome.tabs.onUpdated.addListener((id, change, tab) => {
             if (change.url || change.pinned !== undefined) handle(() => this.track(tab));
         });
-        chrome.tabs.onRemoved.addListener((id, info) => handle(() => {
-            const record = this.snapshotByTab.get(id);
-            if (info?.isWindowClosing && record && this.spaces.some(s => s.id === record.spaceId)) this.restoreQueue.push(record);
-            this.snapshotByTab.delete(id);
-            this.provisional.delete(id);
-            this.recoveryCandidates.delete(id);
-            this.liveTabs.delete(id);
-            for (const space of this.spaces) {
-                for (const key of sections) space[key] = space[key].filter(t => t !== id);
-                if (space.lastTab === id) delete space.lastTab;
-            }
-        }));
-        chrome.tabs.onReplaced.addListener((added, removed) => handle(() => {
-            for (const ids of [this.provisional, this.recoveryCandidates]) {
-                if (ids.delete(removed)) ids.add(added);
-            }
-            for (const space of this.spaces) {
-                for (const key of sections) space[key] = space[key].map(id => id === removed ? added : id);
-                if (space.lastTab === removed) space.lastTab = added;
-            }
-        }));
+        chrome.tabs.onRemoved.addListener((id, info) => {
+            // Cleanup must not depend on initialization succeeding: the creation
+            // operation may still be blocked before it consumes this exact ID.
+            this.pendingCreations.delete(id);
+            return handle(() => {
+                const record = this.snapshotByTab.get(id);
+                if (info?.isWindowClosing && record && this.spaces.some(s => s.id === record.spaceId)) this.restoreQueue.push(record);
+                this.snapshotByTab.delete(id);
+                this.provisional.delete(id);
+                this.recoveryCandidates.delete(id);
+                this.liveTabs.delete(id);
+                for (const space of this.spaces) {
+                    for (const key of sections) space[key] = space[key].filter(t => t !== id);
+                    if (space.lastTab === id) delete space.lastTab;
+                }
+            });
+        });
+        chrome.tabs.onReplaced.addListener((added, removed) => {
+            // Native replacement is an adoption, not a new creation gesture.
+            this.pendingCreations.delete(removed);
+            return handle(() => {
+                for (const ids of [this.provisional, this.recoveryCandidates]) {
+                    if (ids.delete(removed)) ids.add(added);
+                }
+                for (const space of this.spaces) {
+                    for (const key of sections) space[key] = space[key].map(id => id === removed ? added : id);
+                    if (space.lastTab === removed) space.lastTab = added;
+                }
+            });
+        });
         chrome.tabs.onActivated.addListener(info => handle(() => {
             const space = this.isGlobalTab(info.tabId) ? null : ownerOf(this.spaces, info.tabId);
             if (space) { space.lastTab = info.tabId; this.active[info.windowId] = space.id; }

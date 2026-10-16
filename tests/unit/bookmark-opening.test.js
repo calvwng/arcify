@@ -139,3 +139,18 @@ test('failed active-tab observation never restores the opening tab or overwrites
     assert.deepEqual(f.highlights, []); assert.deepEqual(f.replacements, [{ active: false }]);
     assert.deepEqual(f.effects.filter(([kind]) => kind === 'update' || kind === 'focus-window'), []);
 });
+
+test('a newly opened temporary bookmark adopts authoritative Today order without a stale local append', async () => {
+    const f = fixture();
+    const assigned = [{ id: 's', spaceBookmarks: [8], temporaryTabs: [42, 9, 55] },
+        { id: 'other', spaceBookmarks: [7], temporaryTabs: [6] }];
+    chrome.runtime.sendMessage = async message => {
+        f.effects.push(['request', structuredClone(message)]); return { success: true, spaces: structuredClone(assigned) };
+    };
+    await BookmarkUtils.openBookmarkAsTab({ title: 'D', url: 'https://d.test/' }, 's', null, f.context, false);
+    assert.deepEqual(f.context.spaces, assigned);
+    assert.deepEqual(f.effects.find(([kind]) => kind === 'request')[1], {
+        type: 'spaceStore', action: 'assign', tabId: 42, spaceId: 's', pinned: false, newTodayTab: true
+    });
+    assert.equal(f.effects.some(([kind]) => ['save', 'order', 'binding'].includes(kind)), false);
+});

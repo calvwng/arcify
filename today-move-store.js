@@ -41,7 +41,7 @@ export function moveTodayTabsToSpace(store, request) {
         const { windowId, spaceId, bookmarkFolderId, destinationSpaceId, destinationBookmarkFolderId, inverted, entries } = request;
         const ids = entries.map(entry => entry.tabId), selected = new Set(ids);
         const batch = { total: ids.length, completed: [], remaining: [...ids], uncertain: false, destinationSpaceId };
-        let staged = false, writeAttempted = false, beforeSpaces, beforeRanks, expectedSourceIds, expectedTargetIds;
+        let staged = false, writeAttempted = false, beforeSpaces, beforeRanks, beforeQueue, expectedRanks, expectedSourceIds, expectedTargetIds;
         const getSpaces = () => {
             const source = store.spaces.filter(space => space.id === spaceId);
             const target = store.spaces.filter(space => space.id === destinationSpaceId);
@@ -63,7 +63,7 @@ export function moveTodayTabsToSpace(store, request) {
             if (window?.id !== windowId || window.type !== 'normal' || window.incognito) throw changed();
             await getSpaceBookmarkFolder(source);
             await getSpaceBookmarkFolder(getSpaces().target);
-            if (Boolean(await Utils.getInvertTabOrder()) !== inverted) throw changed();
+            if (Boolean(await Utils.getTodayOrderInverted()) !== inverted) throw changed();
             const bindings = await Utils.getPinnedTabStates();
             // One fresh native snapshot validates the complete batch. In particular,
             // a duplicate-URL neighbor can never replace a closed or moved tab ID.
@@ -82,6 +82,7 @@ export function moveTodayTabsToSpace(store, request) {
         try {
             const tabs = await validate();
             beforeSpaces = structuredClone(store.spaces); beforeRanks = new Map(store.restoredRanks);
+            beforeQueue = structuredClone(store.restoreQueue);
             const next = structuredClone(store.spaces);
             const source = next.find(space => space.id === spaceId), target = next.find(space => space.id === destinationSpaceId);
             source.temporaryTabs = source.temporaryTabs.filter(id => !selected.has(id));
@@ -92,7 +93,9 @@ export function moveTodayTabsToSpace(store, request) {
             assertNativeSplitMembershipPreserved(store.spaces, next, tabs);
             expectedSourceIds = [...source.temporaryTabs]; expectedTargetIds = [...target.temporaryTabs];
             store.spaces = next; staged = true;
-            for (const id of [...source.temporaryTabs, ...target.temporaryTabs, ...ids]) store.restoredRanks.delete(id);
+            for (const space of [source, target]) store.rebaseSectionRanks(space, 'temporaryTabs',
+                beforeSpaces.find(previous => previous.id === space.id).temporaryTabs);
+            expectedRanks = new Map(store.restoredRanks);
             await store.persist({ beforeWrite: async () => {
                 // persist awaits metadata and continuity before writing. Recheck at
                 // that final boundary, not only before staging the in-memory move.
@@ -105,7 +108,7 @@ export function moveTodayTabsToSpace(store, request) {
             return batch;
         } catch (error) {
             if (staged && !writeAttempted) {
-                store.spaces = beforeSpaces; store.restoredRanks = beforeRanks;
+                store.spaces = beforeSpaces; store.restoredRanks = beforeRanks; store.restoreQueue = beforeQueue;
                 // persist can update its snapshot caches before its guarded write.
                 // Reload from authoritative storage on the next queued operation.
                 store.initialized = false;
@@ -137,7 +140,7 @@ export function moveTodayTabsToSpace(store, request) {
                         !sameIds(persistedTarget.temporaryTabs, expectedTargetIds))) batch.uncertain = true;
                     const window = await chrome.windows.get(windowId);
                     if (window?.id !== windowId || window.type !== 'normal' || window.incognito) throw changed();
-                    if (Boolean(await Utils.getInvertTabOrder()) !== inverted) batch.uncertain = true;
+                    if (Boolean(await Utils.getTodayOrderInverted()) !== inverted) batch.uncertain = true;
                     const bindings = await Utils.getPinnedTabStates(), tabs = await chrome.tabs.query({});
                     for (const entry of entries) {
                         const matches = tabs.filter(tab => tab.id === entry.tabId), tab = matches[0];
@@ -146,12 +149,12 @@ export function moveTodayTabsToSpace(store, request) {
                         const records = (spaceTabSnapshot || []).filter(record => record.tabId === entry.tabId);
                         const record = records[0], canonicalIndex = persistedTarget.temporaryTabs.indexOf(entry.tabId);
                         const snapshotProven = records.length === 1 && record.spaceId === destinationSpaceId &&
-                            record.section === 'temporaryTabs' && record.url === entry.url && record.order === canonicalIndex &&
+                            record.section === 'temporaryTabs' && record.url === entry.url && record.order === (expectedRanks.get(entry.tabId) ?? canonicalIndex) &&
                             record.windowKey === store.windowKeys.get(windowId);
                         if (atDestination && snapshotProven && matches.length === 1 && validLive(tab, entry, bindings) &&
                             !(Number.isInteger(tab.splitViewId) && tab.splitViewId >= 0)) {
                             batch.completed.push(entry.tabId);
-                            if (!ranks || ranks.has(entry.tabId)) batch.uncertain = true;
+                            if (!ranks || ranks.get(entry.tabId) !== expectedRanks.get(entry.tabId)) batch.uncertain = true;
                         }
                         else if (!atSource) batch.uncertain = true;
                     }

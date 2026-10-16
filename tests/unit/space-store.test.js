@@ -62,9 +62,9 @@ test('restart remaps URLs to new IDs and retains stored order', async () => {
 test('worker restart preserves session membership and opener determines new tab space', async () => {
     const store = new SpaceStore(); await store.dispatch({ action: 'get' });
     const child = { id: 3, windowId: 1, openerTabId: 2, url: 'https://child.test/' }; tabs.push(child);
-    await store.run(async () => { store.track(child); await store.persist(); });
+    await store.run(async () => { store.track(child, { nativeTabs: tabs, created: true }); await store.persist(); });
     const next = new SpaceStore(); await next.dispatch({ action: 'get' });
-    assert.deepEqual(next.spaces[1].temporaryTabs, [2, 3]);
+    assert.deepEqual(next.spaces[1].temporaryTabs, [3, 2]);
 });
 test('explicit assignment beats creation fallback', async () => {
     const store = new SpaceStore(); await store.dispatch({ action: 'get' });
@@ -626,7 +626,7 @@ for (const openerTabId of [1, 2]) test(`browser child from split pane ${openerTa
     tabs[0].splitViewId = tabs[1].splitViewId = 77;
     const child = { id: 3, windowId: 1, openerTabId, url: 'https://child.test/', index: 3, groupId: -1 };
     tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
-    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2, 3, 4]);
+    assert.deepEqual(store.spaces[0].temporaryTabs, [3, 1, 2, 4]);
     assert.equal(tabs[0].splitViewId, 77); assert.equal(tabs[1].splitViewId, 77); assert.deepEqual(mutations, []);
 });
 
@@ -646,10 +646,297 @@ for (const uncertain of ['missing-peer', 'native-gap', 'group-mismatch', 'query-
     assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2, 4, 3]); assert.deepEqual(mutations, []);
 });
 
-test('ordinary native opener child keeps existing adjacent insertion behavior', async () => {
+test('ordinary native opener child inserts directly below its visible source', async () => {
     local.spaces = [space('a', [1, 2])];
     const store = new SpaceStore(); store.install(); await store.run(() => {});
     const child = { id: 3, windowId: 1, openerTabId: 1, url: 'https://child.test/', groupId: -1 };
     tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
-    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 3, 2]); assert.deepEqual(mutations, []);
+    assert.deepEqual(store.spaces[0].temporaryTabs, [3, 1, 2]); assert.deepEqual(mutations, []);
+});
+
+const visibleToday = (store, id = 'a') => {
+    const ids = [...store.spaces.find(space => space.id === id).temporaryTabs];
+    return store.todayOrderInverted ? ids.reverse() : ids;
+};
+for (const inverted of [false, true]) for (const top of [false, true]) test(`new Today insertion is prospective and visible-order aware inverted=${inverted} top=${top}`, async () => {
+    sync.invertTabOrder = inverted; sync.todayNewTabsAtTop = top;
+    local.spaces = [space('a', [1, 2])];
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2]);
+    const oldVisible = visibleToday(store);
+    // The legacy Pinned-only option no longer changes Today representation.
+    sync.invertTabOrder = !inverted;
+    const standalone = { id: 3, windowId: 1, url: 'https://new.test/' };
+    tabs.push(standalone); chrome.tabs.onCreated.emit(standalone); await store.run(() => {});
+    assert.deepEqual(visibleToday(store), top ? [3, ...oldVisible] : [...oldVisible, 3]);
+    const child = { id: 4, windowId: 1, openerTabId: 1, url: 'https://child.test/' };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    const visible = visibleToday(store); assert.equal(visible[visible.indexOf(1) + 1], 4);
+    const before = [...store.spaces[0].temporaryTabs];
+    chrome.tabs.onUpdated.emit(4, { url: 'https://navigated.test/' }, { ...child, url: 'https://navigated.test/' });
+    await store.run(() => {}); assert.deepEqual(store.spaces[0].temporaryTabs, before);
+    const reload = new SpaceStore(); await reload.initialize();
+    assert.deepEqual(visibleToday(reload), visible);
+});
+
+for (const reason of ['other-window', 'saved-pin', 'native-pin', 'global', 'provisional', 'recovering', 'missing', 'ambiguous', 'incognito', 'blank-child']) test(`untrusted ${reason} opener uses standalone Today in the selected Space`, async () => {
+    sync.invertTabOrder = false;
+    session.activeSpaces = { 1: 'b' };
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    if (reason === 'other-window') tabs[0].windowId = 2;
+    if (reason === 'saved-pin') { store.spaces[0].temporaryTabs = []; store.spaces[0].spaceBookmarks = [1]; }
+    if (reason === 'native-pin') tabs[0].pinned = true;
+    if (reason === 'global') store.isGlobalTab = value => (typeof value === 'object' ? value.id : value) === 1;
+    if (reason === 'provisional') store.provisional.add(1);
+    if (reason === 'recovering') store.recoveryCandidates.add(1);
+    if (reason === 'missing') tabs.shift();
+    if (reason === 'ambiguous') store.spaces[1].temporaryTabs.push(1);
+    if (reason === 'incognito') tabs[0].incognito = true;
+    const tab = { id: 3, windowId: 1, openerTabId: 1, url: reason === 'blank-child' ? 'about:blank' : 'https://one.test/' };
+    tabs.push(tab); chrome.tabs.onCreated.emit(tab); await store.run(() => {});
+    assert.equal(ownerOf(store.spaces, 3).id, 'b');
+    assert.equal(visibleToday(store, 'b')[0], 3);
+});
+
+test('fresh same-window Today opener carries exact Space despite a different selected Space', async () => {
+    sync.invertTabOrder = false; session.activeSpaces = { 1: 'b' };
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    const child = { id: 3, windowId: 1, openerTabId: 1, url: 'https://two.test/' };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 3]); assert.deepEqual(store.spaces[1].temporaryTabs, [2]);
+});
+
+for (const inverted of [false, true]) test(`cold onCreated retains creation intent exactly once inverted=${inverted}`, async () => {
+    sync.invertTabOrder = inverted; local.spaces = [space('a', [1, 2])];
+    const child = { id: 3, windowId: 1, openerTabId: 1, url: 'https://child.test/' };
+    tabs.unshift(child);
+    const store = new SpaceStore(); store.install(); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    const visible = visibleToday(store); assert.equal(visible[visible.indexOf(1) + 1], 3);
+    assert.equal(visible.filter(id => id === 3).length, 1);
+    assert.equal(store.pendingCreations.size, 0);
+});
+
+test('cold onCreated never overrides a real restore record', async () => {
+    sync.invertTabOrder = false; session.spaceSession = false;
+    local.spaceTabSnapshot = [
+        { spaceId: 'a', section: 'temporaryTabs', order: 0, url: 'https://one.test/' },
+        { spaceId: 'a', section: 'temporaryTabs', order: 1, url: 'https://two.test/' }
+    ];
+    const store = new SpaceStore(); store.install(); chrome.tabs.onCreated.emit(tabs[1]); await store.run(() => {});
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2]);
+});
+
+test('new placement never applies to ordinary adoption or re-tracking existing tabs', async () => {
+    sync.invertTabOrder = false; local.spaces = [space('a', [1, 2])];
+    const store = new SpaceStore(); await store.initialize();
+    const adopted = { id: 3, windowId: 1, openerTabId: 1, url: 'https://adopted.test/' };
+    tabs.push(adopted); store.track(adopted); await store.persist();
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2, 3]);
+    store.track({ ...tabs[1], openerTabId: 1 }, { nativeTabs: tabs, created: true });
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2, 3]);
+});
+
+for (const inverted of [false, true]) test(`explicit new assignment is standalone while generic assignment retains existing behavior inverted=${inverted}`, async () => {
+    sync.invertTabOrder = inverted; local.spaces = [space('a', [1, 2]), space('b')];
+    const store = new SpaceStore(); await store.initialize();
+    const tab = { id: 3, windowId: 1, openerTabId: 1, url: 'https://same.test/' }; tabs.push(tab);
+    await store.dispatch({ action: 'assign', tabId: 3, spaceId: 'a', newTodayTab: true });
+    assert.equal(visibleToday(store)[0], 3);
+    await store.dispatch({ action: 'assign', tabId: 1, spaceId: 'b' });
+    assert.deepEqual(store.spaces[1].temporaryTabs, [1]);
+});
+
+for (const inverted of [false, true]) for (const edit of ['new', 'manual']) test(`late restoration cannot undo ${edit} ordering across worker reload inverted=${inverted}`, async () => {
+    sync.invertTabOrder = inverted; local.spaces = [space('a', [1, 2])];
+    session.restoredTabRanks = [[1, 0], [2, 2]];
+    session.spaceRestoreQueue = [{ spaceId: 'a', section: 'temporaryTabs', order: 1, url: 'https://late-order.test/' }];
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    if (edit === 'new') {
+        const fresh = { id: 3, windowId: 1, url: 'https://fresh-order.test/' };
+        tabs.push(fresh); chrome.tabs.onCreated.emit(fresh); await store.run(() => {});
+    } else {
+        const before = structuredClone(store.spaces), after = structuredClone(before);
+        after[0].temporaryTabs.reverse(); await store.dispatch({ action: 'patch', before, after });
+    }
+    const intended = [...store.spaces[0].temporaryTabs];
+    const reload = new SpaceStore(); await reload.initialize();
+    const late = { id: 4, windowId: 1, url: 'https://late-order.test/' }; tabs.push(late);
+    reload.track(late); await reload.persist();
+    assert.deepEqual(reload.spaces[0].temporaryTabs.filter(id => id !== 4), intended);
+    if (edit === 'new') assert.equal(visibleToday(reload)[0], 3);
+    const again = new SpaceStore(); await again.initialize(); assert.deepEqual(again.spaces[0].temporaryTabs, reload.spaces[0].temporaryTabs);
+});
+
+test('an exact saved binding already written during pinning cannot supply Today opener scope or adjacency', async () => {
+    sync.invertTabOrder = false; session.activeSpaces = { 1: 'b' };
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    local.pinnedTabStatesById = { 1: { bookmarkId: 'saved-in-flight', pinnedUrl: tabs[0].url } };
+    const child = { id: 3, windowId: 1, openerTabId: 1, url: 'https://child.test/' };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    assert.deepEqual(store.spaces[1].temporaryTabs, [3, 2]);
+});
+
+for (const drift of ['setting', 'window', 'binding']) test(`cold creation rechecks ${drift} after initialization I/O`, async () => {
+    sync.invertTabOrder = false; session.activeSpaces = { 1: 'b' };
+    const child = { id: 3, windowId: 1, ...(drift !== 'setting' ? { openerTabId: 1 } : {}), url: 'https://cold.test/' };
+    tabs.push(child);
+    const store = new SpaceStore();
+    store.discoverBookmarkSpaces = async () => {
+        if (drift === 'setting') sync.todayNewTabsAtTop = false;
+        if (drift === 'window') tabs[0].windowId = 2;
+        if (drift === 'binding') local.pinnedTabStatesById = { 1: { bookmarkId: 'new-pin' } };
+    };
+    store.install(); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    assert.deepEqual(store.spaces[1].temporaryTabs, drift === 'setting' ? [2, 3] : [3, 2]);
+});
+
+for (const inverted of [false, true]) for (const top of [false, true]) test(`uncertain native split stays intact with standalone setting inverted=${inverted} top=${top}`, async () => {
+    sync.invertTabOrder = inverted; sync.todayNewTabsAtTop = top; local.spaces = [space('a', [1, 2])];
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    tabs[0].splitViewId = tabs[1].splitViewId = 77; tabs[0].index = 0; tabs[1].index = 3;
+    const child = { id: 3, windowId: 1, openerTabId: 1, url: 'https://child.test/', index: 4 };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    const visible = visibleToday(store);
+    assert.equal(visible[top ? 0 : visible.length - 1], 3);
+    assert.deepEqual(store.spaces[0].temporaryTabs.filter(id => id !== 3), [1, 2]);
+    assert.deepEqual(mutations, []);
+});
+
+for (const inverted of [false, true]) test(`late other-window restore retains exact pending window scope and authored order inverted=${inverted}`, async () => {
+    sync.invertTabOrder = inverted; tabs[1].windowId = 2;
+    local.spaces = [space('a', [1, 2])];
+    session.restoredTabRanks = [[1, 0], [2, 2]];
+    session.spaceRestoreWindowKeys = [[2, 'second-window']];
+    session.spaceRestoreQueue = [{ spaceId: 'a', section: 'temporaryTabs', order: 1, url: 'https://late-window.test/', windowKey: 'second-window' }];
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    const fresh = { id: 3, windowId: 1, url: 'https://fresh-window.test/' };
+    tabs.push(fresh); chrome.tabs.onCreated.emit(fresh); await store.run(() => {});
+    const intended = [...store.spaces[0].temporaryTabs];
+    const reload = new SpaceStore(); await reload.initialize();
+    const late = { id: 4, windowId: 2, url: 'https://late-window.test/' }; tabs.push(late);
+    reload.track(late); await reload.persist();
+    assert.deepEqual(reload.spaces[0].temporaryTabs.filter(id => id !== 4), intended);
+    assert.equal(reload.restoreQueue.length, 0);
+});
+
+for (const inverted of [false, true]) for (const top of [false, true]) test(`cold pending creations follow event arrival rather than native enumeration inverted=${inverted} top=${top}`, async () => {
+    sync.invertTabOrder = inverted; sync.todayNewTabsAtTop = top; local.spaces = [space('a', [1])];
+    const first = { id: 3, windowId: 1, index: 1, url: 'https://created-first.test/' };
+    const second = { id: 4, windowId: 1, index: 0, url: 'https://created-second.test/' };
+    tabs = [second, first, tabs[0]];
+    const store = new SpaceStore(); store.install();
+    chrome.tabs.onCreated.emit(first); chrome.tabs.onCreated.emit(second); await store.run(() => {});
+    assert.deepEqual(visibleToday(store), top ? [4, 3, 1] : [1, 3, 4]);
+    assert.equal(store.pendingCreations.size, 0);
+});
+
+for (const lifecycle of ['removed', 'replaced']) test(`pending creation cleanup survives failed initialization when tab is ${lifecycle}`, async () => {
+    const store = new SpaceStore(), error = new Error('Initialization unavailable');
+    const logged = [], originalError = console.error;
+    console.error = value => logged.push(value);
+    try {
+        store.initialize = async () => { throw error; };
+        store.install();
+        chrome.tabs.onCreated.emit({ id: 30, windowId: 1, url: 'https://pending.test/' });
+        chrome.tabs.onCreated.emit({ id: 31, windowId: 1, url: 'https://unrelated.test/' });
+        assert.deepEqual([...store.pendingCreations], [30, 31]);
+        if (lifecycle === 'removed') chrome.tabs.onRemoved.emit(30, {});
+        else chrome.tabs.onReplaced.emit(40, 30);
+        assert.deepEqual([...store.pendingCreations], [31], 'exact cleanup happens before queued initialization');
+        await store.chain;
+        assert.deepEqual([...store.pendingCreations], [31]);
+        assert.equal(store.pendingCreations.has(40), false, 'replacement does not acquire inferred creation intent');
+        assert(logged.length > 0); assert(logged.every(value => value === error));
+    } finally { console.error = originalError; }
+});
+
+for (const scenario of [
+    { current: [4, 1, 2, 3], expected: [4, 3, 1, 2] },
+    { current: [1, 2, 3, 4], expected: [3, 1, 2, 4] },
+    { current: [8, 1, 9, 2, 10, 3, 11], expected: [8, 3, 9, 1, 10, 2, 11] },
+    { current: [4, 1, 3], expected: [4, 3, 1] }
+]) test(`stale Today pure reorder preserves uncaptured slots and current survivors ${scenario.current}`, () => {
+    const before = [space('a', [1, 2, 3])], after = [space('a', [3, 1, 2])];
+    const current = [space('a', scenario.current), space('b', scenario.current.includes(2) ? [] : [2])];
+    const result = applySpacePatch(current, before, after);
+    assert.deepEqual(result[0].temporaryTabs, scenario.expected);
+    assert.deepEqual(result[1], current[1]); assert.deepEqual(current[0].temporaryTabs, scenario.current);
+});
+
+test('Today-only pure reorder branch leaves saved-pin and membership-changing merge behavior intact', () => {
+    const before = [space('a', [1, 2, 3])], current = [space('a', [4, 1, 2, 3])];
+    before[0].spaceBookmarks = [5, 6]; current[0].spaceBookmarks = [7, 5, 6];
+    const after = structuredClone(before); after[0].temporaryTabs = [3, 1, 8]; after[0].spaceBookmarks = [6, 5];
+    const result = applySpacePatch(current, before, after);
+    assert.deepEqual(result[0].temporaryTabs, [3, 1, 8, 4]);
+    assert.deepEqual(result[0].spaceBookmarks, [6, 5, 7]);
+});
+
+for (const inverted of [false, true]) test(`stale drag retains newly created top through rank rebase and late restore inverted=${inverted}`, async () => {
+    sync.invertTabOrder = inverted; local.spaces = [space('a', [1, 2])];
+    session.restoredTabRanks = [[1, 0], [2, 2]];
+    session.spaceRestoreQueue = [{ spaceId: 'a', section: 'temporaryTabs', order: 1, url: 'https://pending-drag.test/' }];
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    const before = structuredClone(store.spaces), after = structuredClone(before); after[0].temporaryTabs.reverse();
+    const fresh = { id: 3, windowId: 1, url: 'https://fresh-drag.test/' };
+    tabs.push(fresh); chrome.tabs.onCreated.emit(fresh); await store.run(() => {});
+    await store.dispatch({ action: 'patch', before, after });
+    assert.deepEqual(store.spaces[0].temporaryTabs, inverted ? [2, 1, 3] : [3, 2, 1]);
+    const intended = [...store.spaces[0].temporaryTabs], reload = new SpaceStore(); await reload.initialize();
+    const late = { id: 4, windowId: 1, url: 'https://pending-drag.test/' }; tabs.push(late);
+    reload.track(late); await reload.persist();
+    assert.deepEqual(reload.spaces[0].temporaryTabs.filter(id => id !== 4), intended);
+    assert.equal(visibleToday(reload)[0], 3);
+});
+
+for (const inverted of [false, true]) for (const top of [false, true]) for (const written of [false, true]) test(`cold creation retries retain exact placement inverted=${inverted} top=${top} uncertainWrite=${written}`, async () => {
+    sync.invertTabOrder = inverted; sync.todayNewTabsAtTop = top; local.spaces = [space('a', [1])];
+    tabs = [tabs[0], { id: 3, windowId: 1, url: 'https://cold-write.test/' }];
+    const set = chrome.storage.local.set;
+    let failed = false;
+    chrome.storage.local.set = async values => {
+        if (values.spaces && !failed) {
+            failed = true;
+            if (written) await set(values);
+            throw new Error('One rejected initialization write');
+        }
+        return set(values);
+    };
+    const originalError = console.error; console.error = () => {};
+    try {
+        const store = new SpaceStore(); store.install(); chrome.tabs.onCreated.emit(tabs[1]);
+        await store.chain; await store.dispatch({ action: 'get' });
+        assert.deepEqual(visibleToday(store), top ? [3, 1] : [1, 3]);
+        assert.equal(store.pendingCreations.size, 0);
+        assert.equal(local.spaces[0].temporaryTabs.filter(id => id === 3).length, 1);
+    } finally { console.error = originalError; }
+});
+
+for (const lifecycle of ['removed', 'replaced']) test(`cold write rejection cannot restore ${lifecycle} creation intent`, async () => {
+    sync.invertTabOrder = false; local.spaces = [space('a', [1])];
+    tabs = [tabs[0], { id: 3, windowId: 1, url: 'https://retired-intent.test/' }];
+    const set = chrome.storage.local.set;
+    let failed = false, store;
+    chrome.storage.local.set = async values => {
+        if (values.spaces && !failed) {
+            failed = true;
+            assert(store.pendingCreations.has(3), 'intent remains pending until the first write succeeds');
+            tabs.splice(tabs.findIndex(tab => tab.id === 3), 1);
+            if (lifecycle === 'removed') chrome.tabs.onRemoved.emit(3, {});
+            else {
+                tabs.push({ id: 4, windowId: 1, url: 'https://replacement.test/' });
+                chrome.tabs.onReplaced.emit(4, 3);
+            }
+            assert.equal(store.pendingCreations.has(3), false);
+            throw new Error('Rejected after lifecycle event');
+        }
+        return set(values);
+    };
+    const originalError = console.error; console.error = () => {};
+    try {
+        store = new SpaceStore(); store.install(); chrome.tabs.onCreated.emit(tabs[1]);
+        await store.chain; await store.dispatch({ action: 'get' });
+        assert.deepEqual(local.spaces[0].temporaryTabs, lifecycle === 'removed' ? [1] : [1, 4]);
+        assert.equal(store.pendingCreations.size, 0);
+    } finally { console.error = originalError; }
 });

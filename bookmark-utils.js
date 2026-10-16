@@ -182,14 +182,15 @@ export const BookmarkUtils = {
         }
 
         // Assign the new tab in extension storage
-        await spaceRequest('assign', { tabId: newTab.id, spaceId: targetSpaceId, pinned: isPinned });
-        for (const space of spaces) {
+        const assigned = await spaceRequest('assign', { tabId: newTab.id, spaceId: targetSpaceId,
+            pinned: isPinned, ...(!isPinned ? { newTodayTab: true } : {}) });
+        if (!isPinned) {
+            // Keep the background's exact Today placement, including concurrent
+            // rows, rather than following assignment with a stale local append.
+            spaces.splice(0, spaces.length, ...assigned);
+        } else for (const space of spaces) {
             space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== newTab.id);
             space.temporaryTabs = space.temporaryTabs.filter(id => id !== newTab.id);
-        }
-        if (!isPinned) {
-            spaces.find(s => s.id === targetSpaceId)?.temporaryTabs.push(newTab.id);
-            await saveSpaces();
         }
 
         if (isPinned) {
@@ -204,7 +205,7 @@ export const BookmarkUtils = {
         }
 
         // Persist the bookmark section order independently of the native tab strip.
-        if (typeof persistSpaceTabOrder === 'function') {
+        if (isPinned && typeof persistSpaceTabOrder === 'function') {
             await persistSpaceTabOrder(targetSpaceId, { source: 'arcify', movedTabId: newTab.id });
         }
 

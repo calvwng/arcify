@@ -497,7 +497,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             applyColorOverrides();
         }
 
-        // Re-render active space when tab order inversion setting changes
+        // Re-render saved pins/folders when their display reversal changes
         if (areaName === 'sync' && changes.invertTabOrder) {
             Logger.log('invertTabOrder changed, refreshing active space UI...');
             if (refreshActiveSpaceUITimeout) clearTimeout(refreshActiveSpaceUITimeout);
@@ -1766,7 +1766,7 @@ async function handleBookmarkOperations(event, draggingElement, container, targe
         if (draggingElement.classList.contains('pinned-favicon')) {
             const { tab } = await convertFavoriteToTab(draggingElement, false);
             const space = spaces.find(s => s.id === activeSpaceId);
-            if (space) await moveTabToSpace(tab.id, space.id, false);
+            if (space) await moveTabToSpace(tab.id, space.id, false, dropIntent);
             return; // Exit early, conversion complete
         }
 
@@ -1901,7 +1901,8 @@ function getTempSectionTabIds(spaceElement) {
     const tempContainer = getTempContainer(spaceElement);
     if (!tempContainer) return [];
     return uniqPreserveOrder(
-        Array.from(tempContainer.querySelectorAll('.tab[data-tab-id]')).map(el => parseInt(el.dataset.tabId))
+        // A Favorite dropped here has not yet been converted into a full row.
+        Array.from(tempContainer.querySelectorAll('.tab[data-tab-id], .pinned-favicon[data-tab-id]')).map(el => parseInt(el.dataset.tabId))
     );
 }
 
@@ -1927,14 +1928,15 @@ async function handleArcifyOrderChangeAfterDropByTabId(tabId, container) {
     if (!space) return;
 
     const tabType = container.dataset.tabType;
-    const invertTabOrder = await Utils.getInvertTabOrder();
     if (tabType === 'temporary') {
+        const todayOrderInverted = await Utils.getTodayOrderInverted();
         // DOM order is display order (top->bottom). Canonical storage is extension order (left->right).
         const tempIdsDisplayOrder = getTempSectionTabIds(spaceElement);
-        const tempIdsChromeOrder = invertTabOrder ? [...tempIdsDisplayOrder].reverse() : tempIdsDisplayOrder;
+        const tempIdsChromeOrder = canonicalOrderFromDisplay(tempIdsDisplayOrder, todayOrderInverted);
         // Preserve any non-rendered temp ids (should be rare), append to end.
         space.temporaryTabs = mergeVisibleOrder(space.temporaryTabs ?? [], tempIdsChromeOrder);
     } else if (tabType === 'pinned') {
+        const invertTabOrder = await Utils.getInvertTabOrder();
         // DOM order is display order. Canonical storage is extension order.
         const pinnedIdsDisplayOrder = getFlattenedPinnedSectionTabIds(spaceElement);
         const pinnedIdsChromeOrder = invertTabOrder ? [...pinnedIdsDisplayOrder].reverse() : pinnedIdsDisplayOrder;
@@ -1997,7 +1999,8 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
                 const targetContainer = destination.container;
                 insertAtSidebarDrop(destination, draggingElement);
 
-                const dropInverted = await Utils.getInvertTabOrder();
+                const dropInverted = container.dataset.tabType === 'temporary'
+                    ? await Utils.getTodayOrderInverted() : await Utils.getInvertTabOrder();
                 const dropIntent = container.dataset.tabType === 'temporary'
                     ? { temporaryDisplayOrder: getTempSectionTabIds(spaceElement), inverted: dropInverted }
                     : {
@@ -2197,6 +2200,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
     Logger.log('Loading tabs for space:', space.id);
     Logger.log('Space bookmarks in space:', space.spaceBookmarks);
     const representedPinnedTabIds = new Set();
+    const todayOrderInverted = await Utils.getTodayOrderInverted();
     const invertTabOrder = await Utils.getInvertTabOrder();
     const tabs = (await getOwnedTabs(space.id)).filter(t => !t.pinned);
     const pinnedStatesById = await Utils.getPinnedTabStates();
@@ -2368,11 +2372,16 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
     }
 
     const tempFragment = document.createDocumentFragment();
-    let tabsToLoad = [...new Set([
-        ...space.temporaryTabs,
-        ...space.spaceBookmarks.filter(id => !representedPinnedTabIds.has(id))
-    ])];
-    if (invertTabOrder) tabsToLoad.reverse();
+    const temporaryIds = new Set(space.temporaryTabs);
+    const todayTabsToLoad = [...temporaryIds];
+    const savedPinsToLoad = [...new Set(space.spaceBookmarks.filter(id =>
+        !representedPinnedTabIds.has(id) && !temporaryIds.has(id)))];
+    if (todayOrderInverted) todayTabsToLoad.reverse();
+    if (invertTabOrder) savedPinsToLoad.reverse();
+    // Preserve the existing fallback group boundary, but saved pins retain
+    // their own display order even when the bookmark tree is unavailable.
+    const tabsToLoad = todayOrderInverted
+        ? [...savedPinsToLoad, ...todayTabsToLoad] : [...todayTabsToLoad, ...savedPinsToLoad];
     for (const tabId of tabsToLoad) {
         const tab = tabs.find(t => t.id === tabId);
         if (!tab || representedPinnedTabIds.has(tabId)) continue;
@@ -2419,7 +2428,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
     });
     pinnedContainer.appendChild(pinnedFragment);
     tempContainer.appendChild(tempFragment);
-    tempContainer.dataset.todayOrderInverted = String(invertTabOrder);
+    tempContainer.dataset.todayOrderInverted = String(todayOrderInverted);
     const spaceElement = pinnedContainer.closest('.space');
     if (spaceElement) spaceElement.dataset.bookmarkTreeUnavailable = treeAvailable ? 'false' : 'true';
     bookmarkSelection.reconcile();
@@ -3410,7 +3419,7 @@ async function deleteSpace(spaceId) {
 // -- Helper Functions
 ////////////////////////////////////////////////////////////////
 
-async function moveTabToSpace(tabId, spaceId, pinned = false, openerTabId = null) {
+async function moveTabToSpace(tabId, spaceId, pinned = false, { temporaryDisplayOrder = null, inverted = false } = {}) {
     assertNotNativeSplit(await chrome.tabs.get(tabId));
     if (!spaces.some(s => s.id === spaceId)) return;
     processingTabMoves.add(tabId);
@@ -3441,9 +3450,8 @@ async function moveTabToSpace(tabId, spaceId, pinned = false, openerTabId = null
     if (pinned) {
         space.spaceBookmarks.push(tabId);
     } else {
-        const openerIndex = space.temporaryTabs.indexOf(openerTabId);
-        if (openerIndex >= 0) space.temporaryTabs.splice(openerIndex + 1, 0, tabId);
-        else space.temporaryTabs.push(tabId);
+        space.temporaryTabs.push(tabId);
+        if (temporaryDisplayOrder) space.temporaryTabs = mergeCapturedTemporaryOrder(space.temporaryTabs, temporaryDisplayOrder, inverted);
     }
 
     // 4. Update the UI (remove tab element from old section, create it in new section)
@@ -3460,60 +3468,16 @@ async function moveTabToSpace(tabId, spaceId, pinned = false, openerTabId = null
         const chromeTab = await chrome.tabs.get(tabId);
         if (chromeTab.windowId !== currentWindow.id) { await saveSpaces(); return; }
         const tabElement = await createTabElement(chromeTab, pinned);
-        if (container.children.length > 1) {
-            if (openerTabId) {
-                let tabs = container.querySelectorAll(`.tab`);
-                const openerTabIndex = Array.from(tabs).findIndex(tab => tab.dataset.tabId == openerTabId);
-                if (openerTabIndex + 1 < tabs.length) {
-                    const tabToInsertBefore = tabs[openerTabIndex + 1];
-                    container.insertBefore(tabElement, tabToInsertBefore);
-                } else {
-                    container.appendChild(tabElement);
-                }
-            } else {
-                if (pinned) {
-                    // Add to the bottom after all existing elements
-                    container.appendChild(tabElement);
-                } else {
-                    // Render temporary tabs in extension order
-                    const ownedTabs = await getOwnedTabs(spaceId);
-                    const currentTabIndex = ownedTabs.findIndex(t => t.id === tabId);
-
-                    if (currentTabIndex !== -1 && ownedTabs.length > 1) {
-                        // First, add the new tab element to the container so it can be found in the filter
-                        container.appendChild(tabElement);
-
-                        // Filter to only include tabs in the temporary container (including the new one)
-                        const tabsInContainer = ownedTabs.filter(t => {
-                            return container.querySelector(`[data-tab-id="${t.id}"]`);
-                        });
-
-                        // Apply invert order if enabled
-                        const invertTabOrder = await Utils.getInvertTabOrder();
-                        if (invertTabOrder) {
-                            tabsInContainer.reverse();
-                        }
-
-                        // Re-append all tabs in correct order (including the new one)
-                        tabsInContainer.forEach(t => {
-                            const el = container.querySelector(`[data-tab-id="${t.id}"]`);
-                            if (el) {
-                                container.appendChild(el);
-                            }
-                        });
-                    } else {
-                        // Fallback: use simple insert logic
-                        const invertTabOrder = await Utils.getInvertTabOrder();
-                        if (invertTabOrder) {
-                            container.insertBefore(tabElement, container.firstChild);
-                        } else {
-                            container.appendChild(tabElement);
-                        }
-                    }
-                }
+        container.appendChild(tabElement);
+        if (!pinned) {
+            // This is an existing Favorite moved by a drop, not a new tab. Keep
+            // its captured drop slot and the frozen Today representation.
+            const todayOrderInverted = await Utils.getTodayOrderInverted();
+            const display = todayOrderInverted ? [...space.temporaryTabs].reverse() : space.temporaryTabs;
+            for (const id of display) {
+                const element = container.querySelector(`[data-tab-id="${id}"]`);
+                if (element) container.appendChild(element);
             }
-        } else {
-            container.appendChild(tabElement);
         }
     }
 

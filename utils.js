@@ -1,4 +1,5 @@
 import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
+import { getTodayOrderInverted } from './today-order.js';
 import { isPracticeUrl } from './tour-practice.js';
 import { getSpaceTabs, spaceRequest } from './space-client.js';
 /**
@@ -98,7 +99,8 @@ const Utils = {
             autoArchiveIdleMinutes: 360, // Default: 6 hours
             syncTabGroups: false,
             ordinaryFavoriteTabs: false, // Prospective; existing Favorite tabs keep their mode
-            invertTabOrder: true, // Default: enabled (New tabs/High index on top)
+            invertTabOrder: true, // Saved pin/folder display only; preserve the legacy default
+            todayNewTabsAtTop: true, // Future standalone Today tabs; existing order stays unchanged
             colorOverrides: null, // Default: no color overrides
             debugLoggingEnabled: false, // Default: disabled (controls debug logging)
             showAllOpenTabsInCollapsedFolders: false, // Default: Arc behavior (only show active tab in collapsed folder)
@@ -421,13 +423,26 @@ const Utils = {
         await chrome.storage.sync.set({ useArcLikePositioning: enabled });
     },
 
+    // Saved bookmark/folder display only. Today has a frozen local representation.
     getInvertTabOrder: async function () {
         const settings = await this.getSettings();
         return settings.invertTabOrder;
     },
 
     setInvertTabOrder: async function (enabled) {
+        await this.getTodayOrderInverted();
         await chrome.storage.sync.set({ invertTabOrder: enabled });
+    },
+
+    getTodayOrderInverted,
+
+    getTodayNewTabsAtTop: async function () {
+        const settings = await this.getSettings();
+        return settings.todayNewTabsAtTop !== false;
+    },
+
+    setTodayNewTabsAtTop: async function (enabled) {
+        await chrome.storage.sync.set({ todayNewTabsAtTop: enabled });
     },
 
 

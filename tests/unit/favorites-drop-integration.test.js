@@ -1025,3 +1025,27 @@ test('actual mixed preview preserves a skipped existing Favorite as the exact in
     assert.equal(effects.filter(([kind]) => kind === 'create').length, 2);
     assert.deepEqual(tree, original); assert.deepEqual(writes, []);
 });
+
+for (const todayInverted of [false, true]) test(`Favorite dropped back into Today preserves its exact visible slot independently of saved reversal (frozen=${todayInverted})`, async () => {
+    await reset({ empty: true, inverted: !todayInverted });
+    await chrome.tabs.onMoved.emit(1, { windowId: 10 }); await wait(40);
+    delete favorites()._rect;
+    document.dispatchEvent(Object.assign(new window.Event('keydown', { bubbles: true }), { key: 'Escape' }));
+    local.todayOrderRepresentation = { version: 1, inverted: todayInverted };
+    settings.todayNewTabsAtTop = true;
+    await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+    try {
+        await drop(temporary().querySelector('[data-tab-id="2"]'), favorites(), 25);
+        assert(favorites().querySelector('[data-tab-id="2"]'), JSON.stringify({ status: status(), alerts, favoriteMessages, effects }));
+        const savedFavorites = structuredClone(local.persistentFavorites), beforeBookmarks = structuredClone(tree);
+        const targetRow = temporary().querySelector('[data-tab-id="3"]'); rect(targetRow, 100);
+        await drop(favorites().querySelector('[data-tab-id="2"]'), targetRow, 101);
+        const expected = todayInverted ? [2, 3, 1] : [1, 2, 3];
+        assert.deepEqual([...temporary().querySelectorAll('.tab[data-tab-id]')].map(row => Number(row.dataset.tabId)), expected);
+        assert.deepEqual(storedSpaces[0].temporaryTabs, todayInverted ? [...expected].reverse() : expected);
+        assert.deepEqual(local.persistentFavorites, savedFavorites); assert.deepEqual(tree, beforeBookmarks);
+        assert.deepEqual(alerts, []);
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        assert.deepEqual([...temporary().querySelectorAll('.tab[data-tab-id]')].map(row => Number(row.dataset.tabId)), expected);
+    } finally { delete settings.todayNewTabsAtTop; local.todayOrderRepresentation = { version: 1, inverted: false }; }
+});

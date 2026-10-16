@@ -4,11 +4,11 @@ import { saveTodayTabsInNewFolder, registerTodayFolderMessages } from '../../tod
 import { SpaceStore } from '../../space-store.js';
 import { Utils } from '../../utils.js';
 
-function fixture({ inverted = false } = {}) {
+function fixture({ inverted = false, bookmarkInverted = inverted } = {}) {
     const tabs = [1, 2, 3].map(id => ({ id, windowId: 10, url: 'https://same.test/', title: `Tab ${id}`, pinned: false, active: id === 1 }));
     tabs.push({ id: 9, windowId: 20, url: 'https://same.test/', title: 'Other window', pinned: false, active: true });
     const nodes = [{ id: 'arcify', title: 'Arcify', parentId: 'bar' }, { id: 'root', title: 'Space', parentId: 'arcify' }, { id: 'existing', parentId: 'root', title: 'Existing', url: 'https://old.test/' }];
-    const local = { pinnedTabStatesById: {}, tabNameOverridesById: {}, unrelated: 'keep' }, sync = { invertTabOrder: inverted };
+    const local = { todayOrderRepresentation: { version: 1, inverted }, pinnedTabStatesById: {}, tabNameOverridesById: {}, unrelated: 'keep' }, sync = { invertTabOrder: bookmarkInverted };
     const effects = [], hooks = {}, globalTabs = new Set(), listeners = [];
     let nextId = 100;
     const area = data => ({ async get(keys) {
@@ -85,7 +85,7 @@ for (const mutation of ['closed', 'url', 'pending-url', 'window', 'native-pin', 
         if (mutation === 'root-moved') f.nodes.find(node => node.id === 'root').parentId = 'bar';
         if (mutation === 'root-deleted') f.nodes.splice(f.nodes.findIndex(node => node.id === 'root'), 1);
         if (mutation === 'root-replaced') f.store.spaces[0].bookmarkFolderId = 'replacement';
-        if (mutation === 'invert') f.sync.invertTabOrder = true;
+        if (mutation === 'invert') f.local.todayOrderRepresentation.inverted = true;
         if (mutation === 'private-tab') target.incognito = true;
         if (mutation === 'private-window') f.hooks.window = () => ({ incognito: true });
         if (mutation === 'non-normal-window') f.hooks.window = () => ({ type: 'popup' });
@@ -251,4 +251,25 @@ for (const boundary of ['bookmark-create', 'binding-write', 'membership-persist'
 test('Today save accepts the native unsplit sentinel', async () => {
     const f = fixture(); for (const tab of f.tabs) tab.splitViewId = -1;
     assert.equal((await f.save()).completed.length, 3);
+});
+
+for (const inverted of [false, true]) for (const bookmarkInverted of [false, true]) {
+    test(`folder saves captured Today order independently of bookmark reversal (today=${inverted}, bookmarks=${bookmarkInverted})`, async () => {
+        const f = fixture({ inverted, bookmarkInverted });
+        f.request.entries = (inverted ? [3, 2, 1] : [1, 2, 3]).map(tabId => ({ tabId, url: 'https://same.test/' }));
+        const result = await f.save();
+        const children = f.nodes.filter(node => node.parentId === result.folderId);
+        const displayed = bookmarkInverted ? children.reverse() : children;
+        assert.deepEqual(displayed.map(node => Number(node.title.slice(4))), f.request.entries.map(entry => entry.tabId));
+        assert.equal(f.sync.invertTabOrder, bookmarkInverted);
+        assert.deepEqual(f.local.todayOrderRepresentation, { version: 1, inverted });
+    });
+}
+
+test('bookmark reversal change during folder save stops before another bookmark is created', async () => {
+    const f = fixture();
+    f.hooks.afterCreate = node => { if (!node.url) f.sync.invertTabOrder = true; };
+    await assert.rejects(f.save(), error => error.batch.folderId && error.batch.completed.length === 0);
+    assert.equal(f.creates().length, 1);
+    assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 2, 3, 9]);
 });

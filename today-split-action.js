@@ -94,8 +94,9 @@ export function runTodaySplitAction(store, request) {
                 await resolve(expected, expectedOrder);
                 const space = getSpace();
                 if (!sameIds(next, canonical)) {
+                    const beforeIds = canonical;
                     space.temporaryTabs = next; canonical = [...next];
-                    store.restoredRanks?.delete(second.id);
+                    store.rebaseSectionRanks(space, 'temporaryTabs', beforeIds);
                     // Do not let optional projection turn this single explicit move
                     // into a whole-window reorder before the native split is formed.
                     await store.persist({ skipGroupSync: true });

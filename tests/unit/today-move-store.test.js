@@ -6,14 +6,14 @@ import { syncSpaceGroups } from '../../tab-group-sync.js';
 import { createSpaceRankCheckpoint, readSpaceRankCheckpoint } from '../../space-continuity.js';
 
 const space = (id, temporaryTabs, spaceBookmarks = []) => ({ id, name: id, color: 'blue', bookmarkFolderId: `${id}-root`, temporaryTabs, spaceBookmarks });
-function fixture({ inverted = false, syncGroups = false } = {}) {
+function fixture({ inverted = false, bookmarkInverted = inverted, syncGroups = false } = {}) {
     const tabs = [1, 2, 3, 4, 5, 6, 9, 10].map((id, index) => ({ id, index, windowId: id >= 9 ? 20 : 10,
         url: 'https://same.test/', title: `Tab ${id}`, pinned: false, active: id === 1 || id === 9, groupId: -1, splitViewId: -1 }));
-    const local = { spaces: [space('source', [1, 2, 3, 9], [6]), space('target', [4, 10, 5])],
+    const local = { todayOrderRepresentation: { version: 1, inverted }, spaces: [space('source', [1, 2, 3, 9], [6]), space('target', [4, 10, 5])],
         pinnedTabStatesById: { 6: { bookmarkId: 'pin', pinnedUrl: 'https://same.test/' } }, tabNameOverridesById: { 2: { name: 'Named' } },
         spaceModelVersion: 2, favoriteData: ['untouched'] };
     const session = { spaceSession: true, activeSpaces: { 10: 'source', 20: 'source' }, spaceGroupProjection: {} };
-    const sync = { invertTabOrder: inverted, syncTabGroups: syncGroups }, effects = [], hooks = {}, listeners = [], globals = new Set();
+    const sync = { invertTabOrder: bookmarkInverted, syncTabGroups: syncGroups }, effects = [], hooks = {}, listeners = [], globals = new Set();
     const nodes = [{ id: 'arcify', title: 'Arcify', parentId: 'bar' }, { id: 'source-root', parentId: 'arcify', title: 'source' },
         { id: 'target-root', parentId: 'arcify', title: 'target' }, { id: 'pin', parentId: 'source-root', title: 'Pin', url: 'https://same.test/' }];
     const groups = [];
@@ -110,7 +110,7 @@ const invalidations = {
     provisional: f => f.store.provisional.add(3),
     unresolvedRestore: f => f.store.recoveryCandidates.add(3),
     wrongOrder: f => f.request.entries.reverse(),
-    invertChanged: f => f.sync.invertTabOrder = true,
+    invertChanged: f => f.local.todayOrderRepresentation.inverted = true,
     activeSpaceChanged: f => f.store.active[10] = 'target',
     missingSource: f => f.store.spaces.shift(),
     missingTarget: f => f.store.spaces.pop(),
@@ -349,4 +349,56 @@ test('projection uses fresh native activity before collapsing, including an inhe
         assert.equal(f.groups.find(group => group.id === 101).collapsed, false);
         assert.equal(f.effects.some(effect => effect[0] === 'groupUpdate' && effect[1] === 101 && effect[2].collapsed === true), false);
     }
+});
+
+for (const inverted of [false, true]) test(`Move To ignores saved-bookmark and new-tab setting changes (today inverted=${inverted})`, async () => {
+    const f = fixture({ inverted, bookmarkInverted: !inverted });
+    let changed = false;
+    f.hooks.get = async (area, keys) => {
+        if (!changed && area === 'local' && Array.isArray(keys) && keys.includes('tabNameOverridesById')) {
+            changed = true; f.sync.invertTabOrder = inverted; f.sync.todayNewTabsAtTop = false;
+        }
+    };
+    await f.move();
+    const canonical = f.store.spaces[1].temporaryTabs.filter(id => id < 9);
+    assert.deepEqual(inverted ? canonical.reverse() : canonical, inverted ? [5, 4, 3, 1] : [4, 5, 1, 3]);
+    assert.deepEqual(f.local.todayOrderRepresentation, { version: 1, inverted });
+});
+
+for (const inverted of [false, true]) test(`Move To order survives late restoration in source and target inverted=${inverted}`, async () => {
+    const f = fixture({ inverted }); f.store.todayOrderInverted = inverted;
+    f.store.restoreQueue = [
+        { spaceId: 'source', section: 'temporaryTabs', order: 8, url: 'https://late-source.test/' },
+        { spaceId: 'target', section: 'temporaryTabs', order: 1, url: 'https://late-target.test/' }
+    ];
+    await f.move(); const authored = f.store.spaces.map(space => [...space.temporaryTabs]);
+    const reload = new SpaceStore(); reload.discoverBookmarkSpaces = async () => false; await reload.initialize();
+    for (const [id, name] of [[40, 'target'], [41, 'source']]) {
+        const late = { id, windowId: 10, index: id, url: `https://late-${name}.test/`, groupId: -1 };
+        f.tabs.push(late); reload.track(late);
+    }
+    await reload.persist();
+    assert.deepEqual(reload.spaces.map(space => space.temporaryTabs.filter(id => id < 40)), authored);
+    assert.equal(reload.restoreQueue.length, 0);
+});
+
+test('guarded Move To rolls back rebased pending ranks before any write', async () => {
+    const f = fixture();
+    f.store.restoreQueue = [{ spaceId: 'target', section: 'temporaryTabs', order: 1, url: 'https://late.test/' }];
+    const queue = structuredClone(f.store.restoreQueue), ranks = [...f.store.restoredRanks], spaces = structuredClone(f.store.spaces);
+    const persist = f.store.persist.bind(f.store);
+    f.store.persist = async options => { f.tabs[0].windowId = 20; return persist(options); };
+    await assert.rejects(f.move());
+    assert.deepEqual(f.store.restoreQueue, queue); assert.deepEqual([...f.store.restoredRanks], ranks); assert.deepEqual(f.store.spaces, spaces);
+    assert.equal(writes(f).length, 0);
+});
+
+test('lost acknowledgement recognizes the exact rebased rank checkpoint with pending target restoration', async () => {
+    const f = fixture();
+    f.store.restoreQueue = [{ spaceId: 'target', section: 'temporaryTabs', order: 1, url: 'https://late.test/' }];
+    f.hooks.afterSet = async (area, update) => { if (area === 'local' && update.spaces) throw new Error('Lost acknowledgement'); };
+    await assert.rejects(f.move(), error => {
+        assert.deepEqual(error.batch.completed, [1, 3]); assert.deepEqual(error.batch.remaining, []);
+        assert.equal(error.batch.uncertain, false); return true;
+    });
 });

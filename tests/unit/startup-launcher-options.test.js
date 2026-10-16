@@ -6,11 +6,11 @@ import { runInNewContext } from 'node:vm';
 const source = readFileSync(new URL('../../options.js', import.meta.url), 'utf8').replace(/^import .*;\s*$/gm, '');
 test('startup setting restores and autosaves without replacing other sync data', async () => {
     const values = { startupLauncherEnabled: true, defaultSpaceName: 'Work', autoArchiveEnabled: true,
-        autoArchiveIdleMinutes: 90, ordinaryFavoriteTabs: false, syncTabGroups: true, invertTabOrder: false,
+        autoArchiveIdleMinutes: 90, ordinaryFavoriteTabs: false, syncTabGroups: true, invertTabOrder: false, todayNewTabsAtTop: true,
         showAllOpenTabsInCollapsedFolders: true, debugLoggingEnabled: true,
         colorOverrides: null, unrelatedSavedSetting: 'keep me' };
     const listeners = {};
-    const elements = Object.fromEntries(['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'autoArchiveEnabled', 'syncTabGroups', 'invertTabOrder',
+    const elements = Object.fromEntries(['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'autoArchiveEnabled', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop',
         'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'].map(id => [id, { checked: false, addEventListener(type, fn) { listeners[id] = fn; } }]));
     elements.defaultSpaceName = { value: '', innerHTML: '', appendChild() {}, addEventListener() {} };
     elements.autoArchiveIdleMinutes = { value: '', disabled: false, reportValidity: () => true, addEventListener() {} };
@@ -18,7 +18,7 @@ test('startup setting restores and autosaves without replacing other sync data',
     const document = { getElementById: id => elements[id], addEventListener() {}, createElement: () => ({}),
         documentElement: { style: { setProperty() {}, removeProperty() {} } } };
     const context = { document, console, setTimeout, clearTimeout,
-        Utils: { getSettings: async () => ({ ...values }) }, LocalStorage: { getSpaceNames: async () => ['Work'] },
+        Utils: { getSettings: async () => ({ ...values }), getTodayOrderInverted: async () => false }, LocalStorage: { getSpaceNames: async () => ['Work'] },
         Logger: { log() {}, error() {} }, chrome: { storage: { sync: { set: async patch => Object.assign(values, patch) } },
             runtime: { sendMessage: async () => ({ success: true }) } } };
     runInNewContext(source, context);
@@ -29,7 +29,7 @@ test('startup setting restores and autosaves without replacing other sync data',
     elements.startupLauncherEnabled.checked = false;
     await listeners.startupLauncherEnabled();
     assert.deepEqual(values, { startupLauncherEnabled: false, defaultSpaceName: 'Work', autoArchiveEnabled: true,
-        autoArchiveIdleMinutes: 90, ordinaryFavoriteTabs: false, syncTabGroups: true, invertTabOrder: false,
+        autoArchiveIdleMinutes: 90, ordinaryFavoriteTabs: false, syncTabGroups: true, invertTabOrder: false, todayNewTabsAtTop: true,
         showAllOpenTabsInCollapsedFolders: true, debugLoggingEnabled: true,
         colorOverrides: null, unrelatedSavedSetting: 'keep me' });
 });

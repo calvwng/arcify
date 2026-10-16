@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readSourceText } from '../source-text.js';
-import { assertTodayNewTabRow, assertRowDraftPreserved, assertOrdinaryRowFallback, cleanupNewTabFixtureSpace, recordNewTabRowEvidence, assertNonemptyDraftSelection } from '../../scripts/paired-chrome-newtab-row.mjs';
+import { assertTodayNewTabRow, assertRowDraftPreserved, assertOrdinaryRowFallback, cleanupNewTabFixtureSpace, recordNewTabRowEvidence, assertNonemptyDraftSelection, assertFrozenTodayRowOrder } from '../../scripts/paired-chrome-newtab-row.mjs';
 const id = 'a'.repeat(32);
 const row = () => ({ count: 1, buttons: 1, obsolete: 0, activeSpaceId: 'space', rowSpaceId: 'space', tag: 'BUTTON', text: '+ New Tab',
     visible: true, disabled: false, insideSortable: false, draggable: false, immediatelyAfterHeader: true, immediatelyBeforeList: true,
@@ -18,7 +18,7 @@ for (const [name, change] of [
     ['wrong order setting', s => { s.inverted = 'true'; }], ['hidden', s => { s.visible = false; }],
     ['tiny hit target', s => { s.row.height = 2; }], ['nonempty', s => { s.todayIds = [8]; }], ['removed notices', s => { s.footerNotices = false; }]
 ]) test(`row evidence rejects ${name}`, () => { const state = row(); change(state); assert.throws(() => assertTodayNewTabRow(state, expected)); });
-test('inversion changes Today order without relocating the row', () => {
+test('frozen inverted representation keeps the New Tab row outside Today items', () => {
     const state = row(); state.inverted = 'true'; state.todayIds = [9, 8];
     assertTodayNewTabRow(state, { spaceId: 'space', inverted: true });
 });
@@ -62,7 +62,7 @@ test('real row scenarios remain mandatory inside existing full-suite cases and r
     assert.match(case14, /resolveNativeSidebarTarget/); assert.match(case14, /exerciseNativeNewTabRow/);
     assert.match(runner, /await clickUI\(sidebar.page, '#newTabBtn'\)/); assert.doesNotMatch(runner, /#spotlightBtn/);
     assert(runner.includes("await sidebar.page.waitForSelector('.space.active .temporary-tabs > #newTabBtn:not([disabled])')"), 'Case 8 must observe the initialized enabled row before its one real click.');
-    for (const label of ['normal', 'inverted', 'empty-inverted', 'empty-normal', 'compact-inverted', 'empty-after-metadata-repaint']) assert(source.includes(`layout('${label}'`));
+    for (const label of ['saved-normal', 'saved-inverted', 'empty-saved-inverted', 'empty-saved-normal', 'compact-saved-inverted', 'empty-after-metadata-repaint']) assert(source.includes(`layout('${label}'`));
     assert.match(source, /page\.click\('#newTabBtn', \{ count: 2 \}\)/);
     assert.match(source, /trace\.filter\(event => event.type === 'click'\)\.length, 2/);
     assert.match(source, /tabToSelector\(page, '#newTabBtn'\)/);
@@ -73,6 +73,13 @@ test('real row scenarios remain mandatory inside existing full-suite cases and r
     assert.doesNotMatch(source, /setViewport|dispatchEvent|chrome\.developerPrivate|chrome\.management|setTimeout|puppeteer\.launch/);
     assert(source.includes('A later successful launch cannot add a stale fallback.'));
     for (const path of ['scripts/paired-chrome-newtab-row.mjs', 'tests/unit/paired-chrome-newtab-row.test.js']) assert(workflow.includes(`- '${path}'`));
+});
+
+test('native New Tab success waits for both an idle button and cleared launch feedback', () => {
+    const source = readSourceText(new URL('../../scripts/paired-chrome-newtab-row.mjs', import.meta.url));
+    assert.match(source, /const settled = \(\) => page\.waitForFunction\(\(\) => document\.querySelector\('#newTabBtn'\)\?\.getAttribute\('aria-busy'\) === 'false' &&\s*document\.querySelector\('#spotlightStatus'\)\?\.textContent === ''/);
+    assert.doesNotMatch(source, /Spotlight opened\.|Opened a new tab\. Spotlight is unavailable\./);
+    assert.equal((source.match(/await settled\(\);/g) || []).length, 4);
 });
 
 
@@ -169,5 +176,12 @@ test('real selection and fallback rendering readiness precede their measured act
     assert.match(source, /field.press\('ArrowLeft'\); await field.press\('ArrowLeft'\)/);
     assert.doesNotMatch(source, /field.press\('Home'\)|setSelectionRange/);
     assert(source.indexOf('assertNonemptyDraftSelection(before);') < source.indexOf('await input(`Activate native New Tab'));
-    assert.match(source, /layout\('fallback-complete', folder.spaceId, false, false, fallback.tabId\)/);
+    assert.match(source, /layout\('fallback-complete', folder.spaceId, inverted, false, fallback.tabId\)/);
+});
+
+for (const inverted of [false, true]) test(`saved-order toggles cannot change frozen Today order (${inverted})`, () => {
+    const state = { inverted: String(inverted), todayIds: [5, 8, 3] };
+    assertFrozenTodayRowOrder(state, structuredClone(state), inverted);
+    assert.throws(() => assertFrozenTodayRowOrder(state, { ...state, todayIds: [3, 8, 5] }, inverted));
+    assert.throws(() => assertFrozenTodayRowOrder(state, { ...state, inverted: String(!inverted) }, inverted));
 });

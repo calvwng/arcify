@@ -195,8 +195,11 @@ export function assertTodayMoveReload(before, after, ids) {
 export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pageForUrl, ui, screenshot, snapshot, poll, fixture,
     arcifyId, spotlightId, search, reloadArcify, groupSync, record = async () => {} }) {
     assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.env.CI, 'true'); assert.notEqual(process.getuid?.(), 0);
-    const nonce = randomBytes(16).toString('hex'), windowId = fixture.windowA, inverted = groupSync;
-    const settings = await apiPage.evaluate(() => chrome.storage.sync.get(['syncTabGroups', 'invertTabOrder']));
+    const nonce = randomBytes(16).toString('hex'), windowId = fixture.windowA;
+    const representation = await apiPage.evaluate(async () => (await chrome.storage.local.get('todayOrderRepresentation')).todayOrderRepresentation);
+    assert.equal(representation?.version, 1); assert.equal(typeof representation.inverted, 'boolean');
+    const inverted = representation.inverted;
+    const settings = await apiPage.evaluate(() => chrome.storage.sync.get(['syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop']));
     const initial = await snapshot(windowId), source = initial.spaces.find(space => space.id === initial.activeSpaceId);
     const destination = initial.spaces.find(space => space.id !== source.id && space.id !== fixture.spaces.empty);
     assert(source?.bookmarkFolderId && destination?.bookmarkFolderId);
@@ -206,7 +209,7 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
     const checkpoint = async (phase, data) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
     const option = async (key, value) => {
         await ui(apiPage, `Set ${key} for Today Move`, async () => { if (await apiPage.$eval(`#${key}`, node => node.checked) !== value) await apiPage.click(`label.toggle-label[for="${key}"]`); });
-        await poll(() => apiPage.evaluate(key => chrome.storage.sync.get(key), key), data => Boolean(data[key]) === value, `${key} persisted`);
+        await poll(() => apiPage.evaluate(key => chrome.storage.sync.get(key), key), data => (key === 'syncTabGroups' ? Boolean(data[key]) : data[key] !== false) === value, `${key} persisted`);
     };
     const read = async () => {
         const state = await apiPage.evaluate(async () => {
@@ -263,7 +266,10 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
         await checkpoint(multi ? 'multi-moved' : 'active-single-moved', { before, after, proof, trace, nativeEvents }); return after;
     };
     try {
-        await option('syncTabGroups', groupSync); await option('invertTabOrder', inverted);
+        await option('syncTabGroups', groupSync); await option('invertTabOrder', groupSync);
+        // Seed in canonical append order through the public prospective setting.
+        // Today representation is frozen; never rewrite migration metadata.
+        await option('todayNewTabsAtTop', inverted);
         for (const suffix of ['active', 'twin', 'duplicate', 'stale', 'remaining', 'destination-one', 'destination-two']) {
             const spaceId = suffix.startsWith('destination') ? destination.id : source.id;
             const created = await apiPage.evaluate(async ({ windowId, url, spaceId }) => {
@@ -389,7 +395,7 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
             async () => { if (native) await native.close(); },
             () => apiPage.evaluate(async ids => { const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); const present = ids.filter(id => live.has(id)); if (present.length) await chrome.tabs.remove(present); }, owned),
             async () => { if (pinId) await apiPage.evaluate(id => chrome.bookmarks.remove(id), pinId); },
-            () => option('syncTabGroups', Boolean(settings.syncTabGroups)), () => option('invertTabOrder', Boolean(settings.invertTabOrder))
+            () => option('syncTabGroups', Boolean(settings.syncTabGroups)), () => option('invertTabOrder', settings.invertTabOrder !== false), () => option('todayNewTabsAtTop', settings.todayNewTabsAtTop !== false)
         ], primaryError, record);
     }
 }

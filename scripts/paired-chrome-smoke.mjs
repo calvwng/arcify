@@ -2,6 +2,7 @@
 import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
+import { exerciseTodayCreationOrder, serveTodayOrderFixture } from './paired-chrome-today-order.mjs';
 import { exerciseTodayMove, serveTodayMoveFixture } from './paired-chrome-today-move.mjs';
 import { exerciseNativeNewTabRow, recordNewTabRowEvidence } from './paired-chrome-newtab-row.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
@@ -94,7 +95,9 @@ const stepNames = [
     'Tab menus preserve exact aliases and saved-pin identities through real editing, copy, mute, duplicate and removal',
     'Today real drag and keyboard create native Split View pairs without replacing pages',
     'Today Move preserves exact single and multiple native tabs with group sync off',
-    'Today Move preserves active native tabs and inverted order with group sync on'
+    'Today Move preserves active native tabs and inverted order with group sync on',
+    'Today creation has independent prospective top and opener order with group sync off',
+    'Today creation preserves manual order and native projection with group sync on'
 ];
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
@@ -755,6 +758,7 @@ try {
             if (serveNativeSplitFixture(request, response)) return;
             if (serveTabMenuFixture(request, response)) return;
             if (serveTodayMoveFixture(request, response)) return;
+            if (serveTodayOrderFixture(request, response)) return;
             if (serveOrdinaryFavoriteFixture(request, response)) return;
             if (serveFavoriteIconFixture(request, response)) return;
             const path = new URL(request.url, 'http://localhost').pathname;
@@ -2020,7 +2024,13 @@ try {
     await step(stepNames[41], () => exerciseTodayMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,
         snapshot,poll,fixture,arcifyId,spotlightId,search,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayMoveSyncOn = observation; await saveReport(); } }));
-    } // Full-only cases 3–31, 33–35, 37–38 and 40–41; preserve the original cases' order.
+    await step(stepNames[42], () => exerciseTodayCreationOrder({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,pageForUrl,ui,screenshot,
+        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
+        record:async observation => { report.todayOrderSyncOff = observation; await saveReport(); } }));
+    await step(stepNames[43], () => exerciseTodayCreationOrder({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,pageForUrl,ui,screenshot,
+        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
+        record:async observation => { report.todayOrderSyncOn = observation; await saveReport(); } }));
+    } // Full-only cases 3–31, 33–35, 37–38 and 40–43; preserve the original cases' order.
 
     if (report.runMode === 'native-split') {
         await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,

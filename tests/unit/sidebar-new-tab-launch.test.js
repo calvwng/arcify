@@ -168,3 +168,10 @@ test('unrelated background navigation during cold initialization does not cancel
     f.store.run = operation => run(async () => { f.api.tabs.onUpdated.emit(8, { status: 'loading' }, { id: 8, windowId: 10, active: false }); return operation(); });
     assert.equal((await f.run()).outcome, 'spotlight');
 });
+
+test('ordinary fallback explicitly requests prospective standalone Today placement', async () => {
+    const f = fixture(); delete f.local[PEER_KEY]; await f.run();
+    assert.deepEqual(f.calls.find(call => call[0] === 'assign'), ['assign', {
+        action: 'assign', tabId: 100, spaceId: 'empty', pinned: false, newTodayTab: true
+    }]);
+});

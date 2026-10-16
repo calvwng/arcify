@@ -131,10 +131,10 @@ test('favorite demotion keeps the captured middle temporary position after refre
         return positions.every(index => index >= 0) && positions[0] < positions[1] && positions[1] < positions[2];
     }, { polling: 100 }, desired);
     await page.waitForFunction(async ({ desired, favorite, spaceId }) => {
-        const { spaces, pinnedTabStatesById = {} } = await chrome.storage.local.get(['spaces', 'pinnedTabStatesById']);
+        const { spaces, pinnedTabStatesById = {}, todayOrderRepresentation } = await chrome.storage.local.get(['spaces', 'pinnedTabStatesById', 'todayOrderRepresentation']);
         const space = spaces.find(item => item.id === spaceId);
-        const { invertTabOrder = true } = await chrome.storage.sync.get({ invertTabOrder: true });
-        const display = invertTabOrder ? [...space.temporaryTabs].reverse() : space.temporaryTabs;
+        if (todayOrderRepresentation?.version !== 1) return false;
+        const display = todayOrderRepresentation.inverted ? [...space.temporaryTabs].reverse() : space.temporaryTabs;
         const positions = desired.map(id => display.indexOf(id));
         return !pinnedTabStatesById[favorite] && positions.every(index => index >= 0) &&
             positions[0] < positions[1] && positions[1] < positions[2];

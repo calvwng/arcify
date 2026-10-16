@@ -140,7 +140,7 @@ export async function runBridgeAction(store, request, snapshot, { beforeMutation
         }
         await Utils.setPinnedTabState(tab.id, { bookmarkId: bookmark.id, pinnedUrl: bookmark.url });
     }
-    await store.applyAction({ action: 'assign', tabId: tab.id, spaceId, pinned: Boolean(bookmark) });
+    await store.applyAction({ action: 'assign', tabId: tab.id, spaceId, pinned: Boolean(bookmark), ...(!bookmark ? { newTodayTab: true } : {}) });
     await store.applyAction({ action: 'activate', windowId, spaceId });
     return { tabId: await focus(tab.id) };
 }

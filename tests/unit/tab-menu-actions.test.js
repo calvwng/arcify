@@ -8,11 +8,11 @@ function fixture() {
     const tabs = [1, 2, 3, 9].map(id => ({ id, windowId: id === 9 ? 20 : 10, index: id, title: `Page ${id}`, url: 'https://same.test/', pinned: false, mutedInfo: { muted: false } }));
     const nodes = [{ id: 'arc', title: 'Arcify', parentId: 'bar' }, { id: 'root', title: 'Space', parentId: 'arc' }, { id: 'nested', title: 'Nested', parentId: 'root' },
         { id: 'pin', title: 'Saved title', url: 'https://same.test/', parentId: 'nested', index: 1 }, { id: 'twin', title: 'Other pin', url: 'https://same.test/', parentId: 'nested', index: 2 }];
-    const local = { pinnedTabStatesById: { 2: { bookmarkId: 'pin', pinnedUrl: 'https://same.test/' }, 9: { bookmarkId: 'pin', pinnedUrl: 'https://same.test/' } }, tabNameOverridesById: { 1: { name: 'Alias' }, 2: { name: 'Old saved name' }, 3: { name: 'Twin alias' }, 9: { name: 'Old saved name' } } };
+    const local = { todayOrderRepresentation: { version: 1, inverted: false }, pinnedTabStatesById: { 2: { bookmarkId: 'pin', pinnedUrl: 'https://same.test/' }, 9: { bookmarkId: 'pin', pinnedUrl: 'https://same.test/' } }, tabNameOverridesById: { 1: { name: 'Alias' }, 2: { name: 'Old saved name' }, 3: { name: 'Twin alias' }, 9: { name: 'Old saved name' } } };
     const effects = [], hooks = {}, globalTabs = new Set(), listeners = [];
     globalThis.chrome = {
         runtime: { id: 'test', getURL: path => `chrome-extension://test/${path}`, onMessage: { addListener(fn) { listeners.push(fn); } } },
-        storage: { local: { async get(key) { await hooks.storageGet?.(key); return { [key]: structuredClone(local[key]) }; }, async set(values) { await hooks.storageSet?.(values); Object.assign(local, structuredClone(values)); effects.push(['storage', structuredClone(values)]); await hooks.storageAfterSet?.(values); } } },
+        storage: { sync: { async get(defaults) { return { ...defaults }; } }, local: { async get(key) { await hooks.storageGet?.(key); return { [key]: structuredClone(local[key]) }; }, async set(values) { await hooks.storageSet?.(values); Object.assign(local, structuredClone(values)); effects.push(['storage', structuredClone(values)]); await hooks.storageAfterSet?.(values); } } },
         windows: { async get(id) { return { id, type: 'normal', ...(hooks.window?.() || {}) }; } },
         tabs: { async get(id) { await hooks.tabGet?.(id); const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Closed'); return structuredClone(tab); },
             async query(query = {}) { await hooks.tabQuery?.(query); return structuredClone(tabs.filter(tab => query.windowId === undefined || tab.windowId === query.windowId)); },
@@ -193,5 +193,21 @@ test('duplicate retains its new tab and fails closed if the final native query f
 test('duplicate can still assign its new identity when the source closed after creation', async () => {
     const f = fixture(); f.hooks.duplicate = () => { f.tabs.splice(f.tabs.findIndex(tab => tab.id === 1), 1); };
     assert.equal((await f.run(f.ordinary, 'duplicate')).tabId, 100);
-    assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 100, 3]);
+    assert.deepEqual(f.store.spaces[0].temporaryTabs, [100, 1, 3]);
+});
+
+for (const inverted of [false, true]) for (const top of [false, true]) for (const sourceState of ['today', 'closed', 'other-window', 'saved-pin', 'global']) test(`duplicate visible placement inverted=${inverted} top=${top} source=${sourceState}`, async () => {
+    const f = fixture(); f.local.todayOrderRepresentation.inverted = inverted;
+    chrome.storage.sync.get = async defaults => ({ ...defaults, todayNewTabsAtTop: top });
+    f.hooks.duplicate = () => {
+        if (sourceState === 'closed') f.tabs.splice(f.tabs.findIndex(tab => tab.id === 1), 1);
+        if (sourceState === 'other-window') f.tabs[0].windowId = 20;
+        if (sourceState === 'saved-pin') { f.store.spaces[0].temporaryTabs = [3]; f.store.spaces[0].spaceBookmarks.push(1); }
+        if (sourceState === 'global') f.globalTabs.add(1);
+    };
+    await f.run(f.ordinary, 'duplicate');
+    const ids = [...f.store.spaces[0].temporaryTabs], visible = inverted ? ids.reverse() : ids;
+    if (sourceState === 'today') assert.equal(visible[visible.indexOf(1) + 1], 100);
+    else assert.equal(visible[top ? 0 : visible.length - 1], 100);
+    assert.equal(f.local.pinnedTabStatesById[100], undefined); assert.equal(f.local.tabNameOverridesById[100], undefined);
 });

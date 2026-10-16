@@ -99,6 +99,7 @@ describe('Options Page', () => {
             autoArchiveIdleMinutes: !!document.getElementById('autoArchiveIdleMinutes'),
             autoArchiveIdleMinutesContainer: !!document.getElementById('autoArchiveIdleMinutesContainer'),
             invertTabOrder: !!document.getElementById('invertTabOrder'),
+            todayNewTabsAtTop: !!document.getElementById('todayNewTabsAtTop'),
             showAllOpenTabsInCollapsedFolders: !!document.getElementById('showAllOpenTabsInCollapsedFolders'),
             advancedOptionsToggle: !!document.getElementById('advancedOptionsToggle'),
             advancedOptionsContent: !!document.getElementById('advancedOptionsContent'),
@@ -119,6 +120,7 @@ describe('Options Page', () => {
         expect(elements.autoArchiveIdleMinutes).toBe(true);
         expect(elements.autoArchiveIdleMinutesContainer).toBe(true);
         expect(elements.invertTabOrder).toBe(true);
+        expect(elements.todayNewTabsAtTop).toBe(true);
         expect(elements.showAllOpenTabsInCollapsedFolders).toBe(true);
         expect(elements.advancedOptionsToggle).toBe(true);
         expect(elements.advancedOptionsContent).toBe(true);
@@ -147,6 +149,7 @@ describe('Options Page', () => {
           return {
             autoArchiveEnabled: document.getElementById('autoArchiveEnabled')?.checked,
             invertTabOrder: document.getElementById('invertTabOrder')?.checked,
+            todayNewTabsAtTop: document.getElementById('todayNewTabsAtTop')?.checked,
             showAllOpenTabsInCollapsedFolders: document.getElementById('showAllOpenTabsInCollapsedFolders')?.checked,
             debugLoggingEnabled: document.getElementById('debugLoggingEnabled')?.checked,
           };
@@ -156,6 +159,7 @@ describe('Options Page', () => {
         // showAllOpenTabsInCollapsedFolders=false, debugLoggingEnabled=false
         expect(defaults.autoArchiveEnabled).toBe(false);
         expect(defaults.invertTabOrder).toBe(true);
+        expect(defaults.todayNewTabsAtTop).toBe(true);
         expect(defaults.showAllOpenTabsInCollapsedFolders).toBe(false);
         expect(defaults.debugLoggingEnabled).toBe(false);
 

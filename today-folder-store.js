@@ -34,6 +34,7 @@ export function saveTodayTabsInNewFolder(store, request) {
             throw new Error('Choose 1–100 Today tabs with supported URLs and a folder name of 1–256 characters. Nothing was saved.');
         }
         const result = { folderId: null, title, total: entries.length, completed: [], created: [], failedTabId: null, uncertain: false, cleanupUncertain: false };
+        const bookmarkOrderInverted = Boolean(await Utils.getInvertTabOrder());
         let folderAttempted = false;
         const bound = new Map();
         const getSpace = () => {
@@ -61,7 +62,8 @@ export function saveTodayTabsInNewFolder(store, request) {
             const window = await chrome.windows.get(windowId);
             if (!window || window.id !== windowId || window.type !== 'normal' || window.incognito) throw changed();
             await getSpaceBookmarkFolder(space);
-            if (Boolean(await Utils.getInvertTabOrder()) !== inverted) throw changed();
+            if (Boolean(await Utils.getTodayOrderInverted()) !== inverted ||
+                Boolean(await Utils.getInvertTabOrder()) !== bookmarkOrderInverted) throw changed();
             if (result.folderId) {
                 const [folder] = await chrome.bookmarks.get(result.folderId);
                 if (!folder || folder.url || folder.parentId !== bookmarkFolderId || folder.title !== title) throw changed();
@@ -101,7 +103,7 @@ export function saveTodayTabsInNewFolder(store, request) {
             }
             // Canonical bookmark order is rendered in reverse when the setting
             // is enabled. Preserve the user's visible selection order either way.
-            const ordered = inverted ? [...entries].reverse() : entries;
+            const ordered = bookmarkOrderInverted ? [...entries].reverse() : entries;
             const childIds = [];
             const createdMetadata = new Map();
             for (const entry of ordered) {

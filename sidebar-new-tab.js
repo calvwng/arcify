@@ -31,8 +31,7 @@ export function createSidebarNewTabRow({ button, status, getContext, sendRequest
         pending = Promise.resolve().then(() => sendRequest({ type: 'spotlightBridgeLaunch', windowId, spaceId, fallbackToNewTab: true }))
             .then(response => {
                 if (!response?.ok) throw new Error(response?.error?.message || 'The New Tab result could not be confirmed. Check your tabs before trying again.');
-                status.textContent = response.outcome === 'new-tab'
-                    ? 'Opened a new tab. Spotlight is unavailable.' : 'Spotlight opened.';
+                status.textContent = '';
             }).catch(error => { status.textContent = error.message || 'The New Tab result could not be confirmed. Check your tabs before trying again.'; })
             .finally(() => {
                 pending = null;

@@ -128,9 +128,10 @@ function drag(element, type, y = 100, extra = {}) {
     Object.assign(event, { clientX: 30, clientY: y, dataTransfer: { setData() {} }, ...extra });
     element.dispatchEvent(event); return event;
 }
-async function reset({ inverted = false, empty = false } = {}) {
+async function reset({ inverted = false, todayInverted = false, empty = false } = {}) {
     resetData();
     settings.invertTabOrder = inverted;
+    local.todayOrderRepresentation = { version: 1, inverted: todayInverted };
     if (empty) { getNode('p').children = []; storedSpaces[0].spaceBookmarks = []; storedSpaces[0].temporaryTabs = [1, 2, 3]; local.pinnedTabStatesById = {}; }
     await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local');
     await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
@@ -235,12 +236,13 @@ test('a stale bookmark baseline fails safely and restores the saved tree', async
     assert.deepEqual([...root().children].filter(element => element.dataset.bookmarkId).map(element => element.dataset.bookmarkId), saved);
 });
 
-for (const inverted of [false, true]) test(`live pin-to-temporary drop keeps all other bookmarks and the indicated tab order (inverted=${inverted})`, async () => {
-    await reset({ inverted });
+for (const inverted of [false, true]) for (const todayInverted of [false, true]) test(`live pin-to-temporary drop keeps all other bookmarks and the indicated tab order (bookmarks=${inverted}, Today=${todayInverted})`, async () => {
+    await reset({ inverted, todayInverted });
     const target = temporary().querySelector('[data-tab-id="3"]'); rect(target, 100);
     await drop(row('a'), target, 101);
     assert.deepEqual(ids('p'), ['f', 'g', 'c']); assert.deepEqual(ids('f'), ['b', 'closed']);
-    assert.deepEqual(storedSpaces[0].temporaryTabs, inverted ? [3, 1] : [1, 3]);
+    assert.deepEqual(storedSpaces[0].temporaryTabs, todayInverted ? [3, 1] : [1, 3]);
+    assert.deepEqual([...temporary().querySelectorAll('.tab[data-tab-id]')].map(row => Number(row.dataset.tabId)), [1, 3]);
     assert.deepEqual(writes, [{ kind: 'remove', id: 'a' }]);
     assert.deepEqual(alerts, []);
 });
@@ -650,4 +652,81 @@ test('folder storage changes repaint an idle sidebar without affecting unrelated
         await until(() => row('f') !== original, 'An idle sidebar must receive the changed folder state');
         assertFolder(false); viewport.assert(); assertUnchanged();
     } finally { viewport.restore(); await wait(150); }
+});
+
+for (const todayInverted of [false, true]) test(`saved reversal and prospective placement cannot reorder existing Today rows (frozen=${todayInverted})`, async () => {
+    await reset({ todayInverted });
+    tabs.push(...[4, 5].map(id => ({ id, windowId: 10, pinned: false, active: false, title: `Tab ${id}`, url: `https://tab-${id}.test/` })));
+    storedSpaces[0].temporaryTabs = [3, 4, 5];
+    try {
+        await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); await wait(180);
+        const before = structuredClone(storedSpaces), bookmarkIds = allIds();
+        for (const bookmarkInverted of [true, false]) for (const newTabsAtTop of [true, false]) {
+            settings.invertTabOrder = bookmarkInverted; settings.todayNewTabsAtTop = newTabsAtTop;
+            await onChanged.emit({ invertTabOrder: { newValue: bookmarkInverted }, todayNewTabsAtTop: { newValue: newTabsAtTop } }, 'sync'); await wait(180);
+            assert.deepEqual([...temporary().querySelectorAll('.tab[data-tab-id]')].map(row => Number(row.dataset.tabId)), todayInverted ? [5, 4, 3] : [3, 4, 5]);
+            assert.deepEqual([...root().children].filter(row => row.dataset.bookmarkId).map(row => row.dataset.bookmarkId), bookmarkInverted ? ['c', 'g', 'f', 'a'] : ['a', 'f', 'g', 'c']);
+            assert.deepEqual(storedSpaces, before); assert.deepEqual(allIds(), bookmarkIds); assert.deepEqual(writes, []);
+            assert.equal(temporary().dataset.todayOrderInverted, String(todayInverted));
+        }
+    } finally { tabs.splice(3); delete settings.todayNewTabsAtTop; await reset(); }
+});
+
+for (const todayInverted of [false, true]) for (const inverted of [false, true]) {
+    test(`unavailable bookmark tree preserves saved-pin and Today orders independently (Today=${todayInverted}, saved=${inverted})`, async () => {
+        await reset({ todayInverted, inverted });
+        tabs.push({ id: 4, windowId: 10, pinned: false, active: false, title: 'Other Today tab', url: 'https://tab-4.test/' });
+        storedSpaces[0].temporaryTabs = [3, 4];
+        const before = structuredClone(storedSpaces), beforeTree = structuredClone(tree), beforeBindings = structuredClone(local.pinnedTabStatesById);
+        try {
+            hooks.bookmarkGet = id => { if (id === 'p') throw new Error('Bookmark tree unavailable'); };
+            await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local');
+            await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+            assert(root().querySelector('.bookmark-association-error'));
+            const fallback = [...temporary().querySelectorAll('.favorite-fallback')];
+            const today = [...temporary().querySelectorAll('.tab:not(.favorite-fallback)')];
+            assert.deepEqual(fallback.map(row => Number(row.dataset.tabId)), inverted ? [2, 1] : [1, 2]);
+            assert.deepEqual(today.map(row => Number(row.dataset.tabId)), todayInverted ? [4, 3] : [3, 4]);
+            assert.deepEqual(fallback.map(row => row.dataset.bookmarkId), inverted ? ['b', 'a'] : ['a', 'b']);
+            assert(fallback.every(row => !row.draggable));
+            const allRows = [...temporary().querySelectorAll('.tab[data-tab-id]')];
+            assert.equal(allRows.length, 4); assert.equal(new Set(allRows.map(row => row.dataset.tabId)).size, 4);
+            assert.deepEqual(storedSpaces, before); assert.deepEqual(tree, beforeTree);
+            assert.deepEqual(local.pinnedTabStatesById, beforeBindings); assert.deepEqual(writes, []);
+            delete hooks.bookmarkGet;
+            await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+            assert.equal(temporary().querySelector('.favorite-fallback'), null);
+            assert.deepEqual([...temporary().querySelectorAll('.tab[data-tab-id]')].map(row => Number(row.dataset.tabId)), todayInverted ? [4, 3] : [3, 4]);
+            assert.equal(root().querySelectorAll('[data-tab-id="1"]').length, 1);
+            assert.equal(root().querySelectorAll('[data-tab-id="2"]').length, 1);
+            assert.deepEqual(storedSpaces, before); assert.deepEqual(writes, []);
+        } finally { delete hooks.bookmarkGet; tabs.splice(3); await reset(); }
+    });
+}
+for (const todayInverted of [false, true]) for (const closePeer of [false, true]) test(`new Today top survives an actual stale sidebar drag inverted=${todayInverted} closePeer=${closePeer}`, async () => {
+    const originalTabs = structuredClone(tabs);
+    await reset({ empty: true, todayInverted }); settings.todayNewTabsAtTop = true;
+    const sourceId = todayInverted ? 1 : 3, targetId = todayInverted ? 3 : 1;
+    const source = temporary().querySelector(`[data-tab-id="${sourceId}"]`);
+    const target = temporary().querySelector(`[data-tab-id="${targetId}"]`);
+    try {
+        rect(target, 80); drag(source, 'dragstart');
+        tabs.push({ id: 4, windowId: 10, active: false, pinned: false, title: 'Tab 4', url: 'https://tab-4.test/' });
+        if (todayInverted) storedSpaces[0].temporaryTabs.push(4);
+        else storedSpaces[0].temporaryTabs.unshift(4);
+        if (closePeer) {
+            tabs.splice(tabs.findIndex(tab => tab.id === 2), 1);
+            storedSpaces[0].temporaryTabs = storedSpaces[0].temporaryTabs.filter(id => id !== 2);
+        }
+        await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local'); await wait(180);
+        assert.deepEqual([...temporary().querySelectorAll('.tab[data-tab-id]')].map(row => Number(row.dataset.tabId)),
+            todayInverted ? [3, 2, 1] : [1, 2, 3], 'drag holds the stale captured rows while refresh is busy');
+        drag(target, 'dragover', 81); drag(target, 'drop', 81); drag(source, 'dragend'); await wait(180);
+        const expected = todayInverted ? [2, 3, 1, 4] : [4, 3, 1, 2];
+        assert.deepEqual(storedSpaces[0].temporaryTabs, closePeer ? expected.filter(id => id !== 2) : expected);
+        assert.deepEqual(writes, []); assert.deepEqual(alerts, []);
+    } finally {
+        drag(source, 'dragend'); tabs.splice(0, tabs.length, ...originalTabs);
+        delete settings.todayNewTabsAtTop; await reset();
+    }
 });

@@ -135,6 +135,7 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
     const initial = await snapshot(), space = initial.spaces.find(item => item.id === initial.activeSpaceId);
     assert(space?.bookmarkFolderId);
     const originalInvert = await apiPage.$eval('#invertTabOrder', node => node.checked);
+    const originalNewTop = await apiPage.$eval('#todayNewTabsAtTop', node => node.checked);
     let sidebar, spotlight, folderId, seed = [], primaryError;
     const row = id => `.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`;
     const read = async () => {
@@ -163,14 +164,16 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
         assert.equal(await sidebar.page.$eval('#todayFolderName', node => node === document.activeElement), true);
     });
     try {
-        if(originalInvert)await ui(apiPage,'Use normal visible Today order',()=>apiPage.click('label.toggle-label[for="invertTabOrder"]'));
-        await poll(()=>apiPage.evaluate(()=>chrome.storage.sync.get('invertTabOrder')),data=>data.invertTabOrder===false,'non-inverted Today order');
+        if(originalInvert)await ui(apiPage,'Use normal saved folder order independently of Today',()=>apiPage.click('label.toggle-label[for="invertTabOrder"]'));
+        await poll(()=>apiPage.evaluate(()=>chrome.storage.sync.get('invertTabOrder')),data=>data.invertTabOrder===false,'non-inverted saved folder order');
+        if(originalNewTop)await ui(apiPage,'Append new Today fixture tabs in visible creation order',()=>apiPage.click('label.toggle-label[for="todayNewTabsAtTop"]'));
+        await poll(()=>apiPage.evaluate(()=>chrome.storage.sync.get('todayNewTabsAtTop')),data=>data.todayNewTabsAtTop===false,'prospective bottom insertion');
         seed=await apiPage.evaluate(async ({windowId,spaceId,base})=>{
             const ids=[];
             for(const suffix of ['one','two','one','four','five','six']){
                 const tab=await chrome.tabs.create({windowId,url:`${base}/today-selection-${suffix}`,active:false});
                 ids.push(tab.id);
-                const assigned=await chrome.runtime.sendMessage({type:'spaceStore',action:'assign',tabId:tab.id,spaceId});
+                const assigned=await chrome.runtime.sendMessage({type:'spaceStore',action:'assign',tabId:tab.id,spaceId,pinned:false,newTodayTab:true});
                 if(!assigned.success)throw new Error(assigned.error);
             }
             return ids;
@@ -268,7 +271,8 @@ export async function exerciseTodaySelection({ apiPage, newTabPage, ui, screensh
         await finishBookmarkFixture([
             ()=>apiPage.evaluate(async ids=>{const live=new Set((await chrome.tabs.query({})).map(tab=>tab.id));const present=ids.filter(id=>live.has(id));if(present.length)await chrome.tabs.remove(present);},[...seed,...[sidebar?.tab.id,spotlight?.tab.id].filter(Number.isInteger)]),
             async()=>{if(folderId)await apiPage.evaluate(id=>chrome.bookmarks.removeTree(id),folderId);},
-            async()=>{if(originalInvert!==await apiPage.$eval('#invertTabOrder',node=>node.checked))await ui(apiPage,'Restore original Today display order',()=>apiPage.click('label.toggle-label[for="invertTabOrder"]'));}
+            async()=>{if(originalNewTop!==await apiPage.$eval('#todayNewTabsAtTop',node=>node.checked))await ui(apiPage,'Restore prospective Today insertion preference',()=>apiPage.click('label.toggle-label[for="todayNewTabsAtTop"]'));},
+            async()=>{if(originalInvert!==await apiPage.$eval('#invertTabOrder',node=>node.checked))await ui(apiPage,'Restore original saved folder order',()=>apiPage.click('label.toggle-label[for="invertTabOrder"]'));}
         ],primaryError,record);
     }
 }

@@ -93,14 +93,14 @@ export function runTabMenuAction(store, request) {
                 if ((await Utils.getPinnedTabState(duplicate.id))?.bookmarkId) throw stale();
                 // One final snapshot covers both identities after binding I/O.
                 // Query failures are not evidence that the source was closed.
+                await store.readTodayPlacement();
                 const tabs = await chrome.tabs.query({});
                 const space = getSpace(), live = tabs.find(tab => tab.id === duplicate.id);
                 if (!live || live.windowId !== windowId || live.pinned || live.incognito || isStartupLauncherTab(live) || store.isGlobalTab?.(live.id)) throw stale();
                 const source = tabs.find(tab => tab.id === tabId);
                 assertNotNativeSplit(source); assertNotNativeSplit(live);
                 store.forgetTab(live.id);
-                const sourceIndex = space.temporaryTabs.indexOf(tabId);
-                space.temporaryTabs.splice(sourceIndex < 0 ? space.temporaryTabs.length : sourceIndex + 1, 0, live.id);
+                store.insertCreatedToday(space, live, { nativeTabs: tabs, openerTabId: source?.id });
                 await store.persist();
                 return { tabId: live.id };
             } catch (error) {

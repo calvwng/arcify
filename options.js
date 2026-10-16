@@ -105,12 +105,15 @@ async function saveOptions() {
     ordinaryFavoriteTabs: getCheckboxValue(document.getElementById('ordinaryFavoriteTabs'), false),
     syncTabGroups: getCheckboxValue(document.getElementById('syncTabGroups'), false),
     invertTabOrder: getCheckboxValue(document.getElementById('invertTabOrder'), true),
+    todayNewTabsAtTop: getCheckboxValue(document.getElementById('todayNewTabsAtTop'), true),
     showAllOpenTabsInCollapsedFolders: getCheckboxValue(document.getElementById('showAllOpenTabsInCollapsedFolders'), false),
     colorOverrides: Object.keys(colorOverrides).length > 0 ? colorOverrides : null,
     debugLoggingEnabled: getCheckboxValue(document.getElementById('debugLoggingEnabled'), false)
   };
 
   try {
+    // Freeze the existing Today display before changing the legacy bookmark flag.
+    await Utils.getTodayOrderInverted();
     await chrome.storage.sync.set(settings);
     Logger.log('Settings saved:', settings);
 
@@ -141,6 +144,7 @@ function showToast(message = 'Settings saved') {
 
 // Function to restore options from chrome.storage
 async function restoreOptions() {
+  await Utils.getTodayOrderInverted();
   const settings = await Utils.getSettings();
 
   await populateSpacesDropdown(settings.defaultSpaceName);
@@ -151,6 +155,7 @@ async function restoreOptions() {
   setCheckboxValue(document.getElementById('ordinaryFavoriteTabs'), settings.ordinaryFavoriteTabs, false);
   setCheckboxValue(document.getElementById('syncTabGroups'), settings.syncTabGroups, false);
   setCheckboxValue(document.getElementById('invertTabOrder'), settings.invertTabOrder, true);
+  setCheckboxValue(document.getElementById('todayNewTabsAtTop'), settings.todayNewTabsAtTop, true);
   setCheckboxValue(document.getElementById('showAllOpenTabsInCollapsedFolders'), settings.showAllOpenTabsInCollapsedFolders, false);
   setCheckboxValue(document.getElementById('debugLoggingEnabled'), settings.debugLoggingEnabled, false);
 
@@ -253,7 +258,7 @@ function setupAutoSave() {
   addListenerIfExists('defaultSpaceName', 'change', saveOptions);
 
   // Auto-save for checkboxes (most just save immediately)
-  const checkboxIds = ['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'syncTabGroups', 'invertTabOrder', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
+  const checkboxIds = ['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
   checkboxIds.forEach(id => addListenerIfExists(id, 'change', saveOptions));
 
   // Auto-archive checkbox needs special handling to update visibility
@@ -271,8 +276,13 @@ function setupAutoSave() {
   });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  restoreOptions();
+document.addEventListener('DOMContentLoaded', async () => {
   setupAdvancedOptions();
-  setupAutoSave();
+  try {
+    await restoreOptions();
+    setupAutoSave();
+  } catch (error) {
+    Logger.error('Could not load settings:', error);
+    showToast('Settings could not load. Reload this page before making changes.');
+  }
 });

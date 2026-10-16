@@ -898,3 +898,19 @@ test('registered New Tab row uses the real SpaceStore queue and owns one default
     assert.equal(writes('tab.create').length, 1); assert.equal(getTab(result.tabId).windowId, 1); assert.equal(getTab(result.tabId).active, true);
     assert.equal(writes('tab.update').filter(call => call[1] !== result.tabId).length, 0);
 });
+
+for (const inverted of [false, true]) for (const top of [false, true]) test(`bridge-created Today tab requests standalone visible placement inverted=${inverted} top=${top}`, async () => {
+    local.todayOrderRepresentation = { version: 1, inverted };
+    sync.todayNewTabsAtTop = top;
+    const store = await makeStore({ install: true });
+    const pins = structuredClone(store.spaces.map(space => space.spaceBookmarks)), bookmarks = clone(nodes);
+    const before = store.spaces.find(space => space.id === 'a').temporaryTabs.filter(id => getTab(id).windowId === 1);
+    const response = await createSpotlightBridge(store)(request('openTab', { spaceId: 'a', url: DUPLICATE_URL }), SENDER);
+    assert.equal(response.ok, true, JSON.stringify(response)); await settle(store);
+    const ids = store.spaces.find(space => space.id === 'a').temporaryTabs.filter(id => getTab(id).windowId === 1);
+    const visible = inverted ? [...ids].reverse() : ids;
+    assert.equal(visible[top ? 0 : visible.length - 1], response.tabId);
+    assert.deepEqual(ids.filter(id => id !== response.tabId), before);
+    assert.deepEqual(store.spaces.map(space => space.spaceBookmarks), pins); assert.deepEqual(nodes, bookmarks);
+    assert.equal(writes('tab.create').length, 1);
+});

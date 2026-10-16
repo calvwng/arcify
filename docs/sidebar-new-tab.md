@@ -22,6 +22,8 @@ ID before activation; a different active native tab's Space or opener cannot
 redirect its ownership.
 
 The row announces progress and coalesces clicks while its request is pending.
+Successful Spotlight and ordinary fallback launches clear that feedback; no
+persistent success message reserves sidebar space. Actionable errors stay visible.
 The worker also coalesces concurrent New Tab requests for the same window and
 Space. It captures the active native tab and rejects stale source-window,
 Space, pairing, navigation, or focus changes before dispatch. A cold worker uses

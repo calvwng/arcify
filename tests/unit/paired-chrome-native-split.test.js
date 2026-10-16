@@ -147,3 +147,32 @@ test('native failure captures passive sidebar and full End input before cleanup 
     assert.match(source,/catch\(error\)\{[\s\S]*?evaluate\(readNativeSplitSidebarState\)[\s\S]*?native-split-failed[\s\S]*?finally\{await finishBookmarkFixture/);
     assert.doesNotMatch(readNativeSplitSidebarState.toString(),/\.click\(|\.focus\(|dispatchEvent|sendMessage|chrome\./);
 });
+
+function childSample(inverted = false, openerId = 11) {
+    const before = state(); before.groups = []; before.projection = {};
+    for (const tab of before.tabs) { tab.status = 'complete'; tab.openerTabId = null; }
+    const after = structuredClone(before), child = { ...before.tabs[2], id: 100, index: 2, status: 'complete', openerTabId: openerId };
+    after.tabs.filter(tab => tab.index >= 2).forEach(tab => tab.index++); after.tabs.push(child);
+    after.spaces[0].temporaryTabs = inverted ? [100, 11, 12, 13, 14] : [11, 12, 100, 13, 14];
+    after.snapshot = { spaces: [{ id: 'work', temporaryTabIds: [...after.spaces[0].temporaryTabs] }], tabs: after.tabs.map(tab => ({ id: tab.id, spaceId: 'work' })) };
+    after.rendered = { spaceId: 'work', inverted: String(inverted), ids: inverted ? [...after.spaces[0].temporaryTabs].reverse() : [...after.spaces[0].temporaryTabs], visible: after.tabs.map(() => true) };
+    return { before, after, request: { pair: { ...request, splitViewId: 21 }, openerId, inverted } };
+}
+for (const inverted of [false, true]) for (const openerId of [11, 12]) test(`real split child validation requires after the entire pair: inverted=${inverted}, opener=${openerId}`, async () => {
+    const { assertNativeSplitChild } = await import('../../scripts/paired-chrome-native-split.mjs');
+    const s = childSample(inverted, openerId); const proof = assertNativeSplitChild(s.before, s.after, s.request); assert.equal(proof.childId, 100);
+});
+for (const [name, mutate] of Object.entries({
+    wrongOpener: s => s.after.tabs.at(-1).openerTabId = 14, noOpener: s => delete s.after.tabs.at(-1).openerTabId,
+    childInSplit: s => s.after.tabs.at(-1).splitViewId = 21, missingChild: s => s.after.tabs.pop(), twoChildren: s => s.after.tabs.push({ ...s.after.tabs.at(-1), id: 101 }),
+    newSplitId: s => { s.after.tabs[0].splitViewId = 25; s.after.tabs[1].splitViewId = 25; }, nativeSplitSeparated: s => s.after.tabs[1].index = 4,
+    betweenPanes: s => s.after.spaces[0].temporaryTabs = [11, 100, 12, 13, 14], unrelatedReorder: s => s.after.spaces[0].temporaryTabs = [11, 12, 100, 14, 13],
+    wrongVisible: s => s.after.rendered.ids.reverse(), wrongSnapshot: s => s.after.snapshot.spaces[0].temporaryTabIds.reverse(), hiddenChild: s => s.after.rendered.visible[2] = false,
+    staleSnapshotOwner: s => s.after.snapshot.tabs.at(-1).spaceId = 'other', navigatedOriginal: s => s.after.tabs[0].url = 'http://other',
+    lostPageState: s => s.after.pageStates[11].value = '', bookmarkReordered: s => s.after.bookmarks = [],
+    regrouped: s => s.after.tabs[0].groupId = 30, nativeSurvivorReorder: s => s.after.tabs[3].index = -1,
+    pendingChild: s => s.after.tabs.at(-1).pendingUrl = 'http://pending', loadingChild: s => s.after.tabs.at(-1).status = 'loading'
+})) test(`real split child evidence rejects ${name}`, async () => {
+    const { assertNativeSplitChild } = await import('../../scripts/paired-chrome-native-split.mjs');
+    const s = childSample(); mutate(s); assert.throws(() => assertNativeSplitChild(s.before, s.after, s.request));
+});

@@ -1,4 +1,5 @@
 /** CI-only native Split View proof. Importing this module never launches Chrome. */
+import { visibleTodayOrder, installTodayOrderTrace, assertTodayOrderInput, readTodayOrderSidebar } from './paired-chrome-today-order.mjs';
 import { assertTodayMoveRejected } from './paired-chrome-today-move.mjs';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -76,6 +77,32 @@ export function assertNativeSplitCreated(before,after,request) {
     assert.equal(after.spaces.length,before.spaces.length);
     assert.equal(after.activeSpaceId,before.activeSpaceId);
     return proof;
+}
+
+
+/** A trusted child from either pane belongs after the complete exact pair. */
+export function assertNativeSplitChild(before, after, { pair, openerId, inverted }) {
+    assert(pair.tabIds.includes(openerId)); assertNativeSplitPair(before, pair); assertNativeSplitPair(after, pair);
+    const additions = after.tabs.filter(tab => !before.tabs.some(old => old.id === tab.id)); assert.equal(additions.length, 1);
+    assert.equal(after.tabs.length, before.tabs.length + 1); const child = additions[0];
+    assert.equal(child.windowId, pair.windowId); assert.equal(child.openerTabId, openerId); assert.equal(child.splitViewId, -1);
+    assert.equal(child.pinned, false); assert.equal(child.incognito, false); assert.equal(child.pendingUrl, null); assert.equal(child.status, 'complete');
+    for (const old of before.tabs) { const live = exactTab(after, old.id); assert.deepEqual(identity(live), identity(old)); assert.equal(live.groupId, old.groupId); assert.equal(live.splitViewId, old.splitViewId); }
+    for (const field of ['bookmarks', 'bindings', 'favorites', 'pageStates', 'activeSpaceId', 'groups', 'projection']) assert.deepEqual(after[field], before[field]);
+    const original = before.spaces.find(space => space.id === pair.spaceId), visible = visibleTodayOrder(original.temporaryTabs, inverted);
+    const positions = pair.tabIds.map(id => visible.indexOf(id)); assert.equal(Math.abs(positions[0] - positions[1]), 1);
+    visible.splice(Math.max(...positions) + 1, 0, child.id); const canonical = visibleTodayOrder(visible, inverted);
+    for (const old of before.spaces) assert.deepEqual(after.spaces.find(space => space.id === old.id), old.id === pair.spaceId ? { ...old, temporaryTabs: canonical } : old);
+    const inWindow = ids => ids.filter(id => after.tabs.some(tab => tab.id === id && tab.windowId === pair.windowId));
+    assert.deepEqual(after.snapshot.spaces.find(space => space.id === pair.spaceId).temporaryTabIds, inWindow(canonical));
+    assert.equal(after.snapshot.tabs.find(tab => tab.id === child.id)?.spaceId, pair.spaceId);
+    assert.equal(after.rendered.spaceId, pair.spaceId); assert.equal(after.rendered.inverted, String(inverted));
+    assert.deepEqual(after.rendered.ids, inWindow(visible)); assert(after.rendered.visible.every(Boolean));
+    for (const windowId of new Set(before.tabs.map(tab => tab.windowId))) {
+        const order = state => state.tabs.filter(tab => tab.windowId === windowId && tab.id !== child.id).sort((a, b) => a.index - b.index).map(tab => tab.id);
+        assert.deepEqual(order(after), order(before), 'Opening a child must preserve the original native pair and survivor order.');
+    }
+    return { childId: child.id, openerId, pair, canonical, visible: inWindow(visible) };
 }
 
 export function installNativeSplitInputTrace() {
@@ -192,7 +219,7 @@ export function serveNativeSplitFixture(request,response) {
     if(!match)return false;
     const documentId=randomBytes(16).toString('hex'),color=match[2]==='left'?'#f8d7da':match[2]==='right'?'#d3f4e0':'#e8e8ff';
     response.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Content-Security-Policy':"default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'"});
-    response.end(`<!doctype html><html><head><meta charset="utf-8"><title>Split ${match[2]} ${match[2]==='left'?match[1]:documentId}</title><link rel="icon" href="data:,"><style>html,body{margin:0;min-height:100%;background:${color};font:20px system-ui}main{padding:36px}input{font:inherit;width:90%}</style></head><body data-document-id="${documentId}"><main><h1>Native Split ${match[2]}</h1><p>Existing page ${match[1]}</p><label>Preserved input <input id="split-input" value="untouched"></label><p>Real top-level page. No frames.</p></main></body></html>`);
+    response.end(`<!doctype html><html><head><meta charset="utf-8"><title>Split ${match[2]} ${match[2]==='left'?match[1]:documentId}</title><link rel="icon" href="data:,"><style>html,body{margin:0;min-height:100%;background:${color};font:20px system-ui}main{padding:36px}input{font:inherit;width:90%}</style></head><body data-document-id="${documentId}"><main><h1>Native Split ${match[2]}</h1><p>Existing page ${match[1]}</p><label>Preserved input <input id="split-input" value="untouched"></label><p>Real top-level page. No frames.</p><a id="today-order-child" href="/today-order/${match[1]}/${match[2]}-split-child" target="_blank" rel="opener">Open child outside this split pair</a></main></body></html>`);
     return true;
 }
 
@@ -229,21 +256,23 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
     const nonce=randomBytes(16).toString('hex'),windowId=fixture.windowA;
     const initial=await snapshot(windowId),spaceId=initial.activeSpaceId,space=initial.spaces.find(item=>item.id===spaceId);assert(space?.bookmarkFolderId);
     const unaffectedSpace=initial.spaces.find(item=>item.id===fixture.spaces.empty);assert(unaffectedSpace&&unaffectedSpace.id!==spaceId);assert.deepEqual(unaffectedSpace.tabIds,[]);
-    const settings=await apiPage.evaluate(()=>chrome.storage.sync.get(['syncTabGroups','invertTabOrder']));
+    const settings=await apiPage.evaluate(()=>chrome.storage.sync.get(['syncTabGroups','invertTabOrder','todayNewTabsAtTop']));
+    const representation=await apiPage.evaluate(async()=>(await chrome.storage.local.get('todayOrderRepresentation')).todayOrderRepresentation);
+    assert.equal(representation?.version,1);assert.equal(typeof representation.inverted,'boolean');
     const owned=[],pages=new Map(),evidence={capability,nonce,realMouseDrag:true,realKeyboardContext:true,nativeSplit:true,nativePanel:false,checkpoints:[]};
     let sidebar,primaryError;
     const checkpoint=async(phase,data)=>{evidence.checkpoints.push({phase,...data});await record(structuredClone(evidence));};
-    const option=async(key,value)=>{await ui(apiPage,`Set ${key} with visible options`,async()=>{if(await apiPage.$eval(`#${key}`,node=>node.checked)!==value)await apiPage.click(`label.toggle-label[for="${key}"]`);});await poll(()=>apiPage.evaluate(key=>chrome.storage.sync.get(key),key),data=>Boolean(data[key])===value,`${key} saved`);};
+    const option=async(key,value)=>{await ui(apiPage,`Set ${key} with visible options`,async()=>{if(await apiPage.$eval(`#${key}`,node=>node.checked)!==value)await apiPage.click(`label.toggle-label[for="${key}"]`);});await poll(()=>apiPage.evaluate(key=>chrome.storage.sync.get(key),key),data=>(key==='syncTabGroups'?Boolean(data[key]):data[key]!==false)===value,`${key} saved`);};
     const read=async()=>{
         const state=await apiPage.evaluate(async()=>{const data=await chrome.storage.local.get(['spaces','pinnedTabStatesById','persistentFavorites']);const session=await chrome.storage.session.get(['spaceGroupProjection','spaceGroupSplitDeferrals']);return {
             groups:await chrome.tabGroups.query({}),projection:session.spaceGroupProjection||{},deferrals:session.spaceGroupSplitDeferrals||[],
-            tabs:(await chrome.tabs.query({})).map(({id,windowId,index,url,pendingUrl,pinned,incognito,active,groupId,splitViewId})=>({id,windowId,index,url,pendingUrl:pendingUrl||null,pinned,incognito,active,groupId,splitViewId:splitViewId??-1})).sort((a,b)=>a.id-b.id),
+            tabs:(await chrome.tabs.query({})).map(({id,windowId,index,url,pendingUrl,pinned,incognito,active,groupId,splitViewId,openerTabId,status})=>({id,windowId,index,url,pendingUrl:pendingUrl||null,pinned,incognito,active,groupId,splitViewId:splitViewId??-1,openerTabId:openerTabId??null,status})).sort((a,b)=>a.id-b.id),
             spaces:(data.spaces||[]).map(({id,bookmarkFolderId,temporaryTabs,spaceBookmarks})=>({id,bookmarkFolderId,temporaryTabs,spaceBookmarks})),bookmarks:await chrome.bookmarks.getTree(),bindings:data.pinnedTabStatesById||{},favorites:data.persistentFavorites||[]};});
         state.activeSpaceId=(await snapshot(windowId)).activeSpaceId;state.pageStates=Object.fromEntries(await Promise.all([...pages].map(async([id,page])=>[id,await page.evaluate(readNativeSplitPage)])));return state;
     };
     const awaitPair=async request=>poll(read,state=>{try{assertNativeSplitPair(state,request);return true;}catch{return false;}},'exact native splitViewId membership');
     const clear=()=>ui(sidebar.page,'Clear Today selection with Escape',()=>sidebar.page.keyboard.press('Escape'));
-    const select=async ids=>{await clear();await sidebar.page.waitForFunction(()=>performance.now()-globalThis.__nativeSplitDomLastChange>=250,{polling:50});for(const id of ids)await ui(sidebar.page,'Select exact Today row with Control click',()=>clickBookmarkFixtureRow(sidebar.page,todayRowSelector(id),['Control']));return poll(()=>sidebar.page.evaluate(readTodaySelection),state=>{try{assertTodaySelection(state,ids);return true;}catch{return false;}},'two exact Today selections');};
+    const select=async ids=>{const state=await read();const ordered=visibleTodayOrder(state.spaces.find(space=>space.id===spaceId).temporaryTabs,representation.inverted).filter(id=>ids.includes(id));assert.equal(ordered.length,ids.length);await clear();await sidebar.page.waitForFunction(()=>performance.now()-globalThis.__nativeSplitDomLastChange>=250,{polling:50});for(const id of ids)await ui(sidebar.page,'Select exact Today row with Control click',()=>clickBookmarkFixtureRow(sidebar.page,todayRowSelector(id),['Control']));return poll(()=>sidebar.page.evaluate(readTodaySelection),state=>{try{assertTodaySelection(state,ordered);return true;}catch{return false;}},'two exact Today selections');};
     const menu=async(id,keyboard=false)=>ui(sidebar.page,keyboard?'Open Today context menu with Shift+F10':'Open exact Today context menu with right click',async()=>{
         const selector=todayRowSelector(id);await sidebar.page.waitForSelector(selector,{visible:true});
         if(keyboard){const row=await sidebar.page.$(selector);try{await row.focus();await sidebar.page.keyboard.down('Shift');try{await sidebar.page.keyboard.press('F10');}finally{await sidebar.page.keyboard.up('Shift');}}finally{await row.dispose();}}
@@ -283,10 +312,10 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         }finally{if(mouseDown)await sidebar.page.mouse.up();await geometry.source.dispose();await geometry.target.dispose();}
     });
     try{
-        await option('syncTabGroups',false);await option('invertTabOrder',false);
+        await option('syncTabGroups',false);await option('invertTabOrder',false);await option('todayNewTabsAtTop',false);
         await apiPage.evaluate(windowId=>chrome.windows.update(windowId,{state:'normal',left:0,top:0,width:1200,height:900}),windowId);
-        const seed=await apiPage.evaluate(async({base,windowId,spaceId})=>{const ids=[];for(const suffix of ['left','middle','right','twin','blocked']){const tab=await chrome.tabs.create({windowId,url:`${base}/${suffix}`,active:false});ids.push(tab.id);const response=await chrome.runtime.sendMessage({type:'spaceStore',action:'assign',tabId:tab.id,spaceId});if(!response.success)throw new Error(response.error);}return ids;},{base:`${fixture.base}/native-split/${nonce}`,windowId,spaceId});owned.push(...seed);
-        const unaffected=await apiPage.evaluate(async({url,windowId,spaceId})=>{const tab=await chrome.tabs.create({windowId,url,active:false});const response=await chrome.runtime.sendMessage({type:'spaceStore',action:'assign',tabId:tab.id,spaceId});if(!response.success)throw new Error(response.error);return {id:tab.id,url};},{url:`${fixture.base}/native-split/${nonce}/middle?unaffected`,windowId,spaceId:unaffectedSpace.id});owned.push(unaffected.id);
+        const seed=await apiPage.evaluate(async({base,windowId,spaceId})=>{const ids=[];for(const suffix of ['left','middle','right','twin','blocked']){const tab=await chrome.tabs.create({windowId,url:`${base}/${suffix}`,active:false});ids.push(tab.id);const response=await chrome.runtime.sendMessage({type:'spaceStore',action:'assign',tabId:tab.id,spaceId,pinned:false,newTodayTab:true});if(!response.success)throw new Error(response.error);}return ids;},{base:`${fixture.base}/native-split/${nonce}`,windowId,spaceId});owned.push(...seed);
+        const unaffected=await apiPage.evaluate(async({url,windowId,spaceId})=>{const tab=await chrome.tabs.create({windowId,url,active:false});const response=await chrome.runtime.sendMessage({type:'spaceStore',action:'assign',tabId:tab.id,spaceId,pinned:false,newTodayTab:true});if(!response.success)throw new Error(response.error);return {id:tab.id,url};},{url:`${fixture.base}/native-split/${nonce}/middle?unaffected`,windowId,spaceId:unaffectedSpace.id});owned.push(unaffected.id);
         await poll(()=>apiPage.evaluate(ids=>Promise.all(ids.map(id=>chrome.tabs.get(id))),[...seed,unaffected.id]),tabs=>tabs.every(tab=>tab.status==='complete'),'all native split and unaffected-Space documents loaded');
         // Resolve each initial URL once, then navigate the same known twin target
         // to the left URL. No host permission or injected content script is needed.
@@ -311,6 +340,27 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
             const views=await Promise.all(request.tabIds.map(async id=>({id,...await pages.get(id).evaluate(()=>({visibility:document.visibilityState,topLevel:window===window.top,frames:document.querySelectorAll('iframe,frame').length,width:innerWidth,height:innerHeight}))})));assert(views.every(view=>view.visibility==='visible'&&view.topLevel&&view.frames===0&&view.width>0));await checkpoint('native-split-real-visible-panes',{views});
         });
         await checkpoint('native-split-drag-created',{before,after:created,pair,cdpTargets:infos.filter(info=>info.url.startsWith(`${fixture.base}/native-split/${nonce}/`))});
+        // Both pane links are served localhost anchors. They require real trusted
+        // input and Chrome's observed openerTabId, never a synthetic gesture.
+        for (const openerId of pair.tabIds) {
+            const page = pages.get(openerId); await ui(page, 'Focus original native split pane for a real child link', async () => {});
+            await page.evaluate(installTodayOrderTrace);
+            const childBefore = await read();
+            await ui(page, 'Click one served child link from the exact native split pane', () => page.click('#today-order-child'));
+            const childReceipt = await poll(async () => { const tabs = await apiPage.evaluate(async ids => (await chrome.tabs.query({})).filter(tab => !ids.includes(tab.id)).map(({ id, openerTabId, windowId, status, pendingUrl }) => ({ id, openerTabId, windowId, status, pendingUrl })), childBefore.tabs.map(tab => tab.id)); for (const tab of tabs) if (!owned.includes(tab.id)) owned.push(tab.id); return tabs; },
+                tabs => tabs.length === 1 && tabs[0].status === 'complete' && !tabs[0].pendingUrl, 'one completed native child from the trusted split-pane link');
+            assert.equal(childReceipt[0].openerTabId, openerId);
+            const trace = await page.evaluate(() => globalThis.__todayOrderTrace); assertTodayOrderInput(trace, { type: 'click', elementId: 'today-order-child' });
+            const childRead = async () => ({ ...await read(), snapshot: await snapshot(windowId), rendered: await sidebar.page.evaluate(readTodayOrderSidebar) });
+            const childAfter = await ui(sidebar.page, 'Inspect actual Today order after split-pane child creation', () => poll(childRead, state => {
+                try { assertNativeSplitChild(childBefore, state, { pair, openerId, inverted: representation.inverted }); return true; } catch { return false; }
+            }, 'child immediately below the complete native split pair in real rows and authenticated snapshot'));
+            const proof = assertNativeSplitChild(childBefore, childAfter, { pair, openerId, inverted: representation.inverted });
+            await checkpoint('native-split-trusted-child-after-complete-pair', { before: childBefore, after: childAfter, proof, trace });
+            await apiPage.evaluate(id => chrome.tabs.remove(id), proof.childId);
+            const childClosed = await poll(read, state => { try { assertNativeSplitPagesPreserved(childBefore, state); assert.deepEqual(state.spaces, childBefore.spaces); assertNativeSplitPair(state, pair); return true; } catch { return false; } }, 'exact child cleanup restores the original split identities and canonical order');
+            await checkpoint('native-split-child-cleanup', { childId: proof.childId, state: childClosed });
+        }
         // Switching Spaces and group sync are real user paths, with an existing
         // pair identity required throughout. No createSplit reissue is allowed.
         const other=initial.spaces.find(item=>item.id!==spaceId);assert(other);
@@ -323,7 +373,7 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         // Negative safety probe only: every successful Move case uses genuine menu input.
         const rejectedMoveRequest={
             type:'moveTodayTabsToSpace',windowId,spaceId,bookmarkFolderId:space.bookmarkFolderId,
-            destinationSpaceId:other.id,destinationBookmarkFolderId:other.bookmarkFolderId,inverted:false,
+            destinationSpaceId:other.id,destinationBookmarkFolderId:other.bookmarkFolderId,inverted:representation.inverted,
             entries:request.tabIds.map(tabId=>({tabId,url:exactTab(beforeMoveRejection,tabId).url}))
         };
         const rejectedMove=await sidebar.page.evaluate(message=>chrome.runtime.sendMessage(message),rejectedMoveRequest);
@@ -387,6 +437,6 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
     }
     finally{await finishBookmarkFixture([
         ()=>apiPage.evaluate(async ids=>{const live=new Set((await chrome.tabs.query({})).map(tab=>tab.id));const present=ids.filter(id=>live.has(id));if(present.length)await chrome.tabs.remove(present);},owned),
-        ()=>option('syncTabGroups',Boolean(settings.syncTabGroups)),()=>option('invertTabOrder',Boolean(settings.invertTabOrder))
+        ()=>option('syncTabGroups',Boolean(settings.syncTabGroups)),()=>option('invertTabOrder',settings.invertTabOrder!==false),()=>option('todayNewTabsAtTop',settings.todayNewTabsAtTop!==false)
     ],primaryError,record);}
 }

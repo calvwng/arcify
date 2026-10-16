@@ -472,20 +472,26 @@ test('actual sidebar New Tab retains one in-flight gesture across external Space
     assert.equal(newTabButton.getAttribute('aria-busy'), 'false');
 });
 
-test('actual sidebar keeps New Tab above inverted Today items and outside their order', async () => {
+test('actual sidebar keeps New Tab fixed above Today independently of either ordering setting', async () => {
     await selectSession('alpha'); await settled('alpha');
     const alpha = storedSpaces.find(space => space.id === 'alpha'), beta = storedSpaces.find(space => space.id === 'beta');
-    const beforeAlpha = [...alpha.temporaryTabs], beforeBeta = [...beta.temporaryTabs];
+    const beforeAlpha = [...alpha.temporaryTabs], beforeBeta = [...beta.temporaryTabs], beforeRepresentation = local.todayOrderRepresentation;
     beta.temporaryTabs = beta.temporaryTabs.filter(id => id !== 2); alpha.temporaryTabs = [1, 2];
-    await publishSpaces(); await wait(240);
     const get = chrome.storage.sync.get;
-    chrome.storage.sync.get = async () => ({ invertTabOrder: true });
     try {
-        await onChanged.emit({ invertTabOrder: { newValue: true } }, 'sync'); await wait(300);
-        assertNewTabRow('alpha');
-        assert.deepEqual([...newTabButton.nextElementSibling.querySelectorAll('.tab')].map(row => Number(row.dataset.tabId)), [2, 1]);
+        for (const todayInverted of [false, true]) {
+            local.todayOrderRepresentation = { version: 1, inverted: todayInverted };
+            await publishSpaces(); await wait(240);
+            for (const savedInverted of [false, true]) {
+                chrome.storage.sync.get = async () => ({ invertTabOrder: savedInverted, todayNewTabsAtTop: !savedInverted });
+                await onChanged.emit({ invertTabOrder: { newValue: savedInverted }, todayNewTabsAtTop: { newValue: !savedInverted } }, 'sync'); await wait(300);
+                assertNewTabRow('alpha');
+                assert.deepEqual([...newTabButton.nextElementSibling.querySelectorAll('.tab')].map(row => Number(row.dataset.tabId)), todayInverted ? [2, 1] : [1, 2]);
+                assert.deepEqual(alpha.temporaryTabs, [1, 2]);
+            }
+        }
     } finally {
-        chrome.storage.sync.get = get; alpha.temporaryTabs = beforeAlpha; beta.temporaryTabs = beforeBeta;
+        chrome.storage.sync.get = get; alpha.temporaryTabs = beforeAlpha; beta.temporaryTabs = beforeBeta; local.todayOrderRepresentation = beforeRepresentation;
         await publishSpaces(); await onChanged.emit({ invertTabOrder: { newValue: false } }, 'sync'); await wait(300);
     }
 });
