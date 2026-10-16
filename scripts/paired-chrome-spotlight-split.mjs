@@ -193,14 +193,16 @@ export async function exerciseSpotlightSplit({ browser, observePage, apiPage, sp
         const inputs = await overlayPage.evaluate(() => globalThis.__spotlightSplitInputs || []);
         const allEvents = await apiPage.evaluate(() => globalThis.__spaceActionObservation.events);
         assertSpotlightSplitInput(inputs, { command, targetId, method }); assertSpotlightSplitRequest(allEvents, expected);
-        const sourceProof = assertSpotlightSplitSource(await spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events), request, exact(before.tabs, sourceId).url);
+        const peerEvents = await spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events);
+        const sourceProof = assertSpotlightSplitSource(peerEvents, request, exact(before.tabs, sourceId).url);
         const receipt = assertSpotlightSplitCommitted(before, after, request, allEvents);
         await closeOverlay();
         const screenshotProof = command === 'createSplitView' ? await captureNativeWindow({ nonce, colors: [[248,215,218],[211,244,224]] })
             : await screenshot(overlayPage, `spotlight-unsplit-${sourceId}-${method}`, true, { fullPage: false });
         assert(screenshotProof?.filename, 'Every create/end needs native/page screenshot evidence.');
-        const final = await read(); assertSpotlightSplitCommitted(before, final, request, await apiPage.evaluate(() => globalThis.__spaceActionObservation.events));
-        await checkpoint('trusted-split-committed', { sourceId, targetId, command, method, before, after: final, request, receipt, sourceProof, inputs, rows, pickerShot, screenshot: screenshotProof });
+        const final = await read(), finalEvents = await apiPage.evaluate(() => globalThis.__spaceActionObservation.events);
+        assertSpotlightSplitCommitted(before, final, request, finalEvents);
+        await checkpoint('trusted-split-committed', { sourceId, targetId, command, method, before, after: final, request, receipt, sourceProof, inputs, rows, pickerShot, screenshot: screenshotProof, requestEvents: events, events: allEvents, peerEvents, finalEvents });
     };
     try {
         await setting(false);
@@ -224,8 +226,13 @@ export async function exerciseSpotlightSplit({ browser, observePage, apiPage, sp
             }
             await checkpoint('both-source-panes-proved', { sync, state: await read() });
         }
-    } catch (error) { primaryError = error; await checkpoint('spotlight-split-failed', { message: error.message }); }
-    await finishBookmarkFixture(primaryError, [
+    } catch (error) {
+        primaryError = error;
+        await checkpoint('spotlight-split-failed', { message: error.message }).catch(evidenceError => {
+            try { primaryError.evidenceErrors = [evidenceError.message]; } catch { /* Diagnostic attachment cannot replace a read-only original error or prevent cleanup. */ }
+        });
+    }
+    await finishBookmarkFixture([
         closeOverlay,
         () => apiPage.evaluate(ids => chrome.tabs.remove(ids), owned),
         () => setting(Boolean(initial.sync.syncTabGroups)),
@@ -241,6 +248,7 @@ export async function exerciseSpotlightSplit({ browser, observePage, apiPage, sp
         },
         () => apiPage.evaluate(() => { globalThis.__navigationGroupObservation?.stop(); globalThis.__spaceActionObservation?.stop(); }),
         () => spotlightOptions.evaluate(() => globalThis.__spaceActionObservation?.stop())
-    ], 'Spotlight Split acceptance cleanup');
+    ], primaryError, ({ errors }) => checkpoint('spotlight-split-cleanup-failed', { errors }));
+    if (primaryError) throw primaryError;
     return evidence;
 }
