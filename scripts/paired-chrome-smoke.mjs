@@ -436,6 +436,12 @@ async function sidebarInput(page) {
 async function waitSidebarCommand(page) {
     await page.waitForFunction(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument || document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('[data-result-type="arcify-sidebar-command"]'), { polling: 50 });
 }
+async function waitStartupResults(page) {
+    // Action rows may render before loadInitialResults completes. This fixture
+    // owns live tabs, so require an ordinary tab result before its one-shot offer.
+    // Readiness is passive; an unaccepted offer is never retried.
+    await page.waitForSelector('[data-testid="spotlight-result"][data-result-type="open-tab"]', { visible: true });
+}
 async function waitSidebarSuccess(page) {
     await page.waitForFunction(() => (document.getElementById('arcify-spotlight-host')?.shadowRoot?.querySelector('[data-testid="spotlight-frame"]')?.contentDocument || document.getElementById('arcify-spotlight-host')?.shadowRoot || document).querySelector('.arcify-bridge-status')?.textContent.includes('Arcify sidebar opened.'), { polling: 50 });
 }
@@ -1185,7 +1191,7 @@ try {
         });
         const helper = await newTabPage('chrome://newtab/');
         await waitSidebarCommand(helper.page);
-        await helper.page.waitForSelector('[data-testid="spotlight-result"]:not([data-result-type="arcify-sidebar-command"])');
+        await waitStartupResults(helper.page);
         const focusBefore = await helper.page.evaluate(() => ({ focused: document.hasFocus(), activeElement: document.activeElement?.tagName, inputFocused: document.activeElement?.matches('[data-testid="spotlight-input"]') }));
         const offered = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: helper.tab.id });
         assert.equal(offered.ok, true, JSON.stringify(offered)); assert.equal(offered.accepted, true, JSON.stringify(offered));
@@ -1221,7 +1227,7 @@ try {
         try {
             helper = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`);
             await waitSidebarCommand(helper.page);
-            await helper.page.waitForSelector('[data-testid="spotlight-result"]:not([data-result-type="arcify-sidebar-command"])');
+            await waitStartupResults(helper.page);
             await helper.page.evaluate(installColdSetupObserver, { kind: 'page', peerId: arcifyId, windowId: fixture.windowA });
             pageObserved = true;
             const offered = await external(arcifyOptions, spotlightId, 'startupSuggestion', { windowId: fixture.windowA, tabId: helper.tab.id });

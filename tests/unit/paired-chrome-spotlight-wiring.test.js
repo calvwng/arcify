@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
 import { terminateObservedWorker } from '../../scripts/paired-chrome-worker.mjs';
 import { SPOTLIGHT_ACTION_CASE_NAME } from '../../scripts/paired-chrome-spotlight-actions.mjs';
@@ -13,6 +14,31 @@ function adapter(name, end, dependencies) {
     const finish = runner.indexOf(end, start); assert(finish > start);
     return Function(...Object.keys(dependencies), `return (${runner.slice(start, finish).trim()});`)(...Object.values(dependencies));
 }
+
+test('startup readiness ignores early action rows and waits passively for loaded ordinary tab results', async () => {
+    const { document } = parseHTML('<div data-testid="spotlight-result" data-result-type="arcify-sidebar-command"></div><div data-testid="spotlight-result" data-result-type="arcify-space-action"></div>');
+    const calls = [], wait = adapter('waitStartupResults', 'async function waitSidebarSuccess(', {});
+    await wait({ waitForSelector: async (selector, options) => {
+        calls.push({ selector, options }); assert.equal(document.querySelector(selector), null);
+        const row = document.createElement('div'); row.dataset.testid = 'spotlight-result'; row.dataset.resultType = 'open-tab'; document.body.append(row);
+        assert.equal(document.querySelector(selector), row);
+    } });
+    assert.deepEqual(calls, [{ selector: '[data-testid="spotlight-result"][data-result-type="open-tab"]', options: { visible: true } }]);
+    const source = runner.slice(runner.indexOf('await step(stepNames[14]'), runner.indexOf('await step(stepNames[15]'));
+    assert(source.indexOf('await waitStartupResults(helper.page)') < source.indexOf("const offered = await external("));
+    assert.match(source, /assert.equal\(offered.accepted, true/);
+    assert.match(source, /assert.equal\(repeated.accepted, false/);
+    const cold = runner.slice(runner.indexOf('await step(stepNames[15]'), runner.indexOf('await step(stepNames[16]'));
+    assert(cold.indexOf('await waitStartupResults(helper.page)') > 0);
+    assert(cold.indexOf('await waitStartupResults(helper.page)') < cold.indexOf("const offered = await external("));
+    assert.doesNotMatch(runner, /spotlight-result"\]:not\(\[data-result-type="arcify-sidebar-command"/);
+});
+test('startup readiness failure is preserved without a second observation or offer', async () => {
+    const failure = new Error('Ordinary results did not load'); let reads = 0;
+    const wait = adapter('waitStartupResults', 'async function waitSidebarSuccess(', {});
+    await assert.rejects(wait({ waitForSelector: async () => { reads++; throw failure; } }), error => error === failure);
+    assert.equal(reads, 1);
+});
 
 test('recovery and initial actions are mandatory additions after all previous full cases and before unchanged endings', () => {
     const start = runner.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {\n", runner.indexOf("    } // Full-only cases 34–35, 37–38 and 40–45."));

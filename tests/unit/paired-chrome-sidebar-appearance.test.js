@@ -1,7 +1,31 @@
 // Validator tests only. These imports never launch Chrome.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertCompactSidebar, assertFavoritesResultVisible, assertFavoritesResultDismissed, tabToSelector, setAppearanceControl } from '../../scripts/paired-chrome-sidebar-appearance.mjs';
+import { assertCompactSidebar, assertFavoritesResultVisible, assertFavoritesResultDismissed, tabToSelector, setAppearanceControl, prepareAppearanceBaseline } from '../../scripts/paired-chrome-sidebar-appearance.mjs';
+
+function appearanceBaselineFixture(change = () => {}) {
+    const calls = [], control = { id: 8, windowId: 2, active: true, incognito: false };
+    const state = { tabs: [{ ...control }, { id: 9, windowId: 2, active: false }, { id: 10, windowId: 7, active: true }], durable: [] };
+    change({ control, state });
+    const apiPage = { evaluate: async () => { calls.push('read-control'); return control; } }, page = {};
+    return { calls, state, args: { apiPage, page, windowId: 7,
+        ui: async (target, _label, action) => { calls.push(target === apiPage ? 'foreground-control' : 'foreground-sidebar'); return action(); },
+        read: async () => { calls.push('read-baseline'); return state; }, record: async observation => { calls.push(observation); } } };
+}
+test('appearance baseline selects the future Settings control tab before returning to sidebar and reading all windows', async () => {
+    const f = appearanceBaselineFixture(); assert.equal(await prepareAppearanceBaseline(f.args), f.state);
+    assert.deepEqual(f.calls.slice(0, 4), ['foreground-control', 'read-control', 'foreground-sidebar', 'read-baseline']);
+    assert.deepEqual(f.calls[4], { phase: 'appearance-control-baseline', control: { id: 8, windowId: 2, active: true, incognito: false } });
+});
+for (const [name, change] of Object.entries({ missingId: f => delete f.control.id, wrongWindow: f => f.control.windowId = 7,
+    inactive: f => f.control.active = false, private: f => f.control.incognito = true,
+    lostControl: f => f.state.tabs.shift(), duplicateId: f => f.state.tabs.push({ ...f.state.tabs[0] }),
+    changedWindow: f => f.state.tabs[0].windowId = 3, changedSelection: f => f.state.tabs[0].active = false })) {
+    test(`appearance baseline fails rather than normalizing ${name}`, async () => {
+        const f = appearanceBaselineFixture(change); await assert.rejects(prepareAppearanceBaseline(f.args));
+        assert(!f.calls.some(call => call?.phase === 'appearance-control-baseline'));
+    });
+}
 
 const visible = () => ({ exists: true, wrapperVisible: true, wrapperHidden: false, wrapperHeight: 75, contentY: 250,
     dismissVisible: true, dismissTag: 'BUTTON', dismissDisabled: false, dismissName: 'Dismiss Favorites message',

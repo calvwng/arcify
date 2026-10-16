@@ -6,6 +6,27 @@ import { readFavoritesDropMarker, assertFavoritesDropMarker, assertSavedFavorite
 import { readSpaceDropMarker, assertSpaceDropMarker, readMarkerScreenshotPixels, assertMarkerScreenshotPixels } from './paired-chrome-space-marker.mjs';
 import { locateFreshDragGeometry } from './paired-chrome-ui.mjs';
 
+export async function prepareAppearanceBaseline({ apiPage, page, ui, read, record, windowId }) {
+    // Later settings input selects apiPage in its control window. Establish that
+    // deliberate selection before the strict all-window conservation baseline.
+    const control = await ui(apiPage, 'Prepare appearance control window before baseline',
+        () => apiPage.evaluate(async () => {
+            const tab = await chrome.tabs.getCurrent();
+            return { id: tab?.id, windowId: tab?.windowId, active: tab?.active, incognito: tab?.incognito };
+        }));
+    assert(Number.isSafeInteger(control?.id) && control.id > 0);
+    assert(Number.isSafeInteger(control.windowId) && control.windowId > 0);
+    assert.notEqual(control.windowId, windowId, 'Settings and the fixture sidebar must use distinct windows.');
+    assert.equal(control.active, true); assert.equal(control.incognito, false);
+    await ui(page, 'Observe density fixture baseline', async () => {});
+    const state = await read();
+    const retained = state.tabs.filter(tab => tab.id === control.id);
+    assert.equal(retained.length, 1); assert.equal(retained[0].windowId, control.windowId);
+    assert.equal(retained[0].active, true, 'Foregrounding the sidebar must retain the selected Settings tab in its control window.');
+    await record({ phase: 'appearance-control-baseline', control });
+    return state;
+}
+
 export async function tabToSelector(page, selector, maxTabs = 120, { backward = false } = {}) {
     if (backward) await page.keyboard.down('Shift');
     try {
@@ -240,8 +261,8 @@ export async function exerciseSidebarAppearance({ apiPage, newTabPage, ui, scree
         }
         await apiPage.evaluate(ids => chrome.tabs.remove(ids), saved.filter((_, index) => index % 2 === 0).map(item => item.tabId));
         await poll(() => snapshot(), state => saved.filter((_, index) => index % 2 === 0).every(item => state.favorites.find(favorite => favorite.id === item.id)?.tabId === null), 'real closed density Favorites');
-        await ui(page, 'Observe density fixture baseline', async () => {});
-        const before = await read(), originalOrder = before.durable.map(item => item.id);
+        const before = await prepareAppearanceBaseline({ apiPage, page, ui, read, record, windowId: fixture.windowA });
+        const originalOrder = before.durable.map(item => item.id);
         await set('favoritesLayout', 'compact');
         assert.equal(await apiPage.$eval('#favoriteTileSize', node => node.disabled), false);
         await set('spaceHeaderSize', 12);
