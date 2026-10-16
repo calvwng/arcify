@@ -201,5 +201,32 @@ consumed receipts, active created native tabs and overlay retirement. The run
 then failed its required after-shot on the now-background overlay source page;
 its later replay/rejection checks did not complete. The harness now captures
 the verified active reopened destination as described above and persists the
-action proof before that required capture. This capture correction is pending
-fresh hosted verification; the earlier failed run is not an acceptance pass.
+action proof before that required capture. The later exact-pair run below
+verified both required destination captures; the earlier failed run is not an
+acceptance pass.
+
+
+## Cleanup activation ordering regression
+
+Hosted Arcify `d0b70273a4eed9eabceb21533e9a1b99ea50bb02` with the same exact
+Spotlight peer reached `archive-case-complete`, both required exact reopened
+destination screenshots, cached replay, consumed-view rejection, uncertain-create
+rejection, and stale selection/pairing rejection. The job then failed the strict
+cleanup comparison with `true !== false`; it is not a passing Archive plan.
+
+The cleanup restored original active tabs before its last settings UI operation.
+That visible operation selects the Arcify options tab again, invalidating the
+restored active flags. Executing the actual cleanup sequence against a native-API
+mock reproduces the same failure when the original active control tab is the
+Spotlight options tab. This ordering defect matches the hosted UI trace; that
+failed report did not retain the original/final cleanup snapshots or name the
+mismatching tab field, so the precise historical mismatch remains inferred.
+
+Cleanup now restores the original active tab IDs after all settings UI, then
+restores the original selected Spaces and focused window. Reapplying the original
+selection after native activation preserves a selected Space that differs from
+the active tab’s owner; early Space restoration before fixture deletion remains. All existing exact native-tab, Archive
+record/claim and selected-Space cleanup assertions remain mandatory. Original
+and final cleanup snapshots are persisted before those assertions, and cleanup
+failures are appended without replacing completed action evidence or an earlier
+acceptance failure. The correction awaits fresh exact-pair hosted verification.

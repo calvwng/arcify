@@ -335,12 +335,14 @@ test('existing callbacks retain their reviewed bytes except exact additive route
     // Normalize only these reviewed additive harness lines. The reviewed case 36 control-window setup
     // is retained in its new receipt; other original bodies/options/names stay unchanged. New wiring has its
     // own executable mocked-adapter tests in paired-chrome-extended-wiring.
+    // Case 20's reviewed viewport/paint readiness is retained in this receipt;
+    // its original refresh and exact native-identity gates are still required.
     const preserved = [...definitions].filter(([index]) => index < 50).sort(([a], [b]) => a - b).map(([, item]) => ({ ...item,
         callback: item.callback.replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
             .replace('        helperNavigation:true,\n', '') }));
-    assert.equal(digest(preserved), 'b7f1addd2dca0e23e437a6ff6035dbfeec8f06e9a6aa843f5b726d31016e6107');
+    assert.equal(digest(preserved), '78ad712cf32595be32920d118d0bd7206a85713620a140afe1f83ce468ca0088');
     // Supplemental callbacks 50–53 are unchanged from a56bd14; reopening shares the exact case 53 definition.
     assert.equal(digest([...definitions].filter(([index]) => index >= 50).sort(([a], [b]) => a - b).map(([, item]) => item)), '8f9a8a9f702230caf28fedeaf95b84cbbbc18ae15294506eb8eaf3c2f7ca0bef');
     assert.equal(digest(names.slice(0, 50)), '82b76b57d9a4a3fcefa59ea4db2f52af9664a1d5693b2efff89405c32827c36c');

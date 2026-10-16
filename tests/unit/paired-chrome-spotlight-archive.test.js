@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
+import { finishBookmarkFixture } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 import { registerFavoriteMessages } from '../../favorite-store.js';
 import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
 import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
@@ -624,4 +625,89 @@ for (const captureFailure of [false, true]) test(`real reopen wiring persists ac
     if (captureFailure) await assert.rejects(run(...Object.values(params)), /Required destination capture failed/); else await run(...Object.values(params));
     assert.deepEqual(calls, ['selected', 'trusted-input', 'exact-archive-entry-reopened', 'required-destination', ...(!captureFailure ? ['exact-reopened-destination-captured'] : [])]);
     assert.equal(checkpoints[0].receipt.tabId, 30); assert.equal(evidence.matrix.length, 1); assert.deepEqual(owned, [30]);
+});
+
+function archiveCleanupFixture(fault = null) {
+    const original = { tabs: [
+        { id: 1, windowId: 7, url: 'about:blank', active: false, pinned: false, incognito: false, splitViewId: -1 },
+        { id: 2, windowId: 7, url: `chrome-extension://${ARCIFY}/options.html`, active: false, pinned: false, incognito: false, splitViewId: -1 },
+        { id: 3, windowId: 7, url: `chrome-extension://${SPOTLIGHT}/options.html`, active: true, pinned: false, incognito: false, splitViewId: -1 },
+        { id: 4, windowId: 8, url: URL, active: true, pinned: false, incognito: false, splitViewId: -1 }
+    ], windows: [{ id: 7, focused: false }, { id: 8, focused: true }], local: {}, sync: {}, session: { activeSpaces: { 7: 'home', 8: 'work' } } };
+    if (fault === 'different-owner') original.session.activeSpaces[8] = 'selected-other';
+    const state = copy(original), calls = [], evidence = { complete: true, checkpoints: [{ phase: 'archive-case-complete' }] };
+    state.tabs.find(tab => tab.id === 4).active = false;
+    state.tabs.push({ id: 90, windowId: 8, active: false }, { id: 91, windowId: 8, active: true });
+    state.local = { archivedTabs: [{ entryId: 'fixture-entry' }], archiveReopenClaims: { version: 1, entries: { 'fixture-entry': { phase: 'consumed' } } } };
+    state.session.activeSpaces[8] = 'fixture-space'; state.session.archiveBrowserSession = 'fixture-session'; state.sync.syncTabGroups = false;
+    const activate = id => { const chosen = state.tabs.find(tab => tab.id === id); assert(chosen); for (const tab of state.tabs.filter(tab => tab.windowId === chosen.windowId)) tab.active = tab.id === id;
+        // Mirror SpaceStore's tabs.onActivated owner-selection side effect.
+        state.session.activeSpaces[chosen.windowId] = id === 4 ? 'work' : 'home'; };
+    const focus = id => { for (const window of state.windows) window.focused = window.id === id; };
+    const area = name => ({ get: async keys => copy(Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(key => Object.hasOwn(state[name], key)).map(key => [key, state[name][key]]))),
+        set: async value => Object.assign(state[name], copy(value)), remove: async key => { delete state[name][key]; } });
+    const chrome = { tabs: { query: async () => copy(state.tabs), update: async (id, options) => {
+        assert.deepEqual(copy(options), { active: true }); calls.push(['activate', id]);
+        if (fault === 'activation-fails' && id === 3) throw new Error('Exact original tab cannot be restored');
+        if (fault !== 'activation-noop') activate(id);
+    }, remove: async ids => { state.tabs = state.tabs.filter(tab => !(Array.isArray(ids) ? ids : [ids]).includes(tab.id)); } },
+    windows: { update: async (id, options) => { assert.deepEqual(copy(options), { focused: true }); calls.push(['focus', id]); focus(id); } },
+    storage: { local: area('local'), sync: area('sync'), session: area('session') } };
+    const apiPage = { evaluate: async (fn, arg) => copy(await vm.runInNewContext(`(${fn.toString()})(arg)`, { chrome, arg: copy(arg) })) };
+    const checkpoint = async (phase, data = {}) => { evidence.checkpoints.push({ phase, ...copy(data) }); };
+    const params = { assert, finishBookmarkFixture, original, apiPage, revoked: false, adapters: {}, closeOverlay: async () => {}, favoriteIds: [],
+        local: async message => { if (message.action === 'activate') { calls.push(['select', message.windowId, message.spaceId]); state.session.activeSpaces[message.windowId] = message.spaceId; }
+            if (message.action === 'get' && fault === 'unrelated-selection') state.session.activeSpaces[8] = 'unowned';
+            return { success: true, spaces: [] }; },
+        owned: [90, 91], fixtureApi: { tab: { id: 90 } }, entries: [{ entryId: 'fixture-entry' }], roots: [], spaceRoots: [],
+        archive: async message => { if (message.action === 'list') return copy(state.local.archivedTabs); assert.equal(message.action, 'replace'); state.local.archivedTabs = copy(message.entries); },
+        option: async value => { assert.equal(value, false); calls.push(['option-ui']); activate(2); focus(7);
+            if (fault === 'unrelated-url') state.tabs.find(tab => tab.id === 1).url = 'https://changed.test/';
+            if (fault === 'unrelated-pin') state.tabs.find(tab => tab.id === 1).pinned = true;
+            if (fault === 'unrelated-window') state.tabs.find(tab => tab.id === 1).windowId = 8;
+            if (fault === 'unrelated-split') state.tabs.find(tab => tab.id === 1).splitViewId = 10;
+            if (fault === 'unrelated-private') state.tabs.find(tab => tab.id === 1).incognito = true;
+            if (fault === 'unrelated-tab') state.tabs.push({ id: 99, windowId: 7, active: false });
+            if (fault === 'unrelated-archive') state.local.archivedTabs = [{ entryId: 'unowned' }];
+            if (fault === 'unrelated-claim') state.local.archiveReopenClaims = { entries: { unowned: { phase: 'consumed' } } };
+        }, exact: (values, id) => { const matches = values.filter(value => value.id === id); assert.equal(matches.length, 1); return matches[0]; }, checkpoint,
+        primaryError: fault === 'primary-error' ? new Error('Original acceptance failure') : undefined };
+    if (fault === 'primary-error') params.option = async () => { throw new Error('Cleanup option failure'); };
+    const start = source.indexOf('        await finishBookmarkFixture([', source.indexOf('async function archiveFixture'));
+    const end = source.indexOf('\n    }\n}', start);
+    assert(start > 0 && end > start);
+    const run = new (Object.getPrototypeOf(async function () {}).constructor)(...Object.keys(params), source.slice(start, end));
+    return { run: () => run(...Object.values(params)), original, state, evidence, calls, primaryError: params.primaryError };
+}
+
+test('Archive cleanup restores exact original active tabs after its final settings UI, then original focus', async () => {
+    const value = archiveCleanupFixture(); await value.run();
+    assert.deepEqual(value.state.tabs, value.original.tabs); assert.deepEqual(value.state.windows, value.original.windows);
+    assert.deepEqual(value.state.local, value.original.local); assert.deepEqual(value.state.sync, value.original.sync); assert.deepEqual(value.state.session, value.original.session);
+    assert.deepEqual(value.calls, [['select', 7, 'home'], ['select', 8, 'work'], ['option-ui'], ['activate', 3], ['activate', 4], ['select', 7, 'home'], ['select', 8, 'work'], ['focus', 8]]);
+    assert.equal(value.evidence.complete, true);
+    assert.deepEqual(value.evidence.checkpoints.map(item => item.phase), ['archive-case-complete', 'archive-cleanup-observed', 'archive-cleanup-verified']);
+});
+
+test('Archive cleanup preserves a selected Space distinct from the restored active tab owner', async () => {
+    const value = archiveCleanupFixture('different-owner'); await value.run();
+    assert.deepEqual(value.state.tabs, value.original.tabs); assert.deepEqual(value.state.session.activeSpaces, value.original.session.activeSpaces);
+    assert.deepEqual(value.calls.slice(-5), [['activate', 3], ['activate', 4], ['select', 7, 'home'], ['select', 8, 'selected-other'], ['focus', 8]]);
+});
+
+for (const fault of ['activation-noop', 'activation-fails', 'unrelated-url', 'unrelated-pin', 'unrelated-window', 'unrelated-split', 'unrelated-private', 'unrelated-tab', 'unrelated-archive', 'unrelated-claim', 'unrelated-selection']) {
+    test(`Archive cleanup still fails closed and preserves completed action evidence for ${fault}`, async () => {
+        const value = archiveCleanupFixture(fault); await assert.rejects(value.run(), AggregateError);
+        assert.equal(value.evidence.complete, true); assert.equal(value.evidence.checkpoints[0].phase, 'archive-case-complete');
+        const observed = value.evidence.checkpoints.find(item => item.phase === 'archive-cleanup-observed'); assert(observed);
+        assert.deepEqual(observed.original, value.original); assert.deepEqual(observed.final.tabs, value.state.tabs);
+        assert(!value.evidence.checkpoints.some(item => item.phase === 'archive-cleanup-verified'));
+        assert.equal(value.evidence.checkpoints.at(-1).phase, 'archive-cleanup-failed'); assert(value.evidence.checkpoints.at(-1).errors.length);
+    });
+}
+
+test('Archive cleanup records secondary failures without replacing the original acceptance failure', async () => {
+    const value = archiveCleanupFixture('primary-error'); await value.run();
+    assert.equal(value.primaryError.message, 'Original acceptance failure'); assert.deepEqual(value.primaryError.cleanupErrors, ['Cleanup option failure']);
+    assert.equal(value.evidence.checkpoints.at(-1).phase, 'archive-cleanup-failed');
 });

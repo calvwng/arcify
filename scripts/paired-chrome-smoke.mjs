@@ -40,6 +40,7 @@ import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, revealNativeSidebarSpace, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry, attachCreatedFixtureTab } from './paired-chrome-ui.mjs';
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
+import { locateRemainingNewTabResult } from './paired-chrome-newtab-result-readiness.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
 import { exercisePersistentFavorites } from './paired-chrome-persistent-favorites.mjs';
 import { exerciseSavedFavoriteMarker } from './paired-chrome-favorites-marker.mjs';
@@ -1472,7 +1473,12 @@ try {
         assert.equal(await helper.page.$eval('[data-testid="spotlight-input"]', input => input.value), '');
         await screenshot(helper.page, 'closed-newtab-removed-without-typing');
         const before = await tabsIn(fixture.windowA);
-        await clickResult(helper.page, 'New Tab');
+        await ui(helper.page, 'Select remaining New Tab', () => clickFreshResult(timeout =>
+            locateRemainingNewTabResult(helper.page, timeout, async observation => {
+                report.newTabResultReadiness ||= []; report.newTabResultReadiness.push({ ...observation, observedAt: new Date().toISOString() }); await saveReport();
+            }), async observation => {
+                report.resultClicks ||= []; report.resultClicks.push({ title: 'New Tab', ...observation, observedAt: new Date().toISOString() }); await saveReport();
+            }));
         await poll(() => tab(second.tab.id), tab => tab.active, 'remaining legitimate New Tab activation');
         await poll(async () => helper.page.isClosed(), closed => closed, 'source helper closes after switching to the other tab');
         assert.equal((await tabsIn(fixture.windowA)).length, before.length - 1, 'Only the source helper may close during a valid switch.');

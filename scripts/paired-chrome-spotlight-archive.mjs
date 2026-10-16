@@ -556,7 +556,7 @@ async function archiveFixture(adapters, run) {
             async () => { if (adapters.nativePanel && (await adapters.nativePanel.state()).contexts.length) await adapters.nativePanel.close(); },
             closeOverlay,
             async () => { for (const id of favoriteIds) await favorite({ action: 'remove', windowId, favoriteId: id }); },
-            async () => { for (const tab of original.tabs.filter(tab => tab.active)) await apiPage.evaluate(id => chrome.tabs.update(id, { active: true }), tab.id); for (const [id, spaceId] of Object.entries(original.session.activeSpaces || {})) await local({ action: 'activate', windowId: Number(id), spaceId }); },
+            async () => { for (const [id, spaceId] of Object.entries(original.session.activeSpaces || {})) await local({ action: 'activate', windowId: Number(id), spaceId }); },
             () => apiPage.evaluate(async ids => { const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); const present = [...new Set(ids)].filter(id => live.has(id)); if (present.length) await chrome.tabs.remove(present); }, owned.filter(id => id !== fixtureApi?.tab.id)),
             async () => { if (!entries) return; const existing = await archive({ action: 'list' }); await archive({ action: 'replace', expected: existing, entries: existing.filter(entry => !entries?.some(owned => owned.entryId === entry.entryId)) }); },
             async () => { if (fixtureApi) await apiPage.evaluate(id => chrome.tabs.remove(id), fixtureApi.tab.id); },
@@ -568,9 +568,14 @@ async function archiveFixture(adapters, run) {
             () => apiPage.evaluate(async ids => { for (const id of ids) { let nodes; try { nodes = await chrome.bookmarks.getSubTree(id); } catch { continue; } const [node] = nodes; if (!node || node.url || node.children?.length) throw new Error('Cleanup refuses unexpected nonempty Space root.'); await chrome.bookmarks.removeTree(id); } }, spaceRoots),
             () => option(Boolean(original.sync.syncTabGroups)),
             () => apiPage.evaluate(async original => { if (!Object.hasOwn(original, 'syncTabGroups')) await chrome.storage.sync.remove('syncTabGroups'); }, original.sync),
+            // Settings UI selects its own tab. Restore exact original native tabs only
+            // after the last UI operation. Native activation may select its owning
+            // Space, so restore the independent original selections afterward too.
+            async () => { for (const tab of original.tabs.filter(tab => tab.active)) await apiPage.evaluate(id => chrome.tabs.update(id, { active: true }), tab.id);
+                for (const [id, spaceId] of Object.entries(original.session.activeSpaces || {})) await local({ action: 'activate', windowId: Number(id), spaceId }); },
             async () => { const focused = original.windows.find(window => window.focused); if (focused) await apiPage.evaluate(id => chrome.windows.update(id, { focused: true }), focused.id); },
-            async () => { await local({ action: 'get' }); const final = await apiPage.evaluate(async () => ({ tabs: await chrome.tabs.query({}), local: await chrome.storage.local.get(['archivedTabs', 'archiveReopenClaims']), session: await chrome.storage.session.get('activeSpaces') })); assert.deepEqual(final.local, original.local); assert.deepEqual(final.session.activeSpaces, original.session.activeSpaces); assert.deepEqual(final.tabs.map(tab => tab.id).sort((a, b) => a - b), original.tabs.map(tab => tab.id).sort((a, b) => a - b)); for (const tab of original.tabs) { const kept = exact(final.tabs, tab.id); for (const key of ['windowId', 'url', 'pinned', 'incognito', 'active', 'splitViewId']) assert.equal(kept[key], tab[key]); } await checkpoint('archive-cleanup-verified', { final }); }
-        ], primaryError);
+            async () => { await local({ action: 'get' }); const final = await apiPage.evaluate(async () => ({ tabs: await chrome.tabs.query({}), local: await chrome.storage.local.get(['archivedTabs', 'archiveReopenClaims']), session: await chrome.storage.session.get('activeSpaces') })); await checkpoint('archive-cleanup-observed', { original, final }); assert.deepEqual(final.local, original.local); assert.deepEqual(final.session.activeSpaces, original.session.activeSpaces); assert.deepEqual(final.tabs.map(tab => tab.id).sort((a, b) => a - b), original.tabs.map(tab => tab.id).sort((a, b) => a - b)); for (const tab of original.tabs) { const kept = exact(final.tabs, tab.id); for (const key of ['windowId', 'url', 'pinned', 'incognito', 'active', 'splitViewId']) assert.equal(kept[key], tab[key], `Cleanup preserves original native tab ${tab.id} ${key}.`); } await checkpoint('archive-cleanup-verified', { final }); }
+        ], primaryError, failure => checkpoint('archive-cleanup-failed', { errors: failure.errors }));
     }
 }
 
