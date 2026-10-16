@@ -27,7 +27,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
-import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
+import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, revealNativeSidebarSpace, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry, attachCreatedFixtureTab } from './paired-chrome-ui.mjs';
 import { readNewTabReuseState, assertActiveNewTabReused, isSpotlightNewTabTarget } from './paired-chrome-newtab.mjs';
 import { KEYBOARD_CSP, KEYBOARD_HTML, KEYBOARD_SCRIPT, spotlightSurface, assertHostKeyboardIsolated } from './paired-chrome-keyboard.mjs';
@@ -463,7 +463,7 @@ async function sidebarEnter(page, label) {
 }
 
 // Open through the real authenticated Spotlight command, then identify its native renderer.
-async function nativeTodayMoveSidebar() {
+async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
     await arcifyOptions.evaluate(() => {
         globalThis.__pairedSidebarEvents = [];
         chrome.sidePanel.onOpened.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'opened', ...info }));
@@ -477,6 +477,11 @@ async function nativeTodayMoveSidebar() {
         const eventCount = (await nativePanelState()).events.length;
         await sidebarEnter(helper.page, 'Open genuine native panel for Today Move');
         await waitSidebarSuccess(helper.page);
+        if (revealSpaceId !== null) {
+            const { page } = await resolveNativeSidebarTarget();
+            const reveal = await revealNativeSidebarSpace({ page, poll, extensionId: arcifyId, windowId: fixture.windowA, spaceId: revealSpaceId });
+            (report.nativeSidebarReveals ||= []).push(reveal); await saveReport();
+        }
         const evidence = await captureNativeSidebar(eventCount, 'today-move-native-panel-host-proof');
         const { page } = await resolveNativeSidebarTarget();
         return { page: await observePage(page), evidence,

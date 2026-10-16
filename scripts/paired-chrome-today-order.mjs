@@ -209,7 +209,7 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
         await option('syncTabGroups', groupSync); await option('todayNewTabsAtTop', true); await option('invertTabOrder', false);
         folder = await apiPage.evaluate(async ({ nonce, base }) => {
             const root = (await chrome.bookmarks.search({ title: 'Arcify' })).find(node => !node.url); if (!root) throw new Error('Missing exact Arcify root.');
-            const folder = await chrome.bookmarks.create({ parentId: root.id, title: `Today Order ${nonce}` });
+            const folder = await chrome.bookmarks.create({ parentId: root.id, title: `Today Order ${nonce.slice(0, 6)}` });
             const one = await chrome.bookmarks.create({ parentId: folder.id, title: 'Order saved one', url: `${base}/saved-one` });
             const nested = await chrome.bookmarks.create({ parentId: folder.id, title: 'Order saved folder' });
             await chrome.bookmarks.create({ parentId: nested.id, title: 'Order nested pin', url: `${base}/saved-nested` });
@@ -336,7 +336,10 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
             } catch { return false; }
         }, 'same exact content identities survive witnessed reload with only proven control-page replacements');
         await peerPage.evaluate(() => globalThis.__stopTodayOrderReloadEvents());
-        native = await nativeSidebar(); await select();
+        // A remounted switcher can leave its already-selected chip offscreen.
+        // Reveal the already-selected exact chip with bounded trusted input;
+        // native host capture still requires its unchanged visible geometry.
+        native = await nativeSidebar({ revealSpaceId: folder.spaceId }); await select();
         // The panel-opening helper itself is a genuine standalone creation in
         // this Space. Include its exact receipt in the order, then close it.
         const postOpen = await read(), newHelper = postOpen.tabs.filter(tab => !afterReload.tabs.some(old => old.id === tab.id)); assert.equal(newHelper.length, 1);

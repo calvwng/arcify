@@ -155,3 +155,78 @@ test('Spotlight DOM evidence distinguishes a saved Favorite from an equal-title 
         ]);
     } finally { if(previous) Object.defineProperty(globalThis,'document',previous); else delete globalThis.document; }
 });
+
+const revealExpected = { extensionId: id, spaceId: 'work' };
+function offscreenSelectedChip() {
+    return { ...structuredClone(readyRender), selectedVisible: false,
+        switcher: { x: 0, y: 809, width: 352, height: 44, visible: true, scrollLeft: 0, clientWidth: 352, scrollWidth: 700,
+            pointer: { x: 176, y: 831, hitsSwitcher: true } },
+        selectedChip: { x: 430, y: 817, width: 160, height: 32, styled: true } };
+}
+function revealedChip(before, input) {
+    const after = structuredClone(before); after.selectedVisible = true;
+    after.switcher.scrollLeft += input.deltaX; after.selectedChip.x -= input.deltaX; return after;
+}
+
+test('post-reload reveal plans one bounded horizontal wheel for the exact offscreen active chip', async () => {
+    const { planNativeSidebarSpaceReveal, assertNativeSidebarSpaceRevealed } = await import('../../scripts/paired-chrome-sidebar.mjs');
+    const before = offscreenSelectedChip(), input = planNativeSidebarSpaceReveal(before, revealExpected);
+    assert.deepEqual(input, { x: 176, y: 831, deltaX: 334, deltaY: 0 });
+    const after = revealedChip(before, input); assertNativeSidebarSpaceRevealed(before, after, input, revealExpected);
+    assert.equal(planNativeSidebarSpaceReveal(after, revealExpected), null, 'A visible chip must not receive unnecessary input.');
+    const left = offscreenSelectedChip(); left.switcher.scrollLeft = 348; left.selectedChip.x = -210;
+    const toLeft = planNativeSidebarSpaceReveal(left, revealExpected); assert.equal(toLeft.deltaX, -306);
+    assertNativeSidebarSpaceRevealed(left, revealedChip(left, toLeft), toLeft, revealExpected);
+    const clamped = offscreenSelectedChip(); clamped.selectedChip.x = 600;
+    assert.equal(planNativeSidebarSpaceReveal(clamped, revealExpected).deltaX, 348);
+});
+
+for (const [name, mutate] of Object.entries({
+    wrongSelected: s => s.selectedSpaces = ['other'], wrongRendered: s => s.visibleSpaces = ['other'],
+    multipleSelected: s => s.selectedSpaces.push('other'), hiddenDocument: s => s.visibility = 'hidden',
+    tinyViewport: s => s.width = 16, wrongUrl: s => s.url = 'about:blank', hiddenChip: s => s.selectedChip.styled = false,
+    invalidChip: s => s.selectedChip.width = NaN, verticalOffscreen: s => s.selectedChip.y = 900,
+    alreadyIntersecting: s => s.selectedChip.x = 200, hiddenSwitcher: s => s.switcher.visible = false,
+    switcherOffscreen: s => s.switcher.y = 900, noOverflow: s => s.switcher.scrollWidth = 352,
+    wrongScroll: s => s.switcher.scrollLeft = -1, obstructedPoint: s => s.switcher.pointer.hitsSwitcher = false,
+    outsidePoint: s => s.switcher.pointer.x = 353, unreachableChip: s => s.selectedChip.x = 1000
+})) test(`post-reload wheel plan rejects ${name} rather than repairing readiness`, async () => {
+    const { planNativeSidebarSpaceReveal } = await import('../../scripts/paired-chrome-sidebar.mjs');
+    const state = offscreenSelectedChip(); mutate(state); assert.throws(() => planNativeSidebarSpaceReveal(state, revealExpected));
+});
+
+for (const [name, mutate] of Object.entries({
+    unchangedScroll: s => s.switcher.scrollLeft = 0, wrongMovement: s => s.switcher.scrollLeft -= 2,
+    stillHidden: s => s.selectedVisible = false, changedSelection: s => s.selectedSpaces = ['other'],
+    changedContent: s => s.visibleSpaces = ['other'], changedViewport: s => s.height++,
+    changedChip: s => s.selectedChip.width++, detachedMovement: s => s.selectedChip.x += 2,
+    changedScrollport: s => s.switcher.clientWidth++
+})) test(`post-reload wheel receipt rejects ${name}`, async () => {
+    const { planNativeSidebarSpaceReveal, assertNativeSidebarSpaceRevealed } = await import('../../scripts/paired-chrome-sidebar.mjs');
+    const before = offscreenSelectedChip(), input = planNativeSidebarSpaceReveal(before, revealExpected), after = revealedChip(before, input);
+    mutate(after); assert.throws(() => assertNativeSidebarSpaceRevealed(before, after, input, revealExpected));
+});
+
+test('post-reload reveal delivers one trusted wheel, preserves native identity and never retries failed proof', async () => {
+    const { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } = await import('../../scripts/paired-chrome-sidebar.mjs');
+    for (const failure of [null, 'untrusted', 'selection', 'geometry']) {
+        const before = offscreenSelectedChip(), input = planNativeSidebarSpaceReveal(before, revealExpected);
+        const calls = [], selection = { tab: null, windowId: 7, tabs: [{ id: 12, windowId: 7, active: true }],
+            spaces: [{ id: 'work', temporaryTabs: [12], spaceBookmarks: [] }], activeSpaces: { 7: 'work' } };
+        let reads = 0, selections = 0;
+        const page = { mouse: { move: async (...args) => calls.push(['move', ...args]), wheel: async args => calls.push(['wheel', args]) },
+            evaluate: async fn => {
+                if (fn.name === 'readNativeSidebarRender') return reads++ === 0 ? before : failure === 'geometry' ? before : revealedChip(before, input);
+                if (fn.name === 'readSelection') { const value = structuredClone(selection); if (selections++ && failure === 'selection') value.tabs[0].active = false; return value; }
+                if (fn.toString().includes('const events = globalThis')) { calls.push(['listen']); return; }
+                if (fn.toString().includes('__stopNativeSidebarRevealWheel')) { calls.push(['stop']); return; }
+                if (fn.toString().includes('__nativeSidebarRevealWheel')) return [{ trusted: failure !== 'untrusted', inSwitcher: true, deltaX: input.deltaX, deltaY: 0 }];
+                assert.fail(`Unexpected browser operation: ${fn}`);
+            } };
+        const poll = async (read, ready) => { const value = await read(); assert(ready(value)); return value; };
+        const operation = revealNativeSidebarSpace({ page, poll, extensionId: id, windowId: 7, spaceId: 'work' });
+        if (failure) await assert.rejects(operation); else assert.deepEqual((await operation).selectionAfter, selection);
+        assert.deepEqual(calls.filter(([kind]) => kind === 'wheel'), [['wheel', { deltaX: 334, deltaY: 0 }]]);
+        assert.equal(calls.at(-1)[0], 'stop');
+    }
+});

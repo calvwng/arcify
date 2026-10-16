@@ -119,6 +119,12 @@ test('mandatory real fixture remains browser-free on import and uses trusted inp
     assert.match(source, /assertReloadFixtureProvenance\(beforeReload, state/); assert.match(source, /controlReplacement: reloadReceipt/);
     assert.match(source, /chrome\.tabs\.onCreated\.addListener\(created\)/); assert.match(source, /chrome\.tabs\.onRemoved\.addListener\(removed\)/);
     assert.match(source, /assertReloadWindowSelection\(initial, state\)/);
+    assert.equal((source.match(/revealSpaceId:/g) || []).length, 1, 'Only the post-reload acquisition may request a switcher reveal.');
+    assert(source.indexOf('nativeSidebar({ revealSpaceId: folder.spaceId })') > source.indexOf('await reloadArcify()'));
+    assert.match(source, /title: `Today Order \$\{nonce\.slice\(0, 6\)\}`/);
+    const capture = smoke.slice(smoke.indexOf('async function captureNativeSidebar'), smoke.indexOf('async function closeNativeSidebar'));
+    assert.doesNotMatch(capture, /revealNativeSidebarSpace|mouse\.|scrollIntoView|\.focus\(|setViewport/);
+    assert.match(capture, /createNativeSidebarReadiness\(arcifyId\)/); assert.match(capture, /assertNativeSidebarScreenshot/);
 });
 
 for (const inverted of [false, true]) for (const groupSync of [false, true]) test(`manual reorder keeps exact identity, saved order and native policy inverted=${inverted}, sync=${groupSync}`, () => {

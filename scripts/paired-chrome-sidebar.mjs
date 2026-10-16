@@ -62,11 +62,19 @@ export function readNativeSidebarRender() {
     };
     const switcher = document.querySelector('#spaceSwitcher');
     const selected = [...document.querySelectorAll('#spaceSwitcher > button.active')];
+    const switcherBox = dimensions(switcher);
+    const pointer = { x: (Math.max(0, switcherBox.x) + Math.min(innerWidth, switcherBox.x + switcherBox.width)) / 2,
+        y: (Math.max(0, switcherBox.y) + Math.min(innerHeight, switcherBox.y + switcherBox.height)) / 2 };
+    const selectedStyle = selected.length === 1 ? getComputedStyle(selected[0]) : null;
     return {
         url: location.href, visibility: document.visibilityState, width: innerWidth, height: innerHeight, devicePixelRatio,
-        switcher: { ...dimensions(switcher), visible: visible(switcher) },
+        switcher: { ...switcherBox, visible: visible(switcher), scrollLeft: switcher?.scrollLeft,
+            scrollWidth: switcher?.scrollWidth, clientWidth: switcher?.clientWidth,
+            pointer: { ...pointer, hitsSwitcher: Boolean(switcher?.contains(document.elementFromPoint?.(pointer.x, pointer.y))) } },
         selectedSpaces: selected.map(element => element.dataset.spaceId),
         selectedVisible: selected.length === 1 && visible(selected[0]),
+        selectedChip: selected.length === 1 ? { ...dimensions(selected[0]), styled: selectedStyle.display !== 'none' &&
+            selectedStyle.visibility !== 'hidden' && selectedStyle.visibility !== 'collapse' } : null,
         visibleSpaces: [...document.querySelectorAll('#spacesList > .space')].filter(element =>
             element.classList.contains('active') && visible(element)).map(element => element.dataset.spaceId)
     };
@@ -103,6 +111,90 @@ export function createNativeSidebarReadiness(extensionId) {
         const current = JSON.stringify(nativeSidebarRenderIdentity(rendered));
         const stable = previous === current; previous = current; return stable;
     };
+}
+
+// Explicit fixture input, never part of read-only native capture. A reloaded
+// switcher may mount its already-selected fifth chip outside its scrollport.
+// Reveal that exact selection with one real wheel; never select or repair it.
+export function planNativeSidebarSpaceReveal(before, { extensionId, spaceId }) {
+    assert.equal(before.url, `chrome-extension://${extensionId}/sidebar.html`);
+    assert.equal(before.visibility, 'visible');
+    for (const value of [before.width, before.height]) assert(Number.isFinite(value) && value >= 100);
+    assert(Number.isFinite(before.devicePixelRatio) && before.devicePixelRatio > 0);
+    assert.deepEqual(before.selectedSpaces, [spaceId]); assert.deepEqual(before.visibleSpaces, [spaceId]);
+    const box = before.switcher, chip = before.selectedChip;
+    assert.equal(box?.visible, true); assert.equal(chip?.styled, true);
+    for (const rect of [box, chip]) {
+        for (const key of ['x', 'y', 'width', 'height']) assert(Number.isFinite(rect[key]));
+        assert(rect.width > 0 && rect.height > 0);
+    }
+    const left = Math.max(0, box.x), right = Math.min(before.width, box.x + box.width);
+    assert(right > left && box.y >= 0 && box.y + box.height <= before.height);
+    assert(chip.y >= box.y && chip.y + chip.height <= box.y + box.height);
+    if (nativeSidebarRenderReady(before, extensionId)) return null;
+    assert.equal(before.selectedVisible, false);
+    assert(chip.x >= right || chip.x + chip.width <= left, 'Only a horizontally offscreen selected chip may be revealed.');
+    for (const key of ['scrollLeft', 'scrollWidth', 'clientWidth']) assert(Number.isFinite(box[key]));
+    const maxScroll = box.scrollWidth - box.clientWidth;
+    assert(box.clientWidth > 0 && maxScroll > 0 && box.scrollLeft >= 0 && box.scrollLeft <= maxScroll);
+    assert.equal(box.pointer?.hitsSwitcher, true, 'The wheel point must hit the actual switcher, not an overlay or the + button.');
+    assert(box.pointer.x > left && box.pointer.x < right && box.pointer.y > box.y && box.pointer.y < box.y + box.height);
+    const desired = chip.x + chip.width / 2 - (left + right) / 2;
+    const deltaX = Math.max(-box.scrollLeft, Math.min(maxScroll - box.scrollLeft, desired));
+    assert(deltaX !== 0 && chip.x - deltaX < right && chip.x + chip.width - deltaX > left);
+    return { x: box.pointer.x, y: box.pointer.y, deltaX, deltaY: 0 };
+}
+
+export function assertNativeSidebarSpaceRevealed(before, after, input, { extensionId, spaceId }) {
+    assert.deepEqual(planNativeSidebarSpaceReveal(before, { extensionId, spaceId }), input);
+    assert(input, 'A reveal receipt requires one planned wheel.');
+    assert(nativeSidebarRenderReady(after, extensionId));
+    assert.deepEqual(nativeSidebarRenderIdentity(after), nativeSidebarRenderIdentity(before));
+    assert.equal(after.url, before.url); assert.equal(after.visibility, before.visibility);
+    for (const key of ['x', 'y', 'width', 'height', 'scrollWidth', 'clientWidth']) assert.equal(after.switcher[key], before.switcher[key]);
+    assert.equal(after.selectedChip.styled, true);
+    for (const key of ['y', 'width', 'height']) assert.equal(after.selectedChip[key], before.selectedChip[key]);
+    const moved = after.switcher.scrollLeft - before.switcher.scrollLeft;
+    assert(Math.abs(moved - input.deltaX) <= 1 && moved * input.deltaX > 0, 'The measured wheel must actually move the scrollport.');
+    assert(Math.abs(after.selectedChip.x - before.selectedChip.x + moved) <= 1, 'The same chip must move with the scrollport.');
+    assert(after.selectedChip.x < Math.min(after.width, after.switcher.x + after.switcher.width) &&
+        after.selectedChip.x + after.selectedChip.width > Math.max(0, after.switcher.x));
+}
+
+export async function revealNativeSidebarSpace({ page, poll, extensionId, windowId, spaceId }) {
+    const expected = { extensionId, spaceId };
+    const before = await poll(() => page.evaluate(readNativeSidebarRender), state => {
+        try { planNativeSidebarSpaceReveal(state, expected); return true; } catch { return false; }
+    }, 'exact already-selected Space in a mounted native switcher before horizontal reveal');
+    const input = planNativeSidebarSpaceReveal(before, expected);
+    if (!input) return { before, after: before, input: null };
+    const readSelection = async () => ({ tab: await chrome.tabs.getCurrent() || null, windowId: (await chrome.windows.getCurrent()).id,
+        tabs: (await chrome.tabs.query({})).map(({ id, windowId, active }) => ({ id, windowId, active })).sort((a, b) => a.id - b.id),
+        spaces: ((await chrome.storage.local.get('spaces')).spaces || []).map(({ id, temporaryTabs, spaceBookmarks }) => ({ id, temporaryTabs, spaceBookmarks })),
+        activeSpaces: (await chrome.storage.session.get('activeSpaces')).activeSpaces });
+    const selectionBefore = await page.evaluate(readSelection);
+    assert.equal(selectionBefore.tab, null); assert.equal(selectionBefore.windowId, windowId);
+    assert.equal(selectionBefore.activeSpaces?.[windowId], spaceId);
+    await page.evaluate(() => {
+        const events = globalThis.__nativeSidebarRevealWheel = [];
+        const listener = event => events.push({ trusted: event.isTrusted, deltaX: event.deltaX, deltaY: event.deltaY,
+            inSwitcher: Boolean(event.target.closest('#spaceSwitcher')) });
+        document.addEventListener('wheel', listener, { capture: true, passive: true });
+        globalThis.__stopNativeSidebarRevealWheel = () => document.removeEventListener('wheel', listener, { capture: true });
+    });
+    try {
+        await page.mouse.move(input.x, input.y);
+        await page.mouse.wheel({ deltaX: input.deltaX, deltaY: 0 });
+        const after = await poll(() => page.evaluate(readNativeSidebarRender), state => {
+            try { assertNativeSidebarSpaceRevealed(before, state, input, expected); return true; } catch { return false; }
+        }, 'one trusted horizontal wheel visibly reveals the same selected Space');
+        const events = await page.evaluate(() => globalThis.__nativeSidebarRevealWheel);
+        assert.equal(events.length, 1); assert.equal(events[0].trusted, true); assert.equal(events[0].inSwitcher, true);
+        assert.equal(events[0].deltaY, 0); assert(Math.abs(events[0].deltaX - input.deltaX) <= 1);
+        const selectionAfter = await page.evaluate(readSelection);
+        assert.deepEqual(selectionAfter, selectionBefore, 'Revealing the chip must not change tab identity/activation, canonical order or Space/window ownership.');
+        return { before, input, after, events, selectionBefore, selectionAfter };
+    } finally { await page.evaluate(() => globalThis.__stopNativeSidebarRevealWheel()); }
 }
 
 export function readSpotlightRows() {

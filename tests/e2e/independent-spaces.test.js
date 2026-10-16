@@ -44,20 +44,32 @@ describe('Independent spaces', () => {
             const { spaces } = await chrome.storage.local.get('spaces');
             return spaces.find(s => s.id === spaceId)?.temporaryTabs.includes(child);
         }, { polling: 100 }, { ...setup, child });
-        await helper.evaluate(async child => { await chrome.tabs.move(child, { index: 0 }); }, child);
+        // The frozen representation may store visible opener→child order in
+        // reverse. Native group projection still follows that exact canonical order.
+        const representation = await helper.evaluate(async () => (await chrome.storage.local.get('todayOrderRepresentation')).todayOrderRepresentation);
+        expect(representation?.version).toBe(1);
+        expect(typeof representation.inverted).toBe('boolean');
+        const expectedOrder = representation.inverted ? [child, setup.tabId] : [setup.tabId, child];
+        const reversedNative = await helper.evaluate(async ({ child, tabId, inverted }) => {
+            await chrome.tabs.move(child, { index: inverted ? -1 : 0 });
+            const parent = await chrome.tabs.get(tabId);
+            return (await chrome.tabs.query({ windowId: parent.windowId }))
+                .filter(tab => tab.id === tabId || tab.id === child).map(tab => tab.id);
+        }, { ...setup, child, inverted: representation.inverted });
+        expect(reversedNative).toEqual([...expectedOrder].reverse());
         expect(await helper.evaluate(async spaceId => {
             const response = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'get' });
             return response.spaces.find(s => s.id === spaceId).temporaryTabs;
-        }, setup.spaceId)).toEqual([setup.tabId, child]);
+        }, setup.spaceId)).toEqual(expectedOrder);
         expect(await helper.$eval('#syncTabGroups', el => el.checked)).toBe(false);
         await helper.$eval('#syncTabGroups', input => input.click());
-        await helper.waitForFunction(async ({ tabId, child }) => {
+        await helper.waitForFunction(async ({ tabId, child, expectedOrder }) => {
             const a = await chrome.tabs.get(tabId), b = await chrome.tabs.get(child);
             if (a.groupId === -1 || a.groupId !== b.groupId) return false;
             const members = await chrome.tabs.query({ groupId: a.groupId });
             return (await chrome.tabGroups.get(a.groupId)).title === 'Independent Work'
-                && members.map(t => t.id).join(',') === [tabId, child].join(',');
-        }, { polling: 100 }, { ...setup, child });
+                && members.map(t => t.id).join(',') === expectedOrder.join(',');
+        }, { polling: 100 }, { ...setup, child, expectedOrder });
         await helper.$eval('#syncTabGroups', input => input.click());
         await helper.waitForFunction(async () => !(await chrome.storage.sync.get('syncTabGroups')).syncTabGroups, { polling: 100 });
         await helper.evaluate(() => chrome.runtime.sendMessage({ type: 'spaceStore', action: 'get' }));

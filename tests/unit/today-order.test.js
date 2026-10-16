@@ -26,15 +26,19 @@ for (const legacy of [undefined, false, true]) test(`Today freezes legacy effect
 test('independent extension contexts serialize first freeze on the shared origin lock', async () => {
     const f = fixture(false), requests = [];
     let chain = Promise.resolve();
-    Object.defineProperty(globalThis.navigator, 'locks', { configurable: true, value: { request(name, callback) {
+    const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: { request(name, callback) {
         requests.push(name); const next = chain.then(callback); chain = next.catch(() => {}); return next;
-    } } });
+    } } } });
     try {
         const a = await import('../../today-order.js?worker'), b = await import('../../today-order.js?sidebar');
         assert.deepEqual(await Promise.all([a.getTodayOrderInverted(), b.getTodayOrderInverted()]), [false, false]);
         assert.deepEqual(requests, ['arcify-today-order-representation', 'arcify-today-order-representation']);
         assert.equal(f.writes.length, 1);
-    } finally { delete globalThis.navigator.locks; }
+    } finally {
+        if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
+        else delete globalThis.navigator;
+    }
 });
 
 test('a failed first metadata write retries without a stale cached orientation', async () => {
