@@ -20,7 +20,7 @@ retry a failed full-run case or reuse that run's mutated profile.
 
 The full **49**, Favorite lifecycle **5**, and native Split View **4** jobs remain
 unchanged mandatory workflow outcomes. All four jobs use exact read-only
-checkouts and Spotlight `dae17a24d4e3b90cecd42a19ceeb7322b755370b`, production
+checkouts and Spotlight `9c4462fb0f3cbfe2585757c43f34398e9c906fde`, production
 builds, and the existing isolated driver. The new job has no dependency on the
 full job, browser update, new secret, security-setting change or error exemption.
 Existing sandbox, native input/identity, window-B, screenshot, crash and page-error

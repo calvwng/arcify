@@ -29,7 +29,7 @@ test('native enum proof requires real setup and restoration rather than a vacuou
     assert.match(theme, /space\.id === fixture\.spaces\.work/);
     assert.match(theme, /ui\(settings.page, 'Enable native group sync for exact theme fixture Space', \(\) => setThemeGroupSync\(settings.page, true\)\)/);
     assert.match(theme, /assertThemeNativeProjection\(value, \{ spaceId: target.id, windowId \}\)/);
-    assert.match(theme, /nativeSidebar\(\{ revealSpaceId: target.id \}\)/);
+    assert.match(theme, /native = await nativeSidebar\(\); await selectTarget\(\);/);
     assert.match(theme, /assertThemeNativeProjection\(before, \{ spaceId, windowId \}\)/);
     assert.match(theme, /assertThemeNativeProjection\(after, \{ spaceId, windowId \}\)/);
     assert.match(theme, /assertThemeFixtureRestored\(beforeFixture, value, target.id\)/);
@@ -38,6 +38,20 @@ test('native enum proof requires real setup and restoration rather than a vacuou
     assert.match(theme, /assertThemeFirstPaint\(data, mode, mode\)/);
     assert.doesNotMatch(theme, /dispatchEvent\(|\.value\s*=(?!=)|native\.page\.setViewport|style\.setProperty|emulateFocus/);
 });
+test('theme Favorite setup selects the exact source Space through native UI before its single mutation', () => {
+    const baseline = theme.indexOf('beforeFixture = await read()');
+    const open = theme.indexOf('native = await nativeSidebar(); await selectTarget();');
+    const create = theme.indexOf('const added = await requestScopedFavorite(');
+    const projection = theme.indexOf("await checkpoint('native-projection-required'");
+    assert(baseline > 0 && baseline < open && open < create && create < projection);
+    assert.equal((theme.match(/native = await nativeSidebar\(/g) || []).length, 1);
+    assert.equal((theme.match(/'addBookmark'/g) || []).length, 1);
+    assert.match(theme, /input\('Select exact theme fixture Space', \(\) => native.page.click\(chip\(target.id\)\)\)/);
+    assert.match(theme, /rendered: await native.page.evaluate\(readNativeSidebarRender\), authoritative: await snapshot\(windowId\)/);
+    assert.match(theme, /state.rendered.selectedSpaces.length === 1/);
+    assert.match(theme, /state.authoritative.windowId === windowId && state.authoritative.activeSpaceId === target.id/);
+    assert.doesNotMatch(theme.slice(open, create), /revealSpaceId|\.catch\(|retry/);
+});
 test('workflow watches new evidence/runtime/paint/docs with all four exact peer pins and unchanged security gates', () => {
     for (const path of ['scripts/paired-chrome-space-theme.mjs', 'scripts/paired-chrome-spotlight-appearance.mjs',
         'tests/unit/paired-chrome-space-theme.test.js', 'tests/unit/paired-chrome-spotlight-appearance.test.js', 'tests/unit/paired-chrome-theme-wiring.test.js',
@@ -45,7 +59,7 @@ test('workflow watches new evidence/runtime/paint/docs with all four exact peer 
         assert(workflow.includes(`- '${path}'`), `Missing required workflow watch path: ${path}`);
     }
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
-    assert.equal(pin, 'dae17a24d4e3b90cecd42a19ceeb7322b755370b');
+    assert.equal(pin, '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
     assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 4);
     assert.match(runner, /assert\.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);

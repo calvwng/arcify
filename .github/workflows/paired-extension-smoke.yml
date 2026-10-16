@@ -191,7 +191,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: dae17a24d4e3b90cecd42a19ceeb7322b755370b
+          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -260,7 +260,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: dae17a24d4e3b90cecd42a19ceeb7322b755370b
+          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -329,7 +329,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: dae17a24d4e3b90cecd42a19ceeb7322b755370b
+          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -397,7 +397,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: dae17a24d4e3b90cecd42a19ceeb7322b755370b
+          ref: 9c4462fb0f3cbfe2585757c43f34398e9c906fde
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node

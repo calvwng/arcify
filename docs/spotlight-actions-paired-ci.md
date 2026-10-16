@@ -23,7 +23,7 @@ requires the same action case after setup, appearance, theme, options and recove
 (8 cases total), without replacing any of those three existing jobs.
 
 The runner and all three workflow jobs pin reviewed, published Spotlight commit
-`dae17a24d4e3b90cecd42a19ceeb7322b755370b`. Recovery and action evidence remain
+`9c4462fb0f3cbfe2585757c43f34398e9c906fde`. Recovery and action evidence remain
 separate in the report. The action case receives the current options realms
 after the witnessed recovery reloads, not stale pre-reload Page objects.
 

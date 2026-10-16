@@ -85,7 +85,7 @@ full/lifecycle/native-split plans require exactly 49/5/4 passes. No skip, subset
 same-profile retry or window-B exemption satisfies the full report.
 
 The runner and all three workflow jobs pin the reviewed, published Spotlight
-commit `dae17a24d4e3b90cecd42a19ceeb7322b755370b`. Hosted acceptance remains pending
+commit `9c4462fb0f3cbfe2585757c43f34398e9c906fde`. Hosted acceptance remains pending
 for the final integrated Arcify commit; local oracle checks are not browser proof.
 
 `runHostedOverlayRecovery` creates one nonce-bearing ordinary source through its

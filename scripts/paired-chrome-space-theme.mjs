@@ -456,7 +456,10 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
     };
     const selectTarget = async () => {
         await input('Select exact theme fixture Space', () => native.page.click(chip(target.id)));
-        await poll(() => native.page.evaluate(readNativeSidebarRender), state => state.selectedSpaces[0] === target.id, 'theme Space rendered');
+        await poll(async () => ({ rendered: await native.page.evaluate(readNativeSidebarRender), authoritative: await snapshot(windowId) }),
+            state => state.rendered.selectedSpaces.length === 1 && state.rendered.selectedSpaces[0] === target.id &&
+                state.authoritative.windowId === windowId && state.authoritative.activeSpaceId === target.id,
+            'theme Space selected in both native renderer and authoritative window snapshot');
     };
     try {
         beforeFixture = await read();
@@ -470,6 +473,10 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
             ownedTabs.push(tab.id);
             await apiPage.evaluate(async ({ tabId, spaceId }) => { const reply = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId, spaceId }); if (!reply.success) throw Error(reply.error); }, { tabId: tab.id, spaceId: target.id });
         }
+        // Favorite creation must originate from the currently selected Space.
+        // Open the native panel in its existing Space, then select Work through UI;
+        // a fresh supplemental profile need not already have Work selected.
+        native = await nativeSidebar(); await selectTarget();
         const bookmark = await apiPage.evaluate(options => chrome.bookmarks.create(options), { parentId: target.bookmarkFolderId, title: `Theme Favorite ${nonce}`, url: `${fixture.base}/alpha?theme-favorite=${nonce}` });
         ownedBookmarks.push(bookmark.id);
         const added = await requestScopedFavorite(settings.page, windowId, 'addBookmark', { spaceId: target.id, bookmarkFolderId: target.bookmarkFolderId, bookmarkId: bookmark.id, parentId: bookmark.parentId });
@@ -482,7 +489,7 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
         await ui(settings.page, 'Enable native group sync for exact theme fixture Space', () => setThemeGroupSync(settings.page, true));
         const projected = await poll(read, state => accepted(value => assertThemeNativeProjection(value, { spaceId: target.id, windowId }), state), 'real target-window native group and owned members');
         await checkpoint('native-projection-required', { projection: assertThemeNativeProjection(projected, { spaceId: target.id, windowId }) });
-        native = await nativeSidebar({ revealSpaceId: target.id }); await selectTarget();
+        await selectTarget();
         // Normalize the initial appearance through the real control before using strict snapshots.
         await setMode('light'); await selectTarget();
         await open(); const beforeInvalid = await read();

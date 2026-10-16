@@ -179,7 +179,7 @@ test('new workflow watches sources/tests and pins every mandatory job without we
         'scripts/paired-chrome-native-close.*', 'tests/unit/paired-chrome-native-close.test.js', 'tests/unit/paired_chrome_native_close_test.py',
         'spotlight-space-actions.js', 'tests/unit/spotlight-space-actions.test.js', 'tests/unit/spotlight-bridge.test.js']) assert(workflow.includes(`- '${path}'`), path);
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
-    assert.equal(pin, 'dae17a24d4e3b90cecd42a19ceeb7322b755370b');
+    assert.equal(pin, '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
     assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 4);
     assert.match(runner, /assert.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoTargetCrashes\(report.targetLifecycle\)/); assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);

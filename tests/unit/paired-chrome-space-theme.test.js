@@ -86,7 +86,7 @@ for (const [name, value] of Object.entries({ tab: { id: 2 }, windowId: 2, url: '
 test('fixture is standalone import-safe and never injects user input or forces native geometry', () => {
     const source = readSourceText(new URL('../../scripts/paired-chrome-space-theme.mjs', import.meta.url));
     assert.match(source, /export async function exerciseSpaceTheme/); assert.match(source, /assertSpaceContextFixtureEnvironment\(\)/);
-    assert.match(source, /nativeSidebar\(\{ revealSpaceId: target.id \}\)/); assert.match(source, /assertNativeSidebarScreenshot/); assert.match(source, /assertMarkerScreenshotPixels/);
+    assert.match(source, /native = await nativeSidebar\(\); await selectTarget\(\);/); assert.match(source, /assertNativeSidebarScreenshot/); assert.match(source, /assertMarkerScreenshotPixels/);
     assert.match(source, /native\.page\.reload/); assert.match(source, /settings\.page\.reload/); assert.match(source, /emulateMediaFeatures/);
     assert.doesNotMatch(source, /dispatchEvent\(|\.value\s*=(?!=)|setAttribute\(|\.focus\(|puppeteer\.launch|spawn\(|native\.page\.setViewport|style\.setProperty/);
     assert.match(source, /Input.cancelDragging/); assert.match(source, /Manual follow-up/);

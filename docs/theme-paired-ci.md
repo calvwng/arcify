@@ -11,7 +11,7 @@ on a fresh profile and never replaces those outcomes. Missing, failed, skipped,
 incomplete or extra evidence fails the existing strict run-plan gates.
 
 All four jobs and the runner pin Spotlight to reviewed, published commit
-`dae17a24d4e3b90cecd42a19ceeb7322b755370b`. After verifying that exact checkout,
+`9c4462fb0f3cbfe2585757c43f34398e9c906fde`. After verifying that exact checkout,
 case 47 imports and executes its unchanged
 `test/e2e/options-appearance-evidence.js`. Missing collector code is a failure.
 The Arcify adapter adds only passive observation, required-artifact validation
