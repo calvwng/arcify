@@ -981,7 +981,7 @@ function createSpaceElement(space) {
         e.stopPropagation(); // Prevent closing immediately if clicking outside logic exists
         const opening = !popup.classList.contains('visible');
         if (opening) showArchivedTabsPopup(space.id);
-        setArchivePopupOpen(spaceElement, opening);
+        setArchivePopupOpen(spaceContainer, opening);
     });
 
     // Add to DOM

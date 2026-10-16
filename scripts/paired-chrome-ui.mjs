@@ -1,3 +1,7 @@
+// Preserve input/read errors unchanged, including frozen Error objects, while
+// letting the existing visible-action report retain the failed navigation trace.
+const keyboardSelectionFailures = new WeakMap();
+
 /** Uncaught renderer exceptions cannot be hidden by passing UI assertions. */
 export function assertNoPageErrors(diagnostics) {
     const errors = diagnostics.filter(item => item.type === 'pageerror');
@@ -25,6 +29,8 @@ export async function performVisibleAction(page, label, action, record = async (
         checkpoint.failedPhase = checkpoint.phase;
         checkpoint.phase = 'failed';
         checkpoint.error = error.message;
+        const keyboardSelection = keyboardSelectionFailures.get(error);
+        if (keyboardSelection) checkpoint.keyboardSelection = keyboardSelection;
         checkpoint.finishedAt = new Date().toISOString();
         await record({ ...checkpoint });
         throw error;
@@ -52,18 +58,54 @@ export async function replaceInputText(page, input, text) {
     await input.type(text);
 }
 
-// Choose a unique observed row using real keyboard input, without assuming
-// whether ordinary results or a matching action rank above web search.
+// Actions arrive independently of ordinary results. Navigate the actual rows
+// after every key, never an ArrowDown count computed from an older snapshot.
+// This only selects: it cannot execute a result or replay a failed input.
 export async function selectResultWithKeyboard(input, readRows, matches) {
-    const before = await readRows();
-    const indices = before.flatMap((row, index) => matches(row) ? [index] : []);
-    if (indices.length !== 1 || before.length > 100) throw new Error('Expected one bounded keyboard selection target.');
-    const keys = ['Home', ...Array(indices[0]).fill('ArrowDown')];
-    for (const key of keys) await input.press(key);
-    const after = await readRows();
-    const selected = after.filter(row => row.selected);
-    if (selected.length !== 1 || !matches(selected[0])) throw new Error('Keyboard selection did not reach the requested result.');
-    return { before, keys, after };
+    const trace = { before: null, keys: [], observations: [], phase: 'read-before' };
+    const inspect = rows => {
+        const targetError = () => new Error(trace.keys.length
+            ? 'Keyboard selection did not reach the requested result: expected one bounded keyboard selection target.'
+            : 'Expected one bounded keyboard selection target.');
+        if (!Array.isArray(rows) || rows.length > 100) throw targetError();
+        const targets = rows.flatMap((row, index) => matches(row) ? [index] : []);
+        if (targets.length !== 1) throw targetError();
+        const selected = rows.flatMap((row, index) => row.selected ? [index] : []);
+        if (selected.length > 1 || trace.keys.length && selected.length !== 1) {
+            throw new Error('Keyboard selection did not reach a unique selected row.');
+        }
+        return { target: targets[0], selected: selected[0] ?? -1 };
+    };
+    const order = rows => JSON.stringify(rows.map(({ selected, ...row }) => row));
+    try {
+        let rows = trace.before = await readRows();
+        trace.phase = 'validate-before';
+        let state = inspect(rows), key = 'Home';
+        // At most 100 rows, with a separate hard budget for changes during input.
+        // No sleep, action key, restarted sequence, or uncertain-input retry.
+        while (trace.keys.length < 200) {
+            const previous = rows, previousState = state;
+            trace.phase = 'press'; trace.keys.push(key);
+            await input.press(key);
+            trace.phase = 'read-after';
+            rows = await readRows();
+            trace.observations.push({ key, rows });
+            trace.phase = 'validate-after';
+            state = inspect(rows);
+            if (order(previous) === order(rows)) {
+                const expected = key === 'Home' ? 0 : key === 'ArrowDown'
+                    ? Math.min(previousState.selected + 1, rows.length - 1)
+                    : Math.max(previousState.selected - 1, 0);
+                if (state.selected !== expected) throw new Error('Keyboard navigation did not make the expected single step.');
+            }
+            if (state.selected === state.target) return { before: trace.before, keys: trace.keys, after: rows, observations: trace.observations };
+            key = state.selected < state.target ? 'ArrowDown' : 'ArrowUp';
+        }
+        throw new Error('Keyboard selection exceeded the bounded navigation budget.');
+    } catch (error) {
+        if (error !== null && (typeof error === 'object' || typeof error === 'function')) keyboardSelectionFailures.set(error, trace);
+        throw error;
+    }
 }
 
 // In locked Puppeteer 25, these exact failures occur while scrolling or finding

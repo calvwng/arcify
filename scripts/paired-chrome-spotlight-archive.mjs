@@ -271,6 +271,60 @@ export function assertArchiveReopened(before, after, events, { entry, sourceWind
     return { tabId: native.id, claim, consumedCommit: consumes[0] };
 }
 
+/** Read native identity in the real owned setup document, never the control window. */
+export async function readArchiveFixtureSource() {
+    const tab = await chrome.tabs.getCurrent();
+    if (!tab) throw new Error('Archive fixture requires its own native extension tab.');
+    const window = await chrome.windows.getCurrent();
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ['TAB'], tabIds: [tab.id] });
+    return { extensionId: chrome.runtime.id, url: location.href, timeOrigin: performance.timeOrigin,
+        tab: { id: tab.id, windowId: tab.windowId, url: tab.url, pendingUrl: tab.pendingUrl || null, status: tab.status, incognito: tab.incognito, pinned: tab.pinned },
+        window: { id: window.id, type: window.type, incognito: window.incognito },
+        contexts: contexts.map(({ contextType, documentId, documentUrl, tabId, windowId, frameId, incognito }) => ({ contextType, documentId, documentUrl, tabId, windowId, frameId, incognito })) };
+}
+export function assertArchiveFixtureSource(source, { arcifyId, windowId, tabId, url }, previous = null) {
+    assert.match(arcifyId, /^[a-p]{32}$/); assert(Number.isSafeInteger(windowId) && windowId > 0); assert(Number.isSafeInteger(tabId) && tabId > 0);
+    assert.match(url, new RegExp(`^chrome-extension://${arcifyId}/options\\.html\\?paired-archive-fixture=[a-f0-9]{32}$`));
+    assert.equal(source.extensionId, arcifyId); assert.equal(source.url, url); assert(Number.isFinite(source.timeOrigin) && source.timeOrigin > 0);
+    assert.deepEqual(source.tab, { id: tabId, windowId, url, pendingUrl: null, status: 'complete', incognito: false, pinned: false });
+    assert.deepEqual(source.window, { id: windowId, type: 'normal', incognito: false });
+    assert.equal(source.contexts.length, 1, 'Require exactly one browser-attested extension TAB document.');
+    const context = source.contexts[0]; assert.equal(typeof context.documentId, 'string'); assert(context.documentId);
+    assert.deepEqual(context, { contextType: 'TAB', documentId: context.documentId, documentUrl: url, tabId, windowId, frameId: 0, incognito: false });
+    if (previous) assert.deepEqual(source, previous, 'Archive setup must retain its exact native document and source window.');
+    return source;
+}
+export async function sendArchiveFixtureRequest(endpoint, message) {
+    assert(endpoint?.page && endpoint.source, 'Archive setup requires its verified owned source document.');
+    const { source, page } = endpoint;
+    assert(['favoriteStore', 'archiveStore'].includes(message.type));
+    assert(Number.isSafeInteger(message.windowId) && message.windowId > 0);
+    assertArchiveFixtureSource(await page.evaluate(readArchiveFixtureSource), { arcifyId: source.extensionId,
+        windowId: source.window.id, tabId: source.tab.id, url: source.url }, source);
+    // A deliberate wrong-window probe also uses this genuine document. The
+    // unchanged receiver, not this harness, must reject its mismatched window.
+    return page.evaluate(message => chrome.runtime.sendMessage(message), message);
+}
+export function installArchiveFixtureMessageObservation() {
+    globalThis.__archiveFixtureMessageStop?.();
+    const listener = (message, sender) => {
+        if (!['favoriteStore', 'archiveStore'].includes(message?.type)) return;
+        globalThis.__spaceActionObservation.events.push({ type: 'archive.fixture-message', data: { message,
+            sender: { id: sender.id, url: sender.url || null, origin: sender.origin || null, documentId: sender.documentId || null,
+                frameId: sender.frameId ?? null, documentLifecycle: sender.documentLifecycle || null,
+                tab: sender.tab ? { id: sender.tab.id, windowId: sender.tab.windowId } : null } } });
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    globalThis.__archiveFixtureMessageStop = () => chrome.runtime.onMessage.removeListener(listener);
+}
+export function assertArchiveFixtureSender(events, message, source) {
+    const matches = events.filter(event => event.type === 'archive.fixture-message' && isDeepStrictEqual(event.data.message, message));
+    assert.equal(matches.length, 1, 'Exactly one actual setup message must originate from the owned extension document.');
+    assert.deepEqual(matches[0].data.sender, { id: source.extensionId, url: source.url, origin: `chrome-extension://${source.extensionId}`,
+        documentId: source.contexts[0].documentId, frameId: 0, documentLifecycle: 'active', tab: { id: source.tab.id, windowId: source.window.id } });
+    return matches[0];
+}
+
 /** Own only disposable records and native IDs; positive actions never use these setup adapters. */
 async function archiveFixture(adapters, run) {
     assertSpotlightActionEnvironment();
@@ -282,11 +336,11 @@ async function archiveFixture(adapters, run) {
         session: await chrome.storage.session.get(['activeSpaces', 'archiveBrowserSession']) }));
     const owned = [], roots = [], spaceRoots = [], pages = new Map(), favoriteIds = [];
     const evidence = { nonce, checkpoints: [], matrix: [], complete: false, unitOnly: ['deterministic lost ACK or response', 'mid-storage-callback revocation', 'worker/browser crash during native create', 'Helium and physical keyboard'] };
-    let source, target, entries, overlayPage, revoked = false, primaryError;
+    let source, target, entries, overlayPage, fixtureApi, revoked = false, primaryError;
     const checkpoint = async (phase, data = {}) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
     const local = async message => { const result = await apiPage.evaluate(message => chrome.runtime.sendMessage({ type: 'spaceStore', ...message }), message); assert.equal(result?.success, true, JSON.stringify(result)); return result; };
-    const archive = async message => { const reply = await apiPage.evaluate(message => chrome.runtime.sendMessage({ type: 'archiveStore', ...message }), message); assert.equal(reply?.success, true, JSON.stringify(reply)); return reply.result; };
-    const favorite = async message => { const reply = await apiPage.evaluate(message => chrome.runtime.sendMessage({ type: 'favoriteStore', ...message }), message); assert.equal(reply?.success, true, JSON.stringify(reply)); return reply; };
+    const archive = async message => { const reply = await sendArchiveFixtureRequest(fixtureApi, { type: 'archiveStore', windowId, ...message }); assert.equal(reply?.success, true, JSON.stringify(reply)); return reply.result; };
+    const favorite = async message => { const reply = await sendArchiveFixtureRequest(fixtureApi, { type: 'favoriteStore', ...message }); assert.equal(reply?.success, true, JSON.stringify(reply)); return reply; };
     const activate = async tabId => apiPage.evaluate(async tabId => { const tab = await chrome.tabs.update(tabId, { active: true }); await chrome.windows.update(tab.windowId, { focused: true }); }, tabId);
     const option = async value => {
         await ui(apiPage, 'Set isolated Archive fixture group-sync option', async () => { if (await apiPage.$eval('#syncTabGroups', node => node.checked) !== value) await apiPage.click('label.toggle-label[for="syncTabGroups"]'); });
@@ -358,6 +412,21 @@ async function archiveFixture(adapters, run) {
     };
     try {
         await option(false); await apiPage.evaluate(installSpotlightActionApiObservation); await spotlightOptions.evaluate(installSpotlightActionApiObservation);
+        await apiPage.evaluate(installArchiveFixtureMessageObservation);
+        fixtureApi = await createNavigationFixturePage({ browser, apiPage, observePage, poll, windowId,
+            url: `chrome-extension://${arcifyId}/options.html?paired-archive-fixture=${nonce}` });
+        owned.push(fixtureApi.tab.id);
+        fixtureApi.source = assertArchiveFixtureSource(await fixtureApi.page.evaluate(readArchiveFixtureSource), {
+            arcifyId, windowId, tabId: fixtureApi.tab.id, url: fixtureApi.url });
+        const setupBefore = await settle(); await reset();
+        const wrongWindowRequest = { type: 'favoriteStore', action: 'get', windowId: otherWindow };
+        const wrongWindowResponse = await sendArchiveFixtureRequest(fixtureApi, wrongWindowRequest);
+        assert.deepEqual(wrongWindowResponse, { success: false, code: 'UNAUTHORIZED', error: 'Invalid Favorites sender.' });
+        const setupAfter = await read(), setupObserved = await trace();
+        const wrongWindowSender = assertArchiveFixtureSender(setupObserved.events, wrongWindowRequest, fixtureApi.source);
+        assertArchiveNoMutation(setupBefore, setupAfter, setupObserved.events);
+        await checkpoint('owned-archive-fixture-source-verified', { source: fixtureApi.source, wrongWindowRequest, wrongWindowResponse,
+            wrongWindowSender, before: setupBefore, after: setupAfter, observed: setupObserved });
         const root = await apiPage.evaluate(async () => { const roots = (await chrome.bookmarks.search({ title: 'Arcify' })).filter(node => !node.url); if (roots.length !== 1) throw new Error('Require one exact Arcify root.'); return roots[0]; });
         for (const name of ['Selected', 'Original']) { const folder = await apiPage.evaluate(options => chrome.bookmarks.create(options), { parentId: root.id, title: `Archive ${name} ${nonce}` }); spaceRoots.push(folder.id); }
         const discovered = await local({ action: 'get' }); [source, target] = spaceRoots.map(id => exact(discovered.spaces, id, 'bookmarkFolderId'));
@@ -372,8 +441,11 @@ async function archiveFixture(adapters, run) {
         const pin = await apiPage.evaluate(options => chrome.bookmarks.create(options), { parentId: source.bookmarkFolderId, title: `Saved archive twin ${nonce}`, url: sameUrl }); roots.push(pin.id);
         const pinned = await openSavedPage({ windowId: otherWindow, spaceId: source.id, bookmarkId: pin.id, url: sameUrl }); owned.push(pinned.tab.id); pages.set(pinned.tab.id, pinned.page); await pinned.page.waitForSelector('#action-page-state');
         await activate(current.tab.id); await local({ action: 'activate', windowId, spaceId: source.id });
-        const savedFavorite = await favorite({ action: 'addBookmark', windowId, spaceId: source.id, bookmarkFolderId: source.bookmarkFolderId, bookmarkId: pin.id, parentId: source.bookmarkFolderId });
+        const favoriteRequest = { action: 'addBookmark', windowId, spaceId: source.id, bookmarkFolderId: source.bookmarkFolderId, bookmarkId: pin.id, parentId: source.bookmarkFolderId };
+        const savedFavorite = await favorite(favoriteRequest);
         const item = savedFavorite.favorites.filter(item => item.sourceBookmarkId === pin.id); assert.equal(item.length, 1); favoriteIds.push(item[0].id); owned.push(savedFavorite.tab.id);
+        const favoriteSender = assertArchiveFixtureSender((await trace()).events, { type: 'favoriteStore', ...favoriteRequest }, fixtureApi.source);
+        await checkpoint('owned-archive-favorite-setup', { source: fixtureApi.source, request: favoriteRequest, sender: favoriteSender, favoriteId: item[0].id, tabId: savedFavorite.tab.id });
         const now = Date.now();
         entries = [
             { entryId: `archive-first-${nonce}`, name: `Archive first twin ${nonce}`, url: sameUrl, spaceId: target.id, archivedAt: now, proof: { nonce, identity: 'first' } },
@@ -397,8 +469,10 @@ async function archiveFixture(adapters, run) {
             closeOverlay,
             async () => { for (const id of favoriteIds) await favorite({ action: 'remove', windowId, favoriteId: id }); },
             async () => { for (const tab of original.tabs.filter(tab => tab.active)) await apiPage.evaluate(id => chrome.tabs.update(id, { active: true }), tab.id); for (const [id, spaceId] of Object.entries(original.session.activeSpaces || {})) await local({ action: 'activate', windowId: Number(id), spaceId }); },
-            () => apiPage.evaluate(async ids => { const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); const present = [...new Set(ids)].filter(id => live.has(id)); if (present.length) await chrome.tabs.remove(present); }, owned),
-            async () => { const existing = await archive({ action: 'list' }); await archive({ action: 'replace', expected: existing, entries: existing.filter(entry => !entries?.some(owned => owned.entryId === entry.entryId)) }); },
+            () => apiPage.evaluate(async ids => { const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); const present = [...new Set(ids)].filter(id => live.has(id)); if (present.length) await chrome.tabs.remove(present); }, owned.filter(id => id !== fixtureApi?.tab.id)),
+            async () => { if (!entries) return; const existing = await archive({ action: 'list' }); await archive({ action: 'replace', expected: existing, entries: existing.filter(entry => !entries?.some(owned => owned.entryId === entry.entryId)) }); },
+            async () => { if (fixtureApi) await apiPage.evaluate(id => chrome.tabs.remove(id), fixtureApi.tab.id); },
+            () => apiPage.evaluate(() => globalThis.__archiveFixtureMessageStop?.()),
             () => apiPage.evaluate(async ({ original, ids }) => { const claims = (await chrome.storage.local.get('archiveReopenClaims')).archiveReopenClaims; if (claims?.entries) { const kept = Object.fromEntries(Object.entries(claims.entries).filter(([id]) => !ids.includes(id))); const previous = original.archiveReopenClaims; if (JSON.stringify(kept) !== JSON.stringify(previous?.entries || {})) throw new Error('Cleanup refuses changed unrelated archive claims.'); if (Object.hasOwn(original, 'archiveReopenClaims')) await chrome.storage.local.set({ archiveReopenClaims: previous }); else await chrome.storage.local.remove('archiveReopenClaims'); } const archived = (await chrome.storage.local.get('archivedTabs')).archivedTabs || []; if (JSON.stringify(archived) !== JSON.stringify(original.archivedTabs || [])) throw new Error('Cleanup refuses changed unrelated archive records.'); if (!Object.hasOwn(original, 'archivedTabs')) await chrome.storage.local.remove('archivedTabs'); }, { original: original.local, ids: entries?.map(entry => entry.entryId) || [] }),
             () => apiPage.evaluate(async original => { if (Object.hasOwn(original, 'archiveBrowserSession')) await chrome.storage.session.set({ archiveBrowserSession: original.archiveBrowserSession }); else await chrome.storage.session.remove('archiveBrowserSession'); }, original.session),
             () => apiPage.evaluate(async ids => { for (const id of ids) { const [node] = await chrome.bookmarks.get(id); if (!node?.url) throw new Error('Cleanup refuses unexpected folder.'); await chrome.bookmarks.remove(id); } }, roots),

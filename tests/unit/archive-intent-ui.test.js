@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
 import { createArchiveIntentConsumer, setArchivePopupOpen } from '../../archive-intent-ui.js';
 const context = { windowId: 10, spaceId: 'source', bookmarkFolderId: 'folder', sourceTabId: 1, sourceUrl: 'https://source.test/', pairingGeneration: 'g' };
@@ -48,4 +49,43 @@ test('Spotlight open and native button close/reopen share explicit complete popu
     assert(!f.popup.classList.contains('visible')); assert(!content.classList.contains('hidden')); assert.equal(space.querySelector('button').getAttribute('aria-expanded'), 'false');
     setArchivePopupOpen(space, !f.popup.classList.contains('visible'));
     assert(f.popup.classList.contains('visible')); assert(content.classList.contains('hidden')); assert.equal(space.querySelector('button').getAttribute('aria-expanded'), 'true');
+});
+
+for (const initiallyOpen of [false, true]) test(`actual sidebar Archive callback survives template insertion (${initiallyOpen ? 'already open' : 'closed'})`, () => {
+    const { document, window } = parseHTML(readFileSync(new URL('../../sidebar.html', import.meta.url), 'utf8'));
+    const source = readFileSync(new URL('../../sidebar.js', import.meta.url), 'utf8');
+    const createStart = source.indexOf('function createSpaceElement(space) {');
+    const start = source.indexOf("    const popup = spaceElement.querySelector('.archived-tabs-popup');", createStart);
+    const end = source.indexOf('    // Add to DOM', start);
+    assert(createStart >= 0 && start > createStart && end > start, 'Exercise the production native Archive callback, not a copied handler.');
+
+    const template = document.getElementById('spaceTemplate');
+    const spaceElement = template.content.cloneNode(true), spaceContainer = spaceElement.querySelector('.space');
+    const otherElement = template.content.cloneNode(true), otherContainer = otherElement.querySelector('.space');
+    spaceContainer.dataset.spaceId = 'source'; otherContainer.dataset.spaceId = 'other';
+    const populated = [];
+    const bind = new Function('spaceElement', 'spaceContainer', 'space', 'showArchivedTabsPopup', 'setArchivePopupOpen', source.slice(start, end));
+    bind(spaceElement, spaceContainer, { id: 'source' }, id => populated.push(id), setArchivePopupOpen);
+
+    // Appending the real template empties the fragment captured during setup.
+    assert.equal(spaceElement.nodeType, 11);
+    document.getElementById('spacesList').appendChild(spaceElement);
+    document.getElementById('spacesList').appendChild(otherElement);
+    assert.equal(spaceElement.childNodes.length, 0);
+    assert.equal(spaceContainer.isConnected, true);
+    const popup = spaceContainer.querySelector('.archived-tabs-popup'), content = spaceContainer.querySelector('.space-content');
+    const button = spaceContainer.querySelector('.sidebar-button');
+    if (initiallyOpen) setArchivePopupOpen(spaceContainer, true);
+
+    for (const open of [!initiallyOpen, initiallyOpen, !initiallyOpen]) {
+        assert.doesNotThrow(() => button.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true })));
+        assert.equal(popup.classList.contains('visible'), open);
+        assert.equal(content.classList.contains('hidden'), open);
+        assert.equal(button.getAttribute('aria-expanded'), String(open));
+        assert.equal(spaceContainer.querySelector('.archived-tabs-popup'), popup);
+        assert.equal(otherContainer.querySelector('.archived-tabs-popup').classList.contains('visible'), false);
+        assert.equal(otherContainer.querySelector('.space-content').classList.contains('hidden'), false);
+        assert.equal(otherContainer.querySelector('.sidebar-button').getAttribute('aria-expanded'), 'false');
+    }
+    assert.deepEqual(populated, Array(initiallyOpen ? 1 : 2).fill('source'), 'Only opening populates the exact Space archive.');
 });

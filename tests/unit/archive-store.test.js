@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { ArchiveStore, ARCHIVE_KEY, ARCHIVE_CLAIMS_KEY, ARCHIVE_SESSION_KEY, migrateArchiveEntries, registerArchiveMessages } from '../../archive-store.js';
 import { SpaceStore } from '../../space-store.js';
 import { Utils } from '../../utils.js';
+import { archiveRequest } from '../../archive-client.js';
 
 const clone = value => structuredClone(value);
 const original = (extra = {}) => ({ url: 'https://archive.test/page', name: 'Archived page', spaceId: 'original', archivedAt: 12, ...extra });
@@ -207,6 +208,134 @@ test('Utils legacy reader uses the authoritative route and URL-only removal refu
     const entries = await Utils.getArchivedTabs(); assert(entries[0].entryId);
     await assert.rejects(Utils.removeArchivedTab(entries[0].url, entries[0].spaceId), /Refresh/);
     assert.equal(f.local.archivedTabs.length, 1);
+});
+
+// Use the real client, registered sender guard/schema, queue and archive writer.
+// Only the native browser APIs and its sender metadata are fixture inputs.
+function connectArchiveClient(t, f, options = {}) {
+    const { document = true, sender } = options;
+    const tab = Object.hasOwn(options, 'tab') ? options.tab : { id: 90, windowId: 10 };
+    const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    if (document) Object.defineProperty(globalThis, 'document', { configurable: true, value: {} });
+    else delete globalThis.document;
+    t.after(() => {
+        if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument);
+        else delete globalThis.document;
+    });
+    const state = { tab, sender: sender || { id: 'arcify', url: 'chrome-extension://arcify/options.html',
+        origin: 'chrome-extension://arcify', tab: { id: 90, windowId: 10 } }, messages: [], lookups: 0, focusedLookups: 0 };
+    chrome.tabs.getCurrent = async () => { state.lookups++; return clone(state.tab); };
+    chrome.windows.getCurrent = async () => { state.focusedLookups++; return { id: 20, type: 'normal' }; };
+    registerArchiveMessages(f.store);
+    chrome.runtime.sendMessage = message => {
+        state.messages.push(clone(message));
+        return new Promise(resolve => f.listeners[0](message, clone(state.sender), resolve));
+    };
+    return state;
+}
+
+for (const caller of ['extension-tab', 'native-sidebar', 'background']) test(`global Utils client operations reach the registered writer from ${caller}`, async t => {
+    const entry = original({ entryId: 'one' }), f = fixture([entry]);
+    const c = connectArchiveClient(t, f, caller === 'extension-tab' ? {} : { document: caller !== 'background', tab: undefined,
+        sender: { id: 'arcify', url: `chrome-extension://arcify/${caller === 'native-sidebar' ? 'sidebar.html' : 'background.js'}`, origin: 'chrome-extension://arcify' } });
+    if (caller === 'background') delete chrome.tabs.getCurrent;
+    assert.deepEqual(await Utils.getArchivedTabs(), [entry]);
+    const added = await Utils.addArchivedTab(original({ url: 'https://second.test/' }));
+    assert.equal(added.added, true);
+    const before = await Utils.getArchivedTabs(), replacement = [...before].reverse();
+    assert.deepEqual(await Utils.saveArchivedTabs(replacement, before), replacement);
+    assert.deepEqual(await Utils.removeArchivedTab(added.entry), { entryId: added.entry.entryId });
+    assert.deepEqual(f.local.archivedTabs, [entry]);
+    assert.deepEqual(c.messages.map(message => message.action), ['list', 'add', 'list', 'replace', 'remove']);
+    assert(c.messages.every(message => caller === 'extension-tab' ? message.windowId === 10 : !Object.hasOwn(message, 'windowId')));
+    assert.equal(c.lookups, caller === 'background' ? 0 : 5); assert.equal(c.focusedLookups, 0);
+});
+
+const globalPayload = (action, entry) => action === 'add' ? { entry: original({ url: 'https://added.test/' }) }
+    : action === 'replace' ? { entries: [], expected: [entry] } : action === 'remove' ? { expected: entry } : {};
+for (const action of ['list', 'add', 'replace', 'remove']) {
+    test(`${action} rejects a tab sender's missing/mismatched window and unknown fields before mutation`, async t => {
+        const entry = original({ entryId: 'one' }), f = fixture([entry]), c = connectArchiveClient(t, f);
+        for (const payload of [{}, { windowId: 20 }, { windowId: 10, surprise: true }]) {
+            const response = await chrome.runtime.sendMessage({ type: 'archiveStore', action, ...globalPayload(action, entry), ...payload });
+            assert.equal(response.code, payload.surprise ? 'INVALID_REQUEST' : 'UNAUTHORIZED');
+        }
+        await assert.rejects(archiveRequest(action, { ...globalPayload(action, entry), windowId: 20 }), { code: 'UNAUTHORIZED' });
+        assert.equal(c.messages.at(-1).windowId, 20, 'Explicit stale metadata is rejected, never repaired from the current tab.');
+        c.tab.windowId = 20; // The tab moved between native lookup and browser-authenticated dispatch.
+        await assert.rejects(archiveRequest(action, globalPayload(action, entry)), { code: 'UNAUTHORIZED' });
+        assert.equal(c.messages.at(-1).windowId, 20); assert.equal(c.focusedLookups, 0);
+        assert.deepEqual(f.local.archivedTabs, [entry]); assert.deepEqual(f.effects, []);
+    });
+
+    test(`${action} validates optional global window metadata even without a tab sender`, async t => {
+        const entry = original({ entryId: 'one' }), f = fixture([entry]);
+        const c = connectArchiveClient(t, f, { document: false, sender: { id: 'arcify' } });
+        for (const windowId of [undefined, null, false, '10', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, {}, []]) {
+            await assert.rejects(archiveRequest(action, { ...globalPayload(action, entry), windowId }), { code: 'INVALID_REQUEST' });
+        }
+        c.sender.tab = { id: 90, windowId: 10 };
+        for (const windowId of [undefined, null, false, '10', 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity, {}, []]) {
+            await assert.rejects(archiveRequest(action, { ...globalPayload(action, entry), windowId }), { code: 'UNAUTHORIZED' });
+        }
+        assert.equal(c.lookups, 0); assert.deepEqual(f.local.archivedTabs, [entry]); assert.deepEqual(f.effects, []);
+    });
+}
+
+test('a pending caller-window lookup cannot mutate and its later failure cancels the request', async t => {
+    const entry = original(), f = fixture([entry]), c = connectArchiveClient(t, f);
+    let rejectLookup;
+    chrome.tabs.getCurrent = () => new Promise((_resolve, reject) => { rejectLookup = reject; });
+    const pending = archiveRequest('remove', { expected: entry });
+    await Promise.resolve();
+    assert.deepEqual(c.messages, []); assert.deepEqual(f.effects, []);
+    rejectLookup(new Error('Caller document closed'));
+    await assert.rejects(pending, /Caller document closed/);
+    assert.deepEqual(c.messages, []); assert.deepEqual(f.effects, []); assert.deepEqual(f.local.archivedTabs, [entry]);
+    assert.equal(c.focusedLookups, 0);
+});
+
+for (const failure of ['missing-tabs', 'missing-api', 'throws', 'rejects', 'null', 'empty', 'missing-window', 'missing-id', 'invalid-id', 'string-window', 'negative-window', 'fraction-window', 'unsafe-window']) {
+    test(`document caller ${failure} lookup cancels every global request without a send or mutation`, async t => {
+        const entry = original(), f = fixture([entry]), c = connectArchiveClient(t, f);
+        if (failure === 'missing-tabs') delete chrome.tabs;
+        if (failure === 'missing-api') delete chrome.tabs.getCurrent;
+        if (failure === 'throws') chrome.tabs.getCurrent = () => { throw new Error('Lookup unavailable'); };
+        if (failure === 'rejects') chrome.tabs.getCurrent = async () => { throw new Error('Lookup unavailable'); };
+        const malformed = { null: null, empty: {}, 'missing-window': { id: 90 }, 'missing-id': { windowId: 10 },
+            'invalid-id': { id: -1, windowId: 10 }, 'string-window': { id: 90, windowId: '10' },
+            'negative-window': { id: 90, windowId: -1 }, 'fraction-window': { id: 90, windowId: 1.5 },
+            'unsafe-window': { id: 90, windowId: Number.MAX_SAFE_INTEGER + 1 } };
+        if (Object.hasOwn(malformed, failure)) c.tab = malformed[failure];
+        for (const action of ['list', 'add', 'replace', 'remove']) await assert.rejects(archiveRequest(action, globalPayload(action, entry)));
+        assert.deepEqual(c.messages, []); assert.deepEqual(f.effects, []); assert.deepEqual(f.local.archivedTabs, [entry]);
+        assert.equal(c.focusedLookups, 0);
+    });
+}
+
+test('native sidebar absent tab is allowed, but a tab-bearing sender cannot use that result to bypass its window guard', async t => {
+    const entry = original(), f = fixture([entry]), c = connectArchiveClient(t, f); c.tab = undefined;
+    for (const action of ['list', 'add', 'replace', 'remove']) await assert.rejects(archiveRequest(action, globalPayload(action, entry)), { code: 'UNAUTHORIZED' });
+    assert(c.messages.every(message => !Object.hasOwn(message, 'windowId')));
+    assert.deepEqual(f.effects, []); assert.deepEqual(f.local.archivedTabs, [entry]); assert.equal(c.focusedLookups, 0);
+});
+
+for (const action of ['view', 'archive', 'reopen']) test(`${action} retains its exact requested window without caller lookup or fallback`, async t => {
+    const f = fixture([original({ entryId: 'one' })]), c = connectArchiveClient(t, f);
+    chrome.tabs.getCurrent = async () => { throw new Error('Explicit scoped requests must not look up a replacement window.'); };
+    const prepared = await f.prepare(), before = clone(f.local.archivedTabs); f.effects.length = 0;
+    const payload = action === 'reopen' ? prepared : action === 'archive'
+        ? { tabId: 1, windowId: 10, spaceId: 'source', bookmarkFolderId: 'source-folder', url: f.tabs[0].url } : { windowId: 10 };
+    for (const windowId of [20, undefined]) {
+        await assert.rejects(archiveRequest(action, { ...payload, windowId }), { code: 'UNAUTHORIZED' });
+        assert.equal(c.messages.at(-1).windowId, windowId);
+    }
+    assert.deepEqual(f.local.archivedTabs, before); assert.deepEqual(f.effects, []); assert.equal(c.focusedLookups, 0);
+    const result = await archiveRequest(action, payload);
+    assert.equal(c.messages.at(-1).windowId, 10);
+    if (action === 'view') assert.equal(result.context.windowId, 10);
+    if (action === 'archive') assert.equal(result.archived, true);
+    if (action === 'reopen') { assert.equal(result.consumed, true); assert.equal(f.creates()[0][1].windowId, 10); }
 });
 
 for (const mutation of ['closed', 'moved', 'pinned', 'split', 'bound', 'source', 'folder', 'space']) test(`final read boundary refuses ${mutation} change after assignment without consuming`, async () => {

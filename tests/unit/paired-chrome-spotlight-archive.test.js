@@ -5,8 +5,10 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
+import { registerFavoriteMessages } from '../../favorite-store.js';
 import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
     assertArchiveReopenRequest, waitForArchiveReopenCompletion, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation,
+    readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
     ARCHIVE_FEATURES, ARCHIVE_OPEN_TYPE, ARCHIVE_ENTRY_TYPE } from '../../scripts/paired-chrome-spotlight-archive.mjs';
 const copy = value => structuredClone(value), ARCIFY = 'a'.repeat(32), SPOTLIGHT = 'b'.repeat(32), URL = 'http://127.0.0.1:9999/same';
 const source = readSourceText(new globalThis.URL('../../scripts/paired-chrome-spotlight-archive.mjs', import.meta.url));
@@ -123,7 +125,7 @@ test('hosted driver positively invokes visible UI, observes real native context 
     assert.match(source, /assertArchiveReopened\(before, after, observed\.events/); assert.match(source, /durable-uncertain-create-rejected/); assert.match(source, /captured-reopen-cached-receipt/);
     assert.match(source, /stale-archive-\$\{change\}-rejected/); assert.match(source, /evaluateWithoutGesture\(session/);
     assert.doesNotMatch(source, /\.dispatchEvent\(|\.click\(\)\s*;|Object\.defineProperty|\.sidePanel\.open\(|\.goto\([^\n]*sidebar\.html|fetch\(|setRequestInterception|mockResponse|newPage\(/);
-    assert.match(source, /await activate\(current\.tab\.id\); await local\(\{ action: 'activate', windowId, spaceId: source\.id \}\);\n        const savedFavorite/);
+    assert.match(source, /await activate\(current\.tab\.id\); await local\(\{ action: 'activate', windowId, spaceId: source\.id \}\);\n        const favoriteRequest/);
     assert.match(source, /Cleanup refuses changed unrelated archive records/);
     assert.match(source, /finishBookmarkFixture\(/); assert.match(source, /archive-cleanup-verified/); assert.match(source, /unitOnly: \['deterministic lost ACK/);
 });
@@ -261,4 +263,90 @@ test('native button observer only captures trusted browser input and exact pre-t
     listeners.get('click')({ isTrusted: true, button: 0, target: { closest: () => button } });
     assert.deepEqual(JSON.parse(JSON.stringify(realm.globalThis.__archiveButtonInput.events)), [{ trusted: true, button: 0, shift: false, ctrl: false, alt: false, meta: false, spaceId: 'selected', expandedBefore: 'true' }]);
     realm.globalThis.__archiveButtonInput.stop(); assert.equal(listeners.size, 0);
+});
+
+
+const setupUrl = `chrome-extension://${ARCIFY}/options.html?paired-archive-fixture=${'c'.repeat(32)}`;
+const setupSource = () => ({ extensionId: ARCIFY, url: setupUrl, timeOrigin: 1000,
+    tab: { id: 71, windowId: 7, url: setupUrl, pendingUrl: null, status: 'complete', incognito: false, pinned: false },
+    window: { id: 7, type: 'normal', incognito: false },
+    contexts: [{ contextType: 'TAB', documentId: 'setup-document', documentUrl: setupUrl, tabId: 71, windowId: 7, frameId: 0, incognito: false }] });
+const setupExpected = { arcifyId: ARCIFY, windowId: 7, tabId: 71, url: setupUrl };
+const setupSender = () => ({ id: ARCIFY, url: setupUrl, origin: `chrome-extension://${ARCIFY}`, documentId: 'setup-document',
+    frameId: 0, documentLifecycle: 'active', tab: { id: 71, windowId: 7 } });
+function setupEndpoint({ dispatch = async () => ({ favorites: [] }) } = {}) {
+    const source = setupSource(), sent = [], registrations = [], listeners = [];
+    globalThis.chrome = { runtime: { id: ARCIFY, getURL: path => `chrome-extension://${ARCIFY}/${path}`, onMessage: { addListener: fn => listeners.push(fn) } } };
+    registerFavoriteMessages({ dispatch });
+    const realm = { location: { href: setupUrl }, performance: { timeOrigin: source.timeOrigin }, globalThis: { __spaceActionObservation: { events: [] } },
+        chrome: { tabs: { getCurrent: async () => copy(source.tab) }, windows: { getCurrent: async () => copy(source.window) },
+            runtime: { id: ARCIFY, getContexts: async filters => { assert.deepEqual(copy(filters), { contextTypes: ['TAB'], tabIds: [71] }); return copy(source.contexts); },
+                onMessage: { addListener: fn => registrations.push(fn), removeListener: fn => registrations.splice(registrations.indexOf(fn), 1) },
+                sendMessage: message => new Promise(resolve => { sent.push(copy(message)); const sender = setupSender();
+                    for (const observer of registrations) observer(message, sender); listeners[0](message, sender, resolve); }) } } };
+    vm.runInNewContext(`(${installArchiveFixtureMessageObservation})()`, realm);
+    const endpoint = { source: copy(source), page: { evaluate: async (fn, arg) => copy(await vm.runInNewContext(`(${fn})(argument)`, { ...realm, argument: copy(arg) })) } };
+    return { endpoint, realm, source, sent, events: realm.globalThis.__spaceActionObservation.events, registrations };
+}
+test('owned setup document uses real caller-window metadata and unchanged Favorites receiver permits only its exact window', async () => {
+    const dispatched = [], value = setupEndpoint({ dispatch: async message => { dispatched.push(copy(message)); return { favorites: [] }; } });
+    const good = { type: 'favoriteStore', action: 'get', windowId: 7 };
+    assert.deepEqual(await sendArchiveFixtureRequest(value.endpoint, good), { success: true, favorites: [] });
+    assert.deepEqual(dispatched, [good]); assertArchiveFixtureSender(copy(value.events), good, value.endpoint.source);
+    const bad = { ...good, windowId: 8 };
+    assert.deepEqual(await sendArchiveFixtureRequest(value.endpoint, bad), { success: false, code: 'UNAUTHORIZED', error: 'Invalid Favorites sender.' });
+    assert.deepEqual(dispatched, [good], 'Wrong-window request never enters the store or mutates state.');
+    assertArchiveFixtureSender(copy(value.events), bad, value.endpoint.source);
+    assert.deepEqual(value.sent, [good, bad]);
+    value.realm.globalThis.__archiveFixtureMessageStop(); assert.deepEqual(value.registrations, []);
+});
+for (const [name, mutate] of [
+    ['control window', s => { s.tab.windowId = 8; s.window.id = 8; s.contexts[0].windowId = 8; }],
+    ['different native tab', s => { s.tab.id = 72; s.contexts[0].tabId = 72; }],
+    ['ordinary web page', s => { s.url = 'https://example.test/'; }], ['different extension', s => { s.extensionId = SPOTLIGHT; }],
+    ['pending navigation', s => { s.tab.pendingUrl = 'https://example.test/'; }], ['incomplete document', s => { s.tab.status = 'loading'; }],
+    ['incognito tab', s => { s.tab.incognito = true; }], ['pinned tab', s => { s.tab.pinned = true; }],
+    ['incognito window', s => { s.window.incognito = true; }], ['non-normal window', s => { s.window.type = 'popup'; }],
+    ['missing native context', s => { s.contexts = []; }], ['ambiguous native context', s => { s.contexts.push(copy(s.contexts[0])); }],
+    ['native panel substituted', s => { s.contexts[0].contextType = 'SIDE_PANEL'; }], ['missing document ID', s => { s.contexts[0].documentId = ''; }],
+    ['wrong document URL', s => { s.contexts[0].documentUrl = `chrome-extension://${ARCIFY}/options.html`; }],
+    ['wrong context tab', s => { s.contexts[0].tabId = 72; }], ['wrong context window', s => { s.contexts[0].windowId = 8; }],
+    ['subframe substituted', s => { s.contexts[0].frameId = 1; }], ['invalid document epoch', s => { s.timeOrigin = NaN; }]
+]) test(`owned setup source rejects ${name}`, () => {
+    const bad = setupSource(); mutate(bad); assert.throws(() => assertArchiveFixtureSource(bad, setupExpected));
+});
+for (const fault of ['moved tab', 'reloaded document', 'new document epoch', 'missing current tab', 'lookup rejection']) test(`setup cancels before message on ${fault}`, async () => {
+    const value = setupEndpoint();
+    if (fault === 'moved tab') value.source.tab.windowId = 8;
+    if (fault === 'reloaded document') value.source.contexts[0].documentId = 'replacement-document';
+    if (fault === 'new document epoch') value.realm.performance.timeOrigin = 1001;
+    if (fault === 'missing current tab') value.realm.chrome.tabs.getCurrent = async () => undefined;
+    if (fault === 'lookup rejection') value.realm.chrome.windows.getCurrent = async () => { throw new Error('Window lookup failed'); };
+    await assert.rejects(sendArchiveFixtureRequest(value.endpoint, { type: 'favoriteStore', action: 'get', windowId: 7 }));
+    assert.deepEqual(value.sent, []); assert.deepEqual(value.events, []);
+});
+test('setup sender proof refuses wrong source, document, tab, frame, origin or duplicate transport', () => {
+    const message = { type: 'favoriteStore', action: 'get', windowId: 8 };
+    const event = { type: 'archive.fixture-message', data: { message, sender: setupSender() } };
+    assertArchiveFixtureSender([event], message, setupSource());
+    for (const patch of [{ id: SPOTLIGHT }, { url: `chrome-extension://${ARCIFY}/options.html` }, { origin: 'https://example.test' },
+        { documentId: 'replacement-document' }, { tab: { id: 71, windowId: 8 } }, { tab: null }, { frameId: 1 }, { documentLifecycle: 'prerender' }]) {
+        assert.throws(() => assertArchiveFixtureSender([{ ...event, data: { message, sender: { ...setupSender(), ...patch } } }], message, setupSource()));
+    }
+    assert.throws(() => assertArchiveFixtureSender([], message, setupSource()));
+    assert.throws(() => assertArchiveFixtureSender([event, copy(event)], message, setupSource()));
+});
+test('hosted Archive setup owns a fresh exact-window document, measures wrong-window rejection and retains it until authorized cleanup', () => {
+    assert.match(source, /fixtureApi = await createNavigationFixturePage\(\{ browser, apiPage, observePage, poll, windowId,/);
+    assert.match(source, /options\.html\?paired-archive-fixture=\$\{nonce\}/);
+    assert.match(source, /fixtureApi\.source = assertArchiveFixtureSource\(await fixtureApi\.page\.evaluate\(readArchiveFixtureSource\)/);
+    assert.match(source, /const wrongWindowRequest = \{ type: 'favoriteStore', action: 'get', windowId: otherWindow \}/);
+    assert.match(source, /assertArchiveNoMutation\(setupBefore, setupAfter, setupObserved\.events\)/);
+    assert.match(source, /owned-archive-fixture-source-verified/); assert.match(source, /owned-archive-favorite-setup/);
+    assert.match(source, /const archive = async message => \{ const reply = await sendArchiveFixtureRequest\(fixtureApi, \{ type: 'archiveStore', windowId, \.\.\.message \}\)/);
+    assert.match(source, /const favorite = async message => \{ const reply = await sendArchiveFixtureRequest\(fixtureApi, \{ type: 'favoriteStore', \.\.\.message \}\)/);
+    const bulkClose = source.indexOf('owned.filter(id => id !== fixtureApi?.tab.id)');
+    const archiveCleanup = source.indexOf("if (!entries) return; const existing = await archive({ action: 'list' })", bulkClose);
+    const endpointClose = source.indexOf('if (fixtureApi) await apiPage.evaluate(id => chrome.tabs.remove(id), fixtureApi.tab.id)', archiveCleanup);
+    assert(bulkClose > 0 && archiveCleanup > bulkClose && endpointClose > archiveCleanup);
 });

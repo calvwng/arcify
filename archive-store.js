@@ -397,9 +397,10 @@ export function registerArchiveMessages(store) {
             || sender.tab && (!nativeId(message.windowId) || sender.tab.windowId !== message.windowId)) {
             respond({ success: false, code: 'UNAUTHORIZED', error: 'Invalid archive sender.' }); return;
         }
-        const fields = { list: [], view: ['windowId'], add: ['entry'], replace: ['entries', 'expected'], remove: ['expected'],
+        const fields = { list: ['windowId'], view: ['windowId'], add: ['entry', 'windowId'], replace: ['entries', 'expected', 'windowId'], remove: ['expected', 'windowId'],
             archive: ['tabId', 'windowId', 'spaceId', 'bookmarkFolderId', 'url'], reopen: ['requestId', 'windowId', 'context', 'expected', 'bookmarkFolderId'] };
-        if (!Object.hasOwn(fields, message.action) || Object.keys(message).some(key => !['type', 'action', ...fields[message.action]].includes(key))) {
+        if (!Object.hasOwn(fields, message.action) || Object.keys(message).some(key => !['type', 'action', ...fields[message.action]].includes(key))
+            || Object.hasOwn(message, 'windowId') && !nativeId(message.windowId)) {
             respond({ success: false, code: 'INVALID_REQUEST', error: 'Invalid archive request.' }); return;
         }
         const archive = store.archiveStore;
