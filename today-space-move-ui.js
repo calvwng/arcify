@@ -67,7 +67,16 @@ export function createTodaySpaceMoveAction({ selection, getContext, sendRequest,
 
 // A second view of the same context menu, not another overlay. Its existing
 // session owns outside/blur/hidden/pagehide dismissal and the refresh hold.
-export function appendTodayMovePicker({ document, menu, actions, close, active = () => true, reposition = () => {} }) {
+export function appendTodayMovePicker(options) {
+    const count = options.actions?.count;
+    return appendSpaceMovePicker({ ...options, labels: {
+        action: 'moveTodayTabsToSpace', destinationAction: 'moveTodayToDestination',
+        hint: `Move ${count} tab${count === 1 ? '' : 's'} to Today. Stay in the current Space.`,
+        menu: 'Move Today tabs to Space', destination: name => `Move to Today in ${name}`
+    } });
+}
+
+export function appendSpaceMovePicker({ document, menu, actions, close, active = () => true, reposition = () => {}, labels }) {
     if (!actions?.destinations.length) return;
     function item(label, action, callback) {
         const control = document.createElement('div'); control.className = 'context-menu-item';
@@ -79,18 +88,18 @@ export function appendTodayMovePicker({ document, menu, actions, close, active =
         });
         return control;
     }
-    const trigger = item('Move to Space…', 'moveTodayTabsToSpace', () => {
+    const trigger = item('Move to Space…', labels.action, () => {
         const original = [...menu.childNodes];
         trigger.setAttribute('aria-expanded', 'true');
         const back = item('Back', 'backToTabMenu', restore);
         const hint = document.createElement('div'); hint.className = 'context-menu-hint today-move-hint';
-        hint.textContent = `Move ${actions.count} tab${actions.count === 1 ? '' : 's'} to Today. Stay in the current Space.`;
+        hint.textContent = labels.hint;
         const choices = actions.destinations.map(destination => {
-            const choice = item(destination.name, 'moveTodayToDestination', () => {
+            const choice = item(destination.name, labels.destinationAction, () => {
                 close(); void actions.move(destination);
             });
             choice.dataset.spaceId = destination.id;
-            choice.setAttribute('aria-label', `Move to Today in ${destination.name}`);
+            choice.setAttribute('aria-label', labels.destination(destination.name));
             return choice;
         });
         function restore() {
@@ -103,7 +112,7 @@ export function appendTodayMovePicker({ document, menu, actions, close, active =
         for (const choice of choices) choice.addEventListener('keydown', event => {
             if (event.key === 'ArrowLeft') { event.preventDefault(); restore(); }
         });
-        menu.classList.add('today-move-picker'); menu.setAttribute('aria-label', 'Move Today tabs to Space');
+        menu.classList.add('today-move-picker'); menu.setAttribute('aria-label', labels.menu);
         menu.replaceChildren(back, hint, ...choices); reposition(); choices[0].focus({ preventScroll: true });
     });
     trigger.setAttribute('aria-haspopup', 'menu'); trigger.setAttribute('aria-expanded', 'false');

@@ -51,9 +51,9 @@ globalThis.chrome = {
                 firstSpaceRead = false;
                 return { success: true, spaces };
             }
-            if (message.action === 'patch') {
+            if (message.action === 'patch' || message.action === 'reconcilePins') {
                 patches.push(structuredClone(message));
-                local.spaces = applySpacePatch(local.spaces, message.before, message.after);
+                if (message.action === 'patch' || JSON.stringify(local.spaces) === JSON.stringify(message.before)) local.spaces = applySpacePatch(local.spaces, message.before, message.after);
             }
             if (message.action === 'activate') session.activeSpaces[message.windowId] = message.spaceId;
             return { success: true, spaces: structuredClone(local.spaces) };

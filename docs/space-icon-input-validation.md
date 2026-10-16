@@ -2,7 +2,7 @@
 
 This extends mandatory full-suite case 37 in the paired Chrome fixture. It does
 not add a quick-only mode, remove cases, renumber identities, or change sandbox
-settings: the full suite still requires 43 cases, Favorite lifecycle 5, and
+settings: the full suite now requires 45 cases (including the separate saved Move additions), Favorite lifecycle 5, and
 supplemental native Split View 4. All selected cases must pass exactly once.
 
 The fixture lives in `scripts/paired-chrome-space-icon-input.mjs` and is called
@@ -78,7 +78,7 @@ including its fallback dot and reload. The final options reset restores names.
 
 Local validator/source tests and a production build are not real-Chrome
 acceptance. Hosted results must come from the final combined commit's full
-43-case job; lifecycle and split jobs retain their independent obligations.
+45-case job; lifecycle and split jobs retain their independent obligations.
 The report includes every required screenshot and exact-state observation, and
 retains failures before cleanup. There are no arbitrary sleeps or synthetic
 event substitutes in the new helper.

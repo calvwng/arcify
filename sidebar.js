@@ -1,3 +1,4 @@
+import { withSavedMoveLock, assertSavedMoveSettled } from './saved-move-lock.js';
 import { createSidebarNewTabRow, placeNewTabRow } from './sidebar-new-tab.js';
 import { createContextMenuSession } from './context-menu-session.js';
 import { createSpaceContextMenu, spaceDeleteMessage } from './space-context-menu.js';
@@ -11,6 +12,7 @@ import { createBookmarkSelection } from './bookmark-selection.js';
 import { createTodayTabSelection } from './today-tab-selection.js';
 import { createTodayFolderAction } from './today-folder-ui.js';
 import { createTodaySpaceMoveAction } from './today-space-move-ui.js';
+import { createSavedSpaceMoveAction, captureSavedSelectionMove, captureSavedFolderMove, openSavedFolderContextMenu } from './saved-space-move-ui.js';
 import { createTodaySplitUI } from './today-split-ui.js';
 import { assertNotNativeSplit } from './native-split-safety.js';
 import { createSavedFavoritesUI } from './saved-favorites-ui.js';
@@ -110,7 +112,7 @@ const activeTabReveal = createActiveTabReveal({ getContext: () => ({
 // WeakMap<HTMLElement (folder), Set<number (tabId)>>
 const collapsedFolderShownTabs = new WeakMap();
 const bookmarkOrderBaselines = new Map();
-const favoritesContext = () => ({ spaces, activeSpaceId, windowId: currentWindow?.id });
+const favoritesContext = () => ({ spaces, activeSpaceId, pendingActiveSpaceId, windowId: currentWindow?.id });
 const bookmarkSelection = createBookmarkSelection({ document, getContext: favoritesContext, onGesture: () => todaySelection.clear() });
 const todaySelection = createTodayTabSelection({ document, getContext: favoritesContext, onGesture: () => bookmarkSelection.clear() });
 const saveTodaySelection = createTodayFolderAction({ document, selection: todaySelection, showStatus: showFavoritesStatus,
@@ -120,6 +122,19 @@ const saveTodaySelection = createTodayFolderAction({ document, selection: todayS
     refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
 });
 const moveTodaySelection = createTodaySpaceMoveAction({ selection: todaySelection, getContext: favoritesContext,
+    sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
+});
+const savedMoveCapture = {
+    getContext: favoritesContext, selection: bookmarkSelection, document,
+    readBookmarks: ids => chrome.bookmarks.get(ids),
+    readTree: id => chrome.bookmarks.getSubTree(id),
+    readInverted: () => Utils.getInvertTabOrder()
+};
+const moveSavedSelection = createSavedSpaceMoveAction({ selection: bookmarkSelection, getContext: favoritesContext,
+    readInverted: () => Utils.getInvertTabOrder(),
     sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
     begin: () => { pendingMutationCount++; },
     end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
@@ -735,25 +750,37 @@ async function initSidebar() {
     const allTabs = await chrome.tabs.query({});
     await Utils.prunePinnedTabStates(allTabs.map(t => t.id));
     const windowTabIds = new Set(allTabs.filter(t => t.windowId === currentWindow.id).map(t => t.id));
-    let membershipChanged = false;
-    // Restore bookmark bindings using only this space's owned tabs.
-    for (const space of spaces) {
-        try {
-            const previousMembership = JSON.stringify([space.spaceBookmarks, space.temporaryTabs]);
-            const folder = await getSpaceBookmarkFolder(space);
-            const bound = await BookmarkUtils.matchTabsWithBookmarks(folder, space.id,
-                Utils.setTabNameOverride.bind(Utils), Utils.setPinnedTabState.bind(Utils), null, Utils.getPinnedUrlKey.bind(Utils), currentWindow.id);
-            const previousPins = space.spaceBookmarks;
-            space.spaceBookmarks = reconcileWindowPinOrder(previousPins, bound, windowTabIds);
-            space.temporaryTabs = [...new Set([...space.temporaryTabs, ...previousPins])].filter(id => !space.spaceBookmarks.includes(id));
-            membershipChanged ||= previousMembership !== JSON.stringify([space.spaceBookmarks, space.temporaryTabs]);
-            for (const id of previousPins) if (!space.spaceBookmarks.includes(id)) await Utils.removePinnedTabState(id, { preserveNativePinned: true });
-        } catch (error) {
-            Logger.warn('Space bookmark association needs recovery:', space.id, error);
+    let membershipChanged = false, reconciliationBefore;
+    await withSavedMoveLock(async () => {
+        await assertSavedMoveSettled();
+        // A different panel may have moved saved items after our queued get.
+        // Re-read canonical membership while holding the shared bookmark barrier.
+        const current = await chrome.storage.local.get('spaces');
+        spaces = current.spaces;
+        spaceSaveQueue.reset(spaces);
+        reconciliationBefore = structuredClone(spaces);
+        // Restore bookmark bindings using only this space's owned tabs.
+        for (const space of spaces) {
+            try {
+                const previousMembership = JSON.stringify([space.spaceBookmarks, space.temporaryTabs]);
+                const folder = await getSpaceBookmarkFolder(space);
+                const bound = await BookmarkUtils.matchTabsWithBookmarks(folder, space.id,
+                    Utils.setTabNameOverride.bind(Utils), Utils.setPinnedTabState.bind(Utils), null, Utils.getPinnedUrlKey.bind(Utils), currentWindow.id);
+                const previousPins = space.spaceBookmarks;
+                space.spaceBookmarks = reconcileWindowPinOrder(previousPins, bound, windowTabIds);
+                space.temporaryTabs = [...new Set([...space.temporaryTabs, ...previousPins])].filter(id => !space.spaceBookmarks.includes(id));
+                membershipChanged ||= previousMembership !== JSON.stringify([space.spaceBookmarks, space.temporaryTabs]);
+                for (const id of previousPins) if (!space.spaceBookmarks.includes(id)) await Utils.removePinnedTabState(id, { preserveNativePinned: true });
+            } catch (error) {
+                Logger.warn('Space bookmark association needs recovery:', space.id, error);
+            }
+            createSpaceElement(space);
         }
-        createSpaceElement(space);
+    });
+    if (membershipChanged) {
+        spaces = await spaceRequest('reconcilePins', { before: reconciliationBefore, after: spaces });
+        spaceSaveQueue.reset(spaces);
     }
-    if (membershipChanged) await saveSpaces();
     const activeTab = allTabs.find(t => t.active && t.windowId === currentWindow.id);
     activeChromeTabId = activeTab?.id;
     const { activeSpaces = {} } = await chrome.storage.session.get('activeSpaces');
@@ -2332,6 +2359,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
                                 const bookmarkTab = {
                                     id: null,
                                     title: item.title,
+                                    bookmarkTitle: item.title,
                                     url: item.url,
                                     favIconUrl: null,
                                     spaceName: space.name,
@@ -2429,6 +2457,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
     pinnedContainer.appendChild(pinnedFragment);
     tempContainer.appendChild(tempFragment);
     tempContainer.dataset.todayOrderInverted = String(todayOrderInverted);
+    pinnedContainer.dataset.savedOrderInverted = String(invertTabOrder);
     const spaceElement = pinnedContainer.closest('.space');
     if (spaceElement) spaceElement.dataset.bookmarkTreeUnavailable = treeAvailable ? 'false' : 'true';
     bookmarkSelection.reconcile();
@@ -2916,26 +2945,22 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             if (isPinned || isBookmarkOnly) todaySelection.clear();
             if (pinSnapshot?.error) { showFavoritesStatus(pinSnapshot.error); return; }
             if (todaySnapshot?.error) { showFavoritesStatus(todaySnapshot.error); return; }
-            // Opening a context menu (including a later cancelled name dialog) must
-            // never create the Arcify root as an incidental side effect.
-            const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
-            let allBookmarkSpaceFolders;
-            try {
-                const folder = await getSpaceBookmarkFolder(space);
-                allBookmarkSpaceFolders = await chrome.bookmarks.getChildren(folder.parentId);
-            } catch {
-                // A missing bookmark root must not hide ordinary Close/Archive
-                // actions. Only the save command needs that root; its writer checks
-                // it after confirmation without creating a replacement implicitly.
-                allBookmarkSpaceFolders = [];
-            }
             if (todaySnapshot && !todaySelection.validate(todaySnapshot)) return;
+            let savedMove = null;
+            if (pinSnapshot) {
+                try {
+                    const savedSnapshot = await captureSavedSelectionMove(pinSnapshot, { ...savedMoveCapture,
+                        active: () => menuSession.active && menuRequest === tabContextMenuRequest && !pendingActiveSpaceId });
+                    if (!savedSnapshot) return;
+                    savedMove = moveSavedSelection(savedSnapshot);
+                } catch (error) { if (menuSession.active) showFavoritesStatus(error.message); return; }
+            }
             let actions;
             try {
                 let muted = false;
                 if (!isBookmarkOnly) muted = Boolean((await chrome.tabs.get(tab.id)).mutedInfo?.muted);
                 actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || 1, muted });
-            } catch (error) { showFavoritesStatus(error.message); return; }
+            } catch (error) { if (menuSession.active) showFavoritesStatus(error.message); return; }
             if (!menuSession.active || menuRequest !== tabContextMenuRequest || pendingActiveSpaceId || todaySnapshot && !todaySelection.validate(todaySnapshot) || pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
             showTabContextMenu(
                 keyboard ? tabElement.getBoundingClientRect().left : e.pageX,
@@ -2948,7 +2973,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
                 spaces,
                 moveTabToSpace,
                 setActiveSpace,
-                allBookmarkSpaceFolders,
+                [],
                 createSpaceFromInactive,
                 actions.useCurrentUrl,
                 async () => {
@@ -2967,19 +2992,20 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
                 },
                 todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot), move: moveActions } : null,
                 { ...actions, report: showFavoritesStatus },
-                splitActions ? { ...splitActions, keyboard,
-                    ...(splitActions.create || splitActions.end || moveActions?.destinations.length ? { beginInteraction: () => {
-                        const session = editorSessions.begin('tab', tab.id);
+                { ...splitActions, keyboard,
+                    ...(splitActions?.create || splitActions?.end || moveActions?.destinations.length || savedMove?.destinations.length ? { beginInteraction: () => {
+                        const session = editorSessions.begin(pinSnapshot ? 'bookmark' : 'tab', pinSnapshot ? tabElement.dataset.bookmarkId : tab.id);
                         return () => { void editorSessions.complete(session); };
                     } } : {})
-                } : null,
-                menuSession
+                },
+                menuSession,
+                savedMove
             );
             attached = true;
         } finally { if (!attached) menuSession.close(); }
     };
     tabElement.addEventListener('contextmenu', openTabContextMenu);
-    if (!isPinned && !isBookmarkOnly) tabElement.addEventListener('keydown', event => {
+    if ((!isPinned && !isBookmarkOnly) || tabElement.dataset.bookmarkId) tabElement.addEventListener('keydown', event => {
         if (event.target !== tabElement || event.repeat || event.isComposing) return;
         if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) {
             event.preventDefault(); event.stopImmediatePropagation();
@@ -3500,41 +3526,23 @@ async function movToPrevTabInSpace(tabId, sourceSpace) {
 }
 // Reusable function to set up folder context menu
 function setupFolderContextMenu(folderElement, space, item = null) {
-    folderElement.addEventListener('contextmenu', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const menuSession = createContextMenuSession(document);
-        let attached = false;
-        try {
-            const contextMenu = document.createElement('div');
-            contextMenu.id = 'folder-context-menu';
-            contextMenu.setAttribute('role', 'menu');
-            contextMenu.classList.add('context-menu');
-            contextMenu.style.position = 'fixed';
-            contextMenu.style.left = `${e.clientX}px`;
-            contextMenu.style.top = `${e.clientY}px`;
-
-            const spaceElement = folderElement.closest('.space');
-            const spaceFolder = await getSpaceBookmarkFolder(space);
-            const folderId = folderElement.dataset.bookmarkId;
-            if (folderId && await canCreateFolder(spaceFolder.id, folderId)) {
-                const newFolderOption = document.createElement('div');
-                newFolderOption.classList.add('context-menu-item');
-                newFolderOption.textContent = 'New Folder';
-                newFolderOption.addEventListener('click', async () => {
-                    if (!menuSession.active) return;
-                    menuSession.close();
-                    await createNewFolder(spaceElement, folderElement);
-                });
-                contextMenu.appendChild(newFolderOption);
-            }
-
-            const deleteOption = document.createElement('div');
-            deleteOption.classList.add('context-menu-item');
-            deleteOption.textContent = 'Delete Folder';
-            deleteOption.addEventListener('click', async () => {
-                if (!menuSession.active) return;
-                menuSession.close();
+    const header = folderElement.querySelector(':scope > .folder-header');
+    if (header) header.tabIndex = 0;
+    const open = async (event, keyboard = false) => {
+        event.preventDefault(); event.stopPropagation();
+        tabMenuActions.cancelEdit(); spaceContextMenu.close(false); closeTabContextMenu();
+        bookmarkSelection.clear(); todaySelection.clear();
+        const spaceElement = folderElement.closest('.space'), folderId = folderElement.dataset.bookmarkId;
+        await openSavedFolderContextMenu({ document, element: folderElement, event, keyboard,
+            prepareMove: active => captureSavedFolderMove(folderElement, { ...savedMoveCapture,
+                active: () => active() && !pendingActiveSpaceId }),
+            createMoveAction: moveSavedSelection,
+            canCreate: async () => {
+                const spaceFolder = await getSpaceBookmarkFolder(space);
+                return folderId && await canCreateFolder(spaceFolder.id, folderId);
+            },
+            createFolder: () => createNewFolder(spaceElement, folderElement),
+            deleteFolder: async () => {
                 if (confirm('Are you sure you want to delete this folder and all its contents?')) {
                     if (folderId) await chrome.bookmarks.removeTree(folderId);
                     editorSessions.dispose('folder', folderId);
@@ -3544,11 +3552,17 @@ function setupFolderContextMenu(folderElement, space, item = null) {
                     if (parentFolder) updateFolderPlaceholder(parentFolder);
                     updatePinnedSectionPlaceholders();
                 }
-            });
-
-            contextMenu.appendChild(deleteOption);
-            if (!folderElement.isConnected || !menuSession.active) return;
-            attached = menuSession.attach(contextMenu);
-        } finally { if (!attached) menuSession.close(); }
+            },
+            beginInteraction: () => {
+                const session = editorSessions.begin('folder', folderId);
+                return () => { void editorSessions.complete(session); };
+            },
+            showStatus: showFavoritesStatus
+        });
+    };
+    folderElement.addEventListener('contextmenu', event => void open(event));
+    header?.addEventListener('keydown', event => {
+        if (event.target !== header || event.repeat || event.isComposing) return;
+        if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) void open(event, true);
     });
 }

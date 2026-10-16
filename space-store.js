@@ -12,6 +12,8 @@ import { hasNativeSplit, assertNotNativeSplit, assertNativeSplitMembershipPreser
 import { Utils } from './utils.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { LocalStorage } from './localstorage.js';
+import { checkpointSavedMove, recoverSavedMoveData, finishSavedMoveRecovery, recoverSavedMove } from './saved-move-store.js';
+import { withSavedMoveLock, SAVED_MOVE_JOURNAL_KEY } from './saved-move-lock.js';
 import { captureWindowTabs, matchRestoreRecord } from './space-restore.js';
 import { SPACE_CONTINUITY_KEY, createSpaceContinuityStamp, readSpaceContinuitySnapshot, createSpaceRankCheckpoint, readSpaceRankCheckpoint } from './space-continuity.js';
 
@@ -69,8 +71,11 @@ export class SpaceStore {
         const pending = this.chain.then(async () => {
             // Favorite initialization never enters run(): the single shared gate
             // validates exact global ownership before Space restore/adoption.
-            if (this.favoriteStore) { await this.favoriteStore.initialize(); await this.favoriteStore.reconcile({ updateSpaces: this.initialized }); }
-            await this.initialize(); return operation();
+            if (this.favoriteStore) await this.favoriteStore.initialize();
+            if (this.initialized) await recoverSavedMove(this);
+            await this.initialize();
+            if (this.favoriteStore) await this.favoriteStore.reconcile({ updateSpaces: true });
+            return operation();
         });
         this.chain = pending.catch(console.error);
         return pending;
@@ -84,10 +89,21 @@ export class SpaceStore {
     }
     async initialize() {
         if (this.initialized) return;
-        if (this.favoriteStore) { await this.favoriteStore.initialize(); await this.favoriteStore.reconcile({ updateSpaces: false }); }
+        return withSavedMoveLock(async () => {
+            const journal = (await chrome.storage.local.get(SAVED_MOVE_JOURNAL_KEY))[SAVED_MOVE_JOURNAL_KEY];
+            return journal ? Utils._serializePinnedStateOp(() => this.initializeUnlocked()) : this.initializeUnlocked();
+        });
+    }
+    async initializeUnlocked() {
+        if (this.initialized) return;
+        if (this.favoriteStore) await this.favoriteStore.initialize();
         await this.readTodayPlacement();
-        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', 'spaceRankCheckpoint', SPACE_CONTINUITY_KEY]);
-        const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'spaceRecoveryCandidates']);
+        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', 'spaceRankCheckpoint', SPACE_CONTINUITY_KEY, SAVED_MOVE_JOURNAL_KEY]);
+        const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'spaceRecoveryCandidates', 'spaceSavedMoveSession']);
+        this.provisional = new Set();
+        this.recoveryCandidates = new Set(session.spaceSession ? session.spaceRecoveryCandidates || [] : []);
+        const savedMoveRecovery = await recoverSavedMoveData(this, data, session);
+        if (this.favoriteStore) await this.favoriteStore.reconcile({ updateSpaces: false });
         this.spaces = data.spaces || [];
         this.snapshotByTab = new Map((data.spaceTabSnapshot || []).filter(t => t.tabId).map(t => [t.tabId, t]));
         this.provisional = new Set();
@@ -179,7 +195,8 @@ export class SpaceStore {
         }
         this.initialized = true;
         try {
-            await this.persist();
+            if (savedMoveRecovery) await finishSavedMoveRecovery(this, savedMoveRecovery);
+            else await this.persist();
             for (const id of initializedCreations) this.pendingCreations.delete(id);
         } catch (error) { this.initialized = false; throw error; }
     }
@@ -375,7 +392,7 @@ export class SpaceStore {
         }
     }
 
-    async persist({ skipGroupSync = false, beforeWrite = null } = {}) {
+    async persist({ skipGroupSync = false, beforeWrite = null, savedMove = null } = {}) {
         const tabs = new Map((await chrome.tabs.query({})).map(t => [t.id, t]));
         this.liveTabs = tabs;
         const liveWindows = new Set([...tabs.values()].map(t => t.windowId));
@@ -432,8 +449,10 @@ export class SpaceStore {
         const stamp = await createSpaceContinuityStamp(identity, snapshot);
         const spaceTabSnapshot = [...snapshot, ...this.restoreQueue];
         const spaceRankCheckpoint = await createSpaceRankCheckpoint([...this.restoredRanks], spaceTabSnapshot);
+        const checkpoint = { spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot, spaceRankCheckpoint, spaceWindowSnapshot: windowSnapshot, [SPACE_CONTINUITY_KEY]: stamp };
+        if (savedMove) checkpoint[SAVED_MOVE_JOURNAL_KEY] = await checkpointSavedMove(savedMove, checkpoint, snapshot.length);
         if (beforeWrite) await beforeWrite();
-        await chrome.storage.local.set({ spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot, spaceRankCheckpoint, spaceWindowSnapshot: windowSnapshot, [SPACE_CONTINUITY_KEY]: stamp });
+        await chrome.storage.local.set(checkpoint);
         const spaceSessionUpdate = { spaceSession: true, activeSpaces: this.active, spaceRestoreQueue: this.restoreQueue, restoredTabRanks: [...this.restoredRanks], spaceWindowKeys: [...this.windowKeys], spaceRestoreWindowKeys: [...this.restoreWindowKeys], spaceRecoveryCandidates: [...new Set([...this.recoveryCandidates, ...this.provisional])] };
         const favorites = this.favoriteStore;
         if (favorites?.ownershipPersistence?.checkpointSelection) {
@@ -459,6 +478,20 @@ export class SpaceStore {
             case 'get':
                 if (await this.discoverBookmarkSpaces()) await this.persist();
                 break;
+            case 'reconcilePins': {
+                // Startup's legacy matcher releases the cross-document barrier
+                // before entering this queue. Its observed membership must still
+                // be current; stale recovery can never demote a newly moved pin.
+                if (JSON.stringify(this.spaces) !== JSON.stringify(message.before)) return clone(this.spaces);
+                const next = applySpacePatch(this.spaces, message.before, message.after);
+                assertNativeSplitMembershipPreserved(this.spaces, next, await chrome.tabs.query({}));
+                const previous = this.spaces; this.spaces = next;
+                for (const space of next) for (const section of sections) {
+                    const before = previous.find(value => value.id === space.id)?.[section] || [];
+                    if (JSON.stringify(before) !== JSON.stringify(space[section])) this.rebaseSectionRanks(space, section, before);
+                }
+                break;
+            }
             case 'patch': {
                 const nextSpaces = applySpacePatch(this.spaces, message.before, message.after);
                 assertNativeSplitMembershipPreserved(this.spaces, nextSpaces, await chrome.tabs.query({}));

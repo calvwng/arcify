@@ -106,7 +106,7 @@ test('partial, uncertain, malformed, wrong-ID and contradicted receipts never cl
     assert.match(f.statuses.at(-1), /Moved 1 tab.*sidebar could not refresh/); assert.equal(f.calls.length, 1);
 });
 
-test('actual tab menu replaces Today legacy movement, has keyboard destinations and Back, and preserves pin legacy movement', async () => {
+test('actual tab menu replaces Today legacy movement, has keyboard destinations and Back, and never exposes legacy movement for pins', async () => {
     const f = fixture(); const previous = { document: globalThis.document, window: globalThis.window };
     Object.assign(globalThis, { document: f.document, window: f.window });
     const { showTabContextMenu, closeTabContextMenu } = await import('../../domManager.js');
@@ -136,7 +136,7 @@ test('actual tab menu replaces Today legacy movement, has keyboard destinations 
         f.event(choices[0], 'keydown', { key: 'Enter' }); f.event(choices[0], 'click'); await settle();
         assert.equal(f.calls.length, 1); assert.equal(f.document.getElementById('tab-context-menu'), null); assert.equal(ends, 1);
         open(1); assert(item('moveTodayTabsToSpace')); assert.equal(f.document.querySelector('.with-submenu'), null);
-        closeTabContextMenu(); open(1, true); assert.equal(item('moveTodayTabsToSpace'), null); assert(f.document.querySelector('.with-submenu'));
+        closeTabContextMenu(); open(1, true); assert.equal(item('moveTodayTabsToSpace'), null); assert.equal(f.document.querySelector('.with-submenu'), null);
         closeTabContextMenu();
         showTabContextMenu(0, 0, { id: 1 }, false, false, f.row(1), () => {}, f.context.spaces,
             () => assert.fail('Stale Today must never fall back to legacy movement'), () => {}, [], () => {});

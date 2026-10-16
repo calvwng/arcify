@@ -2,10 +2,10 @@ export const MAX_BOOKMARK_SELECTION = 100;
 const ROW = '.tab[data-bookmark-id]';
 const CONTROL = 'button, input, textarea, select, a, [contenteditable="true"], [role="button"]';
 const modifiers = event => event.shiftKey || event.ctrlKey || event.metaKey;
-const same = (a, b) => a && b && ['element', 'bookmarkId', 'parentId', 'tabId', 'url', 'pinnedUrl'].every(key => a[key] === b[key]);
+const same = (a, b) => a && b && ['element', 'bookmarkId', 'parentId', 'tabId', 'url', 'pinnedUrl', 'title'].every(key => a[key] === b[key]);
 const sameBookmark = (a, b) => a && b && a.bookmarkId === b.bookmarkId && a.parentId === b.parentId &&
     (a.pinnedUrl || a.url) === (b.pinnedUrl || b.url);
-const sameContext = (a, b) => a && b && ['windowId', 'spaceId', 'bookmarkFolderId'].every(key => a[key] === b[key]);
+const sameContext = (a, b) => a && b && ['windowId', 'spaceId', 'bookmarkFolderId', 'inverted'].every(key => a[key] === b[key]);
 
 // Selection is local UI state. Only registered bookmark rows in the active
 // Space participate; neither CSS classes nor transfer text create authority.
@@ -22,7 +22,9 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
 
     function context() {
         const value = getContext(), space = value.spaces.find(item => item.id === value.activeSpaceId);
-        return { windowId: value.windowId, spaceId: space?.id, bookmarkFolderId: space?.bookmarkFolderId };
+        const element = [...document.querySelectorAll('#spacesList .space')].find(row => row.dataset.spaceId === space?.id);
+        return { windowId: value.windowId, spaceId: space?.id, bookmarkFolderId: space?.bookmarkFolderId,
+            inverted: element?.querySelector('[data-tab-type="pinned"]')?.dataset.savedOrderInverted === 'true' };
     }
     function descriptor(element, current = context()) {
         if (!element?.isConnected || registered.get(element) !== element.dataset.bookmarkId ||
@@ -42,7 +44,7 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
         if (tabId !== null && (!Number.isInteger(tabId) || tabId < 0)) return null;
         return { element, bookmarkId: element.dataset.bookmarkId,
             parentId: element.parentElement.closest('.folder')?.dataset.bookmarkId || current.bookmarkFolderId,
-            tabId, url: element.dataset.url, pinnedUrl: element.dataset.pinnedUrl };
+            tabId, url: element.dataset.url, pinnedUrl: element.dataset.pinnedUrl, title: element.dataset.bookmarkTitle };
     }
     function visible(current = context()) {
         const entries = [...document.querySelectorAll(`#spacesList ${ROW}`)].map(row => descriptor(row, current)).filter(Boolean);
@@ -59,8 +61,8 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
         }
         status.dataset.count = String(selected.size); status.hidden = !selected.size;
         status.textContent = selected.size > MAX_BOOKMARK_SELECTION
-            ? `${selected.size} bookmarks selected. Select at most ${MAX_BOOKMARK_SELECTION} for one Favorites drop.`
-            : selected.size ? `${selected.size} bookmark${selected.size === 1 ? '' : 's'} selected. Drag to Favorites. Escape clears selection.` : '';
+            ? `${selected.size} bookmarks selected. Select at most ${MAX_BOOKMARK_SELECTION} for one action.`
+            : selected.size ? `${selected.size} bookmark${selected.size === 1 ? '' : 's'} selected. Right-click to move to another Space, or drag to Favorites. Escape clears selection.` : '';
     }
     function clear() {
         interaction++;
@@ -147,7 +149,7 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
         if (!entry) { clear(); return null; }
         onGesture();
         if (!selected.has(entry.bookmarkId)) { selected = new Map([[entry.bookmarkId, entry]]); anchor = entry; revision++; paint(); }
-        if (selected.size > MAX_BOOKMARK_SELECTION) return { error: `Select at most ${MAX_BOOKMARK_SELECTION} bookmarks for one Favorites drop. Nothing was added.` };
+        if (selected.size > MAX_BOOKMARK_SELECTION) return { error: `Select at most ${MAX_BOOKMARK_SELECTION} bookmarks for one action. Nothing was changed.` };
         const visibleEntries = Object.freeze(entries.map(item => Object.freeze({ ...item })));
         return Object.freeze({ ...scope, revision, visibleEntries,
             entries: Object.freeze(visibleEntries.filter(item => selected.has(item.bookmarkId))) });
@@ -167,7 +169,8 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
         document.body.append(image); event.dataTransfer.setDragImage(image, 20, 20);
     }
     function clearDragImage() { image?.remove(); image = null; }
-    function onActivation() { clearForActivation(); reconcile(); }
+    function onActivation() { interaction++; clearForActivation(); reconcile(); }
+    function captureInteraction() { reconcile(); const started = interaction; return () => started === interaction; }
     function captureActivation() {
         const started = interaction;
         // Browser ownership is checked by the caller before completion. An
@@ -177,7 +180,7 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
     }
     document.addEventListener('click', event => {
         // Dismissing a result is UI housekeeping, not a new selection gesture.
-        if (event.target.closest?.('#favoritesDropNotice')) return;
+        if (event.target.closest?.('#tab-context-menu, #folder-context-menu, #favoritesDropNotice')) return;
         if (!event.target.closest?.(ROW)) clear();
     }, true);
     document.addEventListener('keydown', event => { if (event.key === 'Escape') clear(); }, true);
@@ -189,7 +192,7 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
     const Observer = document.defaultView.MutationObserver;
     if (Observer) new Observer(reconcile).observe(document.getElementById('spacesList'), {
         subtree: true, childList: true, attributes: true,
-        attributeFilter: ['class', 'hidden', 'style', 'data-bookmark-id', 'data-tab-id', 'data-url', 'data-pinned-url', 'data-space-id', 'data-bookmark-tree-unavailable']
+        attributeFilter: ['class', 'hidden', 'style', 'data-bookmark-id', 'data-tab-id', 'data-url', 'data-pinned-url', 'data-bookmark-title', 'data-space-id', 'data-saved-order-inverted', 'data-bookmark-tree-unavailable']
     });
-    return { register, clear, reconcile, freeze, validate, dragImage, clearDragImage, onActivation, captureActivation };
+    return { register, clear, reconcile, freeze, validate, dragImage, clearDragImage, onActivation, captureActivation, captureInteraction };
 }

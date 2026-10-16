@@ -18,6 +18,7 @@ A Chrome extension that replicates Arc browser's tab management system, providin
 - [Open Spotlight or a new tab from the Today row](docs/sidebar-new-tab.md)
 - [Independent Today insertion and opener order](docs/today-insertion-order.md)
 - [Select Today tabs, move them to a Space, or save a pinned folder](docs/today-tab-selection.md)
+- [Move saved pins and folders between Spaces](docs/saved-space-moves.md)
 - [Adjustable Favorites, Space header sizing, and icon-only Space switcher](docs/sidebar-appearance.md)
 - [Custom keyboard emoji for Space icons](docs/space-context-menu.md)
 - [Sidebar management scroll and focus](docs/sidebar-management-scroll.md)

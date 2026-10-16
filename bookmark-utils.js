@@ -266,15 +266,16 @@ export const BookmarkUtils = {
                 // been bound to another bookmark in this run, so URL twins don't both
                 // get claimed by a single bookmark.
                 const available = tabs.filter(t => !claimed.has(t.id));
-                let tab = available.find(t => pinnedTabStatesById[t.id]?.bookmarkId === item.id)
-                    || available.find(t => t.url === item.url && !pinnedTabStatesById[t.id]?.bookmarkId);
+                const exact = available.filter(t => pinnedTabStatesById[t.id]?.bookmarkId === item.id);
+                let tab = exact[0] || available.find(t => t.url === item.url && !pinnedTabStatesById[t.id]?.bookmarkId);
                 // Legacy recovery is limited to already-pinned members without a binding.
                 // Ordinary temporary tabs must never be promoted by a matching URL.
                 if (!tab && getUrlKey) {
                     const targetKey = getUrlKey(item.url);
                     tab = available.find(t => !pinnedTabStatesById[t.id]?.bookmarkId && getUrlKey(t.url) === targetKey);
                 }
-                if (tab) {
+                const matches = exact.length ? exact : tab ? [tab] : [];
+                for (const tab of matches) {
                     claimed.add(tab.id);
                     bookmarks.push(tab.id);
                     // Set tab name override with the bookmark's title if needed

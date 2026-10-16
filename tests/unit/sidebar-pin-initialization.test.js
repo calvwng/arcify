@@ -102,7 +102,17 @@ test('real sidebar appends a newly validated binding without reordering existing
     const result = await initialize(data);
     assert.deepEqual(result.local.spaces[0].spaceBookmarks, [...data.local.spaces[0].spaceBookmarks, 8]);
     assert.deepEqual(result.local.spaces[0].temporaryTabs, [9]);
-    assert.equal(result.patches.length, 1);
-    assert.deepEqual(result.patches[0].after[0].spaceBookmarks, [...data.local.spaces[0].spaceBookmarks, 8]);
+    assert.equal(result.patches.length, 0, 'The barrier rereads an already committed concurrent binding without a redundant patch');
     assert.equal(result.rows.find(row => row.tabId === 8)?.bookmarkId, 'b18');
+});
+
+test('startup retains every exact copy of one saved pin in the same window', async () => {
+    const data = fixture();
+    data.tabs.push({ id: 44, windowId: 10, pinned: false, active: false, title: 'Second exact copy', url: 'https://another-current-page.test/' });
+    data.local.spaces[0].spaceBookmarks.push(44);
+    data.local.pinnedTabStatesById[44] = structuredClone(data.local.pinnedTabStatesById[1]);
+    const result = await initialize(data);
+    assert.deepEqual(result.local.spaces, data.local.spaces); assert.deepEqual(result.patches, []);
+    assert.deepEqual(result.local.pinnedTabStatesById[44], data.local.pinnedTabStatesById[44]);
+    assert.equal(result.local.spaces[0].temporaryTabs.includes(44), false);
 });

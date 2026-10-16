@@ -134,7 +134,8 @@ h3 {
 .today-move-hint { padding: 8px 12px; font-size: 12px; line-height: 1.4; }
 
 .today-move-picker [role="menuitem"]:focus-visible,
-[data-action="moveTodayTabsToSpace"]:focus-visible {
+[data-action="moveTodayTabsToSpace"]:focus-visible,
+[data-action="moveSavedItemsToSpace"]:focus-visible {
     outline: 2px solid var(--accent-color, #4d8dff);
     outline-offset: -2px;
 }

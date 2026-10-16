@@ -59,8 +59,8 @@ const area = state => ({ async get(keys) {
     if (typeof keys === 'string') return { [keys]: structuredClone(state[keys]) };
     return structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
 }, async set(next) { Object.assign(state, structuredClone(next)); }, async remove(key) { delete state[key]; } });
-let beforeTree, beforeRemove, beforeGetTab, beforeTabMenuRequest, beforeTodayMoveRequest;
-const mutations = [], saveRequests = [], splitRequests = [], nativeSplitCalls = [], todayMoveRequests = [];
+let beforeTree, beforeGetBookmarks, beforeRemove, beforeGetTab, beforeTabMenuRequest, beforeTodayMoveRequest;
+const mutations = [], saveRequests = [], splitRequests = [], nativeSplitCalls = [], todayMoveRequests = [], savedMoveRequests = [];
 const settings = { invertTabOrder: false };
 let nextBookmarkId = 100;
 const store = new SpaceStore(); store.initialized = true; store.spaces = storedSpaces; store.active = session.activeSpaces; store.restoredRanks = new Map(); store.restoredMetadata = []; store.isGlobalTab = () => false;
@@ -77,6 +77,11 @@ Object.assign(globalThis, { window, document, Event: window.Event, Node: window.
 globalThis.chrome = {
     runtime: { onMessage, getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'moveSavedItemsToSpace') {
+                savedMoveRequests.push(structuredClone(message));
+                return { success: true, batch: { total: message.entries.length, completed: message.entries.map(entry => entry.bookmarkId),
+                    remaining: [], uncertain: false, destinationSpaceId: message.destinationSpaceId } };
+            }
             if (message.type === 'moveTodayTabsToSpace') {
                 todayMoveRequests.push(structuredClone(message));
                 return beforeTodayMoveRequest?.(message);
@@ -118,7 +123,11 @@ globalThis.chrome = {
     },
     bookmarks: {
         async create(data) { const node = { ...data, id: String(nextBookmarkId++) }; (node.url ? bookmarks : folders).push(node); mutations.push(['bookmark-create', structuredClone(node)]); return structuredClone(node); },
-        async get(id) { return structuredClone([...folders, ...bookmarks].filter(node => node.id === id)); },
+        async get(id) { await beforeGetBookmarks?.(id); const ids = Array.isArray(id) ? id : [id]; return structuredClone([...folders, ...bookmarks].filter(node => ids.includes(node.id))); },
+        async getSubTree(id) {
+            const read = async node => node.url ? node : { ...node, children: await Promise.all((await this.getChildren(node.id)).map(read)) };
+            return Promise.all((await this.get(id)).map(read));
+        },
         async search({ title }) { return structuredClone(folders.filter(node => node.title === title)); },
         async getChildren(id) { await beforeTree?.(); return structuredClone([...folders, ...bookmarks].filter(node => node.parentId === id).sort((a, b) => (a.index ?? Number(a.id.slice(1)) ?? 0) - (b.index ?? Number(b.id.slice(1)) ?? 0))); },
         async update(id, values) { Object.assign(bookmarks.find(node => node.id === id), values); mutations.push(['bookmark-update', id, values]); return structuredClone(bookmarks.find(node => node.id === id)); },
@@ -507,13 +516,13 @@ test('a pending new Space cancels an older async Split menu before adoption', as
     const other = { id: 'split-pending', name: 'Pending Space', color: 'green', bookmarkFolderId: 'split-pending-folder', spaceBookmarks: [], temporaryTabs: [202] };
     let release, entered = false;
     const delayed = new Promise(resolve => { release = resolve; });
-    beforeTree = async () => { entered = true; await delayed; };
+    beforeGetTab = async id => { if (id === 101) { entered = true; await delayed; } };
     try {
         event(live(101), 'keydown', { key: 'F10', shiftKey: true }); await wait(20);
         assert(entered); assert.equal(document.getElementById('tab-context-menu'), null);
         session.activeSpaces[10] = other.id;
         await onChanged.emit({ activeSpaces: { newValue: structuredClone(session.activeSpaces) } }, 'session');
-        beforeTree = null; release(); await wait(25);
+        beforeGetTab = null; release(); await wait(25);
         assert.equal(document.getElementById('tab-context-menu'), null, 'An old request cannot reopen its actionable menu while the next Space is pending');
         event(live(101), 'keydown', { key: 'F10', shiftKey: true }); await wait(25);
         assert.equal(document.getElementById('tab-context-menu'), null, 'A new menu on the obsolete Space must not block pending destination adoption either');
@@ -524,7 +533,7 @@ test('a pending new Space cancels an older async Split menu before adoption', as
         assert.equal(content().closest('.space').dataset.spaceId, other.id); assert(live(202));
         assert.equal(document.getElementById('tab-context-menu'), null); assert.equal(splitRequests.length, before);
     } finally {
-        beforeTree = null; release(); clear(); session.activeSpaces[10] = 'alpha';
+        beforeGetTab = null; release(); clear(); session.activeSpaces[10] = 'alpha';
         await onChanged.emit({ activeSpaces: { newValue: structuredClone(session.activeSpaces) } }, 'session');
         storedSpaces = storedSpaces.filter(space => space.id !== other.id); local.spaces = structuredClone(storedSpaces);
         const tabIndex = tabs.findIndex(tab => tab.id === 202); if (tabIndex >= 0) tabs.splice(tabIndex, 1);
@@ -635,11 +644,11 @@ test('visible Today, saved/live pin and folder menus dismiss across external foc
     clear(); const before = structuredClone(mutations);
     for (const open of [() => context(6), () => pinContext('b10'), () => context(1), folderContext]) {
         for (const exit of ['blur', 'hidden', 'pagehide']) {
-            await open(); assert(document.querySelector('#tab-context-menu, #folder-context-menu'));
+            await open(); assert(document.querySelector('#tab-context-menu, #folder-context-menu'), `${open.name || 'row'}/${exit}: ${document.getElementById('favoritesDropNotice')?.textContent}`);
             leaveSidebar(exit); await wait(40);
             assert.equal(document.querySelector('#tab-context-menu, #folder-context-menu'), null);
             assert.equal(document.activeElement, document.getElementById('newTabBtn'));
-            await open(); assert(document.querySelector('#tab-context-menu, #folder-context-menu')); clear();
+            await open(); assert(document.querySelector('#tab-context-menu, #folder-context-menu'), `${open.name || 'row'}/${exit}: ${document.getElementById('favoritesDropNotice')?.textContent}`); clear();
         }
     }
     assert.deepEqual(mutations, before);
@@ -650,14 +659,14 @@ test('async Today/live-pin/closed-pin menu preparations cannot reopen after leav
     for (const kind of ['today', 'live-pin', 'closed-pin']) for (const exit of ['blur', 'hidden', 'pagehide', 'pointerdown', 'Escape']) {
         let release; const waiting = new Promise(resolve => { release = resolve; });
         const target = kind === 'today' ? live(6) : kind === 'live-pin' ? live(1) : row('b10');
-        if (kind === 'closed-pin') beforeTree = () => waiting;
+        if (kind === 'closed-pin') beforeGetBookmarks = ids => Array.isArray(ids) ? waiting : undefined;
         else beforeGetTab = id => [1, 6].includes(id) ? waiting : undefined;
         try {
             event(target, 'contextmenu', { pageX: 20, pageY: 40 }); await wait(10);
             if (['blur', 'hidden', 'pagehide'].includes(exit)) leaveSidebar(exit);
             else if (exit === 'Escape') clear();
             else event(document.body, 'pointerdown');
-        } finally { beforeTree = null; beforeGetTab = null; release(); }
+        } finally { beforeGetBookmarks = null; beforeGetTab = null; release(); }
         await wait(35);
         assert.equal(document.getElementById('tab-context-menu'), null, `${kind}/${exit} must cancel pending attachment`);
         clear();
@@ -803,4 +812,47 @@ test('real sidebar rejects stale Today row instead of falling back to legacy mov
     try { await context(6); assert.equal(document.getElementById('tab-context-menu'), null); }
     finally { target.hidden = false; clear(); }
     assert.match(document.getElementById('favoritesDropNotice').textContent, /Today row changed/);
+});
+
+
+// This verifies real sidebar request wiring; durable movement itself is exercised
+// by saved-move-store tests. The response stub deliberately leaves source data
+// intact so each fresh menu can be tested against the same exact bookmark IDs.
+test('real sidebar wires closed/live saved batches and clicked folders to exact guarded requests without switching Space', async () => {
+    clear(); const beforeMutations = structuredClone(mutations), beforeTabs = structuredClone(tabs);
+    try {
+        for (const inverted of [false, true]) {
+            settings.invertTabOrder = inverted; await refresh();
+            for (const ids of [['b10'], ['b0'], ['b10', 'b0']]) {
+                clear(); for (const id of ids) event(row(id), 'click', { ctrlKey: true });
+                const expected = [...content().querySelectorAll('.bookmark-selected')].map(node => node.dataset.bookmarkId);
+                event(row(ids[0]), 'keydown', { key: 'F10', shiftKey: true }); await wait(30);
+                const trigger = menuItem('moveSavedItemsToSpace'); assert(trigger);
+                assert.equal(menuItem('moveTodayTabsToSpace'), null); assert.equal(document.querySelector('.with-submenu'), null);
+                event(trigger, 'click');
+                const choice = document.querySelector('[data-action="moveSavedToDestination"][data-space-id="move-dest"]');
+                const beforeCount = savedMoveRequests.length;
+                event(choice, 'keydown', { key: 'Enter' }); event(choice, 'click'); await wait(260);
+                assert.equal(savedMoveRequests.length, beforeCount + 1);
+                const request = savedMoveRequests.at(-1);
+                assert.equal(request.inverted, inverted); assert.equal(request.spaceId, 'alpha'); assert.equal(request.bookmarkFolderId, 'p');
+                assert.equal(request.destinationBookmarkFolderId, 'move-folder');
+                assert.deepEqual(request.entries, expected.map(id => {
+                    const bookmark = bookmarks.find(node => node.id === id);
+                    return { bookmarkId: id, parentId: bookmark.parentId, title: bookmark.title, url: bookmark.url, tabId: id === 'b0' ? 1 : null };
+                }));
+                assert.equal(document.querySelector('.space.active').dataset.spaceId, 'alpha'); assert.equal(session.activeSpaces[10], 'alpha');
+            }
+            clear(); const folder = existingFolder(), folderId = folder.dataset.bookmarkId;
+            event(folder.querySelector(':scope > .folder-header'), 'keydown', { key: 'F10', shiftKey: true }); await wait(30);
+            event(document.querySelector('#folder-context-menu [data-action="moveSavedItemsToSpace"]'), 'click');
+            const choice = document.querySelector('[data-action="moveSavedToDestination"][data-space-id="move-dest"]');
+            event(choice, 'click'); await wait(260);
+            const request = savedMoveRequests.at(-1), entry = request.entries[0];
+            assert.equal(request.inverted, inverted); assert.equal(entry.bookmarkId, folderId); assert.equal(entry.url, null); assert.equal(entry.tabId, null);
+            assert.equal(entry.tree.id, folderId); assert.deepEqual(entry.tree.children.map(child => child.id), (await chrome.bookmarks.getChildren(folderId)).map(child => child.id));
+            assert.equal(document.querySelector('.space.active').dataset.spaceId, 'alpha'); assert.equal(session.activeSpaces[10], 'alpha');
+        }
+        assert.deepEqual(mutations, beforeMutations); assert.deepEqual(tabs, beforeTabs);
+    } finally { settings.invertTabOrder = false; clear(); await refresh(); }
 });

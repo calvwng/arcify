@@ -4,6 +4,7 @@ import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.m
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
 import { exerciseTodayCreationOrder, serveTodayOrderFixture } from './paired-chrome-today-order.mjs';
 import { exerciseTodayMove, serveTodayMoveFixture } from './paired-chrome-today-move.mjs';
+import { exerciseSavedMove, serveSavedMoveFixture } from './paired-chrome-saved-move.mjs';
 import { exerciseNativeNewTabRow, recordNewTabRowEvidence } from './paired-chrome-newtab-row.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
 import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
@@ -97,7 +98,9 @@ const stepNames = [
     'Today Move preserves exact single and multiple native tabs with group sync off',
     'Today Move preserves active native tabs and inverted order with group sync on',
     'Today creation has independent prospective top and opener order with group sync off',
-    'Today creation preserves manual order and native projection with group sync on'
+    'Today creation preserves manual order and native projection with group sync on',
+    'Saved pin and nested folder Move preserves all linked windows and exact identities with group sync off',
+    'Saved pin and nested folder Move preserves inverted order and all-window native projection with group sync on'
 ];
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
@@ -253,6 +256,27 @@ async function pageForUrl(url) {
     const target = await browser.waitForTarget(target => target.type() === 'page' && target.url() === url, { timeout: 20_000 });
     return observePage(await target.page());
 }
+// Fixture-only attachment to one fresh saved page. Equal URLs never select an older target.
+async function openSavedMovePage({ windowId, spaceId, bookmarkId, url }) {
+    const beforeTargets = new Set(browser.targets());
+    const beforeTabs = new Set((await arcifyOptions.evaluate(() => chrome.tabs.query({}))).map(tab => tab.id));
+    const opened = await bridge('openBookmark', { windowId, spaceId, bookmarkId });
+    assert(Number.isSafeInteger(opened.tabId) && !beforeTabs.has(opened.tabId), 'Fixture requires one newly opened exact saved identity.');
+    return attachCreatedFixtureTab({ id: opened.tabId }, async () => {
+        const created = await poll(() => arcifyOptions.evaluate(id => chrome.tabs.get(id), opened.tabId),
+            tab => tab.status === 'complete' && tab.url === url && !tab.pendingUrl, 'exact saved page navigation completed');
+        assert.equal(created.windowId, windowId);
+        const newIds = (await arcifyOptions.evaluate(() => chrome.tabs.query({}))).filter(tab => !beforeTabs.has(tab.id)).map(tab => tab.id);
+        assert.deepEqual(newIds, [opened.tabId], 'Exactly one native page was created by this saved open.');
+        const target = await poll(async () => {
+            const fresh = browser.targets().filter(target => target.type() === 'page' && !beforeTargets.has(target));
+            assert(fresh.length <= 1, 'Ambiguous fresh targets must fail instead of guessing by duplicate URL.');
+            return fresh.length === 1 && fresh[0].url() === url ? fresh[0] : null;
+        }, Boolean, `one fresh target for exact saved tab ${opened.tabId}`);
+        return { tab: created, page: await observePage(await target.page()) };
+    }, id => arcifyOptions.evaluate(id => chrome.tabs.remove(id), id));
+}
+
 async function newTabPage(url, windowId = fixture.windowA) {
     const before = new Set(browser.targets());
     const created = await arcifyOptions.evaluate(options => chrome.tabs.create(options), { windowId, url, active: true });
@@ -764,6 +788,7 @@ try {
             if (serveNativeSplitFixture(request, response)) return;
             if (serveTabMenuFixture(request, response)) return;
             if (serveTodayMoveFixture(request, response)) return;
+            if (serveSavedMoveFixture(request, response)) return;
             if (serveTodayOrderFixture(request, response)) return;
             if (serveOrdinaryFavoriteFixture(request, response)) return;
             if (serveFavoriteIconFixture(request, response)) return;
@@ -2036,7 +2061,13 @@ try {
     await step(stepNames[43], () => exerciseTodayCreationOrder({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,pageForUrl,ui,screenshot,
         snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayOrderSyncOn = observation; await saveReport(); } }));
-    } // Full-only cases 3–31, 33–35, 37–38 and 40–43; preserve the original cases' order.
+    await step(stepNames[44], () => exerciseSavedMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,ui,screenshot,
+        snapshot,bridge,poll,fixture,arcifyId,spotlightId,search,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
+        record:async observation => { report.savedMoveSyncOff = observation; await saveReport(); } }));
+    await step(stepNames[45], () => exerciseSavedMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,ui,screenshot,
+        snapshot,bridge,poll,fixture,arcifyId,spotlightId,search,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
+        record:async observation => { report.savedMoveSyncOn = observation; await saveReport(); } }));
+    } // Full-only cases 3–31, 33–35, 37–38 and 40–45; preserve the original cases' order.
 
     if (report.runMode === 'native-split') {
         await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,

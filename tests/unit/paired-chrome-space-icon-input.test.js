@@ -138,7 +138,7 @@ test('new browser entry points remain non-root CI only; validators import withou
     assert.match(source, /assertAcceptedSpaceDragover\(await page\.evaluate\(readSpaceDragObservation\), destination\)/);
     assert.match(source, /assertMarkerScreenshotPixels/); assert.match(source, /Input\.cancelDragging/);
 });
-test('emoji and icon-only proof is mandatory inside existing full case 37 with unchanged 43/5/4 plans', () => {
+test('emoji and icon-only proof is mandatory inside existing full case 37 with preserved full-suite coverage and 5/4 supplemental plans', () => {
     const context = readSourceText(new URL('../../scripts/paired-chrome-space-context.mjs', import.meta.url));
     const smoke = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
     const plan = readSourceText(new URL('../../scripts/paired-chrome-run-plan.mjs', import.meta.url));
