@@ -335,10 +335,10 @@ test('actual sidebar defers bookmark/storage refresh during Space drag and cance
     storedSpaces[0].name = 'Renamed Alpha'; tree.children[0].title = 'Renamed Alpha';
     await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local');
     await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
-    await wait(180); assert(source.isConnected); assert.equal(spaceChips()[0].textContent, 'Alpha');
+    await wait(180); assert(source.isConnected); assert.equal(spaceChips()[0].querySelector('.space-switcher-name').textContent, 'Alpha');
     drag(document, 'keydown', 730, { key: 'Escape' }); await wait(180);
     assert.deepEqual(chipIds(), ['alpha', 'beta', 'gamma']);
-    assert.equal(spaceChips()[0].textContent, 'Renamed Alpha');
+    assert.equal(spaceChips()[0].querySelector('.space-switcher-name').textContent, 'Renamed Alpha');
     assert.equal(document.querySelector('.dragging-switcher'), null); assert.deepEqual(writes, []);
 });
 

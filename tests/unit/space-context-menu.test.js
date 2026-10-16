@@ -143,7 +143,7 @@ test('failed disabled-control saves restore dialog focus and Tab cannot escape w
     f.event(choice, 'click'); await settle();
     assert.equal(f.document.activeElement, choice);
     f.document.body.focus(); assert(f.event(f.document, 'keydown', { key: 'Tab' }).defaultPrevented);
-    assert.equal(f.document.activeElement.dataset.choice, 'none');
+    assert.equal(f.document.activeElement, f.document.querySelector('.space-emoji-form input'));
     f.document.body.focus(); assert(f.event(f.document, 'keydown', { key: 'Tab', shiftKey: true }).defaultPrevented);
     assert.equal(f.document.activeElement.textContent, 'Cancel');
 });
@@ -171,4 +171,87 @@ test('Space menus close on external focus loss without stealing focus; editors s
         assert.equal(f.document.querySelector('[role="dialog"]'), null);
     }
     assert.deepEqual(f.writes, []);
+});
+
+test('custom emoji paste/save retains whole graphemes, clicked ID, current Space and names', async () => {
+    const f = fixture();
+    for (const emoji of ['👩🏽‍💻', '🇭🇰', '❤️', '👨🏿‍❤️‍💋‍👨🏻', '1️⃣', '🏳️‍🌈']) {
+        f.event(f.chip('b'), 'contextmenu'); f.choose('Change Space Icon');
+        const input = f.document.querySelector('.space-emoji-form input');
+        assert.equal(input.hasAttribute('maxlength'), false);
+        input.value = emoji; f.event(input, 'input', { inputType: 'insertFromPaste' });
+        assert.equal(input.value, emoji);
+        f.event(input.closest('form'), 'submit'); await settle();
+        assert.deepEqual(f.writes.at(-1), ['b', { icon: emoji }]);
+        assert.equal(f.chip('b').querySelector('.space-icon').textContent, emoji);
+        assert.match(f.chip('b').title, /^Inactive\n/);
+        assert.equal(f.chip('b').getAttribute('aria-label'), 'Switch to space Inactive');
+        assert.equal(f.document.activeElement, f.chip('b'));
+    }
+    assert.deepEqual(f.activations, []); assert.deepEqual(f.moves, []);
+    f.event(f.chip('b'), 'contextmenu'); f.choose('Change Space Icon');
+    assert.equal(f.document.activeElement.value, '🏳️‍🌈');
+    f.document.activeElement.value = '';
+    f.event(f.document.querySelector('.space-emoji-form'), 'submit'); await settle();
+    assert.deepEqual(f.writes.at(-1), ['b', { icon: null }]);
+    assert.equal(f.chip('b').querySelector('.space-icon'), null);
+});
+
+test('emoji validation is non-destructive and cancellation/retry preserve the saved icon', async () => {
+    const f = fixture(); f.spaces[1].icon = 'rocket';
+    f.event(f.chip('b'), 'contextmenu'); f.choose('Change Space Icon');
+    const input = f.document.querySelector('.space-emoji-form input'), form = input.closest('form');
+    for (const value of ['🧠⭐', 'text', '<img src=x>', '👩‍']) {
+        input.value = value; f.event(input, 'input'); f.event(form, 'submit'); await settle();
+        assert.equal(input.value, value); assert.equal(input.getAttribute('aria-invalid'), 'true');
+        assert.match(f.document.querySelector('[role="alert"]').textContent, /one complete emoji/);
+    }
+    assert.equal(f.writes.length, 0); assert.equal(f.spaces[1].icon, 'rocket');
+    input.value = '👩🏽‍💻'; f.event(input, 'input');
+    assert.equal(input.hasAttribute('aria-invalid'), false);
+    f.setHook(() => { throw new Error('Storage unavailable'); });
+    f.event(form, 'submit'); await settle();
+    assert.match(f.document.querySelector('[role="alert"]').textContent, /Storage unavailable/);
+    assert.equal(input.value, '👩🏽‍💻'); assert.equal(input.disabled, false);
+    f.setHook(null); f.event(form, 'submit'); await settle(); assert.equal(f.spaces[1].icon, '👩🏽‍💻');
+    f.event(f.chip('b'), 'contextmenu'); f.choose('Change Space Icon');
+    f.document.querySelector('.space-emoji-form input').value = '🌍';
+    f.event([...f.document.querySelectorAll('[role="dialog"] button')].find(button => button.textContent === 'Cancel'), 'click');
+    assert.equal(f.spaces[1].icon, '👩🏽‍💻'); assert.equal(f.document.activeElement, f.chip('b'));
+});
+
+test('IME candidate Enter and Escape never save or dismiss the emoji editor before composition ends', async () => {
+    const f = fixture(); f.event(f.chip('b'), 'contextmenu'); f.choose('Change Space Icon');
+    const input = f.document.querySelector('.space-emoji-form input'), form = input.closest('form'); input.focus();
+    f.event(input, 'compositionstart'); input.value = '👩‍';
+    f.event(input, 'keydown', { key: 'Escape', isComposing: true });
+    assert(f.document.querySelector('[role="dialog"]'));
+    const enter = f.event(input, 'keydown', { key: 'Enter', isComposing: true });
+    assert.equal(enter.defaultPrevented, false); // Let the IME accept its candidate.
+    f.event(form, 'submit'); assert.equal(f.writes.length, 0);
+    input.value = '👩🏽‍💻'; f.event(input, 'compositionend'); f.event(form, 'submit');
+    assert.equal(f.writes.length, 0);
+    f.event(input, 'keydown', { key: 'Enter', isComposing: false, keyCode: 13 });
+    f.event(input, 'keyup'); f.event(form, 'submit'); // A later key event cannot disarm this turn's guard.
+    assert.equal(f.writes.length, 0);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    f.event(input, 'keydown', { key: 'Enter', keyCode: 229 }); f.event(form, 'submit');
+    assert.equal(f.writes.length, 0);
+    f.event(input, 'keyup');
+    f.event(input, 'keydown', { key: 'Enter', isComposing: false }); f.event(form, 'submit'); await settle();
+    assert.deepEqual(f.writes, [['b', { icon: '👩🏽‍💻' }]]);
+});
+
+test('custom emoji repeat-submit and stale target fail without changing another Space', async () => {
+    const f = fixture(); f.event(f.chip('b'), 'contextmenu'); f.choose('Change Space Icon');
+    const input = f.document.querySelector('.space-emoji-form input'), form = input.closest('form');
+    input.value = '👩🏽‍💻';
+    let release; f.setHook(() => new Promise(resolve => { release = resolve; }));
+    f.event(form, 'submit'); f.event(form, 'submit'); assert.equal(f.writes.length, 1);
+    release(); await settle();
+    f.event(f.chip('b'), 'contextmenu'); f.choose('Change Space Icon'); f.spaces.pop();
+    f.document.querySelector('.space-emoji-form input').value = '🧠';
+    f.event(f.document.querySelector('.space-emoji-form'), 'submit'); await settle();
+    assert.match(f.document.querySelector('[role="alert"]').textContent, /no longer exists/);
+    assert.equal(f.writes.length, 1); assert.equal(f.spaces[0].icon, undefined);
 });

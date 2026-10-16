@@ -109,6 +109,7 @@ const report = {
         imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, runnerUid: process.getuid?.() },
     screenshots: [], diagnostics: [], targetLifecycle: [],
     limits: [
+        'Space emoji proof uses trusted Chrome text input and genuine Ctrl+V from the disposable fixture clipboard; OS emoji picker, IME candidate windows/composition, physical typing and Helium remain manual. Icon-only names retain native title and accessibility labels with real hover/focus; browser-chrome tooltip painting is not captured by page screenshots.',
         'Outside-focus menu checks use ordinary sidebar.html tabs and a separate disposable localhost browser window with trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; actual native-panel external focus and Helium remain manual.',
         'General workspace rendering regressions use sidebar.html in a regular tab. Command, Today Move and unified New Tab row checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
@@ -2017,7 +2018,7 @@ try {
     // Menu fixtures own disposable data and finish before ordinary-Favorite
     // restart receipts are captured or a full restart changes window identities.
     await step(stepNames[37], () => exerciseSpaceContextBasics({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
-        snapshot,poll,fixture,arcifyId,
+        snapshot,poll,fixture,arcifyId,screenshotBytes:shot=>readFile(resolve(OUTPUT,shot.filename)),
         record:async observation => { report.spaceContextMenus ||= []; report.spaceContextMenus.push(observation); await saveReport(); } }));
 
     await step(stepNames[38], () => exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,

@@ -5,9 +5,15 @@ Keyboard users can focus the Space name or a chip and press **Shift+F10** or the
 Context Menu key. Arrow keys, Home and End move through the menu; Escape dismisses
 it and returns focus. Opening the menu does not activate or reorder that Space.
 
-- **Change Space Icon:** choose one of 20 named, built-in icons or **No icon**.
-  The bounded, scrollable picker is keyboard accessible. Icons appear beside the
-  Space name in both header and switcher; existing Spaces have no icon by default.
+- **Change Space Icon:** type or paste one emoji into **Emoji**, then choose
+  **Save emoji**, or use one of 20 named presets. Open your device's emoji keyboard
+  in the field (for example, Control–Command–Space on macOS or Windows+. on Windows).
+  Skin tones, joined family/profession emoji, flags, keycaps and variation selectors
+  stay intact. IME candidate confirmation does not submit the editor.
+  **No icon**, or saving an empty field, removes the icon. The bounded, scrollable
+  picker is keyboard accessible. Icons appear in both header and switcher; existing
+  Spaces have no icon by default. **Settings → Sidebar appearance → Hide Space names
+  in switcher** optionally shows only switcher icons with names retained on hover.
 - **Rename:** edit the clicked Space's name and its exact backing bookmark folder.
   Duplicate display names do not redirect the operation to another Space.
 - **Theme Color:** choose the existing eight colors: grey, blue, red, yellow,
@@ -34,8 +40,14 @@ effect. Existing inline rename and color controls use the same metadata path.
 `newFolder` uses `folder-policy.js`; deletion retains the existing queued ownership
 checks and Favorite protection.
 
-Optional icon IDs are allowlisted in `space-icons.js`; no image URLs, HTML, uploads
-or network requests are involved. The local `spaces` record and durable
+`space-icons.js` accepts the existing preset IDs or a single Unicode emoji
+extended grapheme cluster. It validates the browser's Unicode emoji properties
+and sequence structure, including well-formed non-RGI ZWJ combinations and
+unqualified/text-presentation variants; glyph appearance depends on system fonts.
+Plain text, multiple emoji, markup, URLs, broken surrogates, and incomplete
+sequences are rejected without truncating or replacing the input. Validation runs
+on save in both the dialog and worker. No input `maxlength`, UTF-16 slicing, image
+URLs, HTML, uploads or network requests are involved. The local `spaces` record and durable
 `spaceRegistry` entry retain the icon, including a null reset. Registry recovery
 only copies an icon to a matching stable UUID. Older records without an icon keep
 their existing appearance. Metadata refresh updates the header and switcher across
@@ -44,7 +56,8 @@ panels; stale unrelated membership patches cannot erase newer icon metadata.
 ## Verification
 
 Run `npm run test:unit` and `npm run build`. Dedicated actual-module/DOM coverage is
-in `tests/unit/space-context-menu.test.js`, `tests/unit/space-context-sidebar.test.js`
+in `tests/unit/space-context-menu.test.js`, `tests/unit/space-context-sidebar.test.js`,
+`tests/unit/space-icons.test.js`, `tests/unit/sidebar-appearance.test.js`,
 and `tests/unit/space-store.test.js`. These cover inactive/duplicate-name targets,
 header/switcher parity, keyboard and cancellation, repeated submits, errors and
 stale targets, icon reset/recovery, queued metadata, folder creation, and deletion
@@ -69,3 +82,10 @@ persistence, not native-panel layout or a complete browser restart with the
 edited Space retained. Helium-specific manual acceptance remains outstanding.
 Deferred export, Live Folders, richer themes and true Profiles are tracked in
 [the backlog](BACKLOG.md#deferred-space-menu-features).
+
+The keyboard emoji field precedes the preset grid in the focus order; Tab from
+Cancel wraps to that field, and Shift+Tab wraps back. Preset selection continues
+to focus the selected preset on opening; a saved custom emoji focuses its field.
+Unit/DOM checks cover custom emoji, composition, invalid input, retry/cancel and
+recovery. Historical paired runs above predate these additions; real-browser
+keyboard/IME, tooltip and icon-only geometry checks are still required.

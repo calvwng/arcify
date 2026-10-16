@@ -471,7 +471,7 @@ async function activatePinnedTabByURL(bookmarkUrl, targetSpaceId, spaceName, boo
 // Initialize the sidebar when the DOM is loaded
 document.addEventListener('DOMContentLoaded', async () => {
     Logger.log('DOM loaded, initializing sidebar...');
-    await initializeSidebarAppearance({ document, onChange: () => favoritesDropFeedback.refresh(),
+    await initializeSidebarAppearance({ document, onChange: () => { favoritesDropFeedback.refresh(); spaceSwitcherController.refresh(); },
         onError: error => Logger.error('Could not load sidebar appearance:', error) }).ready;
     await applyColorOverrides();
     maxDragFolderDepth = (await chrome.storage.sync.get({ syncTabGroups: false })).syncTabGroups ? 1 : 2;

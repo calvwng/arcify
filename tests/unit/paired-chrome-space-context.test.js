@@ -28,7 +28,7 @@ test('Space detail reader compares resolved theme color while preserving a genui
 
 const geometry = () => ({ rect: { x: 12, y: 30, width: 200, height: 300 }, viewport: { width: 224, height: 600 }, visible: true, focusInside: true });
 const menu = () => ({ ...geometry(), role: 'menu', name: 'Space options: Work', items: SPACE_MENU_ITEMS.map(label => ({ label, role: 'menuitem', tag: 'BUTTON', disabled: false })) });
-const picker = () => ({ ...geometry(), role: 'dialog', modal: 'true', title: 'Change Space Icon: Work', cancel: 'Cancel',
+const picker = () => ({ ...geometry(), role: 'dialog', modal: 'true', title: 'Change Space Icon: Work', cancel: 'Cancel', submit: 'Save emoji', input: { label: 'Emoji', maxLength: -1, disabled: false },
     choices: SPACE_PICKER_IDS.map(id => ({ id, label: `Named ${id}`, tag: 'BUTTON', disabled: false, pressed: String(id === 'rocket') })) });
 const projection = () => ({ spaceId: 'work', headerCount: 1, chipCount: 1, headerText: '🚀', headerHidden: false,
     headerAriaHidden: 'true', chipText: '🚀', chipAriaHidden: 'true' });

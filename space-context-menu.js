@@ -1,5 +1,5 @@
 import { createContextMenuSession } from './context-menu-session.js';
-import { SPACE_ICONS, getSpaceIcon } from './space-icons.js';
+import { SPACE_ICONS, getSpaceIcon, isSpaceEmoji } from './space-icons.js';
 import { SPACE_COLORS } from './space-colors.js';
 
 export const spaceDeleteMessage = space => `Delete Space “${space.name}”? This deletes all saved bookmarks and folders in its backing bookmark subtree and closes its owned tabs across all windows. Shared saved Favorites survive. This cannot be undone in Arcify.`;
@@ -96,8 +96,51 @@ export function createSpaceContextMenu({ document, roots, getSpace, update, newF
             control.dataset.choice = choice.id || 'none'; control.setAttribute('aria-pressed', String(selected));
             if (!icon) control.style.setProperty('--choice-color', `var(--chrome-${choice.id}-color)`);
         }
+        let emojiInput;
+        if (icon) {
+            const form = document.createElement('form'); form.className = 'space-emoji-form';
+            const label = document.createElement('label'); label.textContent = 'Emoji';
+            const input = document.createElement('input'); emojiInput = input;
+            input.type = 'text'; input.value = getSpaceIcon(space.icon)?.glyph || '';
+            input.autocomplete = 'off'; input.spellcheck = false;
+            input.setAttribute('aria-describedby', 'spaceEmojiHint');
+            // No maxlength, slicing, or input-event rewriting: IME, paste, ZWJ,
+            // flags and modifiers must reach validation as complete graphemes.
+            label.appendChild(input); form.appendChild(label);
+            const hint = document.createElement('p'); hint.id = 'spaceEmojiHint'; hint.className = 'space-emoji-hint';
+            hint.textContent = 'Type or paste one emoji using your device’s emoji keyboard. Leave empty to remove the icon.';
+            form.appendChild(hint);
+            const save = button('Save emoji', () => {}, form); save.type = 'submit';
+            let composing = false, compositionKey = false, compositionJustEnded = false;
+            input.addEventListener('compositionstart', () => { composing = true; });
+            input.addEventListener('compositionend', () => {
+                composing = false;
+                // Some IMEs end composition before dispatching Enter's submit.
+                // Suppress only that event turn, without consuming candidate keys.
+                compositionJustEnded = true;
+                setTimeout(() => { compositionJustEnded = false; compositionKey = false; }, 0);
+            });
+            input.addEventListener('keydown', event => {
+                compositionKey = composing || compositionJustEnded || event.isComposing || event.keyCode === 229;
+                if (compositionKey) event.stopPropagation();
+            });
+            input.addEventListener('keyup', () => { compositionKey = false; });
+            input.addEventListener('input', () => { input.removeAttribute('aria-invalid'); status.textContent = ''; });
+            form.addEventListener('submit', event => {
+                event.preventDefault();
+                if (composing || compositionKey || compositionJustEnded) return;
+                const value = input.value.trim();
+                if (value && !isSpaceEmoji(value)) {
+                    input.setAttribute('aria-invalid', 'true');
+                    status.textContent = 'Enter one complete emoji, or leave this field empty to remove the icon.';
+                    input.focus(); return;
+                }
+                void commit(id => update(id, { icon: value || null }));
+            });
+            panel.insertBefore(form, grid);
+        }
         button('Cancel', () => close(), panel);
-        (grid.querySelector('[aria-pressed="true"]') || grid.firstElementChild).focus();
+        (grid.querySelector('[aria-pressed="true"]') || emojiInput || grid.firstElementChild).focus();
     }
     async function deleteTarget() {
         const space = current(), id = targetId;

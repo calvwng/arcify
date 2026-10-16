@@ -940,3 +940,47 @@ for (const lifecycle of ['removed', 'replaced']) test(`cold write rejection cann
         assert.equal(store.pendingCreations.size, 0);
     } finally { console.error = originalError; }
 });
+
+test('custom emoji metadata survives worker restart, stale patches, registry-only recovery and explicit clear', async () => {
+    const folders = ['a', 'b'].map(id => ({ id, title: id, parentId: 'root' }));
+    chrome.bookmarks.getChildren = async id => id === 'root' ? structuredClone(folders) : [];
+    chrome.bookmarks.get = async id => structuredClone(folders.filter(folder => folder.id === id));
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    const before = structuredClone(store.spaces);
+    for (const icon of ['👩🏽‍💻', '🇭🇰', '🏳️‍🌈', '👨🏿‍❤️‍💋‍👨🏻', '\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}']) {
+        await store.dispatch({ action: 'metadata', spaceId: 'b', changes: { icon } });
+        assert.equal(local.spaces[1].icon, icon); assert.equal(local.spaceRegistry.b.icon, icon);
+        assert.equal(local.spaceRegistry.b.spaceUuid, 'b');
+    }
+    const expected = store.spaces[1].icon;
+    const after = structuredClone(before); after[0].color = 'green';
+    await store.dispatch({ action: 'patch', before, after });
+    assert.equal(local.spaces[1].icon, expected);
+    const restarted = new SpaceStore(); await restarted.dispatch({ action: 'get' });
+    assert.equal(restarted.spaces[1].icon, expected);
+    local.spaces = []; session.spaceSession = false; tabs = [];
+    const recovered = new SpaceStore(); await recovered.dispatch({ action: 'get' });
+    assert.equal(recovered.spaces[1].icon, expected);
+    await recovered.dispatch({ action: 'metadata', spaceId: 'b', changes: { icon: null } });
+    assert.equal(local.spaces[1].icon, null); assert.equal(local.spaceRegistry.b.icon, null);
+    local.spaces = []; session.spaceSession = false;
+    const cleared = new SpaceStore(); await cleared.dispatch({ action: 'get' });
+    assert.equal(cleared.spaces[1].icon, undefined); assert.equal(local.spaceRegistry.b.icon, null);
+    assert.deepEqual(mutations, []);
+});
+
+test('metadata rejects malformed emoji before any write and cannot import emoji from the wrong UUID', async () => {
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    chrome.bookmarks.get = async id => [{ id, title: id, parentId: 'root' }];
+    const original = structuredClone(local);
+    for (const icon of ['🧠⭐', '🇺', '👩‍', '🧠\n', 'text', '👩🏽‍💻<script>']) {
+        await assert.rejects(store.dispatch({ action: 'metadata', spaceId: 'b', changes: { icon } }), /complete emoji/);
+        assert.deepEqual(local, original);
+    }
+    local.spaceRegistry = { b: { spaceUuid: 'different', bookmarkFolderId: 'b', icon: '👩🏽‍💻' } };
+    chrome.bookmarks.getChildren = async id => id === 'root' ? [{ id: 'a', title: 'a' }, { id: 'b', title: 'b' }] : [];
+    const next = new SpaceStore(); await next.dispatch({ action: 'get' });
+    assert.equal(next.spaces[1].icon, undefined);
+    await assert.rejects(next.dispatch({ action: 'metadata', spaceId: 'b', changes: { icon: '🇭🇰' } }), /identity has changed/);
+    assert.equal(local.spaceRegistry.b.icon, '👩🏽‍💻');
+});

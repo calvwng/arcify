@@ -219,3 +219,28 @@ test('committed folder creation closes its editor even when the immediate sideba
         assert.match(document.getElementById('spaceOrderStatus').textContent, /Folder created/);
     } finally { chrome.bookmarks.create = originalCreate; chrome.tabs.query = originalQuery; }
 });
+
+test('real sidebar custom emoji and icon-only setting preserve both projections and the live name editor', async () => {
+    menuAction(spaceChip('alpha'), 'Change Space Icon');
+    const input = document.querySelector('.space-emoji-form input'); input.value = '👩🏽‍💻';
+    fire(input, 'input', { inputType: 'insertFromPaste' }); fire(input.closest('form'), 'submit'); await wait(300);
+    assert.equal(storedSpaces[0].icon, '👩🏽‍💻'); assert.equal(local.spaceRegistry.p.icon, '👩🏽‍💻');
+    assert.equal(spaceNode('alpha').querySelector('.space-icon').textContent, '👩🏽‍💻');
+    const chip = spaceChip('alpha'); assert.equal(chip.querySelector('.space-icon').textContent, '👩🏽‍💻');
+    const name = spaceNode('beta').querySelector('.space-name'); name.focus();
+    for (const hideSpaceNames of [true, false, true]) {
+        await onChanged.emit({ sidebarAppearance: { newValue: { hideSpaceNames } } }, 'local');
+        assert.equal(document.documentElement.dataset.hideSpaceNames, String(hideSpaceNames));
+        assert.equal(spaceChip('alpha'), chip); assert.equal(document.activeElement, name);
+        assert.match(chip.title, /^Alpha\n/); assert.equal(chip.getAttribute('aria-label'), 'Switch to space Alpha');
+        assert.equal(chip.querySelector('.space-switcher-name').textContent, 'Alpha');
+        assert.equal(name.value, 'Inline edit');
+    }
+    assert.equal(document.querySelector('.space.active').dataset.spaceId, 'beta');
+    menuAction(chip, 'Change Space Icon'); assert.match(document.querySelector('[role="dialog"] h2').textContent, /Alpha/);
+    assert.equal(document.querySelector('.space-emoji-form input').value, '👩🏽‍💻');
+    fire(document.querySelector('[data-choice="none"]'), 'click'); await wait(300);
+    assert.equal(local.spaceRegistry.p.icon, null); assert.equal(spaceNode('alpha').querySelector('.space-icon').hidden, true);
+    assert.equal(spaceChip('alpha').querySelector('.space-icon'), null);
+    assert.equal(spaceChip('alpha').querySelector('.space-icon-fallback').textContent, '●');
+});

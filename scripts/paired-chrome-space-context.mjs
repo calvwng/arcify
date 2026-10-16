@@ -4,6 +4,7 @@ import { tabToSelector } from './paired-chrome-sidebar-appearance.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { clickFreshResult } from './paired-chrome-ui.mjs';
 import { randomBytes } from 'node:crypto';
+import { exerciseSpaceEmojiInput, exerciseSpaceIconOnlySwitcher, assertIconOnlySpaceActivated, replaceSpaceEmojiWithInput } from './paired-chrome-space-icon-input.mjs';
 import { exerciseExternalMenuDismissal, readMenuPreservedState } from './paired-chrome-menu-focus.mjs';
 
 export function assertSpaceContextFixtureEnvironment(env = process.env, uid = process.getuid?.()) {
@@ -83,8 +84,10 @@ export function assertSpaceIconPicker(state, name, selected = 'none') {
     assert.equal(state.role, 'dialog'); assert.equal(state.modal, 'true'); assert.equal(state.title, `Change Space Icon: ${name}`);
     assert.equal(state.visible, true); assert.equal(state.focusInside, true); bounds(state);
     assert.deepEqual(state.choices.map(choice => choice.id), SPACE_PICKER_IDS);
-    assert.deepEqual(state.choices.filter(choice => choice.pressed === 'true').map(choice => choice.id), [selected]);
+    assert.deepEqual(state.choices.filter(choice => choice.pressed === 'true').map(choice => choice.id), selected === null ? [] : [selected]);
     for (const choice of state.choices) { assert(choice.label); assert.equal(choice.tag, 'BUTTON'); assert.equal(choice.disabled, false); }
+    assert.equal(state.submit, 'Save emoji');
+    assert.equal(state.input?.label, 'Emoji'); assert.equal(state.input?.maxLength, -1); assert.equal(state.input?.disabled, false);
     assert.equal(state.cancel, 'Cancel'); return state;
 }
 export function assertSpaceColorPicker(state, name, selected) {
@@ -268,9 +271,9 @@ export function readSpaceDetailsProjection(spaceId) {
 
 // Fixture setup/cleanup uses synthetic, exact-owned data; every feature action
 // below uses real mouse/keyboard input. No DOM value assignment or synthetic events.
-export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForUrl, ui, screenshot, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
+export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForUrl, ui, screenshot, screenshotBytes, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
     assertSpaceContextFixtureEnvironment();
-    for (const fn of [newTabPage, pageForUrl, ui, screenshot, snapshot, poll]) assert.equal(typeof fn, 'function');
+    for (const fn of [newTabPage, pageForUrl, ui, screenshot, screenshotBytes, snapshot, poll]) assert.equal(typeof fn, 'function');
     const initial = await snapshot();
     assert(initial.spaces[0]?.bookmarkFolderId);
     const original = await apiPage.evaluate(async () => ({
@@ -285,8 +288,8 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForU
     const chip = id => `#spaceSwitcher button[data-space-id="${id}"]`;
     const read = () => apiPage.evaluate(async () => {
         const bookmark = ({ id, parentId, index, title, url, children }) => ({ id, parentId, index, title, ...(url === undefined ? {} : { url }), ...(children ? { children: children.map(bookmark) } : {}) });
-        const local = await chrome.storage.local.get(['spaces', 'spaceRegistry', 'persistentFavorites', 'pinnedTabStatesById']);
-        return { spaces: local.spaces, registry: local.spaceRegistry || {}, favorites: local.persistentFavorites || [], bindings: local.pinnedTabStatesById || {},
+        const local = await chrome.storage.local.get(['spaces', 'spaceRegistry', 'persistentFavorites', 'pinnedTabStatesById', 'sidebarAppearance']);
+        return { appearance: local.sidebarAppearance ?? null, spaces: local.spaces, registry: local.spaceRegistry || {}, favorites: local.persistentFavorites || [], bindings: local.pinnedTabStatesById || {},
             activeSpaces: (await chrome.storage.session.get('activeSpaces')).activeSpaces || {}, bookmarks: (await chrome.bookmarks.getTree()).map(bookmark),
             tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pinned, active, groupId }) => ({ id, windowId, index, url, pinned, active, groupId })).sort((a, b) => a.id - b.id) };
     });
@@ -398,7 +401,12 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForU
         await ui(page, 'Verify real Tab wrap in the icon dialog', async () => {
             await tabToSelector(page, '.space-editor > button');
             await page.keyboard.press('Tab');
+            assert.equal(await page.$eval('.space-emoji-form input', node => node === document.activeElement), true);
+            await page.keyboard.press('Tab');
+            assert.equal(await page.$eval('.space-emoji-form button[type="submit"]', node => node === document.activeElement), true);
+            await page.keyboard.press('Tab');
             assert.equal(await page.$eval('[data-choice="none"]', node => node === document.activeElement), true);
+            await tabToSelector(page, '.space-emoji-form input', 120, { backward: true });
             await page.keyboard.down('Shift');
             try { await page.keyboard.press('Tab'); } finally { await page.keyboard.up('Shift'); }
             assert.equal(await page.$eval('.space-editor > button', node => node === document.activeElement), true);
@@ -416,6 +424,15 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForU
         await ui(page, 'Reload sidebar with saved Space icon', () => page.reload({ waitUntil: 'domcontentloaded' }));
         evidence.reload = await projection(page, '🚀'); assertSpaceContextUnchanged(beforeReload, await read());
         await ui(page, 'Capture restored inactive Space icon', () => capture(page, 'space-context-icon-survives-sidebar-reload'));
+        evidence.emojiInput = await exerciseSpaceEmojiInput({ page, target, ui, read,
+            open: async () => {
+                const icon = (await read()).spaces.find(space => space.id === target.id).icon;
+                await openMenu(page, chip(target.id), target.name, true);
+                await picker(page, SPACE_PICKER_IDS.includes(icon) ? icon : icon ? null : 'none');
+            }, closed: () => awaitEditorClosed(page), saveProof: assertSpaceIconSaved, unchanged: assertSpaceContextUnchanged,
+            projection: glyph => projection(page, glyph), capture, poll, record });
+        await openMenu(page, chip(target.id), target.name); await picker(page, null);
+        evidence.presetAfterCustom = await selectIcon(page, 'rocket', '🚀');
         // Genuine Rename, Theme Color and New Folder edits target the inactive
         // UUID. The validators compare the entire pre-action durable/live state.
         await openMenu(page, chip(target.id), target.name, true);
@@ -477,37 +494,55 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForU
         // Sidebar storage listeners refresh even while hidden; this passive read
         // deliberately does not foreground it or synthesize a visibility event.
         evidence.crossWindowProjection = await projection(page, '⭐');
-        // Deliberate activation is separate from the inactive metadata tests above.
-        await ui(page, 'Show edited Space header using its chip', () => page.click(chip(target.id)));
-        await page.waitForFunction(id => document.querySelector('.space.active')?.dataset.spaceId === id, { polling: 50 }, target.id);
-        await poll(() => apiPage.evaluate(windowId => chrome.tabs.query({ windowId, active: true }), fixture.windowA),
-            tabs => tabs[0]?.id === seededTabs[0], 'explicit Space activation reached its exact owned tab');
-        await ui(page, 'Capture the visible updated Space header and switcher', async () => {
-            evidence.visibleHeader = assertSpaceIconProjection(await page.evaluate(readSpaceIconProjection, target.id),
-                { spaceId: target.id, glyph: '⭐', requireVisibleHeader: true });
-            await capture(page, 'space-context-visible-header-and-switcher-icon');
-            const folder = evidence.folderCreated.folder, beforeFolderCapture = await read();
-            const folderHeader = await page.waitForSelector(`.space[data-space-id="${target.id}"] .folder[data-bookmark-id="${folder.id}"] > .folder-header`, { visible: true });
-            try { await folderHeader.scrollIntoView(); } finally { await folderHeader.dispose(); }
-            evidence.visibleCreatedFolder = await details(page, folder, true);
-            const inspectFolder = () => page.evaluate(readSpaceFolderScreenshot, { spaceId: target.id, folderId: folder.id });
-            evidence.createdFolderScreenshotBefore = await inspectFolder();
-            await record({ phase: 'space-created-folder-before-capture', state: evidence.createdFolderScreenshotBefore });
-            // Preserve the actual pixels and geometry even when a paint guard
-            // fails. Capturing is passive; no reopen, activation or retry occurs.
-            await capture(page, 'space-context-created-folder-renamed-header-and-theme-color');
-            evidence.createdFolderScreenshotAfter = await inspectFolder();
-            await record({ phase: 'space-created-folder-after-capture', state: evidence.createdFolderScreenshotAfter });
-            assertSpaceFolderScreenshot(evidence.createdFolderScreenshotBefore, { spaceId: target.id, folder });
-            assertSpaceFolderScreenshot(evidence.createdFolderScreenshotAfter, { spaceId: target.id, folder });
-            assertSpaceContextUnchanged(beforeFolderCapture, await read());
+        await openMenu(sidebarB.page, chip(target.id), target.name, true); await picker(sidebarB.page, 'star');
+        const beforeCustomHidden = await read();
+        evidence.customForIconOnly = await ui(sidebarB.page, 'Save a custom ZWJ icon before enabling icon-only mode', async () => {
+            const entered = await replaceSpaceEmojiWithInput(sidebarB.page, '👩🏽‍💻', 'paste');
+            await sidebarB.page.keyboard.press('Enter'); return entered;
         });
-        await openMenu(sidebarB.page, chip(target.id), target.name, true);
-        await picker(sidebarB.page, 'star'); evidence.reset = await selectIcon(sidebarB.page, null, null);
-        await projection(page, null);
-        const beforeResetReload = await read();
-        await ui(sidebarB.page, 'Reload reset Space icon in the second window', () => sidebarB.page.reload({ waitUntil: 'domcontentloaded' }));
-        evidence.resetReload = await projection(sidebarB.page, null); assertSpaceContextUnchanged(beforeResetReload, await read());
+        await awaitEditorClosed(sidebarB.page);
+        const afterCustomHidden = await poll(read, state => state.spaces.find(space => space.id === target.id)?.icon === '👩🏽‍💻' && state.registry[target.bookmarkFolderId]?.icon === '👩🏽‍💻', 'custom ZWJ saved before icon-only mode');
+        evidence.customForIconOnlySaved = { before: beforeCustomHidden, after: afterCustomHidden, proof: assertSpaceIconSaved(beforeCustomHidden, afterCustomHidden, { spaceId: target.id, icon: '👩🏽‍💻' }) };
+        await projection(page, '👩🏽‍💻'); await projection(sidebarB.page, '👩🏽‍💻');
+        evidence.iconOnly = await exerciseSpaceIconOnlySwitcher({ apiPage, pages: [page, sidebarB.page],
+            windowIds: [fixture.windowA, fixture.windowB], ui, read, unchanged: assertSpaceContextUnchanged,
+            capture, screenshotBytes, poll, record, whileHidden: async () => {
+                // Deliberate activation is separate from the inactive metadata tests above.
+                const beforeIconOnlyActivation = await read();
+                await ui(page, 'Show edited Space header using its chip', () => page.click(chip(target.id)));
+                await page.waitForFunction(id => document.querySelector('.space.active')?.dataset.spaceId === id, { polling: 50 }, target.id);
+                await poll(() => apiPage.evaluate(windowId => chrome.tabs.query({ windowId, active: true }), fixture.windowA),
+                    tabs => tabs[0]?.id === seededTabs[0], 'explicit Space activation reached its exact owned tab');
+                const afterIconOnlyActivation = await poll(read, state => state.spaces.find(space => space.id === target.id)?.lastTab === seededTabs[0], 'selected icon-only Space remembers its exact owned tab');
+                assertIconOnlySpaceActivated(beforeIconOnlyActivation, afterIconOnlyActivation, { spaceId: target.id, windowId: fixture.windowA, tabId: seededTabs[0] });
+                evidence.iconOnlySelection = { before: beforeIconOnlyActivation, after: afterIconOnlyActivation };
+                await ui(page, 'Capture the visible updated Space header and switcher', async () => {
+                    evidence.visibleHeader = assertSpaceIconProjection(await page.evaluate(readSpaceIconProjection, target.id),
+                        { spaceId: target.id, glyph: '👩🏽‍💻', requireVisibleHeader: true });
+                    await capture(page, 'space-context-visible-header-and-switcher-icon');
+                    const folder = evidence.folderCreated.folder, beforeFolderCapture = await read();
+                    const folderHeader = await page.waitForSelector(`.space[data-space-id="${target.id}"] .folder[data-bookmark-id="${folder.id}"] > .folder-header`, { visible: true });
+                    try { await folderHeader.scrollIntoView(); } finally { await folderHeader.dispose(); }
+                    evidence.visibleCreatedFolder = await details(page, folder, true);
+                    const inspectFolder = () => page.evaluate(readSpaceFolderScreenshot, { spaceId: target.id, folderId: folder.id });
+                    evidence.createdFolderScreenshotBefore = await inspectFolder();
+                    await record({ phase: 'space-created-folder-before-capture', state: evidence.createdFolderScreenshotBefore });
+                    // Preserve the actual pixels and geometry even when a paint guard
+                    // fails. Capturing is passive; no reopen, activation or retry occurs.
+                    await capture(page, 'space-context-created-folder-renamed-header-and-theme-color');
+                    evidence.createdFolderScreenshotAfter = await inspectFolder();
+                    await record({ phase: 'space-created-folder-after-capture', state: evidence.createdFolderScreenshotAfter });
+                    assertSpaceFolderScreenshot(evidence.createdFolderScreenshotBefore, { spaceId: target.id, folder });
+                    assertSpaceFolderScreenshot(evidence.createdFolderScreenshotAfter, { spaceId: target.id, folder });
+                    assertSpaceContextUnchanged(beforeFolderCapture, await read());
+                });
+                await openMenu(sidebarB.page, chip(target.id), target.name, true);
+                await picker(sidebarB.page, null); evidence.reset = await selectIcon(sidebarB.page, null, null);
+                await projection(page, null);
+                const beforeResetReload = await read();
+                await ui(sidebarB.page, 'Reload reset Space icon in the second window', () => sidebarB.page.reload({ waitUntil: 'domcontentloaded' }));
+                evidence.resetReload = await projection(sidebarB.page, null); assertSpaceContextUnchanged(beforeResetReload, await read());
+            } });
         await sidebarB.page.evaluate(observeSpaceMenuEvents);
         await openMenu(sidebarB.page, chip(target.id), target.name);
         evidence.deleteCapture = await captureStableSpaceMenu({ name: target.name, record,

@@ -146,6 +146,16 @@
                     <output id="spaceHeaderSizeValue" for="spaceHeaderSize">16 px</output>
                 </div>
             </div>
+            <div class="options-setting-item options-setting-toggle">
+                <div class="options-setting-copy">
+                    <label for="hideSpaceNames" class="options-label">Hide Space names in switcher</label>
+                    <p id="hideSpaceNamesDescription" class="options-description">Show only icons in the bottom switcher. Hover to see each Space name. Spaces without an icon use a dot; headers and menus keep their names.</p>
+                </div>
+                <div class="toggle-switch-container">
+                    <input type="checkbox" id="hideSpaceNames" class="ios-toggle" role="switch" aria-describedby="hideSpaceNamesDescription" disabled>
+                    <label for="hideSpaceNames" class="toggle-label" aria-hidden="true"></label>
+                </div>
+            </div>
             <button type="button" id="resetSidebarAppearance" class="appearance-reset" disabled>Reset sidebar appearance</button>
             <p id="sidebarAppearanceStatus" class="options-description" role="status" aria-live="polite">Standard layout is the default.</p>
         </section>

@@ -6,7 +6,7 @@ import { DEFAULT_SIDEBAR_APPEARANCE as defaults, SIDEBAR_APPEARANCE_KEY as key,
     normalizeSidebarAppearance, applySidebarAppearance, initializeSidebarAppearance } from '../../sidebar-appearance.js';
 import { initializeSidebarAppearanceOptions } from '../../sidebar-appearance-options.js';
 
-const compact = { favoritesLayout: 'compact', favoriteTileSize: 44, spaceHeaderSize: 12 };
+const compact = { favoritesLayout: 'compact', favoriteTileSize: 44, spaceHeaderSize: 12, hideSpaceNames: false };
 function apiFixture(initial = {}) {
     const data = structuredClone(initial), listeners = new Set(), writes = [];
     let locked = Promise.resolve();
@@ -51,11 +51,11 @@ test('appearance normalization preserves defaults and bounds only finite numeric
         assert.deepEqual(normalizeSidebarAppearance({ favoriteTileSize: bad, spaceHeaderSize: bad }), defaults);
     }
     assert.deepEqual(normalizeSidebarAppearance({ favoritesLayout: 'compact', favoriteTileSize: -5, spaceHeaderSize: 200, unexpected: true }),
-        { favoritesLayout: 'compact', favoriteTileSize: 36, spaceHeaderSize: 20 });
+        { favoritesLayout: 'compact', favoriteTileSize: 36, spaceHeaderSize: 20, hideSpaceNames: false });
     assert.deepEqual(normalizeSidebarAppearance({ favoritesLayout: 'anything', favoriteTileSize: 99, spaceHeaderSize: -1 }),
-        { favoritesLayout: 'standard', favoriteTileSize: 64, spaceHeaderSize: 12 });
+        { favoritesLayout: 'standard', favoriteTileSize: 64, spaceHeaderSize: 12, hideSpaceNames: false });
     assert.deepEqual(normalizeSidebarAppearance({ favoriteTileSize: 45.6, spaceHeaderSize: 17.2 }),
-        { favoritesLayout: 'standard', favoriteTileSize: 46, spaceHeaderSize: 17 });
+        { favoritesLayout: 'standard', favoriteTileSize: 46, spaceHeaderSize: 17, hideSpaceNames: false });
 });
 
 test('in-place density updates preserve Favorite names, state, handlers and Space edit focus', () => {
@@ -119,7 +119,7 @@ test('options restore and independently autosave layout, tile and header through
     await f.input('favoritesLayout', 'standard', 'change');
     assert.equal(f.node('favoriteTileSize').disabled, true);
     assert.equal(f.node('spaceHeaderSize').disabled, false);
-    assert.deepEqual(f.data[key], { favoritesLayout: 'standard', favoriteTileSize: 52, spaceHeaderSize: 19 });
+    assert.deepEqual(f.data[key], { favoritesLayout: 'standard', favoriteTileSize: 52, spaceHeaderSize: 19, hideSpaceNames: false });
     assert.deepEqual(f.data.persistentFavorites, ['preserve']); assert.equal(f.data.unrelated, true);
     assert(f.writes.every(patch => Object.keys(patch).join() === key));
     assert.match(f.node('sidebarAppearanceStatus').textContent, /saved for this Chrome profile/);
@@ -130,7 +130,7 @@ test('options restore and independently autosave layout, tile and header through
 });
 
 test('reset restores appearance defaults without touching unrelated profile data', async () => {
-    const f = await optionsFixture({ [key]: { ...compact, favoriteTileSize: 64 }, colorOverrides: { blue: '#000000' }, spaces: ['unchanged'] });
+    const f = await optionsFixture({ [key]: { ...compact, favoriteTileSize: 64, hideSpaceNames: true }, colorOverrides: { blue: '#000000' }, spaces: ['unchanged'] });
     f.node('resetSidebarAppearance').dispatchEvent(new f.window.Event('click'));
     await f.controller.whenSaved();
     assert.deepEqual(f.data[key], defaults); assert.deepEqual(f.data.colorOverrides, { blue: '#000000' }); assert.deepEqual(f.data.spaces, ['unchanged']);
@@ -178,7 +178,7 @@ test('two options pages serialize independent patches and reconcile to the same 
         assert.equal(f.node('spaceHeaderSize').value, '12');
     }
     await Promise.all([b.input('favoriteTileSize', 52), a.input('spaceHeaderSize', 20)]);
-    assert.deepEqual(shared.data[key], { ...compact, favoriteTileSize: 52, spaceHeaderSize: 20 });
+    assert.deepEqual(shared.data[key], { ...compact, favoriteTileSize: 52, spaceHeaderSize: 20, hideSpaceNames: false });
     for (const f of [a, b]) {
         assert.equal(f.node('favoriteTileSize').value, '52');
         assert.equal(f.node('spaceHeaderSize').value, '20');
@@ -204,4 +204,51 @@ test('CSS uses fixed compact tracks, hidden visual labels, bounded controls and 
     assert.match(css, /\.space-name-container:focus-within \.space-toggle-chevron\s*\{[^}]*min-width: 24px;[^}]*min-height: 24px;/);
     assert.match(css, /\.space-name:focus-visible \{ outline: 2px/);
     assert.match(css, /data-space-header-custom="true"\] \.space-name\s*\{[^}]*font-size: var\(--space-header-font-size\)/);
+});
+
+test('icon-only switcher appearance is opt-in, boolean-only and updates existing elements in place', () => {
+    for (const value of ['true', 1, null, [], {}]) assert.equal(normalizeSidebarAppearance({ hideSpaceNames: value }).hideSpaceNames, false);
+    assert.equal(normalizeSidebarAppearance({ hideSpaceNames: true }).hideSpaceNames, true);
+    const { document } = parseHTML('<html><body><div class="space-header"><input class="space-name" value="Work"></div><div class="space-switcher"><button data-space-id="a" title="Work" aria-label="Switch to space Work"><span class="space-icon">👩🏽‍💻</span><span class="space-switcher-name">Work</span></button></div><div role="dialog"><h2>Rename Work</h2></div></body></html>');
+    const chip = document.querySelector('button'), name = document.querySelector('.space-name');
+    Object.defineProperty(document, 'activeElement', { value: chip });
+    for (const hideSpaceNames of [true, false, true]) {
+        applySidebarAppearance(document, { hideSpaceNames });
+        assert.equal(document.documentElement.dataset.hideSpaceNames, String(hideSpaceNames));
+        assert.equal(document.querySelector('button'), chip); assert.equal(document.activeElement, chip);
+        assert.equal(chip.title, 'Work'); assert.equal(chip.getAttribute('aria-label'), 'Switch to space Work');
+        assert.equal(chip.querySelector('.space-switcher-name').textContent, 'Work');
+        assert.equal(name.value, 'Work'); assert.equal(document.querySelector('h2').textContent, 'Rename Work');
+    }
+});
+
+test('hide-names toggle persists across options pages and sidebar reload, merges independently, and resets', async () => {
+    const shared = apiFixture({ [key]: compact });
+    const a = await optionsFixture({}, shared), b = await optionsFixture({}, shared);
+    const sidebar = parseHTML('<html><body></body></html>').document;
+    const listener = initializeSidebarAppearance({ document: sidebar, api: shared.api }); await listener.ready;
+    assert.equal(a.node('hideSpaceNames').checked, false); assert.equal(a.node('hideSpaceNames').disabled, false);
+    a.node('hideSpaceNames').checked = true; a.node('hideSpaceNames').dispatchEvent(new a.window.Event('change'));
+    await Promise.all([a.controller.whenSaved(), b.input('spaceHeaderSize', 18)]);
+    assert.deepEqual(shared.data[key], { ...compact, spaceHeaderSize: 18, hideSpaceNames: true });
+    assert.equal(b.node('hideSpaceNames').checked, true); assert.equal(sidebar.documentElement.dataset.hideSpaceNames, 'true');
+    const c = await optionsFixture(shared.data);
+    assert.equal(c.node('hideSpaceNames').checked, true);
+    listener.dispose();
+    const nextSidebar = initializeSidebarAppearance({ document: sidebar, api: shared.api }); await nextSidebar.ready;
+    assert.equal(sidebar.documentElement.dataset.hideSpaceNames, 'true');
+    a.node('resetSidebarAppearance').dispatchEvent(new a.window.Event('click')); await a.controller.whenSaved();
+    assert.deepEqual(shared.data[key], defaults); assert.equal(b.node('hideSpaceNames').checked, false);
+    assert.equal(sidebar.documentElement.dataset.hideSpaceNames, 'false');
+    for (const f of [a, b, c]) f.controller.dispose(); nextSidebar.dispose();
+});
+
+test('icon-only CSS leaves headers and menus intact and preserves a 32px button target and visible fallback', async () => {
+    const css = await readFile(new URL('../../styles.css', import.meta.url), 'utf8');
+    assert.match(css, /data-hide-space-names="true"\] \.space-switcher-name \{ display: none; \}/);
+    assert.match(css, /data-hide-space-names="true"\] \.space-switcher button \{ width: 32px; padding: 0; \}/);
+    assert.match(css, /data-hide-space-names="true"\] \.space-switcher \.space-icon \{ margin-right: 0; \}/);
+    assert.match(css, /data-hide-space-names="true"\] \.space-switcher \.space-icon-fallback \{ display: inline-block; \}/);
+    assert.match(css, /\.space-switcher button:focus-visible \{ outline: 2px solid currentColor;/);
+    assert.doesNotMatch(css, /data-hide-space-names="true"\][^{]*\.(?:space-name|space-header|space-context-menu)\s*\{/);
 });

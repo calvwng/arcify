@@ -6,9 +6,10 @@ export function initializeSidebarAppearanceOptions({ document = globalThis.docum
     if (!layout) return null;
     const tileSize = document.getElementById('favoriteTileSize');
     const headerSize = document.getElementById('spaceHeaderSize');
+    const hideNames = document.getElementById('hideSpaceNames');
     const reset = document.getElementById('resetSidebarAppearance');
     const status = document.getElementById('sidebarAppearanceStatus');
-    const controls = [layout, tileSize, headerSize, reset];
+    const controls = [layout, tileSize, headerSize, hideNames, reset];
     const handlers = [];
     let settings = { ...DEFAULT_SIDEBAR_APPEARANCE }, revision = 0, disposed = false, loading = true;
     let pending = 0, queue = Promise.resolve();
@@ -18,6 +19,7 @@ export function initializeSidebarAppearanceOptions({ document = globalThis.docum
         layout.value = settings.favoritesLayout;
         tileSize.value = String(settings.favoriteTileSize);
         headerSize.value = String(settings.spaceHeaderSize);
+        hideNames.checked = settings.hideSpaceNames;
         document.getElementById('favoriteTileSizeValue').textContent = `${settings.favoriteTileSize} px`;
         document.getElementById('spaceHeaderSizeValue').textContent = `${settings.spaceHeaderSize} px`;
         controls.forEach(control => { control.disabled = loading; });
@@ -74,6 +76,7 @@ export function initializeSidebarAppearanceOptions({ document = globalThis.docum
     listen(layout, 'change', () => save({ favoritesLayout: layout.value }));
     listen(tileSize, 'input', () => save({ favoriteTileSize: Number(tileSize.value) }));
     listen(headerSize, 'input', () => save({ spaceHeaderSize: Number(headerSize.value) }));
+    listen(hideNames, 'change', () => save({ hideSpaceNames: hideNames.checked }));
     listen(reset, 'click', () => save({ ...DEFAULT_SIDEBAR_APPEARANCE }));
     return { ready, whenSaved: () => queue, dispose() {
         disposed = true; api.storage.onChanged.removeListener(listener); handlers.forEach(remove => remove());

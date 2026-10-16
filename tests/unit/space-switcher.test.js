@@ -288,3 +288,41 @@ test('line styles keep a visible independent paint surface with dark/forced-colo
     assert.match(css, /prefers-color-scheme: dark[^]*--sidebar-drop-color: #93c5fd/);
     assert.match(css, /\.space-drop-anchor \{\s*background: Highlight;[^}]*forced-color-adjust: none/);
 });
+
+test('icon-only setting retains full emoji, name tooltips, stable drag/keyboard targets and iconless fallbacks', async () => {
+    const f = setup();
+    f.setSpaces([{ id: 'Personal', name: 'My family', icon: '👨‍👩‍👧‍👦' }, { id: 'GenAI', name: 'Research', icon: '🇭🇰' }, { id: 'Finance', name: 'Budget' }]);
+    f.control.render();
+    const nodes = f.buttons();
+    for (const hide of [true, false, true]) {
+        f.document.documentElement.dataset.hideSpaceNames = String(hide);
+        assert.deepEqual(f.buttons(), nodes);
+        assert.equal(nodes[0].querySelector('.space-icon').textContent, '👨‍👩‍👧‍👦');
+        assert.equal(nodes[0].querySelector('.space-switcher-name').textContent, 'My family');
+        assert.match(nodes[0].title, /^My family\n/); assert.equal(nodes[0].getAttribute('aria-label'), 'Switch to space My family');
+        assert.equal(nodes[2].querySelector('.space-icon-fallback').getAttribute('aria-hidden'), 'true');
+        assert.equal(nodes[2].draggable, true);
+    }
+    f.event(nodes[0].querySelector('.space-icon'), 'click', { detail: 0, button: 0 });
+    assert.deepEqual(f.activations, ['Personal']);
+    f.event(nodes[2].querySelector('.space-icon-fallback'), 'dragstart');
+    f.event(nodes[0].querySelector('.space-icon'), 'dragover', { clientX: 1 });
+    f.control.refresh();
+    assert.equal(f.line.dataset.anchorSpaceId, 'Personal'); assert.equal(f.line.dataset.sourceSpaceId, 'Finance');
+    f.event(nodes[0].querySelector('.space-icon'), 'drop', { clientX: 1 }); await settle();
+    assert.deepEqual(f.moves[0], { spaceId: 'Finance', anchorSpaceId: 'Personal', position: 'before' });
+    f.event(f.buttons()[0], 'keydown', { key: 'ArrowRight', altKey: true, shiftKey: true }); await settle();
+    assert.deepEqual(f.moves[1], { spaceId: 'Finance', anchorSpaceId: 'Personal', position: 'after' });
+});
+
+test('appearance geometry refresh retargets the live marker without replacing drag nodes or changing IDs', () => {
+    const f = setup(), nodes = f.buttons();
+    f.event(nodes[2], 'dragstart'); f.event(nodes[1], 'dragover', { clientX: 110 });
+    assert.equal(f.line.dataset.anchorSpaceId, 'GenAI'); assert.equal(f.line.dataset.placement, 'before');
+    nodes.forEach((node, index) => { node.getBoundingClientRect = () => ({ left: 8 + index * 40, right: 40 + index * 40, width: 32, top: 500, bottom: 532, height: 32 }); });
+    f.document.elementFromPoint = () => nodes[2];
+    f.control.refresh();
+    assert.equal(f.line.hidden, true); // Pointer now hits its source, a no-op.
+    assert.deepEqual(f.buttons(), nodes); assert.equal(nodes[2].classList.contains('dragging-switcher'), true);
+    assert.deepEqual(f.moves, []); f.event(nodes[2], 'dragend');
+});

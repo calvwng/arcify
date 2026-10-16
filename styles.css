@@ -2380,6 +2380,12 @@ select:focus-visible,
 /* Space basics: bounded, keyboard-accessible menus and editors. */
 .space-icon { display: inline-block; flex: 0 0 auto; margin-right: 5px; }
 .space-icon[hidden] { display: none; }
+.space-switcher .space-icon-fallback { display: none; }
+:root[data-hide-space-names="true"] .space-switcher-name { display: none; }
+:root[data-hide-space-names="true"] .space-switcher button { width: 32px; padding: 0; }
+:root[data-hide-space-names="true"] .space-switcher .space-icon { margin-right: 0; }
+:root[data-hide-space-names="true"] .space-switcher .space-icon-fallback { display: inline-block; }
+.space-switcher button:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 .space-context-menu, .space-editor {
     box-sizing: border-box;
     color: #f4f4f5;
@@ -2407,6 +2413,8 @@ select:focus-visible,
 .space-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
 .space-choice-grid button { border-color: var(--choice-color, #52525b); overflow-wrap: anywhere; }
 .space-choice-grid button[aria-pressed="true"] { background: #3f3f46; outline: 2px solid #93c5fd; outline-offset: -2px; }
+.space-emoji-form { margin-bottom: 12px; }
+.space-emoji-hint { margin: 0 0 8px; font-size: 12px; line-height: 1.4; color: #d4d4d8; }
 .space-editor-status { margin: 6px 0; color: #fca5a5; overflow-wrap: anywhere; }
 
 /* Split View has its own labeled target; ordinary row edges still reorder. */

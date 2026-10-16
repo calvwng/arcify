@@ -478,7 +478,7 @@ export class SpaceStore {
                 if (Object.keys(attrs).some(key => !['name', 'color', 'icon'].includes(key))) throw new Error('Unsupported Space setting.');
                 if (attrs.name !== undefined && (typeof attrs.name !== 'string' || !attrs.name.trim() || attrs.name.trim().length > 256)) throw new Error('Enter a Space name between 1 and 256 characters.');
                 if (attrs.color !== undefined && !SPACE_COLORS.includes(attrs.color)) throw new Error('Choose one of the eight Space colors.');
-                if (attrs.icon !== undefined && attrs.icon !== null && normalizeSpaceIcon(attrs.icon) !== attrs.icon) throw new Error('Choose an icon from the Space icon picker.');
+                if (attrs.icon !== undefined && attrs.icon !== null && normalizeSpaceIcon(attrs.icon) !== attrs.icon) throw new Error('Choose a preset or enter one complete emoji.');
                 const folder = await getSpaceBookmarkFolder(space);
                 const entry = await LocalStorage.getOrCreateSpaceRegistryEntry(folder.id, { spaceUuid: space.id, name: space.name, color: space.color, icon: space.icon });
                 if (entry.spaceUuid !== space.id) throw new Error('This Space bookmark identity has changed. Refresh and try again.');

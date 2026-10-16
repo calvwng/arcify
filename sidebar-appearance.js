@@ -1,7 +1,7 @@
 // Appearance belongs to this Chrome profile, not to a Space or a saved Favorite.
 export const SIDEBAR_APPEARANCE_KEY = 'sidebarAppearance';
 export const DEFAULT_SIDEBAR_APPEARANCE = Object.freeze({
-    favoritesLayout: 'standard', favoriteTileSize: 44, spaceHeaderSize: 16
+    favoritesLayout: 'standard', favoriteTileSize: 44, spaceHeaderSize: 16, hideSpaceNames: false
 });
 export const SIDEBAR_APPEARANCE_LIMITS = Object.freeze({
     favoriteTileSize: Object.freeze({ min: 36, max: 64 }),
@@ -18,12 +18,13 @@ export function normalizeSidebarAppearance(value) {
         return Math.max(min, Math.min(max, Math.round(input[key])));
     };
     return { favoritesLayout: input.favoritesLayout === 'compact' ? 'compact' : 'standard',
-        favoriteTileSize: size('favoriteTileSize'), spaceHeaderSize: size('spaceHeaderSize') };
+        favoriteTileSize: size('favoriteTileSize'), spaceHeaderSize: size('spaceHeaderSize'), hideSpaceNames: input.hideSpaceNames === true };
 }
 
 export function applySidebarAppearance(document, value) {
     const settings = normalizeSidebarAppearance(value), root = document.documentElement;
     root.dataset.favoritesLayout = settings.favoritesLayout;
+    root.dataset.hideSpaceNames = String(settings.hideSpaceNames);
     root.dataset.spaceHeaderSize = String(settings.spaceHeaderSize);
     root.dataset.spaceHeaderCustom = String(settings.spaceHeaderSize !== DEFAULT_SIDEBAR_APPEARANCE.spaceHeaderSize);
     root.dataset.spaceHeaderCompact = String(settings.spaceHeaderSize < DEFAULT_SIDEBAR_APPEARANCE.spaceHeaderSize);

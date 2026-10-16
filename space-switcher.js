@@ -53,14 +53,19 @@ export function createSpaceSwitcher({ container, getSpaces, getActiveSpaceId, ac
                 const mark = document.createElement('span');
                 mark.className = 'space-icon'; mark.setAttribute('aria-hidden', 'true'); mark.textContent = icon.glyph;
                 button.appendChild(mark);
+            } else {
+                // Only shown by icon-only appearance CSS; no Space metadata is
+                // changed when a name-only legacy Space needs a visible target.
+                const fallback = document.createElement('span'); fallback.className = 'space-icon-fallback';
+                fallback.setAttribute('aria-hidden', 'true'); fallback.textContent = '●'; button.appendChild(fallback);
             }
-            const name = document.createElement('span'); name.textContent = space.name; button.appendChild(name);
+            const name = document.createElement('span'); name.className = 'space-switcher-name'; name.textContent = space.name; button.appendChild(name);
             button.dataset.spaceId = space.id;
             button.draggable = true;
             button.classList.toggle('active', space.id === getActiveSpaceId());
             button.setAttribute('aria-label', `Switch to space ${space.name}`);
             button.setAttribute('aria-keyshortcuts', 'Alt+Shift+ArrowLeft Alt+Shift+ArrowRight Shift+F10');
-            button.title = 'Drag to reorder. Keyboard: Alt+Shift+Left or Right. Right-click or Shift+F10 for Space options.';
+            button.title = `${space.name}\nDrag to reorder. Keyboard: Alt+Shift+Left or Right. Right-click or Shift+F10 for Space options.`;
             container.appendChild(button);
             if (space.id === focusedId) button.focus();
         }
@@ -221,5 +226,5 @@ export function createSpaceSwitcher({ container, getSpaces, getActiveSpaceId, ac
         if (index < 0 || !anchor) return;
         void commit({ spaceId: button.dataset.spaceId, anchorSpaceId: anchor.id, position: offset < 0 ? 'before' : 'after' });
     });
-    return { render };
+    return { render, refresh: () => refreshIndicator(true) };
 }
