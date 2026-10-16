@@ -1,6 +1,6 @@
 # Spotlight Split / End Split
 
-This additive stage is local-only until the publication owner integrates the previously verified extended-action/Archive fixes and pins the final companion commit. No merge, release, permissions, runtime security, or browser-setting changes are part of the feature.
+This additive stage has verified hosted Split evidence at Arcify `eb0e279` and Spotlight `e2ffbe0`: run `38900776291`, job `116972199344`, all 5 required cases passed with 31 screenshots and strict fixture cleanup. No merge, release, permissions, runtime security, or browser-setting changes are part of the feature.
 
 ## Exact optional contract
 
@@ -23,7 +23,7 @@ Only exact own adjacency/split/persistence events are allowed. There is no pin/u
 - Existing Today split tests still exercise the shared queue wrapper.
 - Actual bridge/module tests cover left/right sources, aliases, unsupported capabilities, native split ID 0, incompatible/ambiguous members, exact own events, root/pairing/Space/source races, post-move failures, persistence fences, no replay and unrelated native pairs.
 - Actual client/controller/overlay/New Tab DOM tests cover strict descriptors/receipts, pairing/native epochs, trusted explicit target selection, duplicate disambiguation, focus trap, Cancel/Escape/Enter, stale selection, projected aliases and helper exclusion.
-- `node scripts/check-spotlight-pair.mjs ../arcify-spotlight-split-next` executes both real implementations through mocked Chrome APIs. `node scripts/test-spotlight-pair-contract.mjs ../arcify-spotlight-split-next` includes deliberate provider and consumer drift failures.
+- `node scripts/check-spotlight-pair.mjs ../arcify-spotlight` executes both real implementations through mocked Chrome APIs. `node scripts/test-spotlight-pair-contract.mjs ../arcify-spotlight` includes deliberate provider and consumer drift failures.
 
 Mock and DOM checks do not establish native browser behavior or rendered geometry.
 
@@ -40,4 +40,4 @@ Case 54 requires:
 5. Native X11 window screenshots proving both original colored top-level panes, and End Split screenshots. Parent-retained passive input evidence survives overlay iframe retirement; no retired iframe is polled for success.
 6. One attempt per selected case, no skipped or retried success, incremental failure artifacts, and verified fixture cleanup.
 
-The existing exact official Google HTTPS Chrome-update route, TLS/provenance checks, sandbox defaults and Developer-mode input route are reused unchanged. This local preparation did not launch a browser, update Chrome, publish commits, or claim hosted success. The current local companion pin is `e2ffbe0982a19eacad23cc803aa42e8e6013c6d0`; integration must update it if the companion changes.
+The existing exact official Google HTTPS Chrome-update route, TLS/provenance checks, sandbox defaults and Developer-mode input route are reused unchanged. The verified hosted result covers Split only; Archive reopen intermittency and the separate Open Archive native-binding limitation remain independent, and manual Helium/physical-keyboard acceptance remains outstanding. The verified companion pin is `e2ffbe0982a19eacad23cc803aa42e8e6013c6d0`; integration must update it if the companion changes.

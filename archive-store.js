@@ -1,3 +1,4 @@
+import { observeArchiveCreate } from './archive-create-settlement.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
 import { isPracticeUrl } from './tour-practice.js';
@@ -171,8 +172,9 @@ export class ArchiveStore {
         const entries = await this.listUnlocked(), context = await this.contextUnlocked(windowId);
         return { context, entries: entries.map(entry => ({ entry, bookmarkFolderId: this.store.spaces.find(space => space.id === entry.spaceId)?.bookmarkFolderId || null })) };
     }
-    async targetUnlocked(request, tabId = null, { assigned = false, beforeMutation = async () => {} } = {}) {
+    async targetUnlocked(request, tabId = null, { assigned = false, beforeMutation = async () => {}, settlement = null } = {}) {
         return fencedArchiveRead(request, async () => {
+            settlement?.assert();
             if (!record(request.context) || request.context.windowId !== request.windowId) stale();
             const entry = this.resolve(await this.listUnlocked(), request.expected);
             const space = this.space(entry.spaceId, request.bookmarkFolderId);
@@ -199,6 +201,7 @@ export class ArchiveStore {
                 if (owners.length && (owners.length !== 1 || owners[0].space.id !== space.id || owners[0].section !== 'temporaryTabs')
                     || assigned && owners.length !== 1) stale();
             }
+            if (tabId) settlement?.verify(tab);
             return { entry, space, tab };
         }, tabId);
     }
@@ -248,7 +251,7 @@ export class ArchiveStore {
             return { ...copy(previous.result), replayed: true };
         }
         const target = await this.targetUnlocked(request, null, { beforeMutation }), { entry } = target;
-        let claim = claims[entry.entryId];
+        let claim = claims[entry.entryId], settlement = null;
         if (!claim) {
             const currentIds = new Set((await this.listUnlocked()).map(value => value.entryId));
             // Repairing a damaged/duplicated entry ID cannot clear an unresolved
@@ -266,30 +269,34 @@ export class ArchiveStore {
             await this.writeClaimUnlocked(claim);
             // If this final preflight fails, no native create was attempted, so
             // only this proven unstarted claim may be removed.
-            try { await this.targetUnlocked(request, null, { beforeMutation }); }
+            try { settlement = observeArchiveCreate(request); await this.targetUnlocked(request, null, { beforeMutation }); settlement.assert(); }
             catch (error) {
+                settlement?.stop();
                 claims = await this.claimsUnlocked(); delete claims[entry.entryId];
                 await chrome.storage.local.set({ [ARCHIVE_CLAIMS_KEY]: { version: 1, entries: claims } }); throw error;
             }
             let tab;
             try { tab = await chrome.tabs.create({ windowId: request.windowId, url: entry.url, active: false }); }
-            catch { uncertain({ entryId: entry.entryId }); }
-            if (!nativeId(tab?.id)) uncertain({ entryId: entry.entryId });
+            catch { settlement.stop(); uncertain({ entryId: entry.entryId }); }
+            if (!nativeId(tab?.id)) { settlement.stop(); uncertain({ entryId: entry.entryId }); }
+            settlement.bind(tab);
             claim = { ...claim, tabId: tab.id, phase: 'created' };
             this.pendingCreatedIds.add(tab.id);
             try { await this.writeClaimUnlocked(claim); }
-            catch { uncertain({ entryId: entry.entryId, tabId: tab.id }); }
+            catch { settlement.stop(); uncertain({ entryId: entry.entryId, tabId: tab.id }); }
         }
         try {
+            await settlement?.wait();
             await this.store.readTodayPlacement();
-            const { space, tab } = await this.targetUnlocked(request, claim.tabId, { beforeMutation });
+            const { space, tab } = await this.targetUnlocked(request, claim.tabId, { beforeMutation, settlement });
+            settlement?.handoffAuthority();
             const owned = locations(this.store, tab.id);
             if (!owned.length) {
                 this.store.forgetTab(tab.id);
                 this.store.insertCreatedToday(space, tab);
             }
             try {
-                await this.store.persist({ skipGroupSync: true, beforeWrite: () => this.targetUnlocked(request, claim.tabId, { assigned: true, beforeMutation }) });
+                await this.store.persist({ skipGroupSync: true, beforeWrite: () => this.targetUnlocked(request, claim.tabId, { assigned: true, beforeMutation, settlement }) });
             } catch (error) {
                 // A beforeWrite refusal or lost write response must not let a
                 // later native event persist tentative in-memory membership.
@@ -300,12 +307,13 @@ export class ArchiveStore {
             await this.writeClaimUnlocked(claim);
             const entries = await this.listUnlocked(); this.resolve(entries, request.expected);
             claims = await this.claimsUnlocked();
-            const { tab: confirmed } = await this.targetUnlocked(request, claim.tabId, { assigned: true, beforeMutation });
+            const { tab: confirmed } = await this.targetUnlocked(request, claim.tabId, { assigned: true, beforeMutation, settlement });
             const result = { status: 'reopened', consumed: true, entryId: entry.entryId, tabId: tab.id, tab: confirmed, spaceId: space.id, windowId: request.windowId };
             claims[entry.entryId] = { ...claim, phase: 'consumed', result };
             this.compactClaims(claims);
             // Receipt and exact removal are one durable commit. A lost response
             // is replayable; no URL-based deletion or second native create.
+            settlement?.assert();
             await chrome.storage.local.set({ [ARCHIVE_KEY]: entries.filter(value => value.entryId !== entry.entryId),
                 [ARCHIVE_CLAIMS_KEY]: { version: 1, entries: claims } });
             this.pendingCreatedIds.delete(tab.id);
@@ -319,7 +327,9 @@ export class ArchiveStore {
                     const live = await chrome.tabs.get(tab.id);
                     if (!live || live.windowId !== request.windowId || live.incognito || live.pinned || this.store.isGlobalTab(live)) stale();
                     assertNotNativeSplit(live);
+                    settlement?.verify(live);
                 }, tab.id);
+                settlement?.assert(); settlement?.stop();
                 const focusRequest = { ...request, context: { ...request.context, spaceId: space.id, bookmarkFolderId: space.bookmarkFolderId } };
                 this.store.active[request.windowId] = space.id; space.lastTab = tab.id;
                 try {
@@ -372,7 +382,7 @@ export class ArchiveStore {
             } catch { /* Unknown storage outcome remains an unresolved result. */ }
             fail('REOPEN_PARTIAL', `Tab ${claim.tabId} was created, but its exact Space assignment or archive removal could not be confirmed. The entry is retained unless its completed receipt was committed. Nothing was retried. ${error.message}`,
                 { tabId: claim.tabId, entryId: entry.entryId, consumed: false });
-        }
+        } finally { settlement?.stop(); }
     }
     async archiveUnlocked(request, { automatic = false, protectedUrlKeys = new Set() } = {}) {
         const resolve = async () => {

@@ -15,18 +15,27 @@ export async function assertArchiveActionRoundTrips({ ArcifyBridgeClient, Arcify
     const area = data => ({ async get(keys) { const list = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys || data); return Object.fromEntries(list.map(key => [key, copy(data[key] ?? keys?.[key])])); }, async set(values) { Object.assign(data, copy(values)); } });
     const tabs = [{ id: 1, windowId: 7, index: 0, active: true, url: URL, title: 'Source' }, { id: 2, windowId: 7, index: 1, active: false, url: URL, title: 'Saved' }, { id: 11, windowId: 8, index: 0, active: true, url: URL, title: 'Other window' }];
     const bookmarks = [{ id: 'root', title: 'Arcify' }, { id: 'source-folder', title: 'Source', parentId: 'root' }, { id: 'original-folder', title: 'Original', parentId: 'root' }, { id: 'pin', title: 'Saved', url: URL, parentId: 'source-folder' }];
+    const event = () => { const listeners = new Set(); return { addListener: fn => listeners.add(fn), removeListener: fn => listeners.delete(fn), emit: (...args) => [...listeners].forEach(fn => fn(...args)) }; };
     const effects = [], sent = []; let handle, nextId = 100, dropReopenResponse = false;
     const sender = { id: SPOTLIGHT, url: `chrome-extension://${SPOTLIGHT}/background.js`, origin: `chrome-extension://${SPOTLIGHT}` };
     const previous = globalThis.chrome;
     const native = globalThis.chrome = { runtime: { id: ARCIFY, getURL: path => `chrome-extension://${ARCIFY}/${path}`,
         sendMessage(peerId, message, callback) { assert.equal(peerId, ARCIFY); sent.push(copy(message)); handle(copy(message), sender).then(response => { if (!(dropReopenResponse && message.command === 'reopenArchivedTab')) callback(copy(response)); }); } },
-        storage: { local: area(local), session: area(session), sync: area({}) },
-        windows: { get: async id => ({ id, type: 'normal' }), update: async (id, values) => { effects.push(['focus', id]); return { id, ...values }; } },
-        tabs: { query: async (query = {}) => copy(tabs.filter(tab => Object.entries(query).every(([key, value]) => tab[key] === value))),
+        storage: { onChanged: event(), local: area(local), session: area(session), sync: area({}) },
+        windows: { onRemoved: event(), get: async id => ({ id, type: 'normal' }), update: async (id, values) => { effects.push(['focus', id]); return { id, ...values }; } },
+        tabs: { ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved', 'onReplaced', 'onActivated'].map(name => [name, event()])), query: async (query = {}) => copy(tabs.filter(tab => Object.entries(query).every(([key, value]) => tab[key] === value))),
             get: async id => copy(tabs.find(tab => tab.id === id)),
-            create: async data => { effects.push(['create', copy(data)]); const tab = { id: nextId++, index: tabs.length, title: 'Restored', ...data }; tabs.push(tab); return copy(tab); },
+            create: async data => {
+                effects.push(['create', copy(data)]);
+                const tab = { id: nextId++, index: tabs.length, title: 'Restored', pinned: false, incognito: false, splitViewId: -1, ...data,
+                    url: '', pendingUrl: data.url, status: 'loading' };
+                tabs.push(tab); const created = copy(tab); native.tabs.onCreated.emit(copy(tab));
+                tab.url = data.url; delete tab.pendingUrl; native.tabs.onUpdated.emit(tab.id, { status: 'loading', url: tab.url });
+                tab.status = 'complete'; native.tabs.onUpdated.emit(tab.id, { status: 'complete' });
+                return created;
+            },
             update: async (id, values) => { const tab = tabs.find(tab => tab.id === id); if (values.active) tabs.filter(item => item.windowId === tab.windowId).forEach(item => { item.active = item.id === id; }); Object.assign(tab, values); return copy(tab); } },
-        bookmarks: { search: async query => copy(bookmarks.filter(node => node.title === query.title)), get: async id => copy(bookmarks.filter(node => node.id === id)), getChildren: async id => copy(bookmarks.filter(node => node.parentId === id)) } };
+        bookmarks: { ...Object.fromEntries(['onChanged', 'onMoved', 'onRemoved', 'onCreated'].map(name => [name, event()])), search: async query => copy(bookmarks.filter(node => node.title === query.title)), get: async id => copy(bookmarks.filter(node => node.id === id)), getChildren: async id => copy(bookmarks.filter(node => node.parentId === id)) } };
     try {
         const store = new SpaceStore(); handle = createSpotlightBridge(store);
         const api = { runtime: { id: SPOTLIGHT }, tabs: native.tabs, storage: { local: area(peerLocal) } };

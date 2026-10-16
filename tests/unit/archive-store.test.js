@@ -14,15 +14,22 @@ function fixture(entries = [original()]) {
     const tabs = [{ id: 1, windowId: 10, active: true, url: 'https://source.test/', title: 'Source' }, { id: 2, windowId: 20, active: true, url: 'https://source.test/' }];
     const area = (data, name) => ({ async get(keys) { await hooks.get?.(keys, name); const names = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys || data); return Object.fromEntries(names.map(key => [key, clone(data[key] ?? keys?.[key])])); },
         async set(values) { await hooks.beforeSet?.(values, name); Object.assign(data, clone(values)); effects.push(['storage', name, clone(values)]); await hooks.afterSet?.(values, name); } });
+    const event = () => { const callbacks = new Set(); return { addListener: fn => callbacks.add(fn), removeListener: fn => callbacks.delete(fn), emit: (...args) => [...callbacks].forEach(fn => fn(...args)), callbacks }; };
     globalThis.chrome = {
         runtime: { id: 'arcify', getURL: path => `chrome-extension://arcify/${path}`, onMessage: { addListener(fn) { listeners.push(fn); } } },
-        storage: { local: area(local, 'local'), session: area(session, 'session'), sync: { async get(defaults) { return typeof defaults === 'object' ? defaults : {}; } } },
-        windows: { async get(id) { await hooks.window?.(id); return { id, type: 'normal', ...hooks.windowResult }; },
+        storage: { onChanged: event(), local: area(local, 'local'), session: area(session, 'session'), sync: { async get(defaults) { return typeof defaults === 'object' ? defaults : {}; } } },
+        windows: { onRemoved: event(), async get(id) { await hooks.window?.(id); return { id, type: 'normal', ...hooks.windowResult }; },
             async update(id, data) { await hooks.focusWindow?.(); effects.push(['focus-window', id, data]); } },
-        bookmarks: { async get(id) { await hooks.bookmark?.(id); return clone(nodes.filter(node => node.id === id)); }, async search() { return clone(nodes.filter(node => node.title === 'Arcify')); } },
-        tabs: { async query(query = {}) { await hooks.query?.(query); return clone(tabs.filter(tab => (query.windowId === undefined || query.windowId === tab.windowId) && (query.active === undefined || query.active === tab.active))); },
+        bookmarks: { onChanged: event(), onMoved: event(), onRemoved: event(), onCreated: event(), async get(id) { await hooks.bookmark?.(id); return clone(nodes.filter(node => node.id === id)); }, async search() { return clone(nodes.filter(node => node.title === 'Arcify')); } },
+        tabs: { ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved', 'onReplaced', 'onActivated'].map(name => [name, event()])), async query(query = {}) { await hooks.query?.(query); return clone(tabs.filter(tab => (query.windowId === undefined || query.windowId === tab.windowId) && (query.active === undefined || query.active === tab.active))); },
             async get(id) { await hooks.tab?.(id); const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Closed'); return clone(tab); },
-            async create(data) { effects.push(['create', clone(data)]); const tab = { id: nextTabId++, title: 'Restored', ...data }; tabs.push(tab); await hooks.create?.(tab); return clone(tab); },
+            async create(data) { effects.push(['create', clone(data)]); const tab = { id: nextTabId++, title: 'Restored', status: 'complete', pinned: false, incognito: false, splitViewId: -1, ...data }; tabs.push(tab);
+                if (!hooks.manualCreateEvents) {
+                    chrome.tabs.onCreated.emit({ ...clone(tab), url: '', pendingUrl: data.url, status: 'loading' });
+                    chrome.tabs.onUpdated.emit(tab.id, { status: 'loading', url: data.url });
+                    chrome.tabs.onUpdated.emit(tab.id, { status: 'complete' });
+                }
+                await hooks.create?.(tab); return clone(tab); },
             async update(id, values) { await hooks.focusTab?.(id); effects.push(['focus-tab', id, values]); tabs.filter(tab => tab.windowId === tabs.find(tab => tab.id === id)?.windowId).forEach(tab => { tab.active = tab.id === id; }); return clone(tabs.find(tab => tab.id === id)); },
             async remove(id) { await hooks.remove?.(id); effects.push(['remove', id]); tabs.splice(tabs.findIndex(tab => tab.id === id), 1); } }
     };
@@ -521,7 +528,7 @@ test('a source change during atomic consume keeps the committed receipt but neve
 
 function postCreateUpdateFixture(update, { source = false, mutate } = {}) {
     const f = fixture(), listeners = new Set();
-    chrome.tabs.onUpdated = { addListener: listener => listeners.add(listener), removeListener: listener => listeners.delete(listener) };
+    chrome.tabs.onUpdated = { addListener: listener => listeners.add(listener), removeListener: listener => listeners.delete(listener), emit: (...args) => [...listeners].forEach(listener => listener(...args)) };
     let fired = false;
     f.hooks.get = () => {
         const claim = Object.values(f.local[ARCHIVE_CLAIMS_KEY]?.entries || {}).find(item => item.phase === 'created');
@@ -573,4 +580,120 @@ test('presentation-only created-target event cannot hide a changed native snapsh
     assert.equal(f.creates().length, 1); assert.equal(f.local.archivedTabs.length, 1);
     assert.equal(f.local[ARCHIVE_CLAIMS_KEY].entries[request.expected.entryId].phase, 'created');
     assert(!f.effects.some(([kind]) => kind === 'focus-tab')); assert.equal(f.listeners.size, 0);
+});
+
+// Shape captured in hosted attempt3: onCreated(empty/exact pending URL), then
+// loading+exact URL, title, complete. The native ID remains Chrome's create ID.
+function freshLoadingFixture(at = 'create') {
+    const f = fixture(); f.hooks.manualCreateEvents = true;
+    let native, completed = false;
+    const complete = () => {
+        if (completed) return; completed = true;
+        Object.assign(native, { url: original().url, status: 'loading' }); delete native.pendingUrl;
+        chrome.tabs.onUpdated.emit(native.id, { status: 'loading', url: native.url }, clone(native));
+        native.title = 'Loaded archived page'; chrome.tabs.onUpdated.emit(native.id, { title: native.title }, clone(native));
+        native.status = 'complete'; chrome.tabs.onUpdated.emit(native.id, { status: 'complete' }, clone(native));
+    };
+    f.hooks.create = tab => {
+        native = tab; Object.assign(tab, { url: '', pendingUrl: original().url, status: 'loading' });
+        chrome.tabs.onCreated.emit(clone(tab));
+        if (at === 'create') complete();
+    };
+    f.hooks.beforeSet = values => { if (at === 'before-created-receipt' && values.archiveReopenClaims?.entries?.[Object.keys(values.archiveReopenClaims.entries)[0]]?.phase === 'created') complete(); };
+    f.hooks.afterSet = values => {
+        if (Object.values(values.archiveReopenClaims?.entries || {}).some(claim => claim.phase === 'created')) {
+            if (at === 'after-created-receipt') complete();
+            if (at === 'load-wait') setImmediate(complete);
+        }
+    };
+    return { ...f, complete, native: () => native };
+}
+for (const at of ['create', 'before-created-receipt', 'after-created-receipt', 'load-wait']) test(`captured fresh-create loading sequence settles once during ${at} before strict assignment`, async () => {
+    const f = freshLoadingFixture(at), request = await f.prepare(), result = await f.archive.reopen(request);
+    assert.equal(result.consumed, true); assert.equal(result.status, 'reopened'); assert.equal(result.tabId, 100);
+    assert.equal(f.creates().length, 1); assert.equal(f.local.archivedTabs.length, 0);
+    assert.deepEqual(f.local.spaces.find(space => space.id === 'original').temporaryTabs, [100]);
+    assert.equal(f.local.archiveReopenClaims.entries[request.expected.entryId].phase, 'consumed');
+    for (const value of Object.values(chrome.tabs)) if (value?.callbacks) assert.equal(value.callbacks.size, 0);
+});
+
+function injectFreshBoundary(f, boundary, mutate) {
+    let fired = false;
+    const inject = () => { if (!fired) { fired = true; mutate(); } };
+    const phase = () => Object.values(f.local.archiveReopenClaims?.entries || {})[0]?.phase;
+    if (boundary === 'create') { const previous = f.hooks.create; f.hooks.create = async tab => { await previous?.(tab); inject(); }; }
+    else if (['before-created-receipt', 'after-created-receipt', 'before-assigned-receipt', 'after-assigned-receipt', 'before-consume', 'after-consume'].includes(boundary)) {
+        const hook = boundary.startsWith('before-') ? 'beforeSet' : 'afterSet', previous = f.hooks[hook];
+        const expected = boundary.includes('created') ? 'created' : boundary.includes('assigned') ? 'assigned' : 'consumed';
+        f.hooks[hook] = async values => { await previous?.(values); if (Object.values(values.archiveReopenClaims?.entries || {}).some(claim => claim.phase === expected)) inject(); };
+    } else if (boundary === 'placement-read') {
+        const previous = f.store.readTodayPlacement.bind(f.store); f.store.readTodayPlacement = async () => { await previous(); inject(); };
+    } else if (boundary === 'first-target-read') f.hooks.get = () => { if (phase() === 'created' && chrome.tabs.onUpdated.callbacks.size > 1) inject(); };
+    else if (boundary === 'first-final-native-read') f.hooks.query = query => { if (phase() === 'created' && !Object.keys(query).length) inject(); };
+    else if (boundary === 'between-target-and-persist') f.hooks.persist = inject;
+    else if (boundary === 'before-consume-read') f.hooks.get = () => { if (phase() === 'assigned') inject(); };
+    else if (boundary === 'after-final-target-read') {
+        const previous = f.archive.targetUnlocked.bind(f.archive); f.archive.targetUnlocked = async (...args) => {
+            const result = await previous(...args); if (phase() === 'assigned' && args[2]?.assigned) inject(); return result;
+        };
+    }
+    else if (boundary === 'post-consume-native-read') f.hooks.tab = () => { if (phase() === 'consumed') inject(); };
+    else throw new Error(`Unknown injection ${boundary}`);
+    return () => fired;
+}
+const freshBoundaries = ['create', 'before-created-receipt', 'after-created-receipt', 'placement-read', 'first-target-read', 'first-final-native-read',
+    'between-target-and-persist', 'before-assigned-receipt', 'after-assigned-receipt', 'before-consume-read', 'after-final-target-read', 'before-consume', 'after-consume', 'post-consume-native-read'];
+for (const boundary of freshBoundaries) for (const mutation of ['source', 'target-repeat', ...(['create', 'before-created-receipt', 'after-created-receipt', 'placement-read', 'first-target-read', 'first-final-native-read'].includes(boundary) ? ['pairing'] : [])]) test(`fresh-create ${mutation} change stays rejected across ${boundary}, even after state returns`, async () => {
+    const f = freshLoadingFixture(), request = await f.prepare();
+    const fired = injectFreshBoundary(f, boundary, () => {
+        if (mutation === 'source') chrome.tabs.onUpdated.emit(1, { title: 'Transient source change' });
+        else if (mutation === 'target-repeat') chrome.tabs.onUpdated.emit(100, { status: 'loading', url: request.expected.url });
+        else {
+            chrome.storage.onChanged.emit({ arcifyBridgePairingGeneration: { oldValue: 'original', newValue: 'changed' } }, 'local');
+            chrome.storage.onChanged.emit({ arcifyBridgePairingGeneration: { oldValue: 'changed', newValue: 'original' } }, 'local');
+        }
+    });
+    const consumed = ['before-consume', 'after-consume', 'post-consume-native-read'].includes(boundary);
+    if (consumed) { const result = await f.archive.reopen(request); assert.equal(result.consumed, true); assert.equal(result.status, 'partial'); }
+    else await assert.rejects(f.archive.reopen(request), { code: 'REOPEN_PARTIAL' });
+    assert.equal(fired(), true); assert.equal(f.creates().length, 1);
+    assert.equal(f.local.archivedTabs.length, consumed ? 0 : 1);
+    assert(!f.effects.some(([kind]) => kind === 'focus-tab' || kind === 'focus-window'));
+    assert.equal(f.tabs[0].active, true); assert.equal(f.local.activeSpaces, undefined); assert.equal(f.store.active[10], 'source');
+    for (const value of Object.values(chrome.tabs)) if (value?.callbacks) assert.equal(value.callbacks.size, 0);
+});
+for (const boundary of ['create', 'created']) test(`initial load timeout during ${boundary} preserves the known created receipt without retry`, async t => {
+    let timeout;
+    t.mock.method(globalThis, 'setTimeout', callback => { timeout = callback; return 12345; });
+    t.mock.method(globalThis, 'clearTimeout', () => {});
+    const f = freshLoadingFixture('never'), request = await f.prepare();
+    if (boundary === 'create') { const previous = f.hooks.create; f.hooks.create = tab => { previous(tab); timeout(); }; }
+    else f.hooks.afterSet = values => { if (Object.values(values.archiveReopenClaims?.entries || {}).some(claim => claim.phase === 'created')) timeout(); };
+    await assert.rejects(f.archive.reopen(request), error => error.code === 'REOPEN_PARTIAL' && /initial load/.test(error.message));
+    assert.equal(f.creates().length, 1); assert.equal(f.local.archivedTabs.length, 1);
+    const claim = f.local.archiveReopenClaims.entries[request.expected.entryId]; assert.equal(claim.phase, 'created'); assert.equal(claim.tabId, 100);
+    assert.deepEqual(f.local.spaces[1].temporaryTabs, []); assert.equal(f.store.active[10], 'source');
+    for (const value of Object.values(chrome.tabs)) if (value?.callbacks) assert.equal(value.callbacks.size, 0);
+});
+for (const failure of ['create-rejection', 'missing-returned-id', 'created-receipt-write']) test(`fresh observation cleans up after ${failure} without replaying native creation`, async () => {
+    const f = freshLoadingFixture(), request = await f.prepare();
+    const previous = f.hooks.create;
+    if (failure !== 'created-receipt-write') f.hooks.create = async tab => { await previous(tab); if (failure === 'create-rejection') throw new Error('Lost create response'); delete tab.id; };
+    else f.hooks.beforeSet = values => { if (Object.values(values.archiveReopenClaims?.entries || {}).some(claim => claim.phase === 'created')) throw new Error('Lost created receipt'); };
+    await assert.rejects(f.archive.reopen(request), { code: 'UNCERTAIN_RESULT' });
+    assert.equal(f.creates().length, 1); assert.equal(f.local.archivedTabs.length, 1);
+    for (const area of ['tabs', 'windows', 'bookmarks', 'storage']) for (const value of Object.values(chrome[area])) if (value?.callbacks) assert.equal(value.callbacks.size, 0);
+});
+for (const worker of ['same-worker', 'new-worker']) test(`an explicit ${worker} resumed known-ID claim cannot regain the fresh initial-load allowance or create again`, async t => {
+    const f = freshLoadingFixture(), request = await f.prepare();
+    f.hooks.persist = () => { throw new Error('Known create, assignment failed'); };
+    await assert.rejects(f.archive.reopen(request), { code: 'REOPEN_PARTIAL' });
+    f.hooks.persist = null;
+    if (worker === 'new-worker') f.store.archiveStore = new ArchiveStore(f.store);
+    let timers = 0;
+    t.mock.method(globalThis, 'setTimeout', () => { timers++; throw new Error('A resumed claim must not install fresh-load settlement'); });
+    f.hooks.query = () => chrome.tabs.onUpdated.emit(100, { status: 'loading', url: request.expected.url });
+    await assert.rejects(f.store.archiveStore.reopen({ ...request, requestId: 'explicit-resume-with-navigation' }), { code: 'REOPEN_PARTIAL' });
+    assert.equal(timers, 0); assert.equal(f.creates().length, 1); assert.equal(f.local.archivedTabs.length, 1);
+    assert.equal(f.local.archiveReopenClaims.entries[request.expected.entryId].phase, 'created');
 });

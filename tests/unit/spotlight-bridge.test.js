@@ -12,11 +12,12 @@ const SENDER = { id: PEER, url: `chrome-extension://${PEER}/background.js`, orig
 const JOURNAL_KEY = 'spotlightBridgeRequests';
 const DUPLICATE_URL = 'https://same.test/';
 const clone = value => structuredClone(value);
-let local, session, sync, tabs, groups, windows, nodes, mutations, storageWrites, nextTabId, journalHook;
+let local, session, sync, tabs, groups, windows, nodes, mutations, storageWrites, nextTabId, journalHook, archiveCreateLifecycle;
 const event = () => ({
     listeners: [],
     addListener(listener) { this.listeners.push(listener); },
-    emit(...args) { for (const listener of this.listeners) listener(...clone(args)); }
+    removeListener(listener) { this.listeners = this.listeners.filter(value => value !== listener); },
+    emit(...args) { for (const listener of [...this.listeners]) listener(...clone(args)); }
 });
 function area(data, name) {
     return {
@@ -75,7 +76,7 @@ beforeEach(() => {
         pinnedTabStatesById: { 4: { bookmarkId: 'twin-1', pinnedUrl: DUPLICATE_URL } }
     };
     session = { spaceSession: true, activeSpaces: { 1: 'a', 2: 'b' } };
-    sync = {}; groups = []; mutations = []; storageWrites = []; nextTabId = 100; journalHook = null;
+    sync = {}; groups = []; mutations = []; storageWrites = []; nextTabId = 100; journalHook = null; archiveCreateLifecycle = false;
     windows = [{ id: 1, type: 'normal' }, { id: 2, type: 'normal' }, { id: 3, type: 'popup' }];
     tabs = [
         { id: 1, windowId: 1, index: 0, title: 'First', url: DUPLICATE_URL, active: true, groupId: 987 },
@@ -98,6 +99,7 @@ beforeEach(() => {
         runtime: { id: SELF, getURL: path => `chrome-extension://${SELF}/${path}`, onMessage: event(), onMessageExternal: event() },
         storage: { local: area(local, 'local'), session: area(session, 'session'), sync: area(sync, 'sync'), onChanged: event() },
         windows: {
+            onRemoved: event(),
             async get(id) { const window = windows.find(window => window.id === id); if (!window) throw new Error('No such window'); return clone(window); },
             async update(id, update) { mutations.push(['window.update', id, clone(update)]); return Object.assign(windows.find(window => window.id === id), update); }
         },
@@ -108,9 +110,20 @@ beforeEach(() => {
             async create(options) {
                 mutations.push(['tab.create', clone(options)]);
                 const tab = { id: nextTabId++, index: tabs.filter(tab => tab.windowId === options.windowId).length, groupId: -1, title: '', ...clone(options) };
+                if (archiveCreateLifecycle) Object.assign(tab, { url: '', pendingUrl: options.url, status: 'loading', pinned: false, incognito: false, splitViewId: -1 });
                 tabs.push(tab);
                 chrome.tabs.onCreated.emit(tab);
-                return clone(tab);
+                const created = clone(tab);
+                if (archiveCreateLifecycle) {
+                    // Observe the initial load even when it settles before tabs.create resolves.
+                    tab.url = options.url; delete tab.pendingUrl;
+                    chrome.tabs.onUpdated.emit(tab.id, { status: 'loading', url: tab.url }, tab);
+                    tab.title = 'Restored archive';
+                    chrome.tabs.onUpdated.emit(tab.id, { title: tab.title }, tab);
+                    tab.status = 'complete';
+                    chrome.tabs.onUpdated.emit(tab.id, { status: 'complete' }, tab);
+                }
+                return created;
             },
             async update(id, update) {
                 mutations.push(['tab.update', id, clone(update)]);
@@ -148,6 +161,7 @@ beforeEach(() => {
             }
         },
         bookmarks: {
+            onChanged: event(), onMoved: event(), onRemoved: event(), onCreated: event(),
             async search(query) { return clone(nodes.filter(node => node.title === query.title)); },
             async get(id) { return clone(nodes.filter(node => node.id === String(id))); },
             async getChildren(id) { return clone(nodes.filter(node => node.parentId === id)); },
@@ -984,6 +998,7 @@ test('optional archive capabilities stay out of legacy hello and exact actions r
     assertError(await bridge(request('archiveContext', { tabId: 1 }), SENDER), 'UNSUPPORTED_FEATURE');
 });
 test('real bridge restores one exact same-URL archive in original Space and source window, with one durable create', async () => {
+    archiveCreateLifecycle = true;
     const store = await makeStore(), bridge = createSpotlightBridge(store);
     local.archivedTabs = [{ entryId: 'archived-first', name: 'First archived twin', url: DUPLICATE_URL, spaceId: 'b', archivedAt: 1, legacy: 'retain' },
         { entryId: 'archived-second', name: 'Second archived twin', url: DUPLICATE_URL, spaceId: 'a', archivedAt: 2, legacy: 'retain-too' }];
@@ -1014,6 +1029,7 @@ test('changed private archive record refuses exact bridge action, including unkn
 });
 
 for (const phase of ['assignment', 'selection']) test(`Archive ${phase} persist refusal reloads durable state before a later native-event persist`, async () => {
+    archiveCreateLifecycle = true;
     const store = await makeStore(), bridge = createSpotlightBridge(store);
     local.archivedTabs = [{ entryId: 'archive-refusal', name: 'Archived', url: DUPLICATE_URL, spaceId: 'b', archivedAt: 1 }];
     const features = ['globalFavoritesV1', 'archiveActionsV1'];
