@@ -20,9 +20,12 @@ unchanged Favorite lifecycle receipts and final browser restart. Every previous
 49/5/4. Existing native sidebar gesture and completeness gates are unchanged.
 The independent [appearance/actions job](appearance-actions-paired-ci.md) also
 requires the same action case after setup, appearance, theme, options and recovery
-(8 cases total), without replacing any of those three existing jobs.
+(8 cases total), without replacing any of those three existing jobs. The
+[recovery/actions job](recovery-actions-paired-ci.md) separately runs exactly
+0–2/48/49 on a fresh profile without preceding theme cases; all five outcomes
+remain mandatory.
 
-The runner and all three workflow jobs pin reviewed, published Spotlight commit
+The runner and all five workflow jobs pin reviewed, published Spotlight commit
 `9c4462fb0f3cbfe2585757c43f34398e9c906fde`. Recovery and action evidence remain
 separate in the report. The action case receives the current options realms
 after the witnessed recovery reloads, not stale pre-reload Page objects.

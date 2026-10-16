@@ -172,7 +172,7 @@ test('native sync setup clicks the actual checkbox and rejects untrusted changes
         let checked = false; const calls = [];
         const page = { waitForSelector: async selector => calls.push(['wait', selector]), waitForFunction: async () => calls.push(['ready']),
             $eval: async () => checked,
-            evaluate: async fn => fn.name === 'installThemeInputTrace' ? undefined : [{ type: 'change', trusted }],
+            evaluate: async fn => fn.name.startsWith('installTheme') ? undefined : fn.toString().includes('storage.sync') ? { syncTabGroups: checked } : [{ type: 'change', trusted }],
             click: async selector => { calls.push(['click', selector]); checked = true; } };
         if (trusted) { await setThemeGroupSync(page, true); const count = calls.length; await setThemeGroupSync(page, true); assert.equal(calls.length, count + 2); }
         else await assert.rejects(() => setThemeGroupSync(page, true));

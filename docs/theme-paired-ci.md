@@ -7,10 +7,12 @@ Spotlight action cases 48/49 now follow both theme cases. The full suite require
 49 passing cases exactly once in declared order. Independent Favorite lifecycle
 and native Split View jobs still require 5 and 4 cases. The independent
 [appearance/actions job](appearance-actions-paired-ci.md) requires 8 shared cases
-on a fresh profile and never replaces those outcomes. Missing, failed, skipped,
+on a fresh profile and never replaces those outcomes. The separate
+[recovery/actions job](recovery-actions-paired-ci.md) requires 5 cases and
+provides no theme/appearance acceptance. Missing, failed, skipped,
 incomplete or extra evidence fails the existing strict run-plan gates.
 
-All four jobs and the runner pin Spotlight to reviewed, published commit
+All five jobs and the runner pin Spotlight to reviewed, published commit
 `9c4462fb0f3cbfe2585757c43f34398e9c906fde`. After verifying that exact checkout,
 case 47 imports and executes its unchanged
 `test/e2e/options-appearance-evidence.js`. Missing collector code is a failure.
@@ -82,7 +84,7 @@ required assertion fails.
 
 Local validation is limited to pure validators, mocked adapters, source contracts,
 syntax checks and production builds. These checks are not browser acceptance;
-the final combined commit still requires successful hosted 49/5/4/8 job results.
+the final combined commit still requires successful hosted 49/5/4/8/5 job results.
 No browser, native helper, privileged installation, security flag or host-policy
 change is used locally. Hosted Chrome keeps its normal namespace sandbox.
 

@@ -5,7 +5,69 @@ import { readSourceText } from '../source-text.js';
 import { assertSavedMoved, assertSavedMoveUnchanged, assertSavedMoveRejected, assertSavedMoveTrace, assertSavedMoveBookmarkTrace,
     assertSavedMoveReload, savedMoveTree, savedMoveEntry, canonicalSavedMoveBookmarks, installSavedMoveTrace, installSavedMoveBookmarkTrace,
     serveSavedMoveFixture, savedMoveAction, savedMoveDestination, savedMoveSearchMatches, assertSavedMoveUnsupportedCleanup, assertSavedMoveDurableReload,
-    rightClickSavedMoveRow } from '../../scripts/paired-chrome-saved-move.mjs';
+    rightClickSavedMoveRow, assertSavedMoveOwnedTabsRetired, retireSavedMoveOwnedTabs } from '../../scripts/paired-chrome-saved-move.mjs';
+import { finishBookmarkFixture } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+
+test('saved Move retirement requires dead tabs and bindings together without pruning unrelated entries', () => {
+    const before = { tabIds: [1, 2, 3], bindings: { 1: { bookmarkId: 'owned' }, 2: { bookmarkId: 'kept' }, 99: { bookmarkId: 'unrelated-stale' } } };
+    const after = { tabIds: [2, 3], bindings: { 2: before.bindings[2], 99: before.bindings[99] } };
+    assertSavedMoveOwnedTabsRetired(before, after, [1, 1]);
+    for (const mutate of [state => state.bindings[1] = before.bindings[1], state => state.tabIds.unshift(1),
+        state => delete state.bindings[2], state => delete state.bindings[99], state => state.bindings[2].bookmarkId = 'changed',
+        state => state.tabIds.pop(), state => state.tabIds.push(4), state => state.bindings[3] = { bookmarkId: 'unowned' }]) {
+        const bad = structuredClone(after); mutate(bad);
+        assert.throws(() => assertSavedMoveOwnedTabsRetired(before, bad, [1]));
+    }
+    assert.deepEqual(before.tabIds, [1, 2, 3]);
+    assert.equal(before.bindings[1].bookmarkId, 'owned');
+    assert.throws(() => assertSavedMoveOwnedTabsRetired(before, after, ['1']));
+});
+
+test('saved Move cleanup waits for the real tab-removal binding cleanup before closing native', async () => {
+    const prior = globalThis.chrome, calls = [], records = [];
+    let tabIds = [1, 2], bindings = { 1: { bookmarkId: 'owned' }, 2: { bookmarkId: 'kept' } }, mounted = true;
+    globalThis.chrome = {
+        tabs: { query: async () => tabIds.map(id => ({ id })), remove: async ids => {
+            assert.equal(mounted, true); assert.deepEqual(ids, [1]); calls.push('remove'); tabIds = tabIds.filter(id => !ids.includes(id));
+        } },
+        storage: { local: { get: async key => { assert.equal(key, 'pinnedTabStatesById'); return { pinnedTabStatesById: structuredClone(bindings) }; } } }
+    };
+    try {
+        await finishBookmarkFixture([
+            () => retireSavedMoveOwnedTabs({ apiPage: { evaluate: (fn, args) => fn(args) }, ownedTabIds: [1, 1], record: async value => records.push(value),
+                poll: async (read, accept) => {
+                    assert.equal(accept(await read()), false, 'Removed native tab alone is not settled cleanup.'); calls.push('pending-binding');
+                    assert.equal(mounted, true); delete bindings[1]; calls.push('ordinary-handler');
+                    const state = await read(); assert.equal(accept(state), true); return state;
+                } }),
+            async () => { mounted = false; calls.push('close-native'); }
+        ]);
+        assert.deepEqual(calls, ['remove', 'pending-binding', 'ordinary-handler', 'close-native']);
+        assert.deepEqual(records.map(value => value.phase), ['before-owned-saved-move-tab-cleanup', 'owned-saved-move-tabs-retired']);
+        assert.deepEqual(bindings, { 2: { bookmarkId: 'kept' } });
+    } finally { if (prior === undefined) delete globalThis.chrome; else globalThis.chrome = prior; }
+});
+
+test('saved Move retirement failure preserves diagnostic snapshots and still closes native', async () => {
+    const prior = globalThis.chrome, records = [], primary = Error('original proof failed');
+    let tabIds = [1, 2], closed = false;
+    globalThis.chrome = {
+        tabs: { query: async () => tabIds.map(id => ({ id })), remove: async () => { tabIds = [2]; } },
+        storage: { local: { get: async () => ({ pinnedTabStatesById: { 1: { bookmarkId: 'owned' }, 2: { bookmarkId: 'kept' } } }) } }
+    };
+    try {
+        await finishBookmarkFixture([
+            () => retireSavedMoveOwnedTabs({ apiPage: { evaluate: (fn, args) => fn(args) }, ownedTabIds: [1], record: async value => records.push(value),
+                poll: async (read, accept) => { assert.equal(accept(await read()), false); throw Error('binding cleanup did not finish'); } }),
+            async () => { closed = true; }
+        ], primary);
+        assert.equal(closed, true); assert.equal(primary.message, 'original proof failed');
+        assert.deepEqual(primary.cleanupErrors, ['binding cleanup did not finish']);
+        const failure = records.at(-1); assert.equal(failure.phase, 'owned-saved-move-tab-cleanup-failed');
+        assert.deepEqual(failure.before.tabIds, [1, 2]); assert.deepEqual(failure.after.tabIds, [2]);
+        assert(failure.lastFailure.actual.bindings[1]); assert.equal(failure.lastFailure.expected.bindings[1], undefined);
+    } finally { if (prior === undefined) delete globalThis.chrome; else globalThis.chrome = prior; }
+});
 
 function savedTriggerFixture(errors = []) {
     const calls = [], records = []; let clicks = 0, disposed = 0;
@@ -322,13 +384,21 @@ test('reload keeps exact all-window saved and global identities without old-ID r
 const helper = readSourceText(new URL('../../scripts/paired-chrome-saved-move.mjs', import.meta.url));
 const runner = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
 const workflow = readSourceText(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url));
+test('saved Move final cleanup retires owned bindings before its independently scheduled native close', () => {
+    const cleanup = helper.slice(helper.indexOf('    } finally {\n        await finishBookmarkFixture(['));
+    const retire = cleanup.indexOf('await retireSavedMoveOwnedTabs('), close = cleanup.indexOf('await native.close()');
+    assert(retire > 0 && close > retire);
+    assert.match(cleanup.slice(retire, close), /\},\n[\s\S]*async \(\) => \{ if \(native\) \{/);
+    assert.match(cleanup, /if \(owned.length && !native\) native = await nativeSidebar\(\)/);
+    assert(cleanup.indexOf('chrome.tabs.onRemoved.hasListeners()') < retire);
+});
 test('saved Move proof is mandatory in both new full cases without weakening original window-B/sandbox/reload gates', () => {
     for (const [index, sync] of [[44, false], [45, true]]) assert.match(runner, new RegExp(`await step\\(stepNames\\[${index}\\], \\(\\) => exerciseSavedMove[\\s\\S]*?groupSync:${sync}`));
     assert.equal((runner.match(/exerciseSavedMove\(/g) || []).length, 2);
     assert.match(runner, /if \(serveSavedMoveFixture\(request, response\)\) return/);
     assert.match(runner, /assert.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     const savedStart = runner.indexOf('await step(stepNames[44]');
-    const savedEnd = runner.indexOf('    } // Shared appearance/actions cases 46–49;', savedStart);
+    const savedEnd = runner.indexOf('    } // Shared recovery/actions cases 48–49;', savedStart);
     assert(savedStart > 0 && savedEnd > savedStart);
     assert(runner.indexOf('await step(stepNames[45]', savedStart) < savedEnd);
     assert.doesNotMatch(runner.slice(savedStart, savedEnd), /windowIsolation/);

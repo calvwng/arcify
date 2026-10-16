@@ -100,16 +100,29 @@ test('Tab transport failure is not replayed', async () => {
     let count = 0; const page = { evaluate: async () => false, keyboard: { press: async () => { count++; throw Error('uncertain transport'); } } };
     await assert.rejects(() => tabToSelector(page, '#dismiss'), /uncertain transport/); assert.equal(count, 1);
 });
-test('appearance select uses actual keyboard selection without assigning DOM values', async () => {
-    const calls = []; const page = { click: async selector => calls.push(selector), keyboard: { press: async key => calls.push(key) }, $eval: async () => 'compact' };
-    await setAppearanceControl(page, 'favoritesLayout', 'compact'); assert.deepEqual(calls, ['#favoritesLayout', 'Home', 'ArrowDown', 'Enter']);
+function appearanceInputPage(id, initial, desired) {
+    const calls = []; let current = initial;
+    const receipt = () => ({ control: String(current), status: 'Sidebar appearance saved for this Chrome profile.', stored: { [id]: desired } });
+    const page = { waitForSelector: async selector => calls.push(`wait:${selector}`), waitForFunction: async () => calls.push('queue-complete'),
+        evaluate: async fn => fn.toString().includes('document.activeElement') ? true : receipt(),
+        keyboard: { press: async key => { calls.push(key); if (id === 'favoritesLayout') current = key === 'ArrowDown' ? 'compact' : key === 'Home' ? 'standard' : current;
+            else if (key === 'Home') current = 12; else if (key === 'ArrowRight') current++; } },
+        $eval: async (_selector, fn) => fn.toString().includes('node.min') ? { min: 12, max: 20 } : String(current) };
+    return { page, calls };
+}
+test('appearance select uses actual keyboard selection and waits for genuine save completion', async () => {
+    const { page, calls } = appearanceInputPage('favoritesLayout', 'standard', 'compact');
+    await setAppearanceControl(page, 'favoritesLayout', 'compact');
+    assert.deepEqual(calls, ['wait:#favoritesLayout:not([disabled])', 'Home', 'ArrowDown', 'Enter', 'queue-complete']);
 });
-test('appearance range is adjusted only through actual Home/ArrowRight input', async () => {
-    const calls = []; let reads = 0; const page = { click: async selector => calls.push(selector), keyboard: { press: async key => calls.push(key) }, $eval: async () => ++reads === 1 ? { min: 12, max: 20 } : '14' };
-    await setAppearanceControl(page, 'spaceHeaderSize', 14); assert.deepEqual(calls, ['#spaceHeaderSize', 'Home', 'ArrowRight', 'ArrowRight']);
+test('appearance range uses real Tab then Home/ArrowRight and waits for the final queue', async () => {
+    const { page, calls } = appearanceInputPage('spaceHeaderSize', 16, 14);
+    await setAppearanceControl(page, 'spaceHeaderSize', 14);
+    assert.deepEqual(calls, ['wait:#spaceHeaderSize:not([disabled])', 'Home', 'ArrowRight', 'ArrowRight', 'queue-complete']);
 });
 test('uncertain settings input stops without synthesizing an event or retrying', async () => {
-    let inputs = 0; const page = { click: async () => {}, keyboard: { press: async () => { inputs++; throw Error('uncertain input'); } } };
+    const { page } = appearanceInputPage('favoritesLayout', 'standard', 'compact'); let inputs = 0;
+    page.keyboard.press = async () => { inputs++; throw Error('uncertain input'); };
     await assert.rejects(() => setAppearanceControl(page, 'favoritesLayout', 'compact'), /uncertain input/); assert.equal(inputs, 1);
 });
 

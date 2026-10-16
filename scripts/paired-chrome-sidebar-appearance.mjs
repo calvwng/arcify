@@ -139,19 +139,44 @@ export function assertCompactSidebar(state, { width, size = 44, headerSize = 12,
     return { columns, rows: Math.ceil(state.tiles.length / columns), finalRow: state.tiles.length % columns || columns, state };
 }
 
+/** Read the real queue's final UI acknowledgement as well as its durable value. */
+export function appearanceSaveComplete(receipt, id, value, { changed = true } = {}) {
+    return receipt.control === String(value) && receipt.stored?.[id] === value &&
+        (receipt.status === 'Sidebar appearance saved for this Chrome profile.' ||
+            (!changed && receipt.status === 'Standard layout is the default.'));
+}
+export async function waitForAppearanceControlSaved(page, id, value, { changed = true } = {}) {
+    await page.waitForFunction(async ({ id, value, changed }) => {
+        const status = document.querySelector('#sidebarAppearanceStatus')?.textContent;
+        const stored = (await chrome.storage.local.get('sidebarAppearance')).sidebarAppearance;
+        return document.getElementById(id)?.value === String(value) && stored?.[id] === value &&
+            (status === 'Sidebar appearance saved for this Chrome profile.' || (!changed && status === 'Standard layout is the default.'));
+    }, { polling: 50 }, { id, value, changed });
+    const receipt = await page.evaluate(async id => ({ control: document.getElementById(id)?.value,
+        status: document.querySelector('#sidebarAppearanceStatus')?.textContent,
+        stored: (await chrome.storage.local.get('sidebarAppearance')).sidebarAppearance }), id);
+    assert(appearanceSaveComplete(receipt, id, value, { changed }), 'Require final queue acknowledgement and the exact saved control value.');
+    return receipt;
+}
+
 // Genuine select/range keyboard input. No .value assignment, dispatchEvent, test CSS or settings write.
 export async function setAppearanceControl(page, id, value) {
-    await page.click(`#${id}`);
+    await page.waitForSelector(`#${id}:not([disabled])`);
+    await tabToSelector(page, `#${id}`, 200);
+    const before = await page.$eval(`#${id}`, node => node.value);
+    let changed = before !== String(value);
     if (id === 'favoritesLayout') {
         assert(['standard', 'compact'].includes(value));
         await page.keyboard.press('Home'); if (value === 'compact') await page.keyboard.press('ArrowDown'); await page.keyboard.press('Enter');
     } else {
         const { min, max } = await page.$eval(`#${id}`, node => ({ min: Number(node.min), max: Number(node.max) }));
         assert(Number.isInteger(value) && value >= min && value <= max);
+        changed ||= Number(before) !== min || value !== min;
         await page.keyboard.press('Home');
         for (let index = min; index < value; index++) await page.keyboard.press('ArrowRight');
     }
     assert.equal(await page.$eval(`#${id}`, node => node.value), String(value));
+    return waitForAppearanceControlSaved(page, id, value, { changed });
 }
 
 export async function exerciseSidebarAppearance({ apiPage, newTabPage, ui, screenshot, screenshotBytes, snapshot, poll, fixture, arcifyId, record = async () => {} }) {

@@ -137,7 +137,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -450,6 +450,17 @@ async function nativePanelState() {
         contexts: await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] }),
         events: globalThis.__pairedSidebarEvents || []
     }));
+}
+// Earlier native Sidebar cases install these same passive listeners. The narrow
+// fresh-profile mode has not run them: fail rather than reset or double-register
+// existing observations, and never manufacture an onOpened/onClosed receipt.
+async function prepareRecoverySidebarObservation() {
+    await arcifyOptions.evaluate(() => {
+        if (globalThis.__pairedSidebarEvents !== undefined) throw new Error('Recovery Sidebar observation must start exactly once in a fresh options realm.');
+        globalThis.__pairedSidebarEvents = [];
+        chrome.sidePanel.onOpened.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'opened', ...info }));
+        chrome.sidePanel.onClosed.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'closed', ...info }));
+    });
 }
 async function resolveNativeSidebarTarget() {
     return poll(async () => {
@@ -2240,11 +2251,17 @@ try {
             label:'Required Spotlight options appearance', capturedAt:new Date().toISOString() });
         await saveReport(); return evidence;
     });
+    } // Shared appearance cases 46–47; preserve the original full order.
+
+    if (report.runMode === 'recovery-actions') {
+        await prepareRecoverySidebarObservation();
+    }
+    if (report.runMode === 'full' || report.runMode === 'appearance-actions' || report.runMode === 'recovery-actions') {
     await step(stepNames[48], () => runHostedOverlayRecovery());
     await step(stepNames[49], () => exerciseSpotlightActions({ apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,
         ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,
         record:async evidence => { report.spotlightActions = evidence; await saveReport(); } }));
-    } // Shared appearance/actions cases 46–49; preserve the original full order.
+    } // Shared recovery/actions cases 48–49; preserve the original full order.
 
     if (report.runMode === 'native-split') {
         await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,

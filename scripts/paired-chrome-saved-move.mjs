@@ -27,6 +27,46 @@ const exact = (items, id) => { const matches = items.filter(item => item.id === 
 const nativeIdentity = ({ id, windowId, url, pendingUrl, title, pinned, incognito, active, splitViewId }) => ({ id, windowId, url, pendingUrl, title, pinned, incognito, active, splitViewId });
 const comparable = state => Object.fromEntries(['tabs', 'spaces', 'bookmarks', 'bindings', 'aliases', 'favorites', 'favoriteSession', 'activeSpaces', 'activeSpaceId', 'pageStates', 'groups', 'projection', 'windows', 'savedSnapshot', 'journal'].map(key => [key, state[key]]));
 
+export function assertSavedMoveOwnedTabsRetired(before, after, ownedTabIds) {
+    assert(Array.isArray(ownedTabIds) && ownedTabIds.every(id => Number.isSafeInteger(id) && id > 0));
+    const owned = new Set(ownedTabIds), expected = structuredClone(before);
+    expected.tabIds = expected.tabIds.filter(id => !owned.has(id));
+    for (const id of owned) delete expected.bindings[id];
+    assert.deepEqual(after, expected, 'Owned saved Move tabs and their ephemeral bindings must both retire, preserving all unrelated tab IDs and bindings.');
+    return after;
+}
+
+/** Keep the native panel mounted while its ordinary tab-removal listener drains. */
+export async function retireSavedMoveOwnedTabs({ apiPage, ownedTabIds, poll, record = async () => {} }) {
+    assert(Array.isArray(ownedTabIds) && ownedTabIds.every(id => Number.isSafeInteger(id) && id > 0));
+    const ids = [...new Set(ownedTabIds)];
+    const read = () => apiPage.evaluate(async () => ({
+        tabIds: (await chrome.tabs.query({})).map(tab => tab.id).sort((a, b) => a - b),
+        bindings: (await chrome.storage.local.get('pinnedTabStatesById')).pinnedTabStatesById || {}
+    }));
+    const before = await read();
+    await record({ phase: 'before-owned-saved-move-tab-cleanup', ownedTabIds: ids, before });
+    let after = before, lastFailure;
+    try {
+        await apiPage.evaluate(async ids => {
+            const live = new Set((await chrome.tabs.query({})).map(tab => tab.id));
+            const present = ids.filter(id => live.has(id));
+            if (present.length) await chrome.tabs.remove(present);
+        }, ids);
+        after = await poll(read, state => {
+            after = state;
+            try { assertSavedMoveOwnedTabsRetired(before, state, ids); return true; }
+            catch (error) { lastFailure = { message: error.message, actual: error.actual, expected: error.expected }; return false; }
+        }, 'exact owned saved Move tabs and bindings retire before closing the native panel');
+        await record({ phase: 'owned-saved-move-tabs-retired', ownedTabIds: ids, before, after });
+        return { before, after };
+    } catch (error) {
+        await record({ phase: 'owned-saved-move-tab-cleanup-failed', ownedTabIds: ids, before, after,
+            error: { message: error.message, stack: error.stack }, lastFailure }).catch(() => {});
+        throw error;
+    }
+}
+
 export function serveSavedMoveFixture(request, response) {
     const match = /^\/saved-move\/([a-f0-9]{32})\/([a-z][a-z-]*)$/.exec(new URL(request.url, 'http://127.0.0.1').pathname);
     if (!match) return false;
@@ -478,12 +518,19 @@ export async function exerciseSavedMove({ apiPage, nativeSidebar, newTabPage, op
                 const result = await native.page.evaluate(message => chrome.runtime.sendMessage(message), { type: 'favoriteStore', action: 'remove', windowId, favoriteId: globalFavorite.id });
                 assert.equal(result?.success, true, JSON.stringify(result));
             } },
+            async () => {
+                if (owned.length && !native) native = await nativeSidebar();
+                // Initial DOM rendering precedes listener registration. Observe the
+                // real native document's removal listener before deleting its tabs.
+                if (owned.length) await native.page.waitForFunction(() => chrome.tabs.onRemoved.hasListeners(), { polling: 50 });
+                await retireSavedMoveOwnedTabs({ apiPage, ownedTabIds: owned, poll, record: observation => checkpoint(observation.phase, observation) });
+            },
+            // This remains independent so a failed retirement proof cannot skip closure.
             async () => { if (native) { await native.close(); native = null; } },
             async () => { for (const state of [initial, initialB]) {
                 const active = state.tabs.find(tab => tab.active); if (active) await apiPage.evaluate(id => chrome.tabs.update(id, { active: true }), active.id);
                 await bridge('activateSpace', { windowId: state.windowId, spaceId: state.activeSpaceId });
             } },
-            () => apiPage.evaluate(async ids => { const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); const present = [...new Set(ids)].filter(id => live.has(id)); if (present.length) await chrome.tabs.remove(present); }, owned),
             () => apiPage.evaluate(async ids => { for (const id of ids) { const nodes = await chrome.bookmarks.get(id); if (nodes[0].url) await chrome.bookmarks.remove(id); else await chrome.bookmarks.removeTree(id); } }, roots),
             () => option('syncTabGroups', Boolean(settings.syncTabGroups)), () => option('invertTabOrder', settings.invertTabOrder !== false),
             async () => { await poll(async () => snapshot(fixture.windowB), state => state.activeSpaceId === initialB.activeSpaceId && JSON.stringify(state.tabs.map(({ id, url, active, pinned, spaceId }) => ({ id, url, active, pinned, spaceId })).sort((a, b) => a.id - b.id)) === JSON.stringify(initialB.tabs.map(({ id, url, active, pinned, spaceId }) => ({ id, url, active, pinned, spaceId })).sort((a, b) => a.id - b.id)), 'original window B restored after removing only disposable saved Move data'); }

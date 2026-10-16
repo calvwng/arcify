@@ -1,7 +1,7 @@
 /** Hosted, real-input Space theme evidence. Importing this module never starts Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { tabToSelector, setAppearanceControl } from './paired-chrome-sidebar-appearance.mjs';
+import { tabToSelector, setAppearanceControl, waitForAppearanceControlSaved } from './paired-chrome-sidebar-appearance.mjs';
 import { clickBookmarkFixtureRow, finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { rightClickFreshSpaceTrigger, captureRequiredSpaceScreenshot, assertSpaceContextFixtureEnvironment } from './paired-chrome-space-context.mjs';
 import { replaceSpaceEmojiWithInput } from './paired-chrome-space-icon-input.mjs';
@@ -177,7 +177,8 @@ export async function chooseThemeMode(page, mode) {
     const trace = await page.evaluate(() => globalThis.__spaceThemeInput.events);
     if (before !== mode) assertThemeKeyboardTrace(trace, mode, { select: true });
     else assert(trace.every(event => event.trusted));
-    return { before, mode, trace };
+    const saved = await waitForAppearanceControlSaved(page, 'themeMode', mode, { changed: trace.some(event => event.type === 'change') });
+    return { before, mode, trace, saved };
 }
 export function readThemeFocus(selector) {
     const node = document.querySelector(selector), probe = globalThis.__themeNodeIdentity ||= { nodes: new WeakMap(), next: 0 };
@@ -258,21 +259,61 @@ export function assertThemeHeaderSaved(before, after, { spaceId, changes }) {
     assert.deepEqual(after, expected, 'Header evidence may edit only exact UUID icon/name metadata and the matching bookmark/native group title.');
 }
 
+// The legacy checkbox saves this complete form, even in a previously sparse profile.
+export const THEME_LEGACY_SYNC_KEYS = ['defaultSpaceName', 'startupLauncherEnabled', 'autoArchiveEnabled', 'autoArchiveIdleMinutes',
+    'ordinaryFavoriteTabs', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop', 'showAllOpenTabsInCollapsedFolders', 'colorOverrides', 'debugLoggingEnabled'];
+
+/** Passive receipt for the genuine legacy save, including a new toast mutation. */
+export function installThemeLegacySaveObservation() {
+    globalThis.__themeLegacySave?.dispose();
+    const toast = document.querySelector('#saveToast');
+    if (!toast) throw Error('The real Settings save toast must exist.');
+    const observation = { updates: 0, dispose() { observer.disconnect(); } };
+    const observer = new MutationObserver(() => { observation.updates++; });
+    observer.observe(toast, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['class'] });
+    globalThis.__themeLegacySave = observation;
+}
+
 /** Real Settings checkbox input. Caller foregrounds this ordinary Settings tab. */
 export async function setThemeGroupSync(page, enabled) {
     assert.equal(typeof enabled, 'boolean');
     await page.waitForSelector('#syncTabGroups');
-    // The legacy form loads asynchronously and initially contains a Loading option.
     await page.waitForFunction(() => Boolean(document.querySelector('#defaultSpaceName')?.value), { polling: 50 });
     const before = await page.$eval('#syncTabGroups', node => node.checked);
+    let trace = [];
     if (before !== enabled) {
         await page.evaluate(installThemeInputTrace, '#syncTabGroups');
+        await page.evaluate(installThemeLegacySaveObservation);
         await page.click('label.toggle-label[for="syncTabGroups"]');
-        const trace = await page.evaluate(() => globalThis.__spaceThemeInput.events);
+        trace = await page.evaluate(() => globalThis.__spaceThemeInput.events);
         assert(trace.length && trace.every(event => event.trusted));
         assert(trace.some(event => event.type === 'change'), 'Group sync uses the real checkbox change.');
+        await page.waitForFunction(() => globalThis.__themeLegacySave?.updates > 0 &&
+            document.querySelector('#saveToast.show .toast-message')?.textContent === 'Settings saved', { polling: 50 });
     }
     assert.equal(await page.$eval('#syncTabGroups', node => node.checked), enabled);
+    const sync = await page.evaluate(() => chrome.storage.sync.get(null));
+    assert.equal(sync.syncTabGroups, enabled);
+    return { before, enabled, trace, sync, wrote: before !== enabled };
+}
+
+/** Cleanup only: undo exactly the keys written by the observed fixture form save. */
+export async function restoreThemeLegacySync(apiPage, original, receipt) {
+    assert(receipt?.wrote && receipt.trace.some(event => event.type === 'change' && event.trusted));
+    const current = await apiPage.evaluate(() => chrome.storage.sync.get(null));
+    assert.deepEqual(current, receipt.sync, 'Refuse cleanup after an unowned sync change.');
+    const set = {}, remove = [];
+    for (const key of THEME_LEGACY_SYNC_KEYS) {
+        assert(Object.hasOwn(receipt.sync, key), `Observed form save is missing ${key}.`);
+        if (Object.hasOwn(original, key)) set[key] = original[key]; else remove.push(key);
+    }
+    await apiPage.evaluate(async ({ expected, set, remove }) => {
+        const live = await chrome.storage.sync.get(null);
+        const canonical = value => JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))));
+        if (canonical(live) !== canonical(expected)) throw Error('Sync changed before exact fixture restoration.');
+        if (Object.keys(set).length) await chrome.storage.sync.set(set);
+        if (remove.length) await chrome.storage.sync.remove(remove);
+    }, { expected: current, set, remove });
 }
 
 export function assertThemeFixtureRestored(before, after, spaceId) {
@@ -388,6 +429,70 @@ export function themeRestorationState(state, spaceId) {
         focusedWindowId: state.windows.find(window => window.focused)?.id });
 }
 
+/** Persist strict oracle diagnostics, including the last rejected composite snapshot. */
+export async function pollThemeConservation({ read, poll, validate, record, label }) {
+    let after, difference;
+    try {
+        return await poll(async () => (after = await read()), value => {
+            try { validate(value); difference = null; return true; }
+            catch (error) { difference = { message: error.message, actual: error.actual, expected: error.expected, operator: error.operator }; return false; }
+        }, label);
+    } catch (error) {
+        await record({ after, difference, error: error.message }).catch(() => {});
+        throw error;
+    }
+}
+
+export function themeSpaceSelected(state, { spaceId, windowId }) {
+    return state.rendered.selectedSpaces.length === 1 && state.rendered.selectedSpaces[0] === spaceId &&
+        state.rendered.visibleSpaces.length === 1 && state.rendered.visibleSpaces[0] === spaceId &&
+        state.authoritative.windowId === windowId && state.authoritative.activeSpaceId === spaceId;
+}
+export function themeSelectionTab(state, { spaceId, windowId, favoriteTabIds = [], extensionId }) {
+    const space = targetSpace(state, spaceId), global = new Set(favoriteTabIds);
+    const owned = [...space.spaceBookmarks, ...space.temporaryTabs].map(id => state.tabs.find(tab => tab.id === id))
+        .filter(tab => tab && tab.windowId === windowId && !tab.pinned && !global.has(tab.id) &&
+            tab.url.split(/[?#]/, 1)[0] !== `chrome-extension://${extensionId}/startup-launcher.html`);
+    const tab = owned.find(tab => tab.id === space.lastTab) || owned.at(-1);
+    assert(tab, 'The exact theme fixture Space must have a live selectable tab.');
+    return tab.id;
+}
+export function assertThemeSelectionComplete(observation, { spaceId, windowId, tabId }) {
+    assert(themeSpaceSelected(observation, { spaceId, windowId }));
+    assert.deepEqual(observation.state.tabs.filter(tab => tab.windowId === windowId && tab.active).map(tab => tab.id), [tabId]);
+    assert.equal(targetSpace(observation.state, spaceId).lastTab, tabId, 'The activation must reach durable remembered-tab state before a baseline.');
+    assert.deepEqual(observation.activeRows, [tabId], 'The exact activated owned tab must finish rendering.');
+}
+export async function selectThemeFixtureSpace({ read, poll, click, expected, record }) {
+    const before = await read();
+    if (themeSpaceSelected(before, expected)) return { clicked: false, before };
+    const tabId = themeSelectionTab(before.state, { ...expected, favoriteTabIds: before.authoritative.favorites.map(item => item.tabId).filter(Number.isInteger) });
+    await click();
+    const after = await pollThemeConservation({ read, poll, validate: state => assertThemeSelectionComplete(state, { ...expected, tabId }),
+        label: 'native Space selection finishes exact owned tab activation and remembered state', record });
+    return { clicked: true, tabId, before, after };
+}
+
+/** Real wheel input reveals each required sample; visibility/contrast oracles stay strict. */
+export async function captureThemeSettingsSamples({ page, selectors, capture }) {
+    const measured = [];
+    for (const [index, selector] of selectors.entries()) {
+        let sample = (await page.evaluate(readThemeSamples, [selector]))[0];
+        if (sample.rect && (sample.rect.y < 0 || sample.rect.y + sample.rect.height > sample.viewport.height)) {
+            const deltaY = sample.rect.y + sample.rect.height / 2 - sample.viewport.height / 2;
+            await page.mouse.move(sample.viewport.width / 2, sample.viewport.height / 2);
+            await page.mouse.wheel({ deltaY });
+            await page.waitForFunction(selector => { const rect = document.querySelector(selector).getBoundingClientRect(); return rect.y >= 0 && rect.bottom <= innerHeight; },
+                { polling: 50 }, selector);
+            sample = (await page.evaluate(readThemeSamples, [selector]))[0];
+        }
+        assertThemeSample(sample);
+        measured.push(sample);
+        await capture(index, selector);
+    }
+    return measured;
+}
+
 /** Runner owns browser launch, sandbox and native mounting. Reload evidence is a real document reload. */
 export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, ui, screenshot, screenshotBytes, snapshot, poll, fixture, arcifyId, record = async () => {} }) {
     assertSpaceContextFixtureEnvironment();
@@ -396,7 +501,7 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
     const initial = await snapshot(windowId), target = initial.spaces.find(space => space.id === fixture.spaces.work);
     assert(target?.bookmarkFolderId);
     const ownedTabs = [], ownedBookmarks = [], ownedFavorites = [];
-    let native, settings, primaryError, beforeFixture, original;
+    let native, settings, primaryError, beforeFixture, original, lastSyncSave;
     const evidence = { nativePanel: true, nonce, checkpoints: [], screenshots: [], nativeColorPicker: 'Manual follow-up: the OS color dialog is not automated. Hex saves use real keyboard input.', systemPreference: 'Chrome rendering-media emulation, not a physical OS setting change.' };
     const checkpoint = async (phase, data = {}) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
     const read = () => readThemeFixtureState(apiPage, snapshot, windowId);
@@ -445,21 +550,47 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
         const after = await poll(read, state => accepted(after => assertThemeMetadataSaved(before, after, { spaceId: target.id, windowId, changes }), state), 'exact custom tint and unchanged native/v1 named colors');
         await checkpoint('custom-tint-saved', { before, after, trace });
     };
+    const selection = async () => ({ rendered: await native.page.evaluate(readNativeSidebarRender), authoritative: await snapshot(windowId), state: await read(),
+        activeRows: await native.page.$$eval('.space.active .tab.active[data-tab-id]', nodes => nodes.map(node => Number(node.dataset.tabId))) });
+    const setSync = async (page, enabled) => {
+        const receipt = await setThemeGroupSync(page, enabled);
+        if (receipt.wrote) lastSyncSave = receipt;
+        await checkpoint('legacy-sync-save', { receipt });
+        return receipt;
+    };
     const setMode = async mode => {
         let before, after, trace;
-        await ui(settings.page, `Choose ${mode} appearance using Settings keyboard`, async () => {
-            before = await read(); trace = await chooseThemeMode(settings.page, mode);
-            after = await poll(read, state => accepted(value => assertThemeModeSaved(before, value, mode), state), 'profile appearance saved without overwriting other settings');
-        });
+        try {
+            await ui(settings.page, `Choose ${mode} appearance using Settings keyboard`, async () => {
+                // Foregrounding Settings itself activates an owned tab; finish that
+                // real activation before the strict all-field mode baseline.
+                await pollThemeConservation({ read: selection, poll,
+                    validate: state => assertThemeSelectionComplete(state, { spaceId: target.id, windowId, tabId: settings.tab.id }),
+                    label: 'Settings foreground activation finishes before appearance baseline',
+                    record: data => checkpoint('appearance-baseline-failed', { mode, ...data }) });
+                before = await read(); await checkpoint('before-appearance-input', { mode, before });
+                trace = await chooseThemeMode(settings.page, mode);
+                await checkpoint('appearance-input', { mode, trace });
+                after = await pollThemeConservation({ read, poll, validate: value => assertThemeModeSaved(before, value, mode),
+                    label: 'profile appearance saved without overwriting other settings',
+                    record: data => checkpoint('appearance-conservation-failed', { mode, before, trace, ...data }) });
+            });
+        } catch (error) {
+            const inputTrace = await settings.page.evaluate(() => globalThis.__spaceThemeInput?.events || []).catch(() => null);
+            const lastAfter = await read().catch(() => null);
+            let difference;
+            if (before && lastAfter) { try { assertThemeModeSaved(before, lastAfter, mode); } catch (failure) { difference = { message: failure.message, actual: failure.actual, expected: failure.expected, operator: failure.operator }; } }
+            await checkpoint('appearance-input-failed', { mode, before, after: lastAfter, trace, inputTrace, difference, error: error.message }).catch(() => {});
+            throw error;
+        }
         await checkpoint('appearance-saved', { before, after, trace });
         await poll(() => native.page.evaluate(readThemeState), state => state.mode === mode, 'native sidebar observes appearance storage change');
     };
     const selectTarget = async () => {
-        await input('Select exact theme fixture Space', () => native.page.click(chip(target.id)));
-        await poll(async () => ({ rendered: await native.page.evaluate(readNativeSidebarRender), authoritative: await snapshot(windowId) }),
-            state => state.rendered.selectedSpaces.length === 1 && state.rendered.selectedSpaces[0] === target.id &&
-                state.authoritative.windowId === windowId && state.authoritative.activeSpaceId === target.id,
-            'theme Space selected in both native renderer and authoritative window snapshot');
+        const result = await selectThemeFixtureSpace({ read: selection, poll, expected: { spaceId: target.id, windowId, extensionId: arcifyId },
+            click: () => input('Select exact theme fixture Space', () => native.page.click(chip(target.id))),
+            record: data => checkpoint('native-selection-failed', data) });
+        await checkpoint('native-selection-complete', result);
     };
     try {
         beforeFixture = await read();
@@ -486,7 +617,7 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
         await poll(() => apiPage.evaluate(ids => chrome.tabs.query({}).then(tabs => tabs.filter(tab => ids.includes(tab.id)).map(tab => ({ id: tab.id, status: tab.status }))), ownedTabs), tabs => tabs.length === ownedTabs.length && tabs.every(tab => tab.status === 'complete'), 'owned fixture pages finish loading before theme baselines');
         // Explicit test setup: native compatibility must use a real target group,
         // even when the preceding case left projection disabled.
-        await ui(settings.page, 'Enable native group sync for exact theme fixture Space', () => setThemeGroupSync(settings.page, true));
+        await ui(settings.page, 'Enable native group sync for exact theme fixture Space', () => setSync(settings.page, true));
         const projected = await poll(read, state => accepted(value => assertThemeNativeProjection(value, { spaceId: target.id, windowId }), state), 'real target-window native group and owned members');
         await checkpoint('native-projection-required', { projection: assertThemeNativeProjection(projected, { spaceId: target.id, windowId }) });
         await selectTarget();
@@ -552,8 +683,8 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
             await ui(settings.page, 'Capture narrow real Settings appearance control', async () => {
                 await settings.page.setViewport({ width: 350, height: 900 });
                 await tabToSelector(settings.page, '#themeMode', 200);
-                const measured = await settings.page.evaluate(readThemeSamples, ['#themeMode', 'label[for="themeMode"]', '#favoriteTileSizeValue']); measured.forEach(value => assertThemeSample(value));
-                evidence.screenshots.push(await captureRequiredSpaceScreenshot(screenshot, settings.page, `space-theme-${mode}-narrow-settings`));
+                const measured = await captureThemeSettingsSamples({ page: settings.page, selectors: ['#themeMode', 'label[for="themeMode"]', '#favoriteTileSizeValue', '#favoriteTileSize'],
+                    capture: async index => { evidence.screenshots.push(await captureRequiredSpaceScreenshot(screenshot, settings.page, `space-theme-${mode}-narrow-settings${index ? `-sample-${index + 1}` : ''}`)); } });
                 const disabled = await settings.page.$eval('#favoriteTileSize', node => ({ disabled: node.disabled, opacity: getComputedStyle(node).opacity, background: getComputedStyle(node).backgroundColor, color: getComputedStyle(node).color }));
                 assert.equal(disabled.disabled, true, 'The preceding density fixture must leave Standard layout so disabled control evidence is visible.');
                 assert.equal(disabled.opacity, '1'); assert(computedThemeContrast(disabled.color, [disabled.background]) >= 4.5);
@@ -564,9 +695,9 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
                 await settings.page.keyboard.press('Backspace'); await settings.page.keyboard.type('invalid');
                 await tabToSelector(settings.page, '#bridgeSave', 200); await settings.page.keyboard.press('Enter');
                 await settings.page.waitForSelector('#bridgeStatus[data-state="error"]');
-                const notice = await settings.page.evaluate(readThemeSamples, ['#bridgePeerId', '#bridgeSave', '#bridgeStatus']); notice.forEach(value => assertThemeSample(value));
+                const notice = await captureThemeSettingsSamples({ page: settings.page, selectors: ['#bridgePeerId', '#bridgeSave', '#bridgeStatus'],
+                    capture: async index => { evidence.screenshots.push(await captureRequiredSpaceScreenshot(screenshot, settings.page, `space-theme-${mode}-settings-validation-notice${index ? `-sample-${index + 1}` : ''}`)); } });
                 assert.deepEqual(await read(), beforeNotice, 'Invalid companion ID changes only its visible validation notice.');
-                evidence.screenshots.push(await captureRequiredSpaceScreenshot(screenshot, settings.page, `space-theme-${mode}-settings-validation-notice`));
                 await tabToSelector(settings.page, '#bridgePeerId', 200);
                 await settings.page.keyboard.down('Control'); try { await settings.page.keyboard.press('KeyA'); } finally { await settings.page.keyboard.up('Control'); }
                 await settings.page.keyboard.press('Backspace'); await settings.page.keyboard.type(originalPeer);
@@ -602,8 +733,9 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
             for (const size of [12, 16, 20]) {
                 await ui(settings.page, 'Choose header size through the actual Settings range', () => setAppearanceControl(settings.page, 'spaceHeaderSize', size));
                 await poll(() => native.page.evaluate(readThemeHeaderGeometry), state => state?.fontSize === size, 'header size reached native panel');
-                // A real click on the already-selected chip makes the name intentionally unfocused.
                 await selectTarget();
+                // Focus the real menu control without replaying Space activation.
+                await input('Unfocus header through its real menu control', () => tabToSelector(native.page, '.space.active .space-options', 200));
                 const geometry = assertThemeHeaderGeometry(await native.page.evaluate(readThemeHeaderGeometry), { glyph, name: longName, size });
                 await capture(`space-theme-header-${glyph ? Array.from(glyph).map(c => c.codePointAt(0).toString(16)).join('-') : 'cleared'}-${size}`);
                 await input('Focus the same editable header name with real Tab', () => tabToSelector(native.page, '.space.active .space-name', 200));
@@ -654,7 +786,7 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
             async () => { if (native) { await native.page.emulateMediaFeatures([]); await native.close(); } },
             async () => { // Exact-owned fixture cleanup, not acceptance input or broad storage replacement.
                 const cleanup = await newTabPage(`chrome-extension://${arcifyId}/options.html`, windowId); ownedTabs.push(cleanup.tab.id);
-                await ui(cleanup.page, 'Pause native sync while removing exact owned theme fixture data', () => setThemeGroupSync(cleanup.page, false));
+                await ui(cleanup.page, 'Pause native sync while removing exact owned theme fixture data', () => setSync(cleanup.page, false));
                 await poll(() => cleanup.page.evaluate(() => chrome.storage.sync.get('syncTabGroups')), data => data.syncTabGroups === false, 'cleanup sync is disabled');
                 for (const favoriteId of ownedFavorites) await requestScopedFavorite(cleanup.page, windowId, 'remove', { favoriteId });
                 await ui(cleanup.page, 'Restore prior profile appearance mode and header size', async () => { await chooseThemeMode(cleanup.page, original.appearance?.themeMode || 'system'); await setAppearanceControl(cleanup.page, 'spaceHeaderSize', original.appearance?.spaceHeaderSize || 16); });
@@ -666,12 +798,14 @@ export async function exerciseSpaceTheme({ apiPage, nativeSidebar, newTabPage, u
             () => apiPage.evaluate(async ({ activeSpaces, activeTabs }) => { for (const [windowId, spaceId] of Object.entries(activeSpaces)) { const reply = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'activate', windowId: Number(windowId), spaceId }); if (!reply.success) throw Error(reply.error); } const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); for (const id of activeTabs) if (live.has(id)) await chrome.tabs.update(id, { active: true }); }, original),
             async () => { if (beforeFixture) {
                 await restoreThemeNativeFixture(apiPage, beforeFixture);
-                await ui(apiPage, 'Restore original native group sync setting', async () => { await apiPage.reload({ waitUntil: 'domcontentloaded' }); await setThemeGroupSync(apiPage, beforeFixture.sync.syncTabGroups === true); });
+                await ui(apiPage, 'Restore original native group sync setting', async () => { await apiPage.reload({ waitUntil: 'domcontentloaded' }); await setSync(apiPage, beforeFixture.sync.syncTabGroups === true); });
+                if (lastSyncSave) await restoreThemeLegacySync(apiPage, beforeFixture.sync, lastSyncSave);
                 // Restore focus after the explicit settings/cleanup operations.
                 await apiPage.evaluate(async ({ activeTabs, focusedWindowId }) => { for (const id of activeTabs) await chrome.tabs.update(id, { active: true }); if (focusedWindowId !== undefined) await chrome.windows.update(focusedWindowId, { focused: true }); }, original);
                 await restoreThemeLastTabs(apiPage, beforeFixture.spaces);
                 await checkpoint('before-theme-cleanup-assertion', { before: beforeFixture, after: await read() });
-                const restored = await poll(read, state => accepted(value => assertThemeFixtureRestored(beforeFixture, value, target.id), state), 'exact original theme fixture state restored');
+                const restored = await pollThemeConservation({ read, poll, validate: value => assertThemeFixtureRestored(beforeFixture, value, target.id),
+                    label: 'exact original theme fixture state restored', record: data => checkpoint('theme-cleanup-conservation-failed', { before: beforeFixture, ...data }) });
                 await checkpoint('theme-fixture-restored', { before: beforeFixture, after: restored });
             } }
         ], primaryError, async cleanup => { evidence.cleanup = cleanup; await record(structuredClone(evidence)); });

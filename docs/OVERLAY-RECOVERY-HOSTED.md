@@ -82,9 +82,13 @@ Case 48 of the full runner invokes all four subscenarios. Case 49 then invokes
 the separate initial Space-action fixture, before unchanged Favorite lifecycle
 receipts and the final browser restart. All previous 47 full cases remain; the
 full/lifecycle/native-split plans require exactly 49/5/4 passes. No skip, subset,
-same-profile retry or window-B exemption satisfies the full report.
+same-profile retry or window-B exemption satisfies the full report. The
+[appearance/actions job](appearance-actions-paired-ci.md) requires 8 cases; the
+[recovery/actions job](recovery-actions-paired-ci.md) requires exactly 0–2/48/49
+on another fresh profile with passive Sidebar event observation initialized.
+These supplemental outcomes do not replace any other job or establish a full pass.
 
-The runner and all three workflow jobs pin the reviewed, published Spotlight
+The runner and all five workflow jobs pin the reviewed, published Spotlight
 commit `9c4462fb0f3cbfe2585757c43f34398e9c906fde`. Hosted acceptance remains pending
 for the final integrated Arcify commit; local oracle checks are not browser proof.
 
