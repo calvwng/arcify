@@ -157,3 +157,24 @@ node --check scripts/paired-chrome-smoke.mjs
 node --test tests/unit/paired-chrome-spotlight-archive.test.js tests/unit/paired-chrome-archive-wiring.test.js tests/unit/paired-chrome-run-plan.test.js
 npm run test:unit
 ```
+
+
+## Reopen load-event fence regression
+
+The first hosted `archive-reopen` run on Arcify `02cb27675120b9a14333be9048934581c24a07ad`
+with Spotlight `b510b3dbe8cfae6441fbc55a23ce19de30805a6d` completed the browser New Tab
+reopen but stopped after the overlay reopen created its exact inactive native
+tab. The latter entry remained archived with its durable claim at `created`,
+before assignment or consumption. That failed attempt did not retain its exact
+receiver response or passive update trace, so its precise triggering event is
+not proven.
+
+Deterministic tests reproduce the same durable state when the created target
+emits ordinary title, favicon or load-completion updates during the final read
+boundary. The fence now permits only those presentation/completion updates on
+the known target while still re-reading its native/store identity. Every source
+update, target navigation/loading/ownership mutation, malformed or unknown
+update, activation, removal, replacement, bookmark, storage and pairing change
+retains its existing fail-closed guard. No mutation is retried. This fixes the
+reproduced defect; attributing the historical hosted failure to it remains an
+inference until new exact-pair hosted evidence is reviewed.

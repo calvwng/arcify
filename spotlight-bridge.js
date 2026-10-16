@@ -63,7 +63,18 @@ async function readBridgeSnapshot(store, windowId) {
         ? store.active[windowId] : ownerOf(store.spaces, live.find(t => t.active)?.id)?.id || spaces[0]?.id || null,
     // Keep auxiliary local icon bytes out of v1: older peers reject extra keys.
     spaces, bookmarks, warnings, ...(favorites ? { favorites: favorites
-        .map(({ id, title, url, sourceBookmarkId, tabId }) => ({ id, title, url, sourceBookmarkId, tabId })) } : {}), tabs: live.map(tab => ({ id: tab.id, windowId, title: projectTabTitle(tab, {
+        .map(({ id, title, url, sourceBookmarkId, tabId }) => {
+            // Native close/move/unpin can happen after FavoriteStore.read, even
+            // while this worker queue is held. Export bindings against the same
+            // native sample as tabs; never rewrite ownership or guess by URL.
+            const tab = byId.get(tabId);
+            // Adoption receipts reserve ownership before pin conversion finishes;
+            // only a committed ordinary binding may be exported while unpinned.
+            const ordinary = store.favoriteStore.state.bindings.some(binding => binding.favoriteId === id
+                && binding.windowId === windowId && binding.tabId === tabId && binding.mode === 'ordinary');
+            return { id, title, url, sourceBookmarkId,
+                tabId: tab && (tab.pinned || ordinary) && store.favoriteStore.ownsTab(tab) && !ownerOf(store.spaces, tabId) ? tabId : null };
+        }) } : {}), tabs: live.map(tab => ({ id: tab.id, windowId, title: projectTabTitle(tab, {
         overrides, binding: bindings[tab.id], bookmark: bookmarksByTab.get(tab.id), isSpacePin: Boolean(ownerOf(store.spaces, tab.id)?.spaceBookmarks.includes(tab.id))
     }), url: tab.url || tab.pendingUrl || '',
         active: Boolean(tab.active), pinned: Boolean(tab.pinned), spaceId: ownerOf(store.spaces, tab.id)?.id || null })) };

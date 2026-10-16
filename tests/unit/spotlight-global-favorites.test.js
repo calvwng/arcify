@@ -16,6 +16,8 @@ beforeEach(() => {
     store = { spaces: [], active: {}, discoverBookmarkSpaces: async () => false,
         async run(operation) { assert.equal(state.inQueue, false); state.inQueue = true; try { return await operation(); } finally { state.inQueue = false; } },
         favoriteStore: {
+            state: { get bindings() { return [{ favoriteId: 'saved', windowId: 1, tabId: 10, ...(state.ordinary ? { mode: 'ordinary' } : {}) }]; } },
+            ownsTab: tab => tab.id === 10 && tab.windowId === 1 && !tab.incognito && (state.ordinary || tab.pinned),
             requiresOrdinaryCapability: async () => { assert(state.inQueue, 'capability reads stay on the single-writer queue'); return state.ordinary; },
             read: async () => ({ favorites: [{ id: 'saved', title: 'Saved', url: 'https://saved.test/', sourceBookmarkId: null, tabId: 10 }] }),
             open: async () => { state.mutations.push('open'); return state.tab; }

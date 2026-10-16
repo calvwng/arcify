@@ -34,7 +34,18 @@ export async function fencedArchiveRead(request, operation, tabId = null) {
         event.addListener(callback); cleanups.push(() => event.removeListener(callback));
     };
     const change = () => { changed = true; };
-    for (const name of ['onUpdated', 'onRemoved', 'onAttached', 'onDetached']) watch(chrome.tabs?.[name], id => { if (ids.has(id)) change(); });
+    watch(chrome.tabs?.onUpdated, (id, update) => {
+        if (!ids.has(id)) return;
+        // A newly created inactive target may finish loading while its exact
+        // native/store identity is read. Presentation and completion alone do
+        // not change that identity. Keep every source event and all navigation,
+        // mutation, malformed or unknown target updates fenced.
+        const presentationOnly = id === tabId && id !== request.context?.sourceTabId && record(update)
+            && Object.keys(update).length > 0 && Object.entries(update).every(([key, value]) =>
+                key === 'status' ? value === 'complete' : ['title', 'favIconUrl'].includes(key) && typeof value === 'string');
+        if (!presentationOnly) change();
+    });
+    for (const name of ['onRemoved', 'onAttached', 'onDetached']) watch(chrome.tabs?.[name], id => { if (ids.has(id)) change(); });
     watch(chrome.tabs?.onReplaced, (added, removed) => { if (ids.has(added) || ids.has(removed)) change(); });
     watch(chrome.tabs?.onActivated, info => { if (info.windowId === request.windowId) change(); });
     watch(chrome.windows?.onRemoved, windowId => { if (windowId === request.windowId) change(); });

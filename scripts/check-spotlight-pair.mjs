@@ -205,6 +205,63 @@ try {
     validateSnapshot(replayedFavorite.snapshot, WINDOW);
     assert.equal(created, createsBeforeOpen + 1, 'Journal replay preserves the exact opened Favorite without creating a duplicate.');
 
+    // A native tab event can occur between FavoriteStore's read and the later
+    // bridge tab sample despite the shared worker queue. Exercise real producer
+    // snapshots through the actual client's strict validator, without retries.
+    const baselineTabs = clone(tabs), baselineState = clone(favoriteStore.state);
+    const baselineSession = clone(session.favoriteSession);
+    const readFavorites = favoriteStore.read;
+    try {
+        for (const [label, ordinary, initialPinned, change, retained, adopting = false] of [
+            ['pinned closes', false, true, tab => tabs.splice(tabs.indexOf(tab), 1), false],
+            ['pinned moves', false, true, tab => { tab.windowId = 8; }, false],
+            ['pinned unpins', false, true, tab => { tab.pinned = false; }, false],
+            ['pinned unpins with retained adoption receipt', false, true, tab => { tab.pinned = false; }, false, true],
+            ['pinned navigates', false, true, tab => { tab.url = 'https://different.test/'; }, true],
+            ['ordinary closes', true, false, tab => tabs.splice(tabs.indexOf(tab), 1), false],
+            ['ordinary moves', true, false, tab => { tab.windowId = 8; }, false],
+            ['ordinary stays unpinned', true, false, () => {}, true],
+            ['ordinary repins', true, false, tab => { tab.pinned = true; }, true],
+            ['ordinary unpins', true, true, tab => { tab.pinned = false; }, true]
+        ]) {
+            tabs.splice(0, tabs.length, ...clone(baselineTabs));
+            const native = tabs.find(tab => tab.id === favoriteOpened.tabId);
+            native.pinned = initialPinned;
+            tabs.push({ ...clone(native), id: 999, pinned: true, title: 'Unrelated same-URL pin' });
+            favoriteStore.state = clone(baselineState);
+            const binding = favoriteStore.state.bindings.find(entry => entry.favoriteId === secondId);
+            if (ordinary) binding.mode = 'ordinary';
+            if (adopting) favoriteStore.state.attempts.push({ ...binding, url: native.url, kind: 'adopt' });
+            session.favoriteSession = clone(favoriteStore.state);
+            const ownership = clone(favoriteStore.state), saved = clone(local.persistentFavorites);
+            const sentBefore = sent.length, createdBefore = created;
+            let reads = 0;
+            favoriteStore.read = async function(windowId) {
+                const result = await readFavorites.call(this, windowId);
+                assert.equal(result.favorites.find(favorite => favorite.id === secondId).tabId, native.id, label);
+                reads++;
+                change(native);
+                return result;
+            };
+            const projected = await client.snapshot(WINDOW);
+            assert.equal(validateSnapshot(projected, WINDOW, { allowOrdinaryFavorites: ordinary }), projected, label);
+            assert.equal(projected.favorites.find(favorite => favorite.id === secondId).tabId, retained ? native.id : null, label);
+            assert(projected.tabs.some(tab => tab.id === 999), 'Same-URL twin stays independent');
+            assert.equal(reads, 1, 'No snapshot retries');
+            assert.deepEqual(sent.slice(sentBefore).map(message => message.command), ['hello'], 'No mutation request or retry');
+            assert.equal(created, createdBefore, 'No replacement page is opened');
+            assert.deepEqual(favoriteStore.state, ownership, 'Snapshot projection leaves session ownership alone');
+            assert.deepEqual(session.favoriteSession, ownership, 'Persisted ownership is not rewritten');
+            assert.deepEqual(local.persistentFavorites, saved, 'Saved identity and metadata remain exact');
+            assert.deepEqual(bookmarks, originalBookmarks, 'Source bookmarks remain untouched');
+        }
+    } finally {
+        favoriteStore.read = readFavorites;
+        favoriteStore.state = baselineState;
+        session.favoriteSession = baselineSession;
+        tabs.splice(0, tabs.length, ...baselineTabs);
+    }
+
     // Keep every original legacy/Favorite assertion above intact. The optional
     // action adapter uses a fresh Chrome mock and restores this one afterward.
     const { ArcifySpaceActionsClient } = await peerModule('shared/arcify-space-actions.js');
@@ -221,6 +278,7 @@ try {
     console.log('Verified exported constants/common-v1 wire contracts, initial four-action contexts/payloads/results and real client/provider round trips, real snapshot validation, hello/snapshot/openTab round trips, window isolation, bookmark warnings, version rejection on both sides, and optional saved-Favorite capability/closed snapshots/exact open reuse.');
     console.log('Also verified additive Space-navigation/tab-action contracts and real client/provider round trips for switch, move, Today/saved rename, saved URL editing, duplicate, offscreen copy and explicit mute, preserving exact identities, window isolation and no-replay rejection.');
     console.log('Also verified optional Archive strict contracts and exact same-URL reopening through the real client/provider/store, durable consume receipts, lost response/no duplicate and untouched saved pins/other window.');
+    console.log('Also verified exact Favorite snapshot bindings during native close/move/unpin races, ordinary repin/unpin preservation, strict client validation and unchanged durable/session ownership without retrying any action.');
     console.log('Chrome transport and APIs were mocked; no browser or extension-loading verification was performed.');
 } finally {
     if (previousChrome === undefined) delete globalThis.chrome;

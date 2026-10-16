@@ -518,3 +518,59 @@ test('a source change during atomic consume keeps the committed receipt but neve
     assert.equal(f.store.active[10], 'source'); assert.equal(persistsAfterConsume, 0); assert.equal(f.creates().length, 1);
     assert(!f.effects.some(([kind]) => kind === 'focus-tab' || kind === 'focus-window'));
 });
+
+function postCreateUpdateFixture(update, { source = false, mutate } = {}) {
+    const f = fixture(), listeners = new Set();
+    chrome.tabs.onUpdated = { addListener: listener => listeners.add(listener), removeListener: listener => listeners.delete(listener) };
+    let fired = false;
+    f.hooks.get = () => {
+        const claim = Object.values(f.local[ARCHIVE_CLAIMS_KEY]?.entries || {}).find(item => item.phase === 'created');
+        if (!claim || !listeners.size || fired) return;
+        fired = true;
+        const tabId = source ? 1 : claim.tabId, tab = f.tabs.find(item => item.id === tabId);
+        mutate?.(f, tab);
+        for (const listener of listeners) listener(tabId, clone(update), clone(tab));
+    };
+    return { ...f, listeners, fired: () => fired };
+}
+
+for (const update of [{ status: 'complete' }, { title: 'Loaded archived page' }, { favIconUrl: 'https://archive.test/icon.png' },
+    { status: 'complete', title: 'Loaded archived page', favIconUrl: 'https://archive.test/icon.png' }]) {
+    test(`known created target ${JSON.stringify(update)} does not invalidate exact reopen or require another create`, async () => {
+        const f = postCreateUpdateFixture(update), request = await f.prepare(), result = await f.archive.reopen(request);
+        assert.equal(f.fired(), true); assert.equal(result.status, 'reopened'); assert.equal(result.consumed, true);
+        assert.equal(result.tabId, 100); assert.equal(f.creates().length, 1); assert.deepEqual(f.local.archivedTabs, []);
+        assert.deepEqual(f.local.spaces.find(space => space.id === 'original').temporaryTabs, [100]);
+        assert.equal(f.local[ARCHIVE_CLAIMS_KEY].entries[request.expected.entryId].phase, 'consumed');
+        assert.equal(f.tabs.find(tab => tab.id === 100).active, true); assert.equal(f.store.active[10], 'original');
+        assert.equal(f.store.active[20], 'source'); assert.equal(f.listeners.size, 0);
+    });
+    test(`source ${JSON.stringify(update)} remains conservatively fenced during reopen`, async () => {
+        const f = postCreateUpdateFixture(update, { source: true }), request = await f.prepare();
+        await assert.rejects(f.archive.reopen(request), { code: 'REOPEN_PARTIAL' });
+        assert.equal(f.fired(), true); assert.equal(f.creates().length, 1); assert.equal(f.local.archivedTabs.length, 1);
+        assert.equal(f.local[ARCHIVE_CLAIMS_KEY].entries[request.expected.entryId].phase, 'created');
+        assert.deepEqual(f.local.spaces.find(space => space.id === 'original').temporaryTabs, []);
+        assert(!f.effects.some(([kind]) => kind === 'focus-tab')); assert.equal(f.listeners.size, 0);
+    });
+}
+for (const update of [{ status: 'loading' }, { status: 'unknown' }, { url: 'https://temporary.test/' }, { pendingUrl: 'https://temporary.test/' },
+    { status: 'complete', url: 'https://temporary.test/' }, { title: 'Changed', pinned: true }, { groupId: 4 }, { splitViewId: 8 },
+    { discarded: true }, { unknownFutureField: true }, { title: null }, { favIconUrl: 4 }, {}, null, []]) {
+    test(`known created target ${JSON.stringify(update)} still invalidates the read boundary without consume or retry`, async () => {
+        const f = postCreateUpdateFixture(update), request = await f.prepare();
+        // Event-only transient changes must reject even when final native state matches.
+        await assert.rejects(f.archive.reopen(request), { code: 'REOPEN_PARTIAL' });
+        assert.equal(f.fired(), true); assert.equal(f.creates().length, 1); assert.equal(f.local.archivedTabs.length, 1);
+        assert.equal(f.local[ARCHIVE_CLAIMS_KEY].entries[request.expected.entryId].phase, 'created');
+        assert.deepEqual(f.local.spaces.find(space => space.id === 'original').temporaryTabs, []);
+        assert(!f.effects.some(([kind]) => kind === 'focus-tab')); assert.equal(f.listeners.size, 0);
+    });
+}
+test('presentation-only created-target event cannot hide a changed native snapshot', async () => {
+    const f = postCreateUpdateFixture({ title: 'Loaded archived page' }, { mutate: (_f, tab) => { tab.pinned = true; } });
+    const request = await f.prepare(); await assert.rejects(f.archive.reopen(request), { code: 'REOPEN_PARTIAL' });
+    assert.equal(f.creates().length, 1); assert.equal(f.local.archivedTabs.length, 1);
+    assert.equal(f.local[ARCHIVE_CLAIMS_KEY].entries[request.expected.entryId].phase, 'created');
+    assert(!f.effects.some(([kind]) => kind === 'focus-tab')); assert.equal(f.listeners.size, 0);
+});

@@ -839,6 +839,56 @@ test('local retained icon never widens the strict v1 Favorites snapshot consumed
     assert.deepEqual(local.persistentFavorites, [record]);
 });
 
+for (const [label, ordinary, pinned, change, expectedTabId, adopting = false] of [
+    ['pinned unchanged', false, true, () => {}, 5],
+    ['pinned closes', false, true, () => { tabs = tabs.filter(tab => tab.id !== 5); }, null],
+    ['pinned moves windows', false, true, () => { getTab(5).windowId = 2; }, null],
+    ['pinned unpins', false, true, () => { getTab(5).pinned = false; }, null],
+    ['pinned unpins with retained adoption receipt', false, true, () => { getTab(5).pinned = false; }, null, true],
+    ['pinned navigates', false, true, () => { getTab(5).url = 'https://navigated.test/'; }, 5],
+    ['ordinary stays unpinned', true, false, () => {}, 5],
+    ['ordinary repins', true, false, () => { getTab(5).pinned = true; }, 5],
+    ['ordinary unpins', true, true, () => { getTab(5).pinned = false; }, 5],
+    ['ordinary closes', true, false, () => { tabs = tabs.filter(tab => tab.id !== 5); }, null],
+    ['ordinary moves windows', true, false, () => { getTab(5).windowId = 2; }, null]
+]) test(`snapshot exports the final native Favorite sample when ${label} between reads`, async () => {
+    const { FavoriteStore } = await import('../../favorite-store.js');
+    const saved = { id: 'exact-favorite', title: 'Saved identity', url: DUPLICATE_URL, sourceBookmarkId: 'twin-2' };
+    local.persistentFavorites = [saved];
+    session.favoriteSession = { version: 1, bindings: [{ favoriteId: saved.id, windowId: 1, tabId: 5,
+        ...(ordinary ? { mode: 'ordinary' } : {}) }], attempts: adopting
+        ? [{ favoriteId: saved.id, windowId: 1, tabId: 5, url: saved.url, kind: 'adopt' }] : [] };
+    Object.assign(getTab(5), { pinned, url: DUPLICATE_URL });
+    tabs.push({ ...clone(getTab(5)), id: 6, pinned: true, title: 'Equal-URL unrelated native pin' });
+    const store = new SpaceStore(), favorites = new FavoriteStore(store, { captureIcon: async () => null });
+    await store.run(() => {});
+    const before = { items: clone(favorites.items), state: clone(favorites.state), saved: clone(local.persistentFavorites),
+        session: clone(session.favoriteSession), bookmarks: clone(nodes) };
+    const read = favorites.read.bind(favorites);
+    let readCount = 0;
+    favorites.read = async windowId => {
+        const result = await read(windowId);
+        assert.equal(result.favorites[0].tabId, 5, 'The first native sample has the exact live binding');
+        readCount++;
+        change(); // Native change is external to the serialized worker queue.
+        return result;
+    };
+    mutations.length = 0;
+    const snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(readCount, 1, 'No read or mutation retries');
+    assert.deepEqual(snapshot.favorites, [{ ...saved, tabId: expectedTabId }]);
+    const bound = snapshot.tabs.find(tab => tab.id === expectedTabId);
+    if (expectedTabId !== null) {
+        assert.equal(bound.windowId, 1);
+        assert.equal(bound.spaceId, null);
+        assert.equal(bound.pinned, Boolean(getTab(5).pinned));
+    }
+    assert(snapshot.tabs.some(tab => tab.id === 6), 'Unrelated equal-URL pin remains independent');
+    assert.deepEqual({ items: favorites.items, state: favorites.state, saved: local.persistentFavorites,
+        session: session.favoriteSession, bookmarks: nodes }, before, 'Projection cannot rewrite durable links or session ownership');
+    assert.deepEqual(mutations, [], 'Snapshot must not mutate native tabs, windows or bookmarks');
+});
+
 test('closed persistent Favorite opens once through paired journal, rejects stale IDs/fields/peer/window, and survives worker recreation', async () => {
     const { FavoriteStore } = await import('../../favorite-store.js');
     const store = await makeStore({ install: true }); const favorites = new FavoriteStore(store); favorites.install();

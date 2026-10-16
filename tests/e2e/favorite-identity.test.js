@@ -1,5 +1,6 @@
 import { launchBrowserWithExtension, openSidebar } from './helpers/extension-helper.js';
 import { focusSidebarForInteraction } from './helpers/sidebar-focus.js';
+import { waitForSidebarFixtureRow } from './helpers/sidebar-fixture-evidence.js';
 
 // No internet dependency: all tab navigation uses a local fixture server.
 let url;
@@ -43,7 +44,10 @@ beforeAll(async () => {
         const { spaces } = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'get' });
         const space = spaces[0];
         const a = await chrome.tabs.create({ url, active: false });
-        await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: a.id, spaceId: space.id });
+        const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: a.id, spaceId: space.id });
+        if (!assignment?.success || !assignment.spaces?.find(item => item.id === space.id)?.temporaryTabs?.includes(a.id)) {
+            throw new Error(`Fixture assignment failed for tab ${a.id} in Space ${space.id}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+        }
         return { a: a.id, spaceId: space.id, folderId: space.bookmarkFolderId };
     }, url);
     await page.reload();
@@ -57,11 +61,14 @@ test('same-URL tabs remain distinct through pin, navigation, reload, close, reop
     const first = (await state()).bindings[fixture.a].bookmarkId;
     const b = await page.evaluate(async ({ url, spaceId }) => {
         const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
-        await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+        const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+        if (!assignment?.success || !assignment.spaces?.find(item => item.id === spaceId)?.temporaryTabs?.includes(tab.id)) {
+            throw new Error(`Fixture assignment failed for tab ${tab.id} in Space ${spaceId}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+        }
         await chrome.tabs.update(tab.id, { url });
         return tab.id;
     }, { url, spaceId: fixture.spaceId });
-    await page.waitForSelector(row(b));
+    await waitForSidebarFixtureRow(page, row(b), { stage: 'same-URL twin creation', tabIds: [b], spaceId: fixture.spaceId });
     await page.waitForFunction(id => document.querySelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`), { polling: 100 }, b);
     expect((await state()).bindings[b]?.bookmarkId).toBeUndefined();
 
@@ -102,14 +109,17 @@ test('favorite demotion keeps the captured middle temporary position after refre
         const created = [];
         for (const suffix of ['demote-favorite', 'demote-left', 'demote-right']) {
             const tab = await chrome.tabs.create({ url: `${url}${suffix}`, active: false });
-            await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+            const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+            if (!assignment?.success || !assignment.spaces?.find(item => item.id === spaceId)?.temporaryTabs?.includes(tab.id)) {
+                throw new Error(`Fixture assignment failed for tab ${tab.id} in Space ${spaceId}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+            }
             created.push(tab.id);
         }
         return created;
     }, { url, spaceId: fixture.spaceId });
     const [favorite, left, right] = ids;
-    await page.waitForSelector(row(favorite));
-    await page.waitForSelector(row(right));
+    await waitForSidebarFixtureRow(page, row(favorite), { stage: 'demotion fixture creation', tabIds: ids, spaceId: fixture.spaceId });
+    await waitForSidebarFixtureRow(page, row(right), { stage: 'demotion fixture creation', tabIds: ids, spaceId: fixture.spaceId });
     await toggle(favorite);
     await page.waitForFunction(id => document.querySelector(`.space.active [data-tab-type="pinned"] .tab[data-tab-id="${id}"]`),
         { polling: 100 }, favorite);
@@ -168,7 +178,10 @@ test('closed URL twins render once each and a temporary reorder preserves every 
     }
     const temp = await page.evaluate(async ({ url, spaceId }) => {
         const tab = await chrome.tabs.create({ url, active: false });
-        await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+        const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+        if (!assignment?.success || !assignment.spaces?.find(item => item.id === spaceId)?.temporaryTabs?.includes(tab.id)) {
+            throw new Error(`Fixture assignment failed for tab ${tab.id} in Space ${spaceId}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+        }
         return tab.id;
     }, { url, spaceId: fixture.spaceId });
     await page.waitForFunction(id => {
@@ -208,7 +221,10 @@ test('moving the associated folder out of Arcify keeps live tabs visible and rec
         const ids = [];
         for (const suffix of ['folder-recovery', 'folder-recovery-favorite']) {
             const tab = await chrome.tabs.create({ url: `${url}${suffix}`, active: false });
-            await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+            const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+            if (!assignment?.success || !assignment.spaces?.find(item => item.id === spaceId)?.temporaryTabs?.includes(tab.id)) {
+                throw new Error(`Fixture assignment failed for tab ${tab.id} in Space ${spaceId}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+            }
             ids.push(tab.id);
         }
         return ids;
