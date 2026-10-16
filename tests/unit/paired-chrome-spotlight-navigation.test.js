@@ -5,7 +5,7 @@ import {
     NAVIGATION_FEATURES, NAVIGATION_TITLES, serveSpotlightNavigationFixture,
     assertNavigationContext, assertNavigationPicker, assertNavigationInput,
     assertNavigationNoMutation, assertNavigationRequest, assertNavigationSnapshot,
-    assertNavigationCommitted, createNavigationFixturePage
+    assertNavigationCommitted, createNavigationFixturePage, navigationRetiresOverlay
 } from '../../scripts/paired-chrome-spotlight-navigation.mjs';
 
 const PEER = 'b'.repeat(32), URL = 'http://127.0.0.1/exact-same-url';
@@ -316,3 +316,38 @@ async function attachmentFixture(kind = 'valid') {
 test('fixture attachment distinguishes one fresh native/page identity from an older equal-URL target', () => attachmentFixture());
 for (const kind of ['wrong-window', 'pending-navigation', 'two-native-tabs', 'two-fresh-targets', 'stale-target-only', 'observation-fails'])
     test(`fixture attachment fails closed and cleans exact receipt on ${kind}`, () => attachmentFixture(kind));
+
+for (const [command, destinationId, expected] of [['switchSpace', 'target', true], ['switchSpace', 'empty', false], ['switchSpace', 'remote', false], ['moveCurrentTodayTab', 'target', false], ['moveCurrentTodayTab', 'empty', false]]) {
+    test(`surface retirement is predicted from pre-action ${command} / ${destinationId}`, () => {
+        const before = state(), captured = capture(before), destination = target(before, destinationId), original = clone(before);
+        assert.equal(navigationRetiresOverlay(before, command, captured, destination), expected);
+        assert.deepEqual(before, original, 'Prediction is a pure observation, never a fixture repair.');
+    });
+}
+test('local saved native pins also predict Switch retirement', () => {
+    const before = state(); before.spaces[1].spaceBookmarks = [103]; before.spaces[1].temporaryTabs = [202];
+    assert.equal(navigationRetiresOverlay(before, 'switchSpace', capture(before), target(before, 'target')), true);
+});
+test('retirement decision rejects missing or ambiguous native and destination identities', () => {
+    for (const mutate of [s => s.spaces.push(clone(s.spaces[1])), s => s.tabs = s.tabs.filter(tab => tab.id !== 103), s => s.tabs.push(clone(byId(s, 103)))]) {
+        const before = state(); mutate(before); assert.throws(() => navigationRetiresOverlay(before, 'switchSpace', capture(before), target(before, 'target')));
+    }
+    const before = state(), captured = capture(before), destination = target(before, 'target');
+    assert.throws(() => navigationRetiresOverlay(before, 'switchSpace', captured, { ...destination, bookmarkFolderId: 'wrong' }));
+    assert.throws(() => navigationRetiresOverlay(before, 'unsupported', captured, destination));
+});
+test('Switch completion preserves exact input, fingerprint and native oracles around host retirement', () => {
+    const source = readFileSync(new globalThis.URL('../../scripts/paired-chrome-spotlight-navigation.mjs', import.meta.url), 'utf8');
+    const start = source.indexOf('    const commit = async '), end = source.indexOf('    const rejectPrepared = ', start);
+    const commit = source.slice(start, end);
+    const input = commit.indexOf('assertNavigationInput(observed.input'), proof = commit.indexOf('assertNavigationCommitted(before, finalState'), completion = commit.indexOf('await waitForActionSurfaceCompletion('), finalProof = commit.indexOf('assertNavigationCommitted(before, completedState');
+    assert(input > 0 && proof > input && completion > proof && finalProof > completion);
+    assert(commit.indexOf('const completedState = await read()') < commit.indexOf('const completionTrace = await trace(surface, inputOwner)'));
+    assert(commit.indexOf('const completionTrace = await trace(surface, inputOwner)') < finalProof);
+    assert.match(commit, /entry.fingerprint === JSON.stringify\(request\)/);
+    assert.match(commit, /navigationRetiresOverlay\(before, command, captured, destination\)/);
+    assert.match(commit, /navigation-dispatched-before-validation/); assert.match(commit, /navigation-receipt-before-validation/);
+    assert.match(commit, /trace\(surface, inputOwner\)/); assert.match(commit, /Completion must not replay the action/);
+    assert(!/catch\s*\(|bringToFront\(|activate\(/.test(commit));
+    assert.equal((commit.match(/await requireActionPromptGeometry/g) || []).length, 2, 'Both initial and chosen picker must fit.');
+});

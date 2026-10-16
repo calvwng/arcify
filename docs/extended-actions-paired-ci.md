@@ -36,7 +36,7 @@ window-isolation, crash/error and evidence guards. The new job uses its own fres
 runner/profile, the installed Chrome package, the existing 20-minute timeout,
 and no package-update path. No browser, workflow or publication is performed by
 local assertion tests. The reviewed local Spotlight candidate
-`6379d3a22608507a4865bb44d17344ef8ea1eff6` is pinned in the runner and all six
+`7e19bc21906ba241308f766e551874419eb60287` is pinned in the runner and all six
 workflow checkouts. This preparation does not publish it or run any workflow.
 
 The initial action module's default helper oracle still requires exactly Create
@@ -80,3 +80,46 @@ node --check scripts/paired-chrome-run-plan.mjs
 node --test tests/unit/paired-chrome-run-plan.test.js tests/unit/paired-chrome-extended-wiring.test.js tests/unit/paired-chrome-spotlight-navigation.test.js tests/unit/paired-chrome-spotlight-tabs.test.js tests/unit/paired-chrome-spotlight-actions.test.js
 npm run test:unit
 ```
+
+## Action-surface lifetime and prompt usability
+
+A successful populated local Switch or Duplicate activates a different native tab;
+Spotlight intentionally retires the source overlay. Acceptance predicts that
+lifetime from the exact pre-action command and native membership, preserves only
+passive trusted-input records on the unchanged source parent, and requires the
+original overlay host to disappear. Exact request fingerprint, durable successful
+receipt, native identity/state and one-dispatch checks run before and after that
+completion. Raw dispatch/receipt evidence is saved before validation. No detached
+frame error is caught as success, and no replacement surface, refocus, resubmission
+or retry retrieves the result. Empty or other-window-only Switch, Move, other tab
+commands and whole-page New Tab helpers continue requiring real success status.
+
+Every confirmed prompt must have nonzero visible heading, description, field and
+both buttons inside its real viewport and prompt bounds. Prompt text and errors
+must not overflow horizontally. Read-only polling allows the actual iframe sizing
+to settle; it cannot repair the DOM or waive clipped controls. Initial and selected
+Space pickers and initial/edited tab prompts are checked. Long duplicate Space
+names retain their complete exact option text and identity routing. These geometry
+checks require the companion prompt-bounds CSS repair; only hosted screenshots and
+trusted confirmation on the final pinned pair establish rendered acceptance.
+
+Browser-alias helper origin in cases 50–51 is a separate pre-mutation assertion
+from case 49's committed-folder-action proof. It requires the actual renderer's
+exact Space/tab context-read request and Chrome sender metadata for the current
+helper source. Missing sender-tab metadata requires the existing complete nonce
+challenge/ACK sequence for that exact source; present mismatched metadata cannot
+fall back. Read-only refreshes from other mounted helpers cannot supply evidence
+for the tested source. This origin-only trace does not supply a request ID or
+Chrome document ID and does not claim one-to-one nonce/request correlation.
+Subsequent action evidence remains independently bound to its exact request,
+trusted input, durable receipt and native state. Execution regressions run both
+actual hosted helper call-site blocks against the real strict origin oracle.
+Challenge scoping includes every event naming the tested source or sharing one of
+its nonce values. A wrong-source ACK sharing that nonce is fatal. Complete,
+independently consistent pairs for other helpers are recorded separately and
+cannot satisfy the tested helper's fallback; malformed or ambiguous pairs fail.
+Origin collection uses the existing bounded read-only poll for explicitly
+incomplete context/challenge observations. Every present malformed or mismatched
+entry fails immediately. The trace must remain append-only and helper document
+identity/time origin must stay fixed; navigation, dropped evidence or rewritten
+records fail. No request, input, focus change or mutation is retried.

@@ -11,11 +11,16 @@ on:
       - 'scripts/paired-chrome-spotlight-actions.mjs'
       - 'scripts/paired-chrome-spotlight-navigation.mjs'
       - 'scripts/paired-chrome-spotlight-tabs.mjs'
+      - 'scripts/paired-chrome-action-surface.mjs'
+      - 'scripts/paired-chrome-helper-origin.mjs'
       - 'scripts/check-spotlight-pair.mjs'
       - 'scripts/lib/spotlight-pair-extended-*.mjs'
       - 'scripts/test-spotlight-pair-contract.mjs'
       - 'tests/unit/paired-chrome-spotlight-navigation.test.js'
       - 'tests/unit/paired-chrome-spotlight-tabs.test.js'
+      - 'tests/unit/paired-chrome-action-surface.test.js'
+      - 'tests/unit/paired-chrome-helper-origin.test.js'
+      - 'tests/unit/paired-chrome-helper-origin-wiring.test.js'
       - 'tests/unit/paired-chrome-extended-wiring.test.js'
       - 'docs/spotlight-navigation-paired-ci.md'
       - 'docs/spotlight-tab-commands-hosted.md'
@@ -213,7 +218,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
+          ref: 7e19bc21906ba241308f766e551874419eb60287
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -282,7 +287,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
+          ref: 7e19bc21906ba241308f766e551874419eb60287
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -351,7 +356,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
+          ref: 7e19bc21906ba241308f766e551874419eb60287
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -419,7 +424,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
+          ref: 7e19bc21906ba241308f766e551874419eb60287
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -497,7 +502,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
+          ref: 7e19bc21906ba241308f766e551874419eb60287
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -565,7 +570,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 6379d3a22608507a4865bb44d17344ef8ea1eff6
+          ref: 7e19bc21906ba241308f766e551874419eb60287
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node

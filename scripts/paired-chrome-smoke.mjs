@@ -61,7 +61,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '6379d3a22608507a4865bb44d17344ef8ea1eff6';
+const PINNED_SPOTLIGHT = '7e19bc21906ba241308f766e551874419eb60287';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',

@@ -144,7 +144,7 @@ test('entry is import-safe, hosted-only, uses approved helpers and has no browse
     const source = await readFile(module, 'utf8');
     const result = execFileSync(process.execPath, ['--input-type=module', '-e', `delete globalThis.chrome; await import(${JSON.stringify(module.href)}); console.log('import-safe')`], { encoding: 'utf8' }); assert.equal(result.trim(), 'import-safe');
     assert.match(SPOTLIGHT_TAB_CASE_NAME, /Spotlight tab commands/); assert.equal(Object.keys(TAB_COMMAND_QUERIES).length, 5);
-    for (const text of ['assertTabCommandEnvironment();', 'createNavigationFixturePage(', 'clickFreshResult(', 'replaceInputText(', 'finishBookmarkFixture(', "input.press('KeyV')", 'assertSpotlightHelperProof(']) assert(source.includes(text));
+    for (const text of ['assertTabCommandEnvironment();', 'createNavigationFixturePage(', 'clickFreshResult(', 'replaceInputText(', 'finishBookmarkFixture(', "input.press('KeyV')", 'collectSpotlightHelperOrigin(']) assert(source.includes(text));
     assert.match(source, /unitOnly:.*PARTIAL_COMMIT/);
     assert.doesNotMatch(source, /\.launch\(|--no-sandbox|overridePermissions|navigator\.clipboard\.(read|write)|dispatchEvent\(|new (?:MouseEvent|KeyboardEvent)|sendResponse\(|\.value\s*=(?!=)|process\.argv/);
     assert.match(source, /screenshot\(page, `spotlight-tabs-\$\{label\}`, true/);
@@ -159,4 +159,21 @@ test('receipt lookup uses immutable fingerprint, not repeated command/context or
     assert.deepEqual(findTabCommandReceipt(journal, next), newReceipt);
     assert.deepEqual(findTabCommandReceipt(journal, f.request), f.after.journal[0]);
     assert.throws(() => findTabCommandReceipt([...journal, clone(newReceipt)], next));
+});
+
+test('Duplicate completion preserves exact input, immutable receipt and native proof around retirement', async () => {
+    const source = await readFile(new globalThis.URL('../../scripts/paired-chrome-spotlight-tabs.mjs', import.meta.url), 'utf8');
+    const start = source.indexOf('    const commit = async '), end = source.indexOf('    const replay = ', start), commit = source.slice(start, end);
+    assert(start > 0 && end > start);
+    const input = commit.indexOf('assertTabCommandInput(trace.input'), proof = commit.indexOf('assertTabCommandCommitted(before, after'), completion = commit.indexOf('await waitForActionSurfaceCompletion('), finalProof = commit.lastIndexOf('assertTabCommandCommitted(before, after');
+    assert(input > 0 && proof > input && completion > proof && finalProof > completion);
+    assert(commit.lastIndexOf('after = await read()') < commit.indexOf('const completionTrace = await observed(surface, inputOwner)'));
+    assert(commit.indexOf('const completionTrace = await observed(surface, inputOwner)') < finalProof);
+    assert.match(commit, /findTabCommandReceipt\(state.journal, request\)/);
+    assert.match(commit, /retiresOverlay: command === 'duplicateCurrentTab'/);
+    assert.match(commit, /waitStatus: \(\) => status\(surface, successText/);
+    assert.match(commit, /tab-command-dispatched-before-validation/); assert.match(commit, /tab-command-receipt-before-validation/);
+    assert.match(commit, /observed\(surface, inputOwner\)/); assert.match(commit, /Completion must not replay the action/);
+    assert(!/catch\s*\(|bringToFront\(|activate\(/.test(commit));
+    assert.equal((commit.match(/await requireActionPromptGeometry/g) || []).length, 2, 'Initial and edited prompt must fit.');
 });

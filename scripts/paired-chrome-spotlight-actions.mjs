@@ -161,7 +161,7 @@ export function assertSpotlightActionRequest(events, command, context, spotlight
     assert(!events.some(event => event.type === 'external' && event.data.message.type === 'arcify-sidebar'), 'Space actions cannot replace or route through the physical sidebar transport.');
     return message;
 }
-export function assertSpotlightHelperProof(state, events, { spotlightId, arcifyId, tabId, windowId, request }) {
+export function assertSpotlightHelperProof(state, events, { spotlightId, arcifyId, tabId, windowId, request, navigation }) {
     assert.equal(state.url, `chrome-extension://${spotlightId}/newtab.html`); assert(['chrome://newtab', 'chrome://newtab/'].includes(state.tab.url));
     assert.equal(state.tab.id, tabId); assert.equal(state.tab.windowId, windowId); assert.equal(state.tab.active, true); assert.equal(state.tab.status, 'complete'); assert(!state.tab.pendingUrl); assert.equal(state.visibility, 'visible');
     const internal = events.filter(event => event.type === 'internal').map(event => event.data);
@@ -175,7 +175,24 @@ export function assertSpotlightHelperProof(state, events, { spotlightId, arcifyI
     const { message: action, sender: actionSender } = actions[0];
     assert.deepEqual(Object.keys(action).sort(), ['action', 'command', 'scope', 'fields', 'tabId'].sort());
     assert.equal(action.command, request.command); assert.equal(action.tabId, tabId); assert.deepEqual(action.fields, { title: request.title });
-    assert.deepEqual(Object.keys(action.scope).sort(), ['peerId', 'generation', 'context'].sort());
+    assert.deepEqual(Object.keys(action.scope).sort(), ['peerId', 'generation', 'context', ...(navigation === undefined ? [] : ['navigation'])].sort());
+    if (navigation !== undefined) {
+        // The extended peer carries a separately read, exact navigation context even
+        // for folder/settings actions. Never accept an arbitrary extra scope field.
+        assert.deepEqual(Object.keys(navigation).sort(), ['destinations', 'inverted', 'sourceUrl']);
+        assert.equal(navigation.sourceUrl, state.tab.url); assert.equal(typeof navigation.inverted, 'boolean');
+        assert(Array.isArray(navigation.destinations) && navigation.destinations.length <= 1000);
+        const ids = new Set(), folders = new Set();
+        for (const destination of navigation.destinations) {
+            assert.deepEqual(Object.keys(destination).sort(), ['bookmarkFolderId', 'name', 'spaceId']);
+            for (const key of ['spaceId', 'bookmarkFolderId']) assert(typeof destination[key] === 'string' && destination[key].length > 0 && destination[key].length <= 200);
+            assert(typeof destination.name === 'string' && destination.name.length <= 1024 && !/[\x00-\x1f\x7f]/.test(destination.name));
+            assert(destination.spaceId !== request.context.spaceId && destination.bookmarkFolderId !== request.context.bookmarkFolderId);
+            assert(!ids.has(destination.spaceId) && !folders.has(destination.bookmarkFolderId));
+            ids.add(destination.spaceId); folders.add(destination.bookmarkFolderId);
+        }
+        assert.deepEqual(action.scope.navigation, navigation, 'Scope must match the fresh authenticated navigation read before the action.');
+    }
     assert.equal(action.scope.peerId, arcifyId); assert(action.scope.generation === null || typeof action.scope.generation === 'string' && action.scope.generation.length > 0 && action.scope.generation.length <= 200);
     assert.deepEqual(action.scope.context, request.context);
     assert.equal(actionSender.id, spotlightId); assert.equal(actionSender.url, state.url);
@@ -478,13 +495,20 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
             assert.equal((await prepared.surface.evaluate(readSpotlightRows)).find(row => row.selected)?.type, 'search-query');
             const helperBefore = await helper.page.evaluate(readNewTabReuseState);
             await cancelPrompt(helper.page, 'createSpaceFolder', helperContext, 'Cancel');
+            let navigationRead;
+            if (helperNavigation && requestedUrl === 'chrome://newtab/') {
+                navigationRead = await external(spotlightOptions, arcifyId, 'navigationContext', { windowId, tabId: helper.tab.id, supportedFeatures: [...SPACE_ACTION_FEATURES, 'spaceNavigationV1'] });
+                assert.equal(navigationRead?.ok, true); assert.equal(navigationRead.extensionId, arcifyId);
+                assert.deepEqual(navigationRead.actionContext, helperContext);
+                assert(navigationRead.navigationContext, 'The negotiated helper navigation context must be present.');
+            }
             const created = await commit(helper.page, 'createSpaceFolder', helperContext, { title: `${requestedUrl.startsWith('chrome://') ? 'Alias' : 'Helper'} folder ${nonce}` });
             const helperAfter = await helper.page.evaluate(readNewTabReuseState);
             assert.equal(helperAfter.tab.id, helperBefore.tab.id); assert.equal(helperAfter.tab.windowId, helperBefore.tab.windowId); assert.equal(helperAfter.tab.url, helperBefore.tab.url); assert.equal(helperAfter.url, helperBefore.url); assert.equal(helperAfter.timeOrigin, helperBefore.timeOrigin);
             if (requestedUrl === 'chrome://newtab/') {
-                const options = { spotlightId, arcifyId, tabId: helper.tab.id, windowId, request: created.request };
+                const options = { spotlightId, arcifyId, tabId: helper.tab.id, windowId, request: created.request, navigation: navigationRead?.navigationContext };
                 const trace = await poll(() => observed(), value => { try { assertSpotlightHelperProof(helperAfter, value.peerEvents, options); return true; } catch { return false; } }, 'committed alias action has browser-attested source metadata or a verified nonce acknowledgement');
-                await checkpoint('browser-alias-attested-renderer', { proof: assertSpotlightHelperProof(helperAfter, trace.peerEvents, options), helperBefore, helperAfter, trace, rows });
+                await checkpoint('browser-alias-attested-renderer', { proof: assertSpotlightHelperProof(helperAfter, trace.peerEvents, options), helperBefore, helperAfter, trace, rows, navigationRead });
             }
             await capture(helper.page, requestedUrl === 'chrome://newtab/' ? 'alias-folder-created' : 'owned-helper-folder-created');
             await commit(helper.page, 'openSettings', helperContext);

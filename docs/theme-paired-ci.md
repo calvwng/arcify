@@ -13,7 +13,7 @@ provides no theme/appearance acceptance. Missing, failed, skipped,
 incomplete or extra evidence fails the existing strict run-plan gates.
 
 All six jobs and the runner pin Spotlight to reviewed integrated candidate
-`6379d3a22608507a4865bb44d17344ef8ea1eff6`. After verifying that exact checkout,
+`7e19bc21906ba241308f766e551874419eb60287`. After verifying that exact checkout,
 case 47 imports and executes its unchanged
 `test/e2e/options-appearance-evidence.js`. Missing collector code is a failure.
 The Arcify adapter adds only passive observation, required-artifact validation

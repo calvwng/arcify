@@ -344,7 +344,7 @@ test('all five original workflow jobs retain reviewed bytes and order except the
         ['recovery-actions', 'ef0ee6ab8d6275b1509f56446bc011c1e10b99c968b459ec8997f2f0ab328c5f']
     ];
     // Only this exact reviewed companion upgrade is excluded from legacy bytes.
-    const legacyPinBytes = source => source.replaceAll('6379d3a22608507a4865bb44d17344ef8ea1eff6', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
+    const legacyPinBytes = source => source.replaceAll('7e19bc21906ba241308f766e551874419eb60287', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
     assert.deepEqual(jobs.slice(0, 5).map(match => [match[1], digest(legacyPinBytes(match[0].trimEnd()))]), receipts);
     assert.equal(jobs[5][1], 'extended-actions');
     // No shared conditions or workflow event/security changes can hide a job.

@@ -22,7 +22,7 @@ The full **49**, Favorite lifecycle **5**, and native Split View **4** jobs rema
 unchanged mandatory workflow outcomes. The separate
 [recovery/actions job](recovery-actions-paired-ci.md) requires five cases and
 provides no theme/appearance acceptance. All six jobs use exact read-only
-checkouts and Spotlight `6379d3a22608507a4865bb44d17344ef8ea1eff6`, production
+checkouts and Spotlight `7e19bc21906ba241308f766e551874419eb60287`, production
 builds, and the existing isolated driver. The new job has no dependency on the
 full job, browser update, new secret, security-setting change or error exemption.
 Existing sandbox, native input/identity, window-B, screenshot, crash and page-error

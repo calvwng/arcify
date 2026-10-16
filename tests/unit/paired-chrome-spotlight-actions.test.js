@@ -141,6 +141,48 @@ function directHelperProof({ withChallenge = false } = {}) {
     if (!withChallenge) s.events.splice(0, 2);
     return s;
 }
+function navigationHelperProof({ direct = true } = {}) {
+    const s = direct ? directHelperProof() : helperProof();
+    s.options.navigation = { destinations: [{ spaceId: 'personal', bookmarkFolderId: 'root-personal', name: 'Personal' }], inverted: true, sourceUrl: s.state.tab.url };
+    s.events.at(-1).data.message.scope.navigation = clone(s.options.navigation);
+    return s;
+}
+for (const direct of [true, false]) test(`extended helper retains exact committed action/source proof with authenticated navigation, direct ${direct}`, () => {
+    const s = navigationHelperProof({ direct }), original = clone(s);
+    assert.equal(assertSpotlightHelperProof(s.state, s.events, s.options).proofKind, direct ? 'browser-attested-sender-tab' : 'nonce-challenge-ack');
+    assert.deepEqual(s, original);
+});
+for (const [name, mutate] of Object.entries({
+    unnegotiated: s => delete s.options.navigation,
+    absentScope: s => delete s.events.at(-1).data.message.scope.navigation,
+    staleSource: s => s.events.at(-1).data.message.scope.navigation.sourceUrl = 'chrome://newtab',
+    staleOrder: s => s.events.at(-1).data.message.scope.navigation.inverted = false,
+    staleName: s => s.events.at(-1).data.message.scope.navigation.destinations[0].name = 'Other name',
+    staleFolder: s => s.events.at(-1).data.message.scope.navigation.destinations[0].bookmarkFolderId = 'other',
+    staleSpace: s => s.events.at(-1).data.message.scope.navigation.destinations[0].spaceId = 'other',
+    wrongSender: s => s.events.at(-1).data.sender.id = OWN,
+    wrongSource: s => s.events.at(-1).data.sender.tab.id = 78,
+    extraScope: s => s.events.at(-1).data.message.scope.extra = true,
+    duplicateAction: s => s.events.push(clone(s.events.at(-1)))
+})) test(`extended helper proof rejects ${name}`, () => {
+    const s = navigationHelperProof(); mutate(s); assert.throws(() => assertSpotlightHelperProof(s.state, s.events, s.options));
+});
+for (const [name, mutate] of Object.entries({
+    extraNavigation: n => n.extra = true,
+    wrongUrl: n => n.sourceUrl = 'https://unrelated.test/',
+    malformedOrder: n => n.inverted = 'true',
+    malformedList: n => n.destinations = null,
+    extraDestination: n => n.destinations[0].extra = true,
+    ownSpace: n => n.destinations[0].spaceId = 'work',
+    ownFolder: n => n.destinations[0].bookmarkFolderId = 'root-work',
+    missingId: n => n.destinations[0].spaceId = '',
+    invalidName: n => n.destinations[0].name = 'Name\nControl',
+    duplicateSpace: n => n.destinations.push({ ...n.destinations[0], bookmarkFolderId: 'root-other' }),
+    duplicateFolder: n => n.destinations.push({ ...n.destinations[0], spaceId: 'other' })
+})) test(`even matching scope/read cannot authorize malformed helper navigation: ${name}`, () => {
+    const s = navigationHelperProof(); mutate(s.options.navigation); s.events.at(-1).data.message.scope.navigation = clone(s.options.navigation);
+    assert.throws(() => assertSpotlightHelperProof(s.state, s.events, s.options));
+});
 for (const withChallenge of [false, true]) test(`browser alias accepts exact Chrome sender.tab bound to the committed folder action, challenge ${withChallenge}`, () => {
     const s = directHelperProof({ withChallenge }), original = clone(s);
     const proof = assertSpotlightHelperProof(s.state, s.events, s.options);
@@ -204,7 +246,7 @@ test('hosted alias proof receives the actual committed request and records the o
     const s = directHelperProof(), records = [], created = { request: s.options.request };
     await new vm.Script(`(async () => { ${source.slice(start, end)} })()`).runInNewContext({
         requestedUrl: 'chrome://newtab/', spotlightId: PEER, arcifyId: OWN, windowId: 7, helper: { tab: { id: 77 } },
-        helperBefore: s.state, helperAfter: s.state, created, rows: [], observed: async () => ({ peerEvents: s.events }),
+        helperBefore: s.state, helperAfter: s.state, created, navigationRead: undefined, rows: [], observed: async () => ({ peerEvents: s.events }),
         poll: async (read, predicate) => { const value = await read(); assert(predicate(value)); return value; },
         assertSpotlightHelperProof: (state, events, options) => { assert.equal(options.request, created.request); return assertSpotlightHelperProof(state, events, options); },
         checkpoint: async (phase, data) => records.push({ phase, ...data })
@@ -213,6 +255,29 @@ test('hosted alias proof receives the actual committed request and records the o
     assert.equal(records[0].proof.proofKind, 'browser-attested-sender-tab'); assert.deepEqual(records[0].trace.peerEvents, s.events);
     assert.deepEqual(records[0].helperBefore, s.state); assert.deepEqual(records[0].helperAfter, s.state);
     assert.match(source, /outcome = \{ resultId, before, after, trace, request \}/);
+});
+
+test('hosted extended alias read is exact, read-only, and occurs before the mutation', async () => {
+    const source = readFileSync(new globalThis.URL('../../scripts/paired-chrome-spotlight-actions.mjs', import.meta.url), 'utf8');
+    const start = source.indexOf('            let navigationRead;');
+    const end = source.indexOf('            const created = await commit(', start);
+    assert(start > 0 && end > start);
+    const s = navigationHelperProof(), calls = [];
+    const reply = { ok: true, extensionId: OWN, actionContext: s.options.request.context, navigationContext: s.options.navigation };
+    const run = async ({ helperNavigation = true, requestedUrl = 'chrome://newtab/', response = reply } = {}) => {
+        const script = new vm.Script(`(async () => { ${source.slice(start, end)} return navigationRead; })()`);
+        return script.runInNewContext({ assert, helperNavigation, requestedUrl, spotlightOptions: 'peer-options', arcifyId: OWN,
+            windowId: 7, helper: { tab: { id: 77 } }, helperContext: s.options.request.context, SPACE_ACTION_FEATURES,
+            external: async (...args) => { calls.push(args); return response; }
+        });
+    };
+    assert.equal(await run(), reply);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [['peer-options', OWN, 'navigationContext', { windowId: 7, tabId: 77, supportedFeatures: [...SPACE_ACTION_FEATURES, 'spaceNavigationV1'] }]]);
+    for (const response of [{ ...reply, ok: false }, { ...reply, extensionId: PEER }, { ...reply, actionContext: { ...reply.actionContext, sourceTabId: 78 } }, { ...reply, navigationContext: null }]) await assert.rejects(run({ response }));
+    calls.length = 0;
+    assert.equal(await run({ helperNavigation: false }), undefined);
+    assert.equal(await run({ requestedUrl: `chrome-extension://${PEER}/newtab.html` }), undefined);
+    assert.deepEqual(calls, []);
 });
 
 test('Remove prompt spells out exact saved deletion, retained linked pages and safe initial focus', () => {

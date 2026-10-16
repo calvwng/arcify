@@ -1,6 +1,8 @@
 /** Import-safe mandatory hosted evidence. The existing paired harness owns Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { requireActionPromptGeometry, waitForActionSurfaceCompletion } from './paired-chrome-action-surface.mjs';
+import { collectSpotlightHelperOrigin } from './paired-chrome-helper-origin.mjs';
 import { spotlightSurface } from './paired-chrome-keyboard.mjs';
 import { clickFreshResult, replaceInputText } from './paired-chrome-ui.mjs';
 import { readSpotlightRows, assertMatchedActionFirst } from './paired-chrome-sidebar.mjs';
@@ -37,7 +39,7 @@ export function serveSpotlightTabFixture(request, response) {
     response.end(`<!doctype html><html><head><title>${title}</title><link rel="icon" href="data:,"></head><body data-document-id="${randomBytes(16).toString('hex')}"><h1>${title}</h1><input id="action-page-state" value="retained"></body></html>`);
     return true;
 }
-export function installTabCommandInputObservation() {
+export function installTabCommandInputObservation({ retainInParent = false } = {}) {
     globalThis.__tabCommandInput?.stop(); const events = [], registrations = [];
     for (const type of ['input', 'click', 'keydown', 'paste']) {
         const listener = event => {
@@ -52,6 +54,9 @@ export function installTabCommandInputObservation() {
         document.addEventListener(type, listener, true); registrations.push(() => document.removeEventListener(type, listener, true));
     }
     globalThis.__tabCommandInput = { events, stop: () => registrations.forEach(remove => remove()) };
+    // Duplicate activates its new tab; only passive records survive in the source.
+    globalThis.__tabCommandInputEvents = events;
+    if (retainInParent) parent.__tabCommandInputEvents = events;
 }
 export function readTabCommandPrompt() {
     const prompt = document.querySelector('.arcify-tab-action-prompt'); if (!prompt) return null;
@@ -235,7 +240,7 @@ export async function exerciseSpotlightTabCommands({ browser, observePage, apiPa
     assertTabCommandEnvironment();
     assert.equal(typeof browser?.targets, 'function');
     for (const adapter of [observePage, newTabPage, openSavedPage, ui, screenshot, snapshot, bridge, external, poll, search, record]) assert.equal(typeof adapter, 'function', 'All tab-command evidence adapters are mandatory.');
-    const { installSpotlightActionApiObservation, readSpotlightActionPage, assertSpotlightHelperProof } = await import('./paired-chrome-spotlight-actions.mjs');
+    const { installSpotlightActionApiObservation, readSpotlightActionPage } = await import('./paired-chrome-spotlight-actions.mjs');
     const { createNavigationFixturePage, installNavigationGroupObservation } = await import('./paired-chrome-spotlight-navigation.mjs');
     const windowId = fixture.windowA, otherWindow = fixture.windowB, nonce = randomBytes(16).toString('hex'), base = `${fixture.base}/spotlight-tabs/${nonce}`;
     const initial = await apiPage.evaluate(async () => ({ tabs: await chrome.tabs.query({}), windows: await chrome.windows.getAll(),
@@ -274,7 +279,7 @@ export async function exerciseSpotlightTabCommands({ browser, observePage, apiPa
         await spotlightOptions.evaluate(() => { globalThis.__spaceActionObservation.events.length = 0; });
         if (surface) await surface.evaluate(() => { globalThis.__tabCommandInput.events.length = 0; });
     };
-    const observed = async surface => ({ events: await apiPage.evaluate(() => globalThis.__spaceActionObservation.events), peerEvents: await spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events), input: surface ? await surface.evaluate(() => globalThis.__tabCommandInput.events) : [] });
+    const observed = async (surface, inputOwner = surface) => ({ events: await apiPage.evaluate(() => globalThis.__spaceActionObservation.events), peerEvents: await spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events), input: inputOwner ? await inputOwner.evaluate(() => globalThis.__tabCommandInputEvents) : [] });
     const activate = async id => { await apiPage.evaluate(async id => { const tab = await chrome.tabs.update(id, { active: true }); await chrome.windows.update(tab.windowId, { focused: true }); }, id); await settle(); };
     const closeOverlay = async () => {
         if (!overlayPage || overlayPage.isClosed() || !await overlayPage.evaluate(() => Boolean(document.getElementById('arcify-spotlight-host')))) return;
@@ -298,7 +303,7 @@ export async function exerciseSpotlightTabCommands({ browser, observePage, apiPa
         const query = command === 'renameCurrentTab' && sourceContext.tab.section === 'saved' ? 'rename saved space pin' : command === 'setCurrentTabMuted' && sourceContext.tab.muted ? 'unmute curent tab' : TAB_COMMAND_QUERIES[command];
         await search(page, query); const surface = await spotlightSurface(page), title = tabCommandTitle(command, sourceContext);
         const rows = await poll(() => surface.evaluate(readSpotlightRows), rows => rows[0]?.type === 'arcify-tab-action' && rows[0]?.title === title && rows[0]?.selected, `visible exact ${command} with ordinary web search retained`);
-        assertMatchedActionFirst(rows, { type: 'arcify-tab-action', title, query }); await surface.evaluate(installTabCommandInputObservation); return { surface, rows, query };
+        assertMatchedActionFirst(rows, { type: 'arcify-tab-action', title, query }); await surface.evaluate(installTabCommandInputObservation, { retainInParent: surface !== page }); return { surface, rows, query, inputOwner: page };
     };
     const invoke = async (surface, command, sourceContext, keyboard = false) => {
         if (keyboard) { const input = await surface.$('[data-testid="spotlight-input"]'); assert(input); try { await input.press('Enter'); } finally { await input.dispose(); } return; }
@@ -316,46 +321,58 @@ export async function exerciseSpotlightTabCommands({ browser, observePage, apiPa
         await ui(page, `Cancel ${command} with genuine ${method}`, async () => {
             const before = await read(); await reset(surface); await invoke(surface, command, sourceContext);
             await surface.waitForSelector('.arcify-tab-action-prompt', { visible: true }); const prompt = await surface.evaluate(readTabCommandPrompt); assertTabCommandPrompt(prompt, command, sourceContext);
+            const geometry = await requireActionPromptGeometry({ surface, selector: '.arcify-tab-action-prompt', poll });
             const value = command === 'editCurrentPinUrl' ? `${base}/cancelled` : `Cancelled ${nonce}`; await edit(page, surface, value);
+            const editedGeometry = await requireActionPromptGeometry({ surface, selector: '.arcify-tab-action-prompt', poll });
             const shot = await capture(page, `${command}-cancel-${method}`);
             if (method === 'Escape') await page.keyboard.press('Escape'); else await surface.click('[data-action-cancel]');
             await surface.waitForSelector('.arcify-tab-action-prompt', { hidden: true }); const after = await read(), trace = await observed(surface);
             assertTabCommandNoEffects(before, after, trace.events); assertTabCommandInput(trace.input, command, sourceContext, { outcome: 'cancel', value });
             assert.equal(await surface.$eval('[data-testid="spotlight-input"]', node => node.value), query);
             assert.equal(await surface.$eval('[data-testid="spotlight-input"]', node => document.activeElement === node), true);
-            await checkpoint('tab-prompt-cancelled', { command, method, prompt, rows, before, after, trace, screenshot: shot });
+            await checkpoint('tab-prompt-cancelled', { command, method, prompt, geometry, editedGeometry, rows, before, after, trace, screenshot: shot });
         });
     };
     const commit = async (page, command, sourceContext, fields = {}, keyboard = false) => {
-        const { surface, rows } = await ready(page, command, sourceContext); let result;
+        const { surface, rows, inputOwner } = await ready(page, command, sourceContext); let result;
         await ui(page, `Run ${command} once through the visible Spotlight row`, async () => {
             const before = await read(); assert.equal(before.activeSpaces[otherWindow], otherSpace.id, 'Other window keeps its independently selected Space.'); await reset(surface);
             const targetsBefore = command === 'duplicateCurrentTab' ? new Set(browser.targets()) : null;
             if (command === 'duplicateCurrentTab') pendingDuplicate = { ids: before.tabs.map(tab => tab.id), windowId, url: sourceContext.tab.url };
             await invoke(surface, command, sourceContext, keyboard);
-            let prompt;
+            let prompt, geometry;
             if (['renameCurrentTab', 'editCurrentPinUrl'].includes(command)) {
                 await surface.waitForSelector('.arcify-tab-action-prompt', { visible: true }); prompt = await surface.evaluate(readTabCommandPrompt); assertTabCommandPrompt(prompt, command, sourceContext);
-                await edit(page, surface, fields.title ?? fields.url); await capture(page, `${command}-explicit-prompt`);
+                geometry = await requireActionPromptGeometry({ surface, selector: '.arcify-tab-action-prompt', poll });
+                await edit(page, surface, fields.title ?? fields.url);
+                geometry = await requireActionPromptGeometry({ surface, selector: '.arcify-tab-action-prompt', poll });
+                await capture(page, `${command}-explicit-prompt`);
                 if (keyboard) await page.keyboard.press('Enter'); else await surface.click(`[data-action-confirm="${command}"]`);
             }
-            // Duplicate legitimately activates its new tab. Read-only polling in
-            // the old iframe must not reactivate the source to take a screenshot.
-            await status(surface, successText(command, sourceContext, fields));
-            const dispatched = await observed(surface), request = assertTabCommandRequest(dispatched.events, command, sourceContext, spotlightId, fields);
+            const dispatched = await poll(() => observed(surface, inputOwner), value => value.events.some(event => event.type === 'external' && mutations.includes(event.data.message.command)), 'one observed tab-command dispatch');
+            await checkpoint('tab-command-dispatched-before-validation', { command, before, fields, prompt, geometry, rows, dispatched });
+            const request = assertTabCommandRequest(dispatched.events, command, sourceContext, spotlightId, fields);
             let after = await poll(read, state => {
                 const receipt = findTabCommandReceipt(state.journal, request);
-                return receipt?.response?.ok === true;
+                return typeof receipt?.response?.ok === 'boolean';
             }, 'one durable exact request fingerprint and receipt');
+            await checkpoint('tab-command-receipt-before-validation', { command, before, after, fields, request, dispatched });
+            assert.equal(findTabCommandReceipt(after.journal, request)?.response?.ok, true, 'Exact tab command must have a successful receipt.');
             if (command === 'duplicateCurrentTab') {
                 const duplicateId = findTabCommandReceipt(after.journal, request).response.tabId;
                 const added = after.tabs.filter(tab => !before.tabs.some(old => old.id === tab.id)); assert.equal(added.length, 1); assert.equal(added[0].id, duplicateId); assert.equal(added[0].windowId, windowId); owned.add(duplicateId);
                 await poll(() => apiPage.evaluate(id => chrome.tabs.get(id), duplicateId), tab => tab.status === 'complete' && !tab.pendingUrl && tab.url === sourceContext.tab.url, 'exact native duplicate finishes loading before durable comparison');
                 after = await read(); pendingDuplicate = null;
             }
-            const trace = await observed(surface); assert.deepEqual(assertTabCommandRequest(trace.events, command, sourceContext, spotlightId, fields), request);
+            const trace = await observed(surface, inputOwner); assert.deepEqual(assertTabCommandRequest(trace.events, command, sourceContext, spotlightId, fields), request);
             assertTabCommandInput(trace.input, command, sourceContext, { activation: keyboard ? 'Enter' : 'click', submission: keyboard ? 'Enter' : 'click', ...(prompt ? { value: fields.title ?? fields.url } : {}) });
-            const committed = assertTabCommandCommitted(before, after, { command, context: sourceContext, fields, events: trace.events, request });
+            assertTabCommandCommitted(before, after, { command, context: sourceContext, fields, events: trace.events, request });
+            const completion = await waitForActionSurfaceCompletion({ page, surface, retiresOverlay: command === 'duplicateCurrentTab',
+                waitStatus: () => status(surface, successText(command, sourceContext, fields)) });
+            after = await read();
+            const completionTrace = await observed(surface, inputOwner);
+            assert.deepEqual(assertTabCommandRequest(completionTrace.events, command, sourceContext, spotlightId, fields), request, 'Completion must not replay the action.');
+            const committed = assertTabCommandCommitted(before, after, { command, context: sourceContext, fields, events: completionTrace.events, request });
             let shot;
             if (command === 'duplicateCurrentTab') {
                 const target = await poll(() => { const fresh = browser.targets().filter(target => target.type() === 'page' && !targetsBefore.has(target)); assert(fresh.length <= 1, 'Exact duplicate target cannot be selected by matching an existing equal URL.'); return fresh.length === 1 && fresh[0].url() === sourceContext.tab.url ? fresh[0] : null; }, Boolean, 'one fresh duplicate target tied to the exact new native receipt');
@@ -363,7 +380,7 @@ export async function exerciseSpotlightTabCommands({ browser, observePage, apiPa
                 shot = await capture(duplicatePage, 'exact-native-duplicate-active');
                 const visible = await duplicatePage.evaluate(readSpotlightActionPage); assert.notEqual(visible.timeOrigin, before.pageStates[sourceContext.tab.id].timeOrigin);
             } else shot = await capture(page, `${command}-committed`);
-            await checkpoint('tab-command-committed-once', { command, before, after, fields, prompt, rows, trace, request, committed, screenshot: shot });
+            await checkpoint('tab-command-committed-once', { command, before, after, fields, prompt, geometry, rows, trace, completionTrace, completion, request, committed, screenshot: shot });
             result = { before, after, trace, request, committed, surface };
         });
         return result;
@@ -443,15 +460,17 @@ export async function exerciseSpotlightTabCommands({ browser, observePage, apiPa
         await ui(live.page, 'Observe exact clipboard text through native paste in a cancellable prompt', async () => {
             const beforePaste = await read(); await reset(inspector.surface);
             await invoke(inspector.surface, 'renameCurrentTab', current); await inspector.surface.waitForSelector('[data-tab-action-input]', { visible: true });
+            await requireActionPromptGeometry({ surface: inspector.surface, selector: '.arcify-tab-action-prompt', poll });
             await inspector.surface.evaluate(() => { globalThis.__tabCommandInput.events.length = 0; });
             const input = await inspector.surface.$('[data-tab-action-input]'); assert(input); let pasted;
             try { await input.focus(); await live.page.keyboard.down('Control'); try { await input.press('KeyA'); await input.press('KeyV'); } finally { await live.page.keyboard.up('Control'); } pasted = await input.evaluate(node => node.value); }
             finally { await input.dispose(); }
             const pasteEvents = await inspector.surface.evaluate(() => globalThis.__tabCommandInput.events);
             assertTabCommandClipboard({ events: copied.trace.events, contexts, pasted, pasteEvents, expected: current.tab.url, arcifyId });
+            const geometry = await requireActionPromptGeometry({ surface: inspector.surface, selector: '.arcify-tab-action-prompt', poll });
             const shot = await capture(live.page, 'actual-offscreen-clipboard-native-paste'); await inspector.surface.click('[data-action-cancel]'); await inspector.surface.waitForSelector('.arcify-tab-action-prompt', { hidden: true });
             const afterPaste = await read(), inspectionTrace = await observed(); assertTabCommandNoEffects(beforePaste, afterPaste, inspectionTrace.events);
-            await checkpoint('real-offscreen-copy-exact-text', { contexts, pasted, pasteEvents, beforePaste, afterPaste, inspectionTrace, expected: current.tab.url, screenshot: shot });
+            await checkpoint('real-offscreen-copy-exact-text', { contexts, pasted, pasteEvents, geometry, beforePaste, afterPaste, inspectionTrace, expected: current.tab.url, screenshot: shot });
         });
         // A real bookmark edit while the visible prompt is open must invalidate
         // the prepared context. This fixture mutation is outside the command trace.
@@ -459,10 +478,10 @@ export async function exerciseSpotlightTabCommands({ browser, observePage, apiPa
         await ui(live.page, 'Prepare URL edit before an external bookmark title change', async () => { await invoke(stale.surface, 'editCurrentPinUrl', current); await stale.surface.waitForSelector('[data-tab-action-input]', { visible: true }); await edit(live.page, stale.surface, `${base}/must-not-save`); });
         await apiPage.evaluate(({ id, title }) => chrome.bookmarks.update(id, { title }), { id: saved.id, title: `Externally changed ${nonce}` }); await settle();
         await ui(live.page, 'Reject stale prepared URL edit without changing the native page', async () => {
-            const before = await read(); await reset(stale.surface); await stale.surface.click('[data-action-confirm="editCurrentPinUrl"]'); await stale.surface.waitForSelector('.arcify-bridge-status[data-state="error"]', { visible: true });
+            const before = await read(); await reset(stale.surface); const geometry = await requireActionPromptGeometry({ surface: stale.surface, selector: '.arcify-tab-action-prompt', poll }); await stale.surface.click('[data-action-confirm="editCurrentPinUrl"]'); await stale.surface.waitForSelector('.arcify-bridge-status[data-state="error"]', { visible: true });
             const after = await read(), trace = await observed(stale.surface); assertTabCommandNoEffects(before, after, trace.events);
             assert.equal(trace.peerEvents.filter(event => event.type === 'internal' && event.data.message.action === 'arcifyTabAction').length, 1);
-            await checkpoint('stale-prepared-tab-edit-rejected', { before, after, trace, screenshot: await capture(live.page, 'stale-edit-error') });
+            await checkpoint('stale-prepared-tab-edit-rejected', { before, after, geometry, trace, screenshot: await capture(live.page, 'stale-edit-error') });
         });
         await closeOverlay();
         for (const requestedUrl of [`chrome-extension://${spotlightId}/newtab.html`, 'chrome://newtab/']) {
@@ -472,20 +491,25 @@ export async function exerciseSpotlightTabCommands({ browser, observePage, apiPa
             for (const query of ['', ...Object.values(TAB_COMMAND_QUERIES), 'unmute curent tab', 'rename saved space pin']) {
                 await search(aliasHelper.page, query); const rows = await aliasHelper.page.evaluate(readSpotlightRows); assert(!rows.some(row => row.type === 'arcify-tab-action'), 'Helper must not borrow a previous Today, saved pin, or Favorite.');
             }
-            const state = await aliasHelper.page.evaluate(readNewTabReuseState), trace = await observed();
-            if (requestedUrl === 'chrome://newtab/') assertSpotlightHelperProof(state, trace.peerEvents, { spotlightId, tabId: aliasHelper.tab.id, windowId });
-            await checkpoint('helper-excludes-all-tab-commands', { requestedUrl, state, trace, screenshot: await capture(aliasHelper.page, requestedUrl.startsWith('chrome://') ? 'browser-newtab-excluded' : 'owned-helper-excluded') });
+            const state = await aliasHelper.page.evaluate(readNewTabReuseState);
+            let trace, origin = null, originState = state;
+            if (requestedUrl === 'chrome://newtab/') {
+                const collected = await collectSpotlightHelperOrigin({ initialState: state, poll, spotlightId, tabId: aliasHelper.tab.id, windowId, contextAction: 'arcifyTabActionsContext',
+                    read: async () => { trace = await observed(); const state = await aliasHelper.page.evaluate(readNewTabReuseState); return { state, peerEvents: trace.peerEvents }; } });
+                origin = collected.origin; originState = collected.state;
+            } else trace = await observed();
+            await checkpoint('helper-excludes-all-tab-commands', { requestedUrl, state, originState, trace, origin, screenshot: await capture(aliasHelper.page, requestedUrl.startsWith('chrome://') ? 'browser-newtab-excluded' : 'owned-helper-excluded') });
         }
         await overlay(live.tab.id); current = await context(live.tab.id, 'saved', saved.id); const prepared = await ready(live.page, 'renameCurrentTab', current);
         await ui(live.page, 'Prepare exact saved rename before receiver-side revocation', async () => { await invoke(prepared.surface, 'renameCurrentTab', current); await prepared.surface.waitForSelector('[data-tab-action-input]', { visible: true }); await edit(live.page, prepared.surface, `Revoked ${nonce}`); });
         await ui(apiPage, 'Revoke the actual Arcify paired grant', () => apiPage.click('#bridgeDisconnect')); revoked = true; await apiPage.waitForSelector('#bridgeStatus[data-state="disabled"]');
         await ui(live.page, 'Reject prepared tab rename after pairing revocation', async () => {
             const raw = () => apiPage.evaluate(async () => ({ tabs: await chrome.tabs.query({}), bookmarks: await chrome.bookmarks.getTree(), local: await chrome.storage.local.get(null), session: await chrome.storage.session.get(null), windows: await chrome.windows.getAll() }));
-            await settle(); const before = await raw(); await reset(prepared.surface); await prepared.surface.click('[data-action-confirm="renameCurrentTab"]');
+            await settle(); const before = await raw(); await reset(prepared.surface); const geometry = await requireActionPromptGeometry({ surface: prepared.surface, selector: '.arcify-tab-action-prompt', poll }); await prepared.surface.click('[data-action-confirm="renameCurrentTab"]');
             await prepared.surface.waitForSelector('.arcify-bridge-status[data-state="error"]', { visible: true }); await settle(); const after = await raw(), trace = await observed(prepared.surface);
             assert.deepEqual(after, before); assert(!trace.events.some(event => event.type === 'external' && commands.includes(event.data.message.command)));
             assert.equal(trace.peerEvents.filter(event => event.type === 'internal' && event.data.message.action === 'arcifyTabAction').length, 1);
-            await checkpoint('revoked-prepared-tab-edit-rejected', { before, after, trace, screenshot: await capture(live.page, 'revoked-tab-error') });
+            await checkpoint('revoked-prepared-tab-edit-rejected', { before, after, geometry, trace, screenshot: await capture(live.page, 'revoked-tab-error') });
         });
         return evidence;
     } catch (error) {

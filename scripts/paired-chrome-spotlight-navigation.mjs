@@ -1,6 +1,8 @@
 /** Import-safe hosted acceptance. Only the paired harness owns Chrome and native input. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { requireActionPromptGeometry, waitForActionSurfaceCompletion } from './paired-chrome-action-surface.mjs';
+import { collectSpotlightHelperOrigin } from './paired-chrome-helper-origin.mjs';
 import { spotlightSurface } from './paired-chrome-keyboard.mjs';
 import { clickFreshResult, replaceInputText, selectResultWithKeyboard, attachCreatedFixtureTab } from './paired-chrome-ui.mjs';
 import { readSpotlightRows, assertMatchedActionFirst } from './paired-chrome-sidebar.mjs';
@@ -10,7 +12,7 @@ import { projectTabTitle } from '../tab-title-projection.js';
 import { isStartupLauncherTab } from '../startup-launcher-tab.js';
 import { readNewTabReuseState } from './paired-chrome-newtab.mjs';
 import { assertSpotlightActionEnvironment, installSpotlightActionApiObservation, readSpotlightActionPage,
-    assertSpotlightActionContext, assertSpotlightActionUnchanged, assertSpotlightActionNoWrites, assertSpotlightHelperProof } from './paired-chrome-spotlight-actions.mjs';
+    assertSpotlightActionContext, assertSpotlightActionUnchanged, assertSpotlightActionNoWrites } from './paired-chrome-spotlight-actions.mjs';
 
 export const SPOTLIGHT_NAVIGATION_CASE_NAME = 'Spotlight Space navigation uses genuine destination pickers and preserves exact Today/native identities';
 export const NAVIGATION_FEATURES = Object.freeze(['globalFavoritesV1', 'spaceActionsV1', 'spaceNavigationV1']);
@@ -25,6 +27,16 @@ const canonSnapshots = values => Object.fromEntries(Object.entries(values).map((
 const active = (state, windowId) => { const tabs = state.tabs.filter(tab => tab.windowId === windowId && tab.active); assert.equal(tabs.length, 1); return tabs[0].id; };
 const changedStorage = events => events.filter(event => event.type === 'storage' && Object.values(event.data.changes).some(value => JSON.stringify(value.oldValue) !== JSON.stringify(value.newValue)));
 
+// Decide from exact pre-action native membership, never from a detached-frame
+// exception or an outcome that could hide the wrong destination activation.
+export function navigationRetiresOverlay(before, command, captured, destination) {
+    assert(commands.includes(command));
+    if (command !== 'switchSpace') return false;
+    const space = exact(before.spaces, destination.spaceId);
+    assert.equal(space.bookmarkFolderId, destination.bookmarkFolderId);
+    return [...space.spaceBookmarks, ...space.temporaryTabs].some(id => exact(before.tabs, id).windowId === captured.context.windowId);
+}
+
 export function serveSpotlightNavigationFixture(request, response) {
     const match = /^\/spotlight-navigation\/([a-f0-9]{32})\/([a-z-]+)$/.exec(new URL(request.url, 'http://127.0.0.1').pathname);
     if (!match) return false;
@@ -35,7 +47,7 @@ export function serveSpotlightNavigationFixture(request, response) {
 }
 
 /** Capture listeners only. Never sets isTrusted or calls a controller. */
-export function installNavigationInputObservation() {
+export function installNavigationInputObservation({ retainInParent = false } = {}) {
     globalThis.__navigationInput?.stop();
     const events = [], registrations = [];
     for (const type of ['input', 'change', 'click', 'keydown']) {
@@ -51,6 +63,9 @@ export function installNavigationInputObservation() {
         document.addEventListener(type, listener, true); registrations.push(() => document.removeEventListener(type, listener, true));
     }
     globalThis.__navigationInput = { events, stop: () => registrations.forEach(remove => remove()) };
+    // Retain passive event records only, as Switch may retire this exact iframe.
+    globalThis.__navigationInputEvents = events;
+    if (retainInParent) parent.__navigationInputEvents = events;
 }
 export function installNavigationGroupObservation() {
     globalThis.__navigationGroupObservation?.stop(); const registrations = [];
@@ -301,8 +316,8 @@ export async function exerciseSpotlightNavigation({ browser, observePage, apiPag
         await spotlightOptions.evaluate(() => { globalThis.__spaceActionObservation.events.length = 0; });
         if (surface) await surface.evaluate(() => { globalThis.__navigationInput.events.length = 0; });
     };
-    const trace = async surface => ({ events: await apiPage.evaluate(() => globalThis.__spaceActionObservation.events), peerEvents: await spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events),
-        input: surface ? await surface.evaluate(() => globalThis.__navigationInput.events) : [] });
+    const trace = async (surface, inputOwner = surface) => ({ events: await apiPage.evaluate(() => globalThis.__spaceActionObservation.events), peerEvents: await spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events),
+        input: inputOwner ? await inputOwner.evaluate(() => globalThis.__navigationInputEvents) : [] });
     const capture = async (page, label) => { const result = await screenshot(page, `spotlight-navigation-${label}`, true, { fullPage: false }); assert(result?.filename && result?.capturedAt, 'Screenshot evidence is mandatory.'); return result; };
     const context = async (id, section) => {
         const state = await read(), reply = await external(spotlightOptions, arcifyId, 'navigationContext', { windowId, tabId: id, supportedFeatures: NAVIGATION_FEATURES });
@@ -336,7 +351,7 @@ export async function exerciseSpotlightNavigation({ browser, observePage, apiPag
         const rows = await poll(() => surface.evaluate(readSpotlightRows), rows => rows[0]?.type === 'arcify-space-action' && rows[0]?.title === NAVIGATION_TITLES[command] && rows[0].selected, 'fuzzy navigation action selected above preserved web search');
         assertMatchedActionFirst(rows, { type: 'arcify-space-action', title: NAVIGATION_TITLES[command], query: NAVIGATION_QUERIES[command] });
         assert.equal(await surface.$eval('[data-testid="spotlight-result"]', node => node.getClientRects().length > 0 && getComputedStyle(node).visibility !== 'hidden'), true);
-        await surface.evaluate(installNavigationInputObservation); return { surface, rows };
+        await surface.evaluate(installNavigationInputObservation, { retainInParent: surface !== page }); return { surface, rows, inputOwner: page };
     };
     const invoke = async (surface, command, method) => {
         if (method === 'Enter') { const input = await surface.$('[data-testid="spotlight-input"]'); assert(input); try { await input.press('Enter'); } finally { await input.dispose(); } }
@@ -365,6 +380,7 @@ export async function exerciseSpotlightNavigation({ browser, observePage, apiPag
         await ui(page, 'Cancel a real destination picker without changing any state', async () => {
             const before = await settle(); await reset(surface); await invoke(surface, command, activation);
             await surface.waitForSelector('.arcify-space-action-prompt', { visible: true }); const picker = await surface.evaluate(readNavigationPicker); assertNavigationPicker(picker, command, captured.navigation);
+            const geometry = await requireActionPromptGeometry({ surface, selector: '.arcify-space-action-prompt', poll });
             const screenshot = await capture(page, `${command}-cancel-${method}`);
             if (method === 'Escape') { const select = await surface.$('[data-space-destination]'); try { await select.press('Escape'); } finally { await select.dispose(); } }
             else await surface.click('[data-action-cancel]');
@@ -372,47 +388,60 @@ export async function exerciseSpotlightNavigation({ browser, observePage, apiPag
             const after = await read(), observed = await trace(surface); assertSpotlightActionUnchanged(before, after); assertNavigationNoMutation(observed.events);
             assertNavigationInput(observed.input, command, { outcome: 'cancel', activation });
             assert.equal(await surface.$eval('[data-testid="spotlight-input"]', node => node.value), NAVIGATION_QUERIES[command]);
-            await checkpoint('picker-cancelled-zero-mutation', { command, method, activation, before, after, rows, picker, observed, screenshot });
+            await checkpoint('picker-cancelled-zero-mutation', { command, method, activation, before, after, rows, picker, geometry, observed, screenshot });
         });
     };
     const commit = async (page, command, captured, destination, { activation = 'click', submission = 'click', groupSync = false } = {}) => {
-        const { surface, rows } = await ready(page, command); let outcome;
+        const { surface, rows, inputOwner } = await ready(page, command); let outcome;
         await ui(page, 'Choose an exact existing Space through genuine Spotlight input', async () => {
             const before = await settle(); await reset(surface); await invoke(surface, command, activation);
             await surface.waitForSelector('.arcify-space-action-prompt', { visible: true }); const picker = await surface.evaluate(readNavigationPicker); assertNavigationPicker(picker, command, captured.navigation);
-            const index = await choose(surface, { ...captured, command }, destination), screenshot = await capture(page, `${command}-chosen-${destination.spaceId}`);
+            const initialGeometry = await requireActionPromptGeometry({ surface, selector: '.arcify-space-action-prompt', poll });
+            const index = await choose(surface, { ...captured, command }, destination);
+            const geometry = await requireActionPromptGeometry({ surface, selector: '.arcify-space-action-prompt', poll });
+            const screenshot = await capture(page, `${command}-chosen-${destination.spaceId}`);
             if (submission === 'Enter') { const select = await surface.$('[data-space-destination]'); try { await select.press('Enter'); } finally { await select.dispose(); } }
             else await surface.click(`[data-action-confirm="${command}"]`);
-            // Do not foreground source after Switch; status/trace reads retain its
-            // original Page/Frame even when Chrome activates destination elsewhere.
-            const after = await poll(read, state => state.journal.some(entry => { try { const request = JSON.parse(entry.fingerprint); return request.command === command && request.context.sourceTabId === captured.context.sourceTabId && request.destination?.spaceId === destination.spaceId && entry.response?.ok; } catch { return false; } }), 'one durable navigation receipt');
-            await surface.waitForFunction(text => [...document.querySelectorAll('.arcify-bridge-status')].some(node => node.textContent.includes(text)), { polling: 50 }, command === 'switchSpace' ? 'Selected Space switched.' : 'Current tab moved. This Space stays selected.');
-            const observed = await trace(surface), request = assertNavigationRequest(observed.events, command, captured, destination, spotlightId);
+            // A populated Switch activates a different native tab and retires the
+            // original overlay. Read only retained passive input and native APIs.
+            const observed = await poll(() => trace(surface, inputOwner), value => value.events.some(event => event.type === 'external' && mutations.includes(event.data.message.command)), 'one observed navigation dispatch');
+            await checkpoint('navigation-dispatched-before-validation', { command, before, rows, picker, initialGeometry, geometry, observed, screenshot });
+            const request = assertNavigationRequest(observed.events, command, captured, destination, spotlightId);
+            const after = await poll(read, state => state.journal.some(entry => entry.fingerprint === JSON.stringify(request) && typeof entry.response?.ok === 'boolean'), 'one exact durable navigation receipt');
+            await checkpoint('navigation-receipt-before-validation', { command, before, after, request, observed });
             assertNavigationInput(observed.input, command, { outcome: 'commit', destinationIndex: index, activation, submission });
             const finalState = groupSync && command === 'switchSpace' ? await settle() : await read();
-            const finalTrace = await trace(surface);
+            const finalTrace = await trace(surface, inputOwner);
             assert.deepEqual(assertNavigationRequest(finalTrace.events, command, captured, destination, spotlightId), request, 'No late automatic retry during settled readback.');
-            const proof = assertNavigationCommitted(before, finalState, { command, captured, destination, request, events: finalTrace.events, groupSync });
-            await checkpoint('navigation-committed-exactly-once', { before, after: finalState, rows, picker, observed, finalTrace, request, proof, screenshot });
-            outcome = { before, after: finalState, request, proof, surface };
+            assertNavigationCommitted(before, finalState, { command, captured, destination, request, events: finalTrace.events, groupSync });
+            const retiresOverlay = navigationRetiresOverlay(before, command, captured, destination);
+            const completion = await waitForActionSurfaceCompletion({ page, surface, retiresOverlay,
+                waitStatus: () => surface.waitForFunction(text => [...document.querySelectorAll('.arcify-bridge-status')].some(node => node.textContent.includes(text)), { polling: 50 }, command === 'switchSpace' ? 'Selected Space switched.' : 'Current tab moved. This Space stays selected.') });
+            const completedState = await read();
+            const completionTrace = await trace(surface, inputOwner);
+            assert.deepEqual(assertNavigationRequest(completionTrace.events, command, captured, destination, spotlightId), request, 'Completion must not replay the action.');
+            const proof = assertNavigationCommitted(before, completedState, { command, captured, destination, request, events: completionTrace.events, groupSync });
+            await checkpoint('navigation-committed-exactly-once', { before, after: completedState, rows, picker, initialGeometry, geometry, observed, finalTrace, completionTrace, completion, request, proof, screenshot });
+            outcome = { before, after: completedState, request, proof, surface };
         }); return outcome;
     };
     const rejectPrepared = async (page, captured, command, destination, label, alter) => {
         const { surface } = await ready(page, command);
-        await ui(page, 'Prepare an exact destination before its context changes', async () => { await invoke(surface, command, 'click'); await surface.waitForSelector('.arcify-space-action-prompt', { visible: true }); await choose(surface, { ...captured, command }, destination); });
+        await ui(page, 'Prepare an exact destination before its context changes', async () => { await invoke(surface, command, 'click'); await surface.waitForSelector('.arcify-space-action-prompt', { visible: true }); await choose(surface, { ...captured, command }, destination); await requireActionPromptGeometry({ surface, selector: '.arcify-space-action-prompt', poll }); });
         await alter();
         await ui(page, 'Reject the stale destination once without retry', async () => {
             // Raw read remains valid after peer revocation, unlike bridge snapshot.
             const raw = () => apiPage.evaluate(async () => ({ tabs: await chrome.tabs.query({}), windows: await chrome.windows.getAll(), bookmarks: await chrome.bookmarks.getTree(), local: await chrome.storage.local.get(null), session: await chrome.storage.session.get(null) }));
             let stableRaw, stableSince;
             const before = await poll(async () => { await local({ action: 'get' }); return raw(); }, value => { const serialized = JSON.stringify(value); if (serialized !== stableRaw) { stableRaw = serialized; stableSince = Date.now(); return false; } return Date.now() - stableSince >= 400; }, 'settled raw state before rejected confirmation'); await reset(surface);
+            const geometry = await requireActionPromptGeometry({ surface, selector: '.arcify-space-action-prompt', poll });
             await surface.click(`[data-action-confirm="${command}"]`);
             await surface.waitForSelector('.arcify-bridge-status[data-state="error"]', { visible: true });
             await local({ action: 'get' }); const after = await raw(), observed = await trace(surface);
             assert.deepEqual(after, before, 'Rejected prepared action cannot change native or stored state.'); assertNavigationNoMutation(observed.events);
             const attempts = observed.peerEvents.filter(event => event.type === 'internal' && event.data.message.action === 'arcifySpaceAction'); assert.equal(attempts.length, 1);
             const error = await surface.$eval('.arcify-bridge-status[data-state="error"]', node => node.textContent); assert(error.length > 0);
-            await checkpoint(label, { before, after, observed, error, screenshot: await capture(page, label) });
+            await checkpoint(label, { before, after, geometry, observed, error, screenshot: await capture(page, label) });
         });
     };
     try {
@@ -435,10 +464,11 @@ export async function exerciseSpotlightNavigation({ browser, observePage, apiPag
             await ui(sourcePage.page, 'Require an explicit destination before Enter', async () => {
                 const before = await settle(); await reset(surface); await invoke(surface, command, 'Enter'); await surface.waitForSelector('[data-space-destination]');
                 const select = await surface.$('[data-space-destination]'); try { await select.press('Enter'); } finally { await select.dispose(); }
-                const picker = await surface.evaluate(readNavigationPicker); assertNavigationPicker(picker, command, captured.navigation); assert.equal(picker.error, 'Choose a destination Space first.');
+                const picker = await surface.evaluate(readNavigationPicker); assertNavigationPicker(picker, command, captured.navigation);
+                const geometry = await requireActionPromptGeometry({ surface, selector: '.arcify-space-action-prompt', poll }); assert.equal(picker.error, 'Choose a destination Space first.');
                 const after = await read(), observed = await trace(surface); assertSpotlightActionUnchanged(before, after); assertNavigationNoMutation(observed.events);
                 assertNavigationInput(observed.input, command, { outcome: 'no-choice', activation: 'Enter', submission: 'Enter' });
-                await checkpoint('empty-picker-enter-does-not-guess', { before, after, picker, observed, screenshot: await capture(sourcePage.page, 'no-destination-error') });
+                await checkpoint('empty-picker-enter-does-not-guess', { before, after, picker, geometry, observed, screenshot: await capture(sourcePage.page, 'no-destination-error') });
                 await surface.click('[data-action-cancel]');
             });
         }
@@ -465,8 +495,10 @@ export async function exerciseSpotlightNavigation({ browser, observePage, apiPag
             assert(!unavailable.some(row => row.type === 'arcify-space-action' && row.title === NAVIGATION_TITLES.moveCurrentTodayTab)); assert(unavailable.some(row => row.type === 'search-query'));
             const helperState = await helper.page.evaluate(readNewTabReuseState);
             if (requestedUrl === 'chrome://newtab/') {
-                const observed = await trace(); assertSpotlightHelperProof(helperState, observed.peerEvents, { spotlightId, tabId: helper.tab.id, windowId });
-                await checkpoint('browser-helper-real-nonce-proof', { helperState, observed });
+                let observed;
+                const { state: originState, origin } = await collectSpotlightHelperOrigin({ initialState: helperState, poll, spotlightId, tabId: helper.tab.id, windowId, contextAction: 'arcifySpaceActionsContext',
+                    read: async () => { observed = await trace(); const state = await helper.page.evaluate(readNewTabReuseState); return { state, peerEvents: observed.peerEvents }; } });
+                await checkpoint('browser-helper-real-nonce-proof', { helperState, originState, observed, origin });
             }
             const before = await read(); await reset();
             const rejection = await external(spotlightOptions, arcifyId, 'moveCurrentTodayTab', { windowId, supportedFeatures: NAVIGATION_FEATURES, context: helperCaptured.context, sourceUrl: helperCaptured.navigation.sourceUrl, destination: identity(target), inverted: helperCaptured.navigation.inverted });
