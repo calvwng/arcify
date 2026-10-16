@@ -4,7 +4,7 @@ import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
 import { assertSavedMoved, assertSavedMoveUnchanged, assertSavedMoveRejected, assertSavedMoveTrace, assertSavedMoveBookmarkTrace,
     assertSavedMoveReload, savedMoveTree, savedMoveEntry, canonicalSavedMoveBookmarks, installSavedMoveTrace, installSavedMoveBookmarkTrace,
-    serveSavedMoveFixture, savedMoveAction, savedMoveDestination, savedMoveSearchMatches } from '../../scripts/paired-chrome-saved-move.mjs';
+    serveSavedMoveFixture, savedMoveAction, savedMoveDestination, savedMoveSearchMatches, assertSavedMoveUnsupportedCleanup, assertSavedMoveDurableReload } from '../../scripts/paired-chrome-saved-move.mjs';
 
 function searchSample() {
     const closed = { id: 'closed', title: 'Distinct closed nonce', url: 'https://test/closed' };
@@ -54,7 +54,7 @@ function sample({ inverted = false, groupSync = false, closed = false, folderMov
         groups: [], projection: {}, savedSnapshot: [], journal: null };
     function project(state) {
         const nodes = flat(state.bookmarks);
-        state.savedSnapshot = state.spaces.flatMap(space => ['spaceBookmarks', 'temporaryTabs'].flatMap(section => space[section].map((tabId, order) => ({ tabId, spaceId: space.id, section, order, tabIndex: state.tabs.find(tab => tab.id === tabId).index, ...(state.bindings[tabId] ? { pinnedState: state.bindings[tabId] } : {}) }))));
+        state.savedSnapshot = state.spaces.flatMap(space => ['spaceBookmarks', 'temporaryTabs'].flatMap(section => space[section].map((tabId, order) => ({ tabId, spaceId: space.id, section, order, windowKey: `window-${state.tabs.find(tab => tab.id === tabId).windowId}`, tabIndex: state.tabs.find(tab => tab.id === tabId).index, ...(state.bindings[tabId] ? { pinnedState: state.bindings[tabId] } : {}) }))));
         state.snapshots = Object.fromEntries([7, 8].map(wid => {
             const own = state.tabs.filter(tab => tab.windowId === wid), local = ids => ids.filter(id => own.some(tab => tab.id === id));
             const leaves = state.spaces.flatMap(space => flat([find(nodes, space.bookmarkFolderId)]).filter(node => node.url).map(node => ({ id: node.id, spaceId: space.id, title: node.title, url: node.url,
@@ -223,12 +223,65 @@ test('server scopes synthetic pages by nonce and generates distinct real documen
     assert.equal(savedMoveAction(false), '#tab-context-menu [data-action="moveSavedItemsToSpace"]');
     assert.equal(savedMoveDestination('dst', true), '#folder-context-menu [data-action="moveSavedToDestination"][data-space-id="dst"]');
 });
+test('owned unsupported native-pin cleanup leaves every moved copy and source bookmark intact', () => {
+    const { after } = sample(), before = structuredClone(after);
+    const pin = flat(before.bookmarks).find(node => node.id === 'b');
+    const original = before.tabs.find(tab => tab.windowId === 7);
+    before.tabs.forEach(tab => { if (tab.windowId === 7) tab.index++; });
+    before.savedSnapshot.forEach(record => { if (before.tabs.find(tab => tab.id === record.tabId)?.windowId === 7) record.tabIndex++; });
+    const negative = { ...original, id: 901, index: 0, pinned: true, active: false, groupId: -1 };
+    before.tabs.push(negative); before.tabs.sort((a, b) => a.id - b.id);
+    before.bindings[901] = { bookmarkId: pin.id, pinnedUrl: pin.url }; before.aliases[901] = 'negative title';
+    before.pageStates[901] = { documentId: 'owned-negative' };
+    before.snapshots[7].tabs.push({ ...negative, spaceId: null });
+    assertSavedMoveUnsupportedCleanup(before, after, { tabId: 901, bookmarkId: pin.id });
+    for (const mutate of [s => delete s.bindings[101], s => s.bookmarks = [], s => s.tabs[0].url = 'https://changed/',
+        s => s.spaces[0].spaceBookmarks = [], s => s.activeSpaces[8] = 'other', s => s.windows[0].focused = false,
+        s => s.pageStates[202].value = 'lost', s => s.tabs.push(negative)]) {
+        const bad = structuredClone(after); mutate(bad);
+        assert.throws(() => assertSavedMoveUnsupportedCleanup(before, bad, { tabId: 901, bookmarkId: pin.id }));
+    }
+    for (const mutate of [s => s.tabs.find(tab => tab.id === 901).active = true,
+        s => s.tabs.find(tab => tab.id === 901).pinned = false,
+        s => s.savedSnapshot.push({ tabId: 901 }), s => s.spaces[0].spaceBookmarks.push(901)]) {
+        const bad = structuredClone(before); mutate(bad);
+        assert.throws(() => assertSavedMoveUnsupportedCleanup(bad, after, { tabId: 901, bookmarkId: pin.id }));
+    }
+});
+test('durable reload permits live window-key rotation and vacant rank compaction, retaining pending anchors', () => {
+    const { after: before } = sample();
+    before.savedSnapshot.push({ tabId: 901, spaceId: 'source', section: 'temporaryTabs', order: 7,
+        windowKey: 'pending-original', tabIndex: 3, url: 'https://pending/', nameOverride: { title: 'Pending' } });
+    before.savedSnapshot.push({ tabId: 902, spaceId: 'source', section: 'temporaryTabs', order: 9,
+        windowKey: 'pending-original', tabIndex: 4, url: 'https://pending/' });
+    const after = structuredClone(before);
+    for (const record of after.savedSnapshot) if (after.tabs.some(tab => tab.id === record.tabId)) record.windowKey += '-new';
+    after.savedSnapshot.find(record => record.tabId === 901).order = 1;
+    after.savedSnapshot.find(record => record.tabId === 902).order = 2;
+    assertSavedMoveDurableReload(before, after);
+    for (const mutate of [s => s.savedSnapshot.find(r => r.tabId === 901).windowKey = 'guessed',
+        s => s.savedSnapshot.find(r => r.tabId === 901).order = 3,
+        s => s.savedSnapshot.find(r => r.tabId === 902).order = 8,
+        s => s.savedSnapshot.find(r => r.tabId === 101).order += 100,
+        s => s.savedSnapshot.reverse(),
+        s => s.savedSnapshot.find(r => r.tabId === 901).order = 0,
+        s => s.savedSnapshot.find(r => r.tabId === 901).spaceId = 'destination',
+        s => s.savedSnapshot.find(r => r.tabId === 901).nameOverride.title = 'Lost',
+        s => s.savedSnapshot.find(r => r.tabId === 101).windowKey = 'split-window',
+        s => s.savedSnapshot.find(r => r.tabId === 101).tabIndex++,
+        s => s.savedSnapshot.push({ ...s.savedSnapshot[0] }),
+        s => s.savedSnapshot = s.savedSnapshot.filter(r => r.tabId !== 102),
+        s => s.tabs.find(t => t.id === 201).windowId = 7,
+        s => s.tabs.push({ id: 901, index: 3, windowId: 7 })]) {
+        const bad = structuredClone(after); mutate(bad); assert.throws(() => assertSavedMoveDurableReload(before, bad));
+    }
+});
 test('reload keeps exact all-window saved and global identities without old-ID remapping', () => {
     const { after: before } = sample(); const after = structuredClone(before);
     after.windows[0].focused = false; after.tabs.find(tab => tab.id === 101).active = false; after.tabs.find(tab => tab.id === 101).groupId = 77;
     assertSavedMoveReload(before, after, [101, 102, 201, 202, 90]);
     for (const change of [s => s.snapshots[8].bookmarks.find(bookmark => bookmark.id === 'b').spaceId = 'source', s => s.snapshots[8].tabs.find(tab => tab.id === 201).spaceId = 'source',
-        s => s.savedSnapshot[0].order = -999, s => s.favoriteSession.bindings = [], s => s.bookmarks = [], s => s.pageStates[202].documentId = 'new', s => s.tabs.find(tab => tab.id === 90).pinned = false]) {
+        s => s.savedSnapshot[0].order = -999, s => delete s.bindings[201], s => s.favoriteSession.bindings = [], s => s.bookmarks = [], s => s.pageStates[202].documentId = 'new', s => s.tabs.find(tab => tab.id === 90).pinned = false]) {
         const wrong = structuredClone(after); change(wrong); assert.throws(() => assertSavedMoveReload(before, wrong, [101, 102, 201, 202, 90]));
     }
 });

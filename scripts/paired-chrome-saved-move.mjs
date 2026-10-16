@@ -56,6 +56,25 @@ export function assertSavedMoveUnchanged(before, after) {
     assert.deepEqual(snapshots(after), snapshots(before), 'Rejected saved Move must not publish changed authenticated snapshots.');
 }
 
+/** Retire only the owned, deliberately unsupported native-pin negative fixture before reload. */
+export function assertSavedMoveUnsupportedCleanup(before, after, { tabId, bookmarkId }) {
+    const removed = exact(before.tabs, tabId);
+    assert(removed.pinned && !removed.active, 'Only the inactive native-pin negative fixture may be closed.');
+    assert.equal(before.bindings[tabId]?.bookmarkId, bookmarkId);
+    assert(!before.savedSnapshot.some(record => record.tabId === tabId));
+    assert(!before.spaces.some(space => [...space.spaceBookmarks, ...space.temporaryTabs].includes(tabId)));
+    const expected = structuredClone(before);
+    expected.tabs = expected.tabs.filter(tab => tab.id !== tabId).map(tab => tab.windowId === removed.windowId && tab.index > removed.index ? { ...tab, index: tab.index - 1 } : tab);
+    for (const record of expected.savedSnapshot) {
+        const tab = expected.tabs.find(tab => tab.id === record.tabId);
+        if (tab?.windowId === removed.windowId && before.tabs.find(item => item.id === tab.id).index > removed.index) record.tabIndex--;
+    }
+    delete expected.bindings[tabId]; delete expected.aliases[tabId]; delete expected.pageStates[tabId];
+    for (const snapshot of Object.values(expected.snapshots)) snapshot.tabs = snapshot.tabs.filter(tab => tab.id !== tabId);
+    assertSavedMoveUnchanged(expected, after);
+    assert.equal(flatten(after.bookmarks).filter(node => node.id === bookmarkId).length, 1, 'The original unsupported saved bookmark must remain.');
+}
+
 /** Only canonical bookmark fields are captured; Chrome folder modification timestamps are not identity/order. */
 export function canonicalSavedMoveBookmarks(nodes) {
     return nodes.map(({ id, parentId, index, title, url, dateAdded, children }) => ({ id, parentId, index, title,
@@ -418,6 +437,17 @@ export async function exerciseSavedMove({ apiPage, nativeSidebar, newTabPage, op
         await selectSource();
         await input('Keep the unmoved source saved page active before helper cleanup', () => native.page.click(savedRow(pins['same-url-decoy'].id)));
         await poll(read, state => state.tabs.find(tab => tab.id === copies['same-url-decoy'][0])?.active && state.activeSpaceId === source.id, 'unmoved source active before reload');
+        // Native toolbar pins are deliberately outside durable Space ownership.
+        // Their ephemeral saved binding is normalized on reload; retire this
+        // owned negative fixture first, without weakening moved-copy reload proof.
+        const beforeUnsupportedCleanup = await read();
+        await apiPage.evaluate(id => chrome.tabs.remove(id), blocked);
+        pages.delete(blocked);
+        const afterUnsupportedCleanup = await poll(read, state => { try {
+            assertSavedMoveUnsupportedCleanup(beforeUnsupportedCleanup, state, { tabId: blocked, bookmarkId: pins['native-blocked'].id }); return true;
+        } catch { return false; } }, 'only the owned unsupported native pin closes and its saved bookmark remains');
+        await checkpoint('native-pinned-negative-fixture-retired', { tabId: blocked, bookmarkId: pins['native-blocked'].id,
+            before: beforeUnsupportedCleanup, after: afterUnsupportedCleanup });
         await checkpoint('saved-render-and-paired-search', { rendered, searchBefore, searchAfter, searchSurface, invalidation, searchBeforeB, searchAfterB, searchSurfaceB, invalidationB });
         const closedHelper = await native.close(); native = null;
         const beforeReload = await waitForTodayMoveHelperCleanup({ read, poll, closedHelper });
@@ -452,11 +482,57 @@ export async function exerciseSavedMove({ apiPage, nativeSidebar, newTabPage, op
     }
 }
 
+/** Compare durable semantic identity while allowing documented reload rank/key normalization. */
+export function assertSavedMoveDurableReload(before, after) {
+    const states = [before, after];
+    for (const state of states) {
+        assert.equal(new Set(state.savedSnapshot.map(record => record.tabId)).size, state.savedSnapshot.length, 'Durable snapshot IDs must be unique.');
+        const keys = new Map(), windowsByKey = new Map(), ranks = new Map();
+        for (const record of state.savedSnapshot) {
+            assert(Number.isSafeInteger(record.order) && record.order >= 0, 'Durable ranks must be non-negative integers.');
+            assert(typeof record.windowKey === 'string' && record.windowKey.length, 'Every durable record requires its window provenance key.');
+            const partition = JSON.stringify([record.spaceId, record.section]);
+            if (!ranks.has(partition)) ranks.set(partition, new Set());
+            assert(!ranks.get(partition).has(record.order), 'Live and pending ranks must be unique within their partition.');
+            ranks.get(partition).add(record.order);
+            const tab = state.tabs.find(tab => tab.id === record.tabId);
+            if (tab) {
+                assert.equal(record.tabIndex, tab.index, 'Durable index must describe the actual exact native tab.');
+                if (keys.has(tab.windowId)) assert.equal(keys.get(tab.windowId), record.windowKey, 'One window has one live provenance key.');
+                if (windowsByKey.has(record.windowKey)) assert.equal(windowsByKey.get(record.windowKey), tab.windowId, 'Live window keys cannot collide across windows.');
+                keys.set(tab.windowId, record.windowKey); windowsByKey.set(record.windowKey, tab.windowId);
+            }
+        }
+    }
+    assert.deepEqual(after.savedSnapshot.map(record => record.tabId), before.savedSnapshot.map(record => record.tabId), 'Stored snapshot identity order must survive.');
+    const identity = state => state.savedSnapshot.map(({ tabIndex, windowKey, order, ...record }) => record).sort((a, b) => a.tabId - b.tabId);
+    assert.deepEqual(identity(after), identity(before), 'Every exact live/pending record, Space, section and saved metadata must survive.');
+    for (const old of before.savedSnapshot) {
+        const current = after.savedSnapshot.find(record => record.tabId === old.tabId);
+        const oldTab = before.tabs.find(tab => tab.id === old.tabId), newTab = after.tabs.find(tab => tab.id === old.tabId);
+        assert.equal(Boolean(newTab), Boolean(oldTab), 'Reload cannot adopt pending IDs or lose live identities.');
+        if (oldTab) {
+            assert.equal(newTab.windowId, oldTab.windowId, 'Live provenance must remain in the exact original window.');
+            assert.equal(current.order, old.order, 'Live durable order must remain exact.');
+        } else {
+            assert.equal(current.windowKey, old.windowKey, 'Pending provenance keys cannot rotate.'); assert.equal(current.tabIndex, old.tabIndex);
+            const ordinal = before.savedSnapshot.filter(record => record.spaceId === old.spaceId && record.section === old.section)
+                .sort((a, b) => a.order - b.order).findIndex(record => record.tabId === old.tabId);
+            assert(current.order === old.order || current.order === ordinal, 'Pending ranks may only retain their rank or compact to the exact prior merged ordinal.');
+        }
+    }
+    const partitions = state => {
+        const result = {};
+        for (const record of state.savedSnapshot) (result[JSON.stringify([record.spaceId, record.section])] ||= []).push(record);
+        return Object.fromEntries(Object.entries(result).sort().map(([key, records]) => [key, records.sort((a, b) => a.order - b.order).map(record => record.tabId)]));
+    };
+    assert.deepEqual(partitions(after), partitions(before), 'Rank gaps may collapse only without moving any live or pending identity across its ordered neighbors.');
+}
+
 export function assertSavedMoveReload(before, after, ids) {
     assertTodayMoveReload(before, after, ids);
     for (const field of ['favoriteSession']) assert.deepEqual(after[field], before[field], `Witnessed reload preserves ${field}.`);
-    const savedIdentity = records => records.map(({ tabIndex, ...record }) => record);
-    assert.deepEqual(savedIdentity(after.savedSnapshot), savedIdentity(before.savedSnapshot), 'Witnessed reload preserves exact durable saved order, ownership and metadata.');
+    assertSavedMoveDurableReload(before, after);
     for (const [wid, snapshot] of Object.entries(before.snapshots)) {
         const current = after.snapshots[wid]; assert.equal(current.activeSpaceId, snapshot.activeSpaceId);
         assert.deepEqual(current.bookmarks, snapshot.bookmarks); assert.deepEqual(current.favorites, snapshot.favorites);
