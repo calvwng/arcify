@@ -33,6 +33,23 @@ export function savedMoveEntry(node, tabId = null) {
     return { bookmarkId: node.id, parentId: node.parentId, title: node.title, url: node.url || null, tabId,
         ...(!node.url ? { tree: savedMoveTree(node) } : {}) };
 }
+
+// Spotlight intentionally represents an open saved pin by its authoritative
+// bookmark result and suppresses the duplicate open-tab row. Validate that
+// presentation together with the exact per-window saved/live binding.
+export function savedMoveSearchMatches(rows, snapshot, { windowId, spaceId, spaceName, closed, live, tabId }) {
+    if (snapshot.windowId !== windowId) return false;
+    for (const [pin, expectedTabId] of [[closed, null], [live, tabId]]) {
+        const records = snapshot.bookmarks.filter(item => item.id === pin.id);
+        if (records.length !== 1 || records[0].spaceId !== spaceId || records[0].tabId !== expectedTabId
+            || records[0].title !== pin.title || records[0].url !== pin.url) return false;
+        const matches = rows.filter(row => row.type === 'bookmark' && row.title === pin.title);
+        if (matches.length !== 1 || matches[0].space !== spaceName) return false;
+        if (rows.some(row => row.type === 'open-tab' && row.title === pin.title)) return false;
+    }
+    const linked = snapshot.tabs.filter(tab => tab.id === tabId);
+    return linked.length === 1 && linked[0].windowId === windowId && linked[0].spaceId === spaceId;
+}
 export function assertSavedMoveUnchanged(before, after) {
     assert.deepEqual(comparable(after), comparable(before), 'Cancelled/rejected saved Move must preserve every captured native, bookmark, Favorite and Space identity.');
     const snapshots = state => Object.fromEntries(Object.entries(state.snapshots).map(([id, { capturedAt, ...snapshot }]) => [id, snapshot]));
@@ -354,14 +371,18 @@ export async function exerciseSavedMove({ apiPage, nativeSidebar, newTabPage, op
         const invalidationB = await poll(() => spotlightB.page.evaluate(() => ({ timeOrigin: performance.timeOrigin, changes: globalThis.__pairedTodaySearch?.changes || [] })), state => state.changes.length > 0, 'authenticated saved Move invalidation reaches the existing window-B Spotlight');
         assert.equal(invalidationB.timeOrigin, searchSurfaceB.documentTimeOrigin);
         const searchAfterB = await ui(spotlightB.page, 'Return to window B mounted saved query without retyping or reloading', async () => {
-            const rows = await poll(() => spotlightB.page.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'bookmark' && row.title === pins.closed.title && row.space === destination.name)
-                && rows.some(row => row.type === 'open-tab' && row.title === pins.active.title && row.space === destination.name), 'window-B exact closed and live saved ownership refreshed');
+            const rows = await poll(() => spotlightB.page.evaluate(readSpotlightRows), rows => savedMoveSearchMatches(rows, moved.snapshots[fixture.windowB], {
+                windowId: fixture.windowB, spaceId: destination.id, spaceName: destination.name,
+                closed: pins.closed, live: pins.active, tabId: copies.active[1]
+            }), 'window-B exact closed and live saved ownership refreshed');
             assert.equal(await spotlightB.page.$eval('[data-testid="spotlight-input"]', node => node.value), nonce);
             assert.equal(await spotlightB.page.evaluate(() => performance.timeOrigin), searchSurfaceB.documentTimeOrigin); return rows;
         });
         const searchAfter = await ui(spotlight.page, 'Return to mounted saved Move query without retyping or reloading', async () => {
-            const rows = await poll(() => spotlight.page.evaluate(readSpotlightRows), rows => rows.some(row => row.type === 'bookmark' && row.title === pins.closed.title && row.space === destination.name)
-                && rows.some(row => row.type === 'open-tab' && row.title === pins.active.title && row.space === destination.name), 'closed saved and exact live results refresh to destination');
+            const rows = await poll(() => spotlight.page.evaluate(readSpotlightRows), rows => savedMoveSearchMatches(rows, moved.snapshots[windowId], {
+                windowId, spaceId: destination.id, spaceName: destination.name,
+                closed: pins.closed, live: pins.active, tabId: copies.active[0]
+            }), 'closed saved and exact live results refresh to destination');
             assert.equal(await spotlight.page.$eval('[data-testid="spotlight-input"]', node => node.value), nonce);
             assert.equal(await spotlight.page.evaluate(() => performance.timeOrigin), searchSurface.documentTimeOrigin); return rows;
         });

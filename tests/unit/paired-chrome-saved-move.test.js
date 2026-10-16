@@ -4,7 +4,33 @@ import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
 import { assertSavedMoved, assertSavedMoveUnchanged, assertSavedMoveRejected, assertSavedMoveTrace, assertSavedMoveBookmarkTrace,
     assertSavedMoveReload, savedMoveTree, savedMoveEntry, canonicalSavedMoveBookmarks, installSavedMoveTrace, installSavedMoveBookmarkTrace,
-    serveSavedMoveFixture, savedMoveAction, savedMoveDestination } from '../../scripts/paired-chrome-saved-move.mjs';
+    serveSavedMoveFixture, savedMoveAction, savedMoveDestination, savedMoveSearchMatches } from '../../scripts/paired-chrome-saved-move.mjs';
+
+function searchSample() {
+    const closed = { id: 'closed', title: 'Distinct closed nonce', url: 'https://test/closed' };
+    const live = { id: 'live', title: 'Distinct live nonce', url: 'https://test/live' };
+    return { options: { windowId: 8, spaceId: 'destination', spaceName: 'Home', closed, live, tabId: 201 },
+        rows: [closed, live].map(pin => ({ type: 'bookmark', title: pin.title, space: 'Home' })),
+        snapshot: { windowId: 8, bookmarks: [{ ...closed, spaceId: 'destination', tabId: null },
+            { ...live, spaceId: 'destination', tabId: 201 }], tabs: [{ id: 201, windowId: 8, spaceId: 'destination' }] } };
+}
+test('moved saved live pins retain bookmark presentation and exact window binding without a duplicate tab row', () => {
+    const s = searchSample();
+    s.rows.push({ type: 'arcify-favorite', title: s.options.live.title, space: null });
+    assert.equal(savedMoveSearchMatches(s.rows, s.snapshot, s.options), true);
+});
+for (const [name, change] of Object.entries({
+    wrongType: s => s.rows[1].type = 'open-tab', duplicate: s => s.rows.push({ ...s.rows[1] }),
+    duplicateTab: s => s.rows.push({ ...s.rows[1], type: 'open-tab' }), staleSpace: s => s.rows[1].space = 'Work',
+    missingClosed: s => s.rows.shift(), wrongWindow: s => s.snapshot.windowId = 7,
+    wrongLiveCopy: s => s.snapshot.bookmarks[1].tabId = 101, lostBinding: s => s.snapshot.bookmarks[1].tabId = null,
+    unexpectedClosedBinding: s => s.snapshot.bookmarks[0].tabId = 99, wrongBookmark: s => s.snapshot.bookmarks[1].id = 'same-url-decoy',
+    changedUrl: s => s.snapshot.bookmarks[1].url = 'https://other/', changedTitle: s => s.snapshot.bookmarks[1].title = 'Other',
+    staleOwnership: s => s.snapshot.bookmarks[1].spaceId = 'source', missingLive: s => s.snapshot.tabs = [],
+    wrongLiveWindow: s => s.snapshot.tabs[0].windowId = 7, wrongLiveSpace: s => s.snapshot.tabs[0].spaceId = 'source'
+})) test(`saved search evidence rejects ${name}`, () => {
+    const s = searchSample(); change(s); assert.equal(savedMoveSearchMatches(s.rows, s.snapshot, s.options), false);
+});
 
 const flat = nodes => nodes.flatMap(node => [node, ...flat(node.children || [])]);
 const find = (nodes, id) => flat(nodes).find(node => node.id === id);
