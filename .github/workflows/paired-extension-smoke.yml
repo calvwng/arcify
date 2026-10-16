@@ -21,6 +21,16 @@ on:
       - 'scripts/paired-chrome-menu-focus.mjs'
       - 'scripts/paired-chrome-sidebar.mjs'
       - 'scripts/paired-chrome-sidebar-appearance.mjs'
+      - 'scripts/paired-chrome-space-theme.mjs'
+      - 'scripts/paired-chrome-spotlight-appearance.mjs'
+      - 'tests/unit/paired-chrome-space-theme.test.js'
+      - 'tests/unit/paired-chrome-spotlight-appearance.test.js'
+      - 'tests/unit/paired-chrome-theme-wiring.test.js'
+      - 'tests/unit/sidebar-theme.test.js'
+      - 'tests/unit/appearance-bootstrap.test.js'
+      - 'assets/appearance-bootstrap.js'
+      - 'docs/space-themes.md'
+      - 'docs/theme-paired-ci.md'
       - 'scripts/paired-chrome-management-scroll.mjs'
       - 'scripts/paired-chrome-today-selection.mjs'
       - 'scripts/paired-chrome-today-move.mjs'
@@ -170,7 +180,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 019b52718c84c84f785081537534b8902e47946a
+          ref: 4e4204bacde4beef5f8686437cbf9c540f65fe7c
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -239,7 +249,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 019b52718c84c84f785081537534b8902e47946a
+          ref: 4e4204bacde4beef5f8686437cbf9c540f65fe7c
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node
@@ -307,7 +317,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 019b52718c84c84f785081537534b8902e47946a
+          ref: 4e4204bacde4beef5f8686437cbf9c540f65fe7c
           persist-credentials: false
           path: arcify-spotlight
       - name: Set up Node

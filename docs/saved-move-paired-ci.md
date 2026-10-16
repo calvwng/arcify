@@ -1,6 +1,6 @@
 # Saved pin and folder Move: paired Chrome evidence
 
-The mandatory full runner adds cases 44 and 45 before the unchanged Favorite lifecycle and browser-restart ending. It now requires 45 cases, retaining every original 43 case; the separate Favorite lifecycle (5) and native Split View (4) plans remain unchanged. No quick mode, skipped result, retry on the same profile, or window-B exemption can satisfy the full report.
+The mandatory full runner adds cases 44 and 45 before the unchanged Favorite lifecycle and browser-restart ending. Those additions retained every original 43 case. With the separate theme additions the full plan now requires 47 cases; the separate Favorite lifecycle (5) and native Split View (4) plans remain unchanged. No quick mode, skipped result, retry on the same profile, or window-B exemption can satisfy the full report.
 
 ## Real-browser fixture
 
@@ -23,7 +23,7 @@ Every case removes only its disposable fixture data, restores the original windo
 
 ## Local checks and limits
 
-Importing the evidence module and running its pure validator tests does not launch Chrome. Mutation tests deliberately corrupt identities, hierarchy/order, both window snapshots, global ownership, native pinning, group projection, trusted input and reload continuity and require rejection. The runner's strict count/order/status tests require all 45/5/4 selected cases exactly once.
+Importing the evidence module and running its pure validator tests does not launch Chrome. Mutation tests deliberately corrupt identities, hierarchy/order, both window snapshots, global ownership, native pinning, group projection, trusted input and reload continuity and require rejection. The runner's strict count/order/status tests require all 47/5/4 selected cases exactly once.
 
 No browser fixture is run locally. Real acceptance requires the final combined commit's hosted workflow; passing pure tests or a production build is not browser evidence. Backend storage-failure and crash-journal tests are intentionally separate from real Chrome evidence: the browser fixture does not inject fake storage errors or manufacture split IDs. Native Split View descendants and ambiguous bindings fail closed in backend tests. Physical keyboard hardware, Helium and user-profile behavior remain unverified.
 

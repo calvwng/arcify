@@ -103,7 +103,7 @@ never catches that guard's failure or silently retries around it; it is a separa
 explicitly authorized provenance choice. No host permissions or key trust were
 changed to make the signed-source route pass.
 
-The full 45 cases (the original 39 plus two Today Move, two Today creation-order and two saved Move cases) and fresh-profile
+The full 47 cases (the original 39 plus two Today Move, two Today creation-order, two saved Move and two theme cases) and fresh-profile
 Favorite lifecycle 5 cases remain mandatory, with their original order and
 assertions. The supplemental job uses
 setup cases 0–2 plus distinct case 39; its four-case pass is never a full-suite pass.

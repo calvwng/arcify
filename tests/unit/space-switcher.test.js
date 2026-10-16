@@ -285,7 +285,9 @@ test('line styles keep a visible independent paint surface with dark/forced-colo
     assert.match(style, /background: var\(--sidebar-drop-color, #2563eb\)/);
     assert.doesNotMatch(style, /transition|animation/);
     assert.match(css, /\.space-drop-anchor\[hidden\] \{ display: none; \}/);
-    assert.match(css, /prefers-color-scheme: dark[^]*--sidebar-drop-color: #93c5fd/);
+    const theme = await readFile(new URL('../../sidebar-theme.js', import.meta.url), 'utf8');
+    assert.match(theme, /prefers-color-scheme: dark/);
+    assert.match(theme, /'--sidebar-drop-color': theme.marker/);
     assert.match(css, /\.space-drop-anchor \{\s*background: Highlight;[^}]*forced-color-adjust: none/);
 });
 

@@ -1,5 +1,6 @@
 // Optional, one-way projection. This is the only module allowed to mutate groups.
 // Space identity and ordering never depend on the projection succeeding.
+import { normalizeSpaceColor } from './space-colors.js';
 import { hasNativeSplit } from './native-split-safety.js';
 
 export async function detachGlobalTabs(tabIds) {
@@ -97,9 +98,9 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}, globalTabIds = 
             // member. A moved active tab may belong to a non-current logical Space.
             const collapsed = Boolean(activeSpaces[windowId] && activeSpaces[windowId] !== space.id &&
                 !state.activeMember && !state.activeGroupMember);
-            if (!liveGroup || liveGroup.title !== space.name || liveGroup.color !== space.color || liveGroup.collapsed !== collapsed) {
+            if (!liveGroup || liveGroup.title !== space.name || liveGroup.color !== normalizeSpaceColor(space.color) || liveGroup.collapsed !== collapsed) {
                 if (state.missing || state.blocked && !state.metadataSafe) { if (state.blocked) defer(); continue; }
-                await chrome.tabGroups.update(groupId, { title: space.name, color: space.color, collapsed });
+                await chrome.tabGroups.update(groupId, { title: space.name, color: normalizeSpaceColor(space.color), collapsed });
             }
             const current = await chrome.tabs.query({ groupId });
             current.sort((a, b) => a.index - b.index);

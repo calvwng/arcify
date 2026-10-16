@@ -6,7 +6,7 @@ import { DEFAULT_SIDEBAR_APPEARANCE as defaults, SIDEBAR_APPEARANCE_KEY as key,
     normalizeSidebarAppearance, applySidebarAppearance, initializeSidebarAppearance } from '../../sidebar-appearance.js';
 import { initializeSidebarAppearanceOptions } from '../../sidebar-appearance-options.js';
 
-const compact = { favoritesLayout: 'compact', favoriteTileSize: 44, spaceHeaderSize: 12, hideSpaceNames: false };
+const compact = { favoritesLayout: 'compact', favoriteTileSize: 44, spaceHeaderSize: 12, hideSpaceNames: false, themeMode: 'system' };
 function apiFixture(initial = {}) {
     const data = structuredClone(initial), listeners = new Set(), writes = [];
     let locked = Promise.resolve();
@@ -51,11 +51,11 @@ test('appearance normalization preserves defaults and bounds only finite numeric
         assert.deepEqual(normalizeSidebarAppearance({ favoriteTileSize: bad, spaceHeaderSize: bad }), defaults);
     }
     assert.deepEqual(normalizeSidebarAppearance({ favoritesLayout: 'compact', favoriteTileSize: -5, spaceHeaderSize: 200, unexpected: true }),
-        { favoritesLayout: 'compact', favoriteTileSize: 36, spaceHeaderSize: 20, hideSpaceNames: false });
+        { favoritesLayout: 'compact', favoriteTileSize: 36, spaceHeaderSize: 20, hideSpaceNames: false, themeMode: 'system' });
     assert.deepEqual(normalizeSidebarAppearance({ favoritesLayout: 'anything', favoriteTileSize: 99, spaceHeaderSize: -1 }),
-        { favoritesLayout: 'standard', favoriteTileSize: 64, spaceHeaderSize: 12, hideSpaceNames: false });
+        { favoritesLayout: 'standard', favoriteTileSize: 64, spaceHeaderSize: 12, hideSpaceNames: false, themeMode: 'system' });
     assert.deepEqual(normalizeSidebarAppearance({ favoriteTileSize: 45.6, spaceHeaderSize: 17.2 }),
-        { favoritesLayout: 'standard', favoriteTileSize: 46, spaceHeaderSize: 17, hideSpaceNames: false });
+        { favoritesLayout: 'standard', favoriteTileSize: 46, spaceHeaderSize: 17, hideSpaceNames: false, themeMode: 'system' });
 });
 
 test('in-place density updates preserve Favorite names, state, handlers and Space edit focus', () => {
@@ -119,7 +119,7 @@ test('options restore and independently autosave layout, tile and header through
     await f.input('favoritesLayout', 'standard', 'change');
     assert.equal(f.node('favoriteTileSize').disabled, true);
     assert.equal(f.node('spaceHeaderSize').disabled, false);
-    assert.deepEqual(f.data[key], { favoritesLayout: 'standard', favoriteTileSize: 52, spaceHeaderSize: 19, hideSpaceNames: false });
+    assert.deepEqual(f.data[key], { favoritesLayout: 'standard', favoriteTileSize: 52, spaceHeaderSize: 19, hideSpaceNames: false, themeMode: 'system' });
     assert.deepEqual(f.data.persistentFavorites, ['preserve']); assert.equal(f.data.unrelated, true);
     assert(f.writes.every(patch => Object.keys(patch).join() === key));
     assert.match(f.node('sidebarAppearanceStatus').textContent, /saved for this Chrome profile/);
@@ -178,7 +178,7 @@ test('two options pages serialize independent patches and reconcile to the same 
         assert.equal(f.node('spaceHeaderSize').value, '12');
     }
     await Promise.all([b.input('favoriteTileSize', 52), a.input('spaceHeaderSize', 20)]);
-    assert.deepEqual(shared.data[key], { ...compact, favoriteTileSize: 52, spaceHeaderSize: 20, hideSpaceNames: false });
+    assert.deepEqual(shared.data[key], { ...compact, favoriteTileSize: 52, spaceHeaderSize: 20, hideSpaceNames: false, themeMode: 'system' });
     for (const f of [a, b]) {
         assert.equal(f.node('favoriteTileSize').value, '52');
         assert.equal(f.node('spaceHeaderSize').value, '20');
@@ -251,4 +251,28 @@ test('icon-only CSS leaves headers and menus intact and preserves a 32px button 
     assert.match(css, /data-hide-space-names="true"\] \.space-switcher \.space-icon-fallback \{ display: inline-block; \}/);
     assert.match(css, /\.space-switcher button:focus-visible \{ outline: 2px solid currentColor;/);
     assert.doesNotMatch(css, /data-hide-space-names="true"\][^{]*\.(?:space-name|space-header|space-context-menu)\s*\{/);
+});
+
+test('appearance theme normalizes to System without migrating storage and round trips explicit choices', async () => {
+    for (const value of ['system', undefined, null, 'LIGHT', 'url(bad)', {}, 1]) assert.equal(normalizeSidebarAppearance({ themeMode: value }).themeMode, 'system');
+    const f = await optionsFixture({ [key]: { ...compact, themeMode: 'dark' } });
+    assert.equal(f.node('themeMode').value, 'dark'); assert.equal(f.document.documentElement.dataset.theme, 'dark');
+    assert.equal(f.writes.length, 0);
+    await f.input('themeMode', 'light', 'change');
+    assert.equal(f.data[key].themeMode, 'light'); assert.equal(f.document.documentElement.dataset.theme, 'light');
+    f.controller.dispose();
+    const reopened = await optionsFixture(f.data); assert.equal(reopened.node('themeMode').value, 'light');
+    reopened.node('resetSidebarAppearance').dispatchEvent(new reopened.window.Event('click')); await reopened.controller.whenSaved();
+    assert.equal(reopened.data[key].themeMode, 'system'); assert.equal(reopened.node('themeMode').value, 'system'); reopened.controller.dispose();
+});
+
+test('concurrent options theme and density patches merge, update all pages and preserve unrelated data', async () => {
+    const shared = apiFixture({ [key]: defaults, colorOverrides: { blue: '#000000' }, spaces: [{ id: 'a', color: 'blue', customTint: '#ffffff' }] });
+    const a = await optionsFixture({}, shared), b = await optionsFixture({}, shared);
+    await Promise.all([a.input('themeMode', 'dark', 'change'), b.input('spaceHeaderSize', 12)]);
+    assert.deepEqual(shared.data[key], { ...defaults, themeMode: 'dark', spaceHeaderSize: 12 });
+    for (const f of [a, b]) { assert.equal(f.node('themeMode').value, 'dark'); assert.equal(f.document.documentElement.dataset.theme, 'dark'); }
+    assert.deepEqual(shared.data.spaces, [{ id: 'a', color: 'blue', customTint: '#ffffff' }]);
+    assert.deepEqual(shared.data.colorOverrides, { blue: '#000000' });
+    a.controller.dispose(); b.controller.dispose();
 });

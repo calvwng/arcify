@@ -112,6 +112,7 @@ export function assertSpaceDetailsProjection(state, { spaceId, name, color, fold
     if (requireVisibleTheme) {
         assert.equal(state.activeSpaceId, spaceId); assert.equal(state.headerVisible, true);
         assert(state.expectedColor?.trim()); assert.equal(state.appliedColor, state.expectedColor);
+        assert(state.expectedTint?.trim()); assert.equal(state.appliedTint, state.expectedTint);
     }
     if (folder) assert.deepEqual(state.folders.filter(item => item.id === folder.id), [{ id: folder.id, title: folder.title, visible: true }]);
     return state;
@@ -129,7 +130,9 @@ export function assertSpaceContextUnchanged(before, after) {
     assert.deepEqual(after, before, 'Opening/cancelling a Space menu or reloading must preserve all captured durable and live state.');
 }
 export function assertSpaceMetadataSaved(before, after, { spaceId, changes }) {
-    assert(Object.keys(changes).length > 0 && Object.keys(changes).every(key => ['icon', 'name', 'color'].includes(key)));
+    assert(Object.keys(changes).length > 0 && Object.keys(changes).every(key => ['icon', 'name', 'color', 'customTint'].includes(key)));
+    if (Object.hasOwn(changes, 'color')) { assert(SPACE_COLOR_IDS.includes(changes.color)); assert.equal(changes.customTint, null); }
+    if (Object.hasOwn(changes, 'customTint')) assert(changes.customTint === null || /^#[0-9a-f]{6}$/.test(changes.customTint));
     const expected = structuredClone(before), matches = expected.spaces.filter(space => space.id === spaceId);
     assert.equal(matches.length, 1, 'The exact target Space must exist before editing.');
     const target = matches[0], entry = expected.registry[target.bookmarkFolderId];
@@ -263,7 +266,9 @@ export function readSpaceDetailsProjection(spaceId) {
     return { spaceId, headerCount: headers.length, chipCount: chips.length, headerName: header?.querySelector('.space-name')?.value,
         headerColor: color, activeSpaceId: document.querySelector('.space.active')?.dataset.spaceId,
         headerVisible: Boolean(header?.getClientRects().length && getComputedStyle(header).visibility === 'visible'),
-        expectedColor: getComputedStyle(document.documentElement).getPropertyValue(`--chrome-${color}-color`).trim(),
+        expectedTint: getComputedStyle(document.documentElement).getPropertyValue(`--chrome-${color}-color`).trim(),
+        appliedTint: getComputedStyle(document.documentElement).getPropertyValue('--space-tint').trim(),
+        expectedColor: getComputedStyle(document.documentElement).getPropertyValue('--space-bg-color').trim(),
         appliedColor: container ? getComputedStyle(container).getPropertyValue('--space-bg-color').trim() : null, chipName: chip?.lastElementChild?.textContent, chipLabel: chip?.getAttribute('aria-label'),
         folders: [...(header?.querySelectorAll('.folder[data-bookmark-id]') || [])].map(node => ({ id: node.dataset.bookmarkId, title: node.querySelector('.folder-title')?.textContent,
             visible: Boolean(node.getClientRects().length && getComputedStyle(node).visibility === 'visible') })) };
@@ -456,7 +461,7 @@ export async function exerciseSpaceContextBasics({ apiPage, newTabPage, pageForU
         await ui(page, 'Choose a basic color on the exact inactive Space', () => page.click(`[data-choice="${color}"]`));
         await awaitEditorClosed(page);
         const afterColor = await poll(read, state => state.spaces.find(space => space.id === target.id)?.color === color && state.registry[target.bookmarkFolderId]?.color === color, 'exact inactive Space color saved');
-        evidence.colored = { before: beforeColor, after: afterColor, proof: assertSpaceMetadataSaved(beforeColor, afterColor, { spaceId: target.id, changes: { color } }) };
+        evidence.colored = { before: beforeColor, after: afterColor, proof: assertSpaceMetadataSaved(beforeColor, afterColor, { spaceId: target.id, changes: { color, customTint: null } }) };
         target.color = color; await details(page);
         assert.equal(await page.$eval(chip(target.id), node => node === document.activeElement), true);
         await openMenu(page, chip(target.id), target.name);

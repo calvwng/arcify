@@ -1,7 +1,7 @@
 import { getTodayOrderInverted, getTodayInsertionIndex } from './today-order.js';
 import { mergeVisibleOrder } from './sidebar-tabs.js';
 import { normalizeSpaceIcon } from './space-icons.js';
-import { SPACE_COLORS } from './space-colors.js';
+import { SPACE_COLORS, normalizeCustomTint, normalizeSpaceColor } from './space-colors.js';
 import { createFolder } from './folder-policy.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { moveSpace } from './space-order.js';
@@ -32,11 +32,14 @@ export function applySpacePatch(current, before, after) {
         let target = result.find(s => s.id === next.id);
         if (!target) {
             if (prev) continue; // A different panel deleted this space.
-            target = { ...clone(next), spaceBookmarks: [], temporaryTabs: [] };
+            target = { ...clone(next), color: normalizeSpaceColor(next.color),
+                ...(next.customTint !== undefined ? { customTint: normalizeCustomTint(next.customTint) } : {}), spaceBookmarks: [], temporaryTabs: [] };
             result.push(target);
         }
         for (const [key, value] of Object.entries(next)) {
-            if (!sections.includes(key) && JSON.stringify(value) !== JSON.stringify(prev?.[key])) target[key] = clone(value);
+            if (key === 'color' && !SPACE_COLORS.includes(value)) continue;
+            if (key === 'customTint' && value !== null && !normalizeCustomTint(value)) continue;
+            if (!sections.includes(key) && JSON.stringify(value) !== JSON.stringify(prev?.[key])) target[key] = key === 'customTint' ? normalizeCustomTint(value) : clone(value);
         }
         for (const key of sections) {
             const oldIds = prev?.[key] || [];
@@ -84,7 +87,8 @@ export class SpaceStore {
         folder ||= await LocalStorage.getOrCreateSpaceFolder(name);
         const entry = await LocalStorage.getOrCreateSpaceRegistryEntry(folder.id, { name, color });
         return { id: entry.spaceUuid, spaceUuid: entry.spaceUuid, uuid: entry.spaceUuid,
-            bookmarkFolderId: folder.id, name, color: entry.color || color,
+            bookmarkFolderId: folder.id, name, color: normalizeSpaceColor(entry.color || color),
+            ...(normalizeCustomTint(entry.customTint) ? { customTint: normalizeCustomTint(entry.customTint) } : {}),
             ...(normalizeSpaceIcon(entry.icon) ? { icon: normalizeSpaceIcon(entry.icon) } : {}), spaceBookmarks: [], temporaryTabs: [] };
     }
     async initialize() {
@@ -104,7 +108,8 @@ export class SpaceStore {
         this.recoveryCandidates = new Set(session.spaceSession ? session.spaceRecoveryCandidates || [] : []);
         const savedMoveRecovery = await recoverSavedMoveData(this, data, session);
         if (this.favoriteStore) await this.favoriteStore.reconcile({ updateSpaces: false });
-        this.spaces = data.spaces || [];
+        this.spaces = (data.spaces || []).map(space => ({ ...space, color: normalizeSpaceColor(space.color),
+            ...(space.customTint !== undefined ? { customTint: normalizeCustomTint(space.customTint) } : {}) }));
         this.snapshotByTab = new Map((data.spaceTabSnapshot || []).filter(t => t.tabId).map(t => [t.tabId, t]));
         this.provisional = new Set();
         this.recoveryCandidates = new Set(session.spaceSession ? session.spaceRecoveryCandidates || [] : []);
@@ -245,8 +250,9 @@ export class SpaceStore {
             }
             space.name = folder.title;
             const entry = await LocalStorage.getOrCreateSpaceRegistryEntry(folder.id, {
-                spaceUuid: space.id, name: space.name, color: space.color, icon: space.icon
+                spaceUuid: space.id, name: space.name, color: space.color, icon: space.icon, customTint: space.customTint
             });
+            if (entry.spaceUuid === space.id && space.customTint === undefined && normalizeCustomTint(entry.customTint)) space.customTint = normalizeCustomTint(entry.customTint);
             // Only recover metadata belonging to this stable Space identity.
             if (entry.spaceUuid === space.id && space.icon === undefined && normalizeSpaceIcon(entry.icon)) space.icon = normalizeSpaceIcon(entry.icon);
         }
@@ -508,14 +514,15 @@ export class SpaceStore {
                 const space = this.spaces.find(space => space.id === message.spaceId);
                 if (!space) throw new Error('This Space no longer exists.');
                 const attrs = message.changes || {};
-                if (Object.keys(attrs).some(key => !['name', 'color', 'icon'].includes(key))) throw new Error('Unsupported Space setting.');
+                if (Object.keys(attrs).some(key => !['name', 'color', 'icon', 'customTint'].includes(key))) throw new Error('Unsupported Space setting.');
                 if (attrs.name !== undefined && (typeof attrs.name !== 'string' || !attrs.name.trim() || attrs.name.trim().length > 256)) throw new Error('Enter a Space name between 1 and 256 characters.');
                 if (attrs.color !== undefined && !SPACE_COLORS.includes(attrs.color)) throw new Error('Choose one of the eight Space colors.');
+                if (attrs.customTint !== undefined && attrs.customTint !== null && !normalizeCustomTint(attrs.customTint)) throw new Error('Enter a six-digit hex color, such as #8bb3f3.');
                 if (attrs.icon !== undefined && attrs.icon !== null && normalizeSpaceIcon(attrs.icon) !== attrs.icon) throw new Error('Choose a preset or enter one complete emoji.');
                 const folder = await getSpaceBookmarkFolder(space);
-                const entry = await LocalStorage.getOrCreateSpaceRegistryEntry(folder.id, { spaceUuid: space.id, name: space.name, color: space.color, icon: space.icon });
+                const entry = await LocalStorage.getOrCreateSpaceRegistryEntry(folder.id, { spaceUuid: space.id, name: space.name, color: space.color, icon: space.icon, customTint: space.customTint });
                 if (entry.spaceUuid !== space.id) throw new Error('This Space bookmark identity has changed. Refresh and try again.');
-                const changes = { ...attrs, ...(attrs.name !== undefined ? { name: attrs.name.trim() } : {}) };
+                const changes = { ...attrs, ...(attrs.customTint !== undefined ? { customTint: normalizeCustomTint(attrs.customTint) } : {}), ...(attrs.name !== undefined ? { name: attrs.name.trim() } : {}) };
                 if (changes.name !== undefined) await chrome.bookmarks.update(folder.id, { title: changes.name });
                 await LocalStorage.updateSpaceRegistryEntry(folder.id, changes);
                 Object.assign(space, changes);

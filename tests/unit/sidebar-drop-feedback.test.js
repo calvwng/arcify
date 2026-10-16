@@ -96,6 +96,8 @@ test('feedback styles preserve hit-testing, dark mode and forced-color contrast 
     assert.match(anchor, /position: fixed/);
     assert.match(anchor, /pointer-events: none/);
     assert.doesNotMatch(anchor, /transition|animation/);
-    assert.match(css, /prefers-color-scheme: dark/);
+    const theme = await readFile(new URL('../../sidebar-theme.js', import.meta.url), 'utf8');
+    assert.match(theme, /prefers-color-scheme: dark/);
+    assert.match(theme, /'--sidebar-drop-color': theme.marker/);
     assert.match(css, /forced-colors: active/);
 });

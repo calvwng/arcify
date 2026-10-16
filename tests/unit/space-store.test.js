@@ -984,3 +984,75 @@ test('metadata rejects malformed emoji before any write and cannot import emoji 
     await assert.rejects(next.dispatch({ action: 'metadata', spaceId: 'b', changes: { icon: '🇭🇰' } }), /identity has changed/);
     assert.equal(local.spaceRegistry.b.icon, '👩🏽‍💻');
 });
+
+test('custom Space tint is UUID metadata across rename, stale patch, worker restart, folder discovery and clear', async () => {
+    const folders = ['a', 'b'].map(id => ({ id, title: id, parentId: 'root' }));
+    chrome.bookmarks.getChildren = async id => id === 'root' ? structuredClone(folders) : [];
+    chrome.bookmarks.get = async id => structuredClone(folders.filter(folder => folder.id === id));
+    chrome.bookmarks.update = async (id, changes) => Object.assign(folders.find(folder => folder.id === id), changes);
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    const before = structuredClone(store.spaces);
+    await store.dispatch({ action: 'metadata', spaceId: 'b', changes: { customTint: '#Ff0088', icon: '👩🏽‍💻' } });
+    assert.equal(local.spaces[1].customTint, '#ff0088'); assert.equal(local.spaces[1].color, 'blue');
+    assert.equal(local.spaceRegistry.b.customTint, '#ff0088'); assert.equal(local.spaceRegistry.b.spaceUuid, 'b');
+    await store.dispatch({ action: 'metadata', spaceId: 'b', changes: { name: 'Research' } });
+    const after = structuredClone(before); after[0].color = 'green';
+    await store.dispatch({ action: 'patch', before, after });
+    assert.equal(local.spaces[1].customTint, '#ff0088'); assert.equal(local.spaces[1].name, 'Research');
+    const restarted = new SpaceStore(); await restarted.dispatch({ action: 'get' });
+    assert.equal(restarted.spaces[1].customTint, '#ff0088');
+    // An older reader drops the unknown tint field; recover only this UUID's registry record.
+    delete local.spaces[1].customTint;
+    const olderReader = new SpaceStore(); await olderReader.dispatch({ action: 'get' });
+    assert.equal(olderReader.spaces[1].customTint, '#ff0088');
+    folders[1].title = 'Synced bookmark rename';
+    await olderReader.run(async () => { await olderReader.discoverBookmarkSpaces(); await olderReader.persist(); });
+    assert.equal(local.spaces[1].name, 'Synced bookmark rename'); assert.equal(local.spaces[1].customTint, '#ff0088');
+    local.spaces = []; session.spaceSession = false; tabs = [];
+    const recovered = new SpaceStore(); await recovered.dispatch({ action: 'get' });
+    assert.equal(recovered.spaces[1].customTint, '#ff0088'); assert.equal(recovered.spaces[1].icon, '👩🏽‍💻');
+    await recovered.dispatch({ action: 'metadata', spaceId: 'b', changes: { customTint: null } });
+    assert.equal(local.spaces[1].customTint, null); assert.equal(local.spaceRegistry.b.customTint, null);
+    local.spaces = []; session.spaceSession = false;
+    const cleared = new SpaceStore(); await cleared.dispatch({ action: 'get' });
+    assert.equal(cleared.spaces[1].customTint, undefined); assert.equal(cleared.spaces[1].color, 'blue');
+    assert.deepEqual(mutations, []);
+});
+
+test('invalid custom tints reject before writes and wrong registry UUID never donates tint', async () => {
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    chrome.bookmarks.get = async id => [{ id, title: id, parentId: 'root' }];
+    const original = structuredClone(local);
+    for (const customTint of ['#fff', 'red', 'url(https://bad.test)', 'var(--blue)', '#ff0000; color:white', '#123456\n', 123456, {}, []]) {
+        await assert.rejects(store.dispatch({ action: 'metadata', spaceId: 'b', changes: { customTint } }), /six-digit hex/);
+        assert.deepEqual(local, original);
+    }
+    local.spaceRegistry = { b: { spaceUuid: 'wrong', bookmarkFolderId: 'b', color: 'pink', customTint: '#000000' } };
+    chrome.bookmarks.getChildren = async id => id === 'root' ? [{ id: 'a', title: 'a' }, { id: 'b', title: 'b' }] : [];
+    const next = new SpaceStore(); await next.dispatch({ action: 'get' });
+    assert.equal(next.spaces[1].customTint, undefined); assert.equal(next.spaces[1].color, 'blue');
+    await assert.rejects(next.dispatch({ action: 'metadata', spaceId: 'b', changes: { customTint: '#ffffff' } }), /identity has changed/);
+    assert.equal(local.spaceRegistry.b.customTint, '#000000');
+});
+
+test('custom tint cannot widen native group colors or leak CSS from malformed imported metadata', async () => {
+    local.spaces[0].customTint = '#ffffff'; local.spaces[1].customTint = 'url(https://bad.test)';
+    local.spaces[1].color = '#123456'; sync.syncTabGroups = true;
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    assert.equal(store.spaces[0].color, 'blue'); assert.equal(store.spaces[0].customTint, '#ffffff');
+    assert.equal(store.spaces[1].color, 'grey'); assert.equal(store.spaces[1].customTint, null);
+    const colors = mutations.filter(entry => entry[0] === 'update').map(entry => entry[2].color);
+    assert.deepEqual(colors, ['blue', 'grey']);
+    const before = structuredClone(store.spaces), after = structuredClone(before);
+    after[0].customTint = 'url(https://bad.test)'; after[0].color = '#ff00ff';
+    await store.dispatch({ action: 'patch', before, after });
+    assert.equal(store.spaces[0].customTint, '#ffffff'); assert.equal(store.spaces[0].color, 'blue');
+});
+
+test('new legacy patch Spaces cannot bypass color validation through the initial clone', () => {
+    const next = { ...space('new'), color: 'url(https://bad.test)', customTint: 'var(--bad)' };
+    const result = applySpacePatch([], [], [next]);
+    assert.equal(result[0].color, 'grey'); assert.equal(result[0].customTint, null);
+    const valid = applySpacePatch([], [], [{ ...next, color: 'pink', customTint: '#FfAa00' }]);
+    assert.equal(valid[0].color, 'pink'); assert.equal(valid[0].customTint, '#ffaa00');
+});

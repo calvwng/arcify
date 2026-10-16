@@ -13,6 +13,7 @@
  */
 
 import { Logger } from './logger.js';
+import { normalizeCustomTint, normalizeSpaceColor } from './space-colors.js';
 import { normalizeSpaceIcon } from './space-icons.js';
 
 const LocalStorage = {
@@ -33,7 +34,7 @@ const LocalStorage = {
     },
     // Get the durable entry for a space's bookmark folder, creating it (with a fresh
     // spaceUuid) on first sight, or preserving the existing Space UUID during recovery.
-    // On creation the passed name/color/icon seed the entry.
+    // On creation the passed name/color/icon/customTint seed the entry.
     getOrCreateSpaceRegistryEntry: async function (bookmarkFolderId, attrs = {}) {
         if (!bookmarkFolderId) return null;
         return this._serializeRegistryOp(async () => {
@@ -47,7 +48,8 @@ const LocalStorage = {
                     spaceUuid,
                     bookmarkFolderId,
                     name: attrs.name ?? null,
-                    color: attrs.color ?? null,
+                    color: attrs.color == null ? null : normalizeSpaceColor(attrs.color),
+                    ...(normalizeCustomTint(attrs.customTint) ? { customTint: normalizeCustomTint(attrs.customTint) } : {}),
                     ...(normalizeSpaceIcon(attrs.icon) ? { icon: normalizeSpaceIcon(attrs.icon) } : {}),
                     order: attrs.order ?? 0,
                 };
@@ -67,7 +69,7 @@ const LocalStorage = {
             }
         });
     },
-    // Update a registry entry's mutable attributes (name/color/icon/order) so the durable record
+    // Update a registry entry's mutable attributes (name/color/icon/customTint/order) so the durable record
     // tracks the user's renames/recolors. No-op if the entry doesn't exist yet.
     updateSpaceRegistryEntry: async function (bookmarkFolderId, attrs = {}) {
         if (!bookmarkFolderId) return;
@@ -76,8 +78,9 @@ const LocalStorage = {
             const entry = registry[bookmarkFolderId];
             if (!entry) return;
             if (attrs.name !== undefined) entry.name = attrs.name;
-            if (attrs.color !== undefined) entry.color = attrs.color;
+            if (attrs.color !== undefined) entry.color = normalizeSpaceColor(attrs.color);
             if (attrs.order !== undefined) entry.order = attrs.order;
+            if (attrs.customTint !== undefined) entry.customTint = normalizeCustomTint(attrs.customTint);
             if (attrs.icon !== undefined) entry.icon = normalizeSpaceIcon(attrs.icon);
             await this.saveSpaceRegistry(registry);
         });

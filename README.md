@@ -21,6 +21,7 @@ A Chrome extension that replicates Arc browser's tab management system, providin
 - [Move saved pins and folders between Spaces](docs/saved-space-moves.md)
 - [Adjustable Favorites, Space header sizing, and icon-only Space switcher](docs/sidebar-appearance.md)
 - [Custom keyboard emoji for Space icons](docs/space-context-menu.md)
+- [Custom Space tints and System/Light/Dark appearance](docs/space-themes.md)
 - [Sidebar management scroll and focus](docs/sidebar-management-scroll.md)
 - Clean, minimal interface
 - [Optional one-click startup launcher](docs/startup-launcher.md) (off by default)

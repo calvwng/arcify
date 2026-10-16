@@ -211,7 +211,7 @@ const metadataSaved = (before, changes) => {
     if (changes.name !== undefined) after.bookmarks[0].title = changes.name;
     return after;
 };
-for (const [kind, changes] of Object.entries({ rename: { name: 'Renamed Work' }, color: { color: 'purple' } })) {
+for (const [kind, changes] of Object.entries({ rename: { name: 'Renamed Work' }, color: { color: 'purple', customTint: null } })) {
     test(`${kind} proof allows only exact UUID metadata and corresponding saved fields`, () => {
         const before = state(); assertSpaceMetadataSaved(before, metadataSaved(before, changes), { spaceId: 'work', changes });
     });
@@ -277,10 +277,10 @@ test('real basic-edit fixture types and submits forms, verifies all exact-ID mut
 
 
 test('visible created-folder screenshot proof also requires the applied theme of the explicitly activated Space', () => {
-    const visible = { ...details(), activeSpaceId: 'work', headerVisible: true, expectedColor: 'rgb(100, 80, 150)', appliedColor: 'rgb(100, 80, 150)' };
+    const visible = { ...details(), activeSpaceId: 'work', headerVisible: true, expectedColor: 'rgb(100, 80, 150)', appliedColor: 'rgb(100, 80, 150)', expectedTint: '#aabbcc', appliedTint: '#aabbcc' };
     const options = { ...detailOptions, requireVisibleTheme: true };
     assertSpaceDetailsProjection(visible, options);
-    for (const changes of [{ activeSpaceId: 'other' }, { headerVisible: false }, { expectedColor: '' }, { appliedColor: 'rgb(0, 0, 0)' }]) {
+    for (const changes of [{ activeSpaceId: 'other' }, { headerVisible: false }, { expectedColor: '' }, { appliedColor: 'rgb(0, 0, 0)' }, { expectedTint: '' }, { appliedTint: '#000000' }]) {
         assert.throws(() => assertSpaceDetailsProjection({ ...visible, ...changes }, options));
     }
 });

@@ -1,3 +1,5 @@
+import { DEFAULT_SPACE_COLORS, normalizeColorOverrides } from '../../space-colors.js';
+import { setSpaceColorOverrides } from '../../sidebar-theme.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -20,8 +22,8 @@ function fixture(initial = {}) {
     elements.autoArchiveIdleMinutes = { value: '360', disabled: false, reportValidity: () => true, addEventListener() {} };
     elements.autoArchiveIdleMinutesContainer = { style: {} };
     const document = { getElementById: id => elements[id], addEventListener() {}, createElement: () => ({}),
-        documentElement: { style: { setProperty() {}, removeProperty() {} } } };
-    const context = { document, console, setTimeout, clearTimeout, Utils,
+        documentElement: { dataset: {}, style: { setProperty() {}, removeProperty() {} } } };
+    const context = { DEFAULT_SPACE_COLORS, normalizeColorOverrides, setSpaceColorOverrides, document, console, setTimeout, clearTimeout, Utils,
         LocalStorage: { getSpaceNames: async () => ['Home'] }, Logger: { log() {}, error() {} }, chrome };
     runInNewContext(source, context);
     return { sync, local, spaces, events, listeners, elements, context };

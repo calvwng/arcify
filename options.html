@@ -5,6 +5,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Arcify Settings</title>
+    <meta name="color-scheme" content="light dark">
+    <script src="assets/appearance-bootstrap.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Varela+Round&display=swap" rel="stylesheet">
@@ -118,6 +120,15 @@
             <p class="options-description">Saved on this Chrome profile. Changes appear in every open Arcify sidebar.</p>
             <div class="options-setting-item options-setting-field">
                 <div class="options-setting-copy">
+                    <label for="themeMode" class="options-label">Appearance</label>
+                    <p id="themeModeDescription" class="options-description">Follow your system, or always use light or dark surfaces. Space tints adapt for readable text. Customize an individual Space from its Theme Color menu.</p>
+                </div>
+                <select id="themeMode" class="options-input" aria-describedby="themeModeDescription" disabled>
+                    <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+                </select>
+            </div>
+            <div class="options-setting-item options-setting-field">
+                <div class="options-setting-copy">
                     <label for="favoritesLayout" class="options-label">Favorites layout</label>
                     <p id="favoritesLayoutDescription" class="options-description">Standard keeps the current expanding buttons and state labels. Compact uses fixed-size, icon-only tiles. Names and open/closed states remain in tooltips and accessible labels.</p>
                 </div>
@@ -183,7 +194,7 @@
 
         <section class="options-section" aria-labelledby="colorsHeading">
             <h2 id="colorsHeading" class="options-section-title">Colors</h2>
-            <p class="options-description">Customize the palette used throughout the extension. Dark variants are generated automatically.</p>
+            <p class="options-description">Customize the shared preset palette. Individual Space tints override these presets. Surfaces adapt to your appearance setting.</p>
             <div class="color-overrides-grid">
                 <div class="color-override-item">
                     <label for="colorGrey" class="color-override-label">Grey</label>

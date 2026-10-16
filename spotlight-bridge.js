@@ -1,3 +1,4 @@
+import { normalizeSpaceColor } from './space-colors.js';
 import { createSidebarNewTabLauncher } from './sidebar-new-tab-launch.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { ownerOf, tabIds } from './space-store.js';
@@ -28,7 +29,7 @@ async function readBridgeSnapshot(store, windowId) {
     const byId = new Map(live.map(tab => [tab.id, tab]));
     const [bindings, overrides] = await Promise.all([Utils.getPinnedTabStates(), Utils.getTabNameOverrides()]);
     const spaces = store.spaces.map(space => ({
-        id: space.id, name: space.name, color: space.color, bookmarkFolderId: space.bookmarkFolderId,
+        id: space.id, name: space.name, color: normalizeSpaceColor(space.color), bookmarkFolderId: space.bookmarkFolderId,
         tabIds: tabIds(space).filter(id => byId.has(id)),
         pinnedTabIds: space.spaceBookmarks.filter(id => byId.has(id)),
         temporaryTabIds: space.temporaryTabs.filter(id => byId.has(id))

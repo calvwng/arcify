@@ -7,7 +7,7 @@ const workflow = readSourceText(new URL('../../.github/workflows/paired-extensio
 
 test('menu evidence modules execute once in full-only scope before Favorite receipts and browser restart', () => {
     const fullStart = runner.indexOf("    if (report.runMode === 'full') {\n");
-    const fullEnd = runner.indexOf('    } // Full-only cases 3–31, 33–35, 37–38 and 40–45;');
+    const fullEnd = runner.indexOf('    } // Full-only cases 3–31, 33–35, 37–38 and 40–47;');
     assert(fullStart > 0 && fullEnd > fullStart);
     for (const [name, index] of [['exerciseSpaceContextBasics', 37], ['exerciseTabMenuActions', 38]]) {
         assert.match(runner, new RegExp(`import \\{[^}]*${name}[^}]*\\} from './paired-chrome-`));
@@ -39,7 +39,8 @@ test('paired workflow watches menu sources and tests while retaining reviewed pe
         'space-context-menu.js', 'space-icons.js', 'space-colors.js', 'localstorage.js', 'tab-menu-*.js', 'tab-title-projection.js', 'domManager.js']) {
         assert(workflow.includes(`- '${path}'`), `Missing trigger path ${path}`);
     }
-    assert.match(workflow, /ref: 019b52718c84c84f785081537534b8902e47946a/);
+    const peerPin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
+    assert(workflow.includes(`ref: ${peerPin}`));
     assert.match(workflow, /permissions:\n  contents: read/);
     assert.match(runner, /process\.env\.GITHUB_ACTIONS !== 'true' \|\| process\.env\.CI !== 'true'/);
     assert.match(runner, /process\.getuid\?\.\(\) === 0/);

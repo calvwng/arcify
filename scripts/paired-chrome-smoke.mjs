@@ -11,6 +11,8 @@ import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
 import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership, seedFocusedReloadSpacePins } from './paired-chrome-ordinary-favorites.mjs';
 import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
+import { exerciseSpaceTheme } from './paired-chrome-space-theme.mjs';
+import { exerciseSpotlightOptionsAppearance } from './paired-chrome-spotlight-appearance.mjs';
 import { exerciseSidebarAppearance } from './paired-chrome-sidebar-appearance.mjs';
 import { exerciseBookmarkMultiSelection, assertNativeDragSourceStable } from './paired-chrome-bookmark-selection.mjs';
 /**
@@ -26,7 +28,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import puppeteer from './paired-chrome-runtime/index.mjs';
 import { assertNativeSidebarEvidence, assertSidebarHelperUnchanged, readNativeSidebarRender, nativeSidebarRenderReady, nativeSidebarRenderIdentity, createNativeSidebarReadiness, assertNativeSidebarScreenshot, revealNativeSidebarSpace, readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { performVisibleAction, performVisibleClick, replaceInputText, captureVisibleFailurePage, clickFreshResult, selectResultWithKeyboard, assertNoPageErrors, locateFreshDragGeometry, attachCreatedFixtureTab } from './paired-chrome-ui.mjs';
@@ -53,7 +55,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '019b52718c84c84f785081537534b8902e47946a';
+const PINNED_SPOTLIGHT = '4e4204bacde4beef5f8686437cbf9c540f65fe7c';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',
@@ -100,7 +102,9 @@ const stepNames = [
     'Today creation has independent prospective top and opener order with group sync off',
     'Today creation preserves manual order and native projection with group sync on',
     'Saved pin and nested folder Move preserves all linked windows and exact identities with group sync off',
-    'Saved pin and nested folder Move preserves inverted order and all-window native projection with group sync on'
+    'Saved pin and nested folder Move preserves inverted order and all-window native projection with group sync on',
+    'Native Space custom tint and appearance retain real named groups, readable controls and exact identities',
+    'Spotlight options appearance follows System and explicit modes through real controls and first paint'
 ];
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
@@ -112,9 +116,10 @@ const report = {
         imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, runnerUid: process.getuid?.() },
     screenshots: [], diagnostics: [], targetLifecycle: [],
     limits: [
+        'Space theme and Spotlight options require real hosted input, screenshots and passive first-paint evidence. System preference changes use Chrome rendering-media emulation; native OS color picker, physical OS appearance changes and Helium remain manual.',
         'Space emoji proof uses trusted Chrome text input and genuine Ctrl+V from the disposable fixture clipboard; OS emoji picker, IME candidate windows/composition, physical typing and Helium remain manual. Icon-only names retain native title and accessibility labels with real hover/focus; browser-chrome tooltip painting is not captured by page screenshots.',
         'Outside-focus menu checks use ordinary sidebar.html tabs and a separate disposable localhost browser window with trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; actual native-panel external focus and Helium remain manual.',
-        'General workspace rendering regressions use sidebar.html in a regular tab. Command, Today Move and unified New Tab row checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking and Helium behavior remain manual.',
+        'General workspace rendering regressions use sidebar.html in a regular tab. Command, Today Move, Space theme and unified New Tab row checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
         'Command registration is read through chrome.commands.getAll; physical/OS shortcut dispatch is not exercised.',
         'The ordinary-Favorite close case separately sends one native XTEST Ctrl+W to the verified Chrome window under CI Xvfb and requires exact tab/target destruction. It does not claim physical keyboard hardware or Helium shortcut acceptance.',
@@ -2067,7 +2072,21 @@ try {
     await step(stepNames[45], () => exerciseSavedMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,ui,screenshot,
         snapshot,bridge,poll,fixture,arcifyId,spotlightId,search,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.savedMoveSyncOn = observation; await saveReport(); } }));
-    } // Full-only cases 3–31, 33–35, 37–38 and 40–45; preserve the original cases' order.
+    await step(stepNames[46], () => exerciseSpaceTheme({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,ui,screenshot,
+        screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
+        record:async evidence => { report.spaceTheme = evidence; await saveReport(); } }));
+    await step(stepNames[47], async () => {
+        // Imported only after the runner has verified the exact reviewed peer HEAD.
+        // Missing collector or missing evidence fails this mandatory case.
+        const { collectOptionsAppearanceEvidence } = await import(pathToFileURL(resolve(COMPANION, 'test/e2e/options-appearance-evidence.js')).href);
+        const evidence = await exerciseSpotlightOptionsAppearance({ browser,collectOptionsAppearanceEvidence,observePage,apiPage:arcifyOptions,peerPage:spotlightOptions,
+            extensionId:spotlightId,outputDir:resolve(OUTPUT,'spotlight-options-appearance'),poll,
+            record:async evidence => { report.spotlightOptionsAppearance = evidence; await saveReport(); } });
+        for (const shot of evidence.screenshots) report.screenshots.push({ ...shot, filename:`spotlight-options-appearance/${shot.filename}`,
+            label:'Required Spotlight options appearance', capturedAt:new Date().toISOString() });
+        await saveReport(); return evidence;
+    });
+    } // Full-only cases 3–31, 33–35, 37–38 and 40–47; preserve the original cases' order.
 
     if (report.runMode === 'native-split') {
         await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,

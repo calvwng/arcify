@@ -914,3 +914,15 @@ for (const inverted of [false, true]) for (const top of [false, true]) test(`bri
     assert.deepEqual(store.spaces.map(space => space.spaceBookmarks), pins); assert.deepEqual(nodes, bookmarks);
     assert.equal(writes('tab.create').length, 1);
 });
+
+test('custom Space tints keep the exact v1 snapshot shape and named native group color', async () => {
+    local.spaces[0].customTint = '#ff0044'; local.spaces[1].customTint = '#000000';
+    const store = await makeStore(), snapshot = await getBridgeSnapshot(store, 1);
+    assert.equal(snapshot.spaces[0].color, 'blue'); assert.equal(snapshot.spaces[1].color, 'red');
+    for (const item of snapshot.spaces) {
+        assert.equal(Object.hasOwn(item, 'customTint'), false);
+        assert.deepEqual(Object.keys(item).sort(), ['bookmarkFolderId', 'color', 'id', 'name', 'pinnedTabIds', 'tabIds', 'temporaryTabIds'].sort());
+    }
+    store.spaces[0].color = 'var(--untrusted)';
+    assert.equal((await getBridgeSnapshot(store, 1)).spaces[0].color, 'grey');
+});

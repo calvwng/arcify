@@ -79,3 +79,11 @@ registry-only icon recovery, live multi-panel setting changes, name tooltips and
 labels, header/edit focus preservation, iconless fallback targets, and keyboard
 and drag ordering. These new cases have unit/DOM coverage; real-browser visual
 and native IME acceptance remain separate checks.
+
+## Appearance mode
+
+The same profile-local settings also provide **System** (default), **Light** and
+**Dark**. System follows live OS changes; explicit choices override them. See
+[Space colors and appearance](space-themes.md) for per-Space custom tints and
+contrast handling. Reset sidebar appearance returns the mode to System along
+with the layout defaults.

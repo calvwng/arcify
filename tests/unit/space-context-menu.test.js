@@ -71,7 +71,7 @@ test('Theme Color offers exactly the existing eight named colors and affects onl
     assert.equal(f.document.querySelectorAll('[data-choice]').length, 8);
     assert.equal(f.document.activeElement.dataset.choice, 'red');
     f.event(f.document.querySelector('[data-choice="cyan"]'), 'click'); await settle();
-    assert.deepEqual(f.writes, [['b', { color: 'cyan' }]]); assert.equal(f.spaces[0].color, 'blue');
+    assert.deepEqual(f.writes, [['b', { color: 'cyan', customTint: null }]]); assert.equal(f.spaces[0].color, 'blue');
 });
 
 test('rename/folder forms trim their input, preserve target identity and cancel without a write', async () => {
@@ -254,4 +254,48 @@ test('custom emoji repeat-submit and stale target fail without changing another 
     f.event(f.document.querySelector('.space-emoji-form'), 'submit'); await settle();
     assert.match(f.document.querySelector('[role="alert"]').textContent, /no longer exists/);
     assert.equal(f.writes.length, 1); assert.equal(f.spaces[0].icon, undefined);
+});
+
+test('custom tint picker and strict hex form target the inactive UUID without changing its native color', async () => {
+    const f = fixture(); f.event(f.chip('b'), 'contextmenu'); f.choose('Theme Color');
+    const color = f.document.querySelector('.space-tint-form input[type="color"]');
+    const hex = f.document.querySelector('.space-tint-form input[type="text"]');
+    const form = hex.closest('form');
+    assert.equal(color.value, '#ff9e97'); assert.equal(hex.value, '#ff9e97');
+    for (const value of ['#fff', 'red', 'rgb(1 2 3)', '#12345678', '#000000; color: red']) {
+        hex.value = value; f.event(hex, 'input'); f.event(form, 'submit'); await settle();
+        assert.equal(hex.getAttribute('aria-invalid'), 'true'); assert.match(f.document.querySelector('.space-editor-status').textContent, /six-digit hex/);
+        assert.equal(f.writes.length, 0); assert.equal(f.document.activeElement, hex);
+    }
+    color.value = '#123456'; f.event(color, 'input'); assert.equal(hex.value, '#123456'); assert.equal(hex.hasAttribute('aria-invalid'), false);
+    hex.value = '#Aa00Ff'; f.event(hex, 'input'); assert.equal(color.value, '#aa00ff');
+    f.event(form, 'submit'); await settle();
+    assert.deepEqual(f.writes, [['b', { customTint: '#aa00ff' }]]);
+    assert.equal(f.spaces[1].color, 'red'); assert.equal(f.spaces[1].customTint, '#aa00ff');
+    assert.equal(f.document.querySelector('[role="dialog"]'), null); assert.equal(f.document.activeElement, f.chip('b'));
+    assert.deepEqual(f.activations, []); assert.deepEqual(f.moves, []);
+});
+
+test('custom tint cancellation, reset and named preset choices preserve independent icon and stable identity', async () => {
+    const f = fixture(); f.spaces[1].customTint = '#000000'; f.spaces[1].icon = '👩🏽‍💻';
+    const open = () => { f.event(f.chip('b'), 'contextmenu'); f.choose('Theme Color'); };
+    open(); assert.equal(f.document.querySelector('.space-tint-form input[type="text"]').value, '#000000');
+    assert.equal(f.document.querySelector('.space-choice-grid [aria-pressed="true"]'), null);
+    f.document.querySelector('.space-tint-form input[type="text"]').value = '#ffffff';
+    f.event(f.document, 'keydown', { key: 'Escape' }); assert.deepEqual(f.writes, []);
+    open(); f.event([...f.document.querySelectorAll('button')].find(button => button.textContent === 'Reset to red preset'), 'click'); await settle();
+    assert.deepEqual(f.writes, [['b', { customTint: null }]]); assert.equal(f.spaces[1].color, 'red'); assert.equal(f.spaces[1].icon, '👩🏽‍💻');
+    open(); assert.equal(f.document.querySelector('[data-choice="red"]').getAttribute('aria-pressed'), 'true');
+    f.event(f.document.querySelector('[data-choice="cyan"]'), 'click'); await settle();
+    assert.deepEqual(f.writes[1], ['b', { color: 'cyan', customTint: null }]); assert.equal(f.spaces[1].icon, '👩🏽‍💻');
+});
+
+test('failed custom tint saves keep hex text and focus available for correction and retry', async () => {
+    const f = fixture(); f.setHook(() => { throw new Error('Storage unavailable'); });
+    f.event(f.header('b'), 'contextmenu'); f.choose('Theme Color');
+    const input = f.document.querySelector('.space-tint-form input[type="text"]');
+    input.value = '#ffffff'; input.focus(); f.event(input.closest('form'), 'submit'); await settle();
+    assert.equal(input.value, '#ffffff'); assert.equal(f.spaces[1].customTint, undefined); assert.equal(input.disabled, false);
+    assert.match(f.document.querySelector('.space-editor-status').textContent, /Storage unavailable/);
+    f.setHook(null); f.event(input.closest('form'), 'submit'); await settle(); assert.equal(f.spaces[1].customTint, '#ffffff');
 });

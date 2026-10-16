@@ -16,9 +16,10 @@ it and returns focus. Opening the menu does not activate or reorder that Space.
   in switcher** optionally shows only switcher icons with names retained on hover.
 - **Rename:** edit the clicked Space's name and its exact backing bookmark folder.
   Duplicate display names do not redirect the operation to another Space.
-- **Theme Color:** choose the existing eight colors: grey, blue, red, yellow,
-  green, pink, purple or cyan. This is the existing basic background/group color,
-  not a gradient, wallpaper or richer theme system.
+- **Theme Color:** choose one of the eight named presets, or use a custom picker /
+  six-digit hex tint. Reset restores the named preset. The tint adapts to profile
+  Light/Dark appearance; Chrome tab groups retain their named color. See the
+  [theme guide](space-themes.md) for persistence and appearance details.
 - **New Folder:** name a saved folder directly under the clicked Space's bookmark
   root, including when that Space is inactive. It uses the existing folder policy;
   deeper folder restrictions and group-sync behavior are unchanged.
@@ -89,3 +90,9 @@ to focus the selected preset on opening; a saved custom emoji focuses its field.
 Unit/DOM checks cover custom emoji, composition, invalid input, retry/cancel and
 recovery. Historical paired runs above predate these additions; real-browser
 keyboard/IME, tooltip and icon-only geometry checks are still required.
+
+## Custom themes
+
+Theme Color also accepts a custom picker/hex tint and a reset to the named preset.
+See [Space colors and appearance](space-themes.md) for System/Light/Dark mode,
+contrast behavior and profile-local persistence.

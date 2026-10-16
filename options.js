@@ -1,3 +1,5 @@
+import { normalizeColorOverrides, DEFAULT_SPACE_COLORS } from './space-colors.js';
+import { setSpaceColorOverrides } from './sidebar-theme.js';
 import './spotlight-bridge-options.js';
 import './sidebar-appearance-options.js';
 /**
@@ -19,16 +21,7 @@ import { LocalStorage } from './localstorage.js';
 import { Logger } from './logger.js';
 
 // Default color values (must be 6-digit hex for color picker compatibility)
-const DEFAULT_COLORS = {
-  grey: '#cccccc',
-  blue: '#8bb3f3',
-  red: '#ff9e97',
-  yellow: '#ffe29f',
-  green: '#8bda99',
-  pink: '#fbaad7',
-  purple: '#d6a6ff',
-  cyan: '#a5e2ea'
-};
+const DEFAULT_COLORS = DEFAULT_SPACE_COLORS;
 
 const COLOR_NAMES = Object.keys(DEFAULT_COLORS);
 
@@ -71,15 +64,7 @@ function updateAutoArchiveIdleMinutesVisibility(forceEnabled) {
 
 // Function to apply color overrides to CSS variables
 function applyColorOverrides(colorOverrides) {
-  const root = document.documentElement;
-  COLOR_NAMES.forEach(colorName => {
-    const colorValue = colorOverrides?.[colorName];
-    if (colorValue) {
-      root.style.setProperty(`--user-chrome-${colorName}-color`, colorValue);
-    } else {
-      root.style.removeProperty(`--user-chrome-${colorName}-color`);
-    }
-  });
+  setSpaceColorOverrides(document, colorOverrides);
 }
 
 // Function to save options to chrome.storage
@@ -167,7 +152,7 @@ async function restoreOptions() {
   updateAutoArchiveIdleMinutesVisibility(settings.autoArchiveEnabled);
 
   // Restore color overrides
-  const colorOverrides = settings.colorOverrides || {};
+  const colorOverrides = normalizeColorOverrides(settings.colorOverrides);
   COLOR_NAMES.forEach(colorName => {
     const colorPicker = document.getElementById(getColorPickerId(colorName));
     if (colorPicker) {

@@ -451,7 +451,7 @@ function assertNewTabRow(spaceId) {
 test('actual sidebar moves one New Tab identity across empty/nonempty Spaces and metadata replacement', async () => {
     for (const id of ['empty', 'alpha', 'beta']) { await selectSession(id); await settled(id); assertNewTabRow(id); }
     const before = newTabButton.closest('.space');
-    storedSpaces.find(space => space.id === 'beta').color = 'green'; await publishSpaces(); await wait(240);
+    storedSpaces.find(space => space.id === 'beta').name = 'Beta renamed'; await publishSpaces(); await wait(240);
     assertNewTabRow('beta'); assert.notEqual(newTabButton.closest('.space'), before);
     for (const id of ['bookmarkSelectionStatus', 'todaySelectionStatus', 'spotlightStatus', 'urlCopyToast']) {
         assert(document.querySelector('.new-tab-btn-container').contains(document.getElementById(id)), `${id} retains its stable notice host`);
@@ -536,4 +536,30 @@ test('a deferred old-view New Tab click cannot target the hidden logical Space o
         assert.match(document.getElementById('spotlightStatus').textContent, /finish loading/);
     } finally { input.dispatchEvent(new window.Event('blur')); }
     await settled('beta'); assertNewTabRow('beta');
+});
+
+test('actual sidebar profile theme and Space tint changes retain rows, New Tab and Today selection', async () => {
+    await selectSession('alpha'); await settled('alpha'); await wait(200);
+    const space = document.querySelector('.space[data-space-id="alpha"]'), row = space.querySelector('.tab');
+    const editor = space.querySelector('.space-name'), button = document.querySelector('#spaceSwitcher button[data-space-id="alpha"]');
+    const activeSpace = structuredClone(session.activeSpaces);
+    row.classList.add('today-selected'); row.setAttribute('aria-selected', 'true');
+    for (const themeMode of ['dark', 'light', 'system']) {
+        await onChanged.emit({ sidebarAppearance: { newValue: { themeMode } } }, 'local');
+        assert.equal(document.documentElement.dataset.themeMode, themeMode);
+        assert.equal(document.querySelector('.space[data-space-id="alpha"]'), space);
+        assert.equal(space.querySelector('.tab'), row); assert.equal(space.querySelector('.space-name'), editor);
+        assert.equal(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'), button);
+        assert.equal(row.getAttribute('aria-selected'), 'true'); assert(row.classList.contains('today-selected'));
+    }
+    for (const customTint of ['#000000', '#ffffff', '#aabbcc', null]) {
+        storedSpaces.find(item => item.id === 'alpha').customTint = customTint;
+        await publishSpaces(); await wait(200);
+        assert.equal(document.querySelector('.space[data-space-id="alpha"]'), space); assert.equal(space.querySelector('.tab'), row);
+        assertNewTabRow('alpha'); assert.equal(row.getAttribute('aria-selected'), 'true');
+        assert.deepEqual(session.activeSpaces, activeSpace);
+    }
+    storedSpaces.find(item => item.id === 'alpha').color = 'purple'; await publishSpaces(); await wait(200);
+    assert.equal(document.querySelector('.space[data-space-id="alpha"]'), space); assert.equal(space.querySelector('.tab'), row);
+    assert.equal(space.querySelector('#spaceColorSelect').value, 'purple');
 });

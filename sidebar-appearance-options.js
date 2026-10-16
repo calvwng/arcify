@@ -1,15 +1,17 @@
-import { SIDEBAR_APPEARANCE_KEY, DEFAULT_SIDEBAR_APPEARANCE, normalizeSidebarAppearance } from './sidebar-appearance.js';
+import { SIDEBAR_APPEARANCE_KEY, DEFAULT_SIDEBAR_APPEARANCE, normalizeSidebarAppearance, initializeSidebarAppearance } from './sidebar-appearance.js';
 
 export function initializeSidebarAppearanceOptions({ document = globalThis.document, api = globalThis.chrome,
     locks = globalThis.navigator?.locks } = {}) {
     const layout = document?.getElementById('favoritesLayout');
     if (!layout) return null;
+    const themeMode = document.getElementById('themeMode');
+    const appearance = initializeSidebarAppearance({ document, api });
     const tileSize = document.getElementById('favoriteTileSize');
     const headerSize = document.getElementById('spaceHeaderSize');
     const hideNames = document.getElementById('hideSpaceNames');
     const reset = document.getElementById('resetSidebarAppearance');
     const status = document.getElementById('sidebarAppearanceStatus');
-    const controls = [layout, tileSize, headerSize, hideNames, reset];
+    const controls = [layout, tileSize, headerSize, hideNames, themeMode, reset].filter(Boolean);
     const handlers = [];
     let settings = { ...DEFAULT_SIDEBAR_APPEARANCE }, revision = 0, disposed = false, loading = true;
     let pending = 0, queue = Promise.resolve();
@@ -17,6 +19,7 @@ export function initializeSidebarAppearanceOptions({ document = globalThis.docum
     const render = () => {
         if (disposed) return;
         layout.value = settings.favoritesLayout;
+        if (themeMode) themeMode.value = settings.themeMode;
         tileSize.value = String(settings.favoriteTileSize);
         headerSize.value = String(settings.spaceHeaderSize);
         hideNames.checked = settings.hideSpaceNames;
@@ -73,13 +76,14 @@ export function initializeSidebarAppearanceOptions({ document = globalThis.docum
         control.addEventListener(event, handler);
         handlers.push(() => control.removeEventListener(event, handler));
     };
+    if (themeMode) listen(themeMode, 'change', () => save({ themeMode: themeMode.value }));
     listen(layout, 'change', () => save({ favoritesLayout: layout.value }));
     listen(tileSize, 'input', () => save({ favoriteTileSize: Number(tileSize.value) }));
     listen(headerSize, 'input', () => save({ spaceHeaderSize: Number(headerSize.value) }));
     listen(hideNames, 'change', () => save({ hideSpaceNames: hideNames.checked }));
     listen(reset, 'click', () => save({ ...DEFAULT_SIDEBAR_APPEARANCE }));
     return { ready, whenSaved: () => queue, dispose() {
-        disposed = true; api.storage.onChanged.removeListener(listener); handlers.forEach(remove => remove());
+        disposed = true; appearance.dispose(); api.storage.onChanged.removeListener(listener); handlers.forEach(remove => remove());
     } };
 }
 

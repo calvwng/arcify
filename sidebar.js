@@ -1,4 +1,6 @@
 import { withSavedMoveLock, assertSavedMoveSettled } from './saved-move-lock.js';
+import { normalizeCustomTint } from './space-colors.js';
+import { applySpaceTheme, initializeSpaceColorOverrides } from './sidebar-theme.js';
 import { createSidebarNewTabRow, placeNewTabRow } from './sidebar-new-tab.js';
 import { createContextMenuSession } from './context-menu-session.js';
 import { createSpaceContextMenu, spaceDeleteMessage } from './space-context-menu.js';
@@ -207,69 +209,8 @@ function actionsForTabRow(tabElement, { selectionCount = 1, muted = false } = {}
     return tabMenuActions(target, { selectionCount, muted });
 }
 
-// Function to apply color overrides from settings
-async function applyColorOverrides() {
-    try {
-        const settings = await Utils.getSettings();
-        Logger.log('Applying color overrides, settings:', settings);
-
-        const root = document.documentElement;
-
-        // Clear any existing overrides first
-        const colorNames = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'];
-        colorNames.forEach(colorName => {
-            root.style.removeProperty(`--user-chrome-${colorName}-color`);
-        });
-
-        // Apply new overrides if they exist
-        if (settings.colorOverrides && Object.keys(settings.colorOverrides).length > 0) {
-            Logger.log('Found color overrides:', settings.colorOverrides);
-            Object.keys(settings.colorOverrides).forEach(colorName => {
-                const colorValue = settings.colorOverrides[colorName];
-                if (colorValue) {
-                    root.style.setProperty(`--user-chrome-${colorName}-color`, colorValue);
-                    Logger.log(`Applied color override: --user-chrome-${colorName}-color = ${colorValue}`);
-                }
-            });
-        } else {
-            Logger.log('No color overrides found in settings');
-        }
-
-        // Re-apply colors to all existing spaces
-        reapplySpaceColors();
-    } catch (error) {
-        Logger.error('Error applying color overrides:', error);
-    }
-}
-
-// Function to re-apply colors to the active space
 function reapplySpaceColors() {
-    const sidebarContainer = document.getElementById('sidebar-container');
-    if (!sidebarContainer || !activeSpaceId || spaces.length === 0) return;
-
-    // Find the active space
-    const activeSpace = spaces.find(space => space.id === activeSpaceId);
-    if (!activeSpace) return;
-
-    const root = document.documentElement;
-    const colorVar = `--chrome-${activeSpace.color}-color`;
-    const colorDarkVar = `--chrome-${activeSpace.color}-color-dark`;
-
-    // Get computed values
-    const computedStyle = getComputedStyle(root);
-    let colorValue = computedStyle.getPropertyValue(colorVar).trim();
-    let colorDarkValue = computedStyle.getPropertyValue(colorDarkVar).trim();
-
-    // Fallback if variables aren't set yet
-    if (!colorValue) {
-        colorValue = `var(--chrome-${activeSpace.color}-color, rgba(255, 255, 255, 0.1))`;
-    }
-    if (!colorDarkValue) {
-        colorDarkValue = `var(--chrome-${activeSpace.color}-color-dark, rgba(255, 255, 255, 0.1))`;
-    }
-
-    sidebarContainer.style.setProperty('--space-bg-color', colorValue);
-    sidebarContainer.style.setProperty('--space-bg-color-dark', colorDarkValue);
+    applySpaceTheme(document, spaces.find(space => space.id === activeSpaceId));
 }
 
 const savedFavoritesUI = createSavedFavoritesUI({
@@ -486,9 +427,10 @@ async function activatePinnedTabByURL(bookmarkUrl, targetSpaceId, spaceName, boo
 // Initialize the sidebar when the DOM is loaded
 document.addEventListener('DOMContentLoaded', async () => {
     Logger.log('DOM loaded, initializing sidebar...');
+    const palette = initializeSpaceColorOverrides({ document, onError: error => Logger.error('Could not load color palette:', error) });
     await initializeSidebarAppearance({ document, onChange: () => { favoritesDropFeedback.refresh(); spaceSwitcherController.refresh(); },
         onError: error => Logger.error('Could not load sidebar appearance:', error) }).ready;
-    await applyColorOverrides();
+    await palette.ready;
     maxDragFolderDepth = (await chrome.storage.sync.get({ syncTabGroups: false })).syncTabGroups ? 1 : 2;
 
     // Listen for storage changes to re-apply colors when they're updated
@@ -506,10 +448,6 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (areaName === 'sync' && changes.syncTabGroups) {
             maxDragFolderDepth = changes.syncTabGroups.newValue ? 1 : 2;
             sidebarDropFeedback.refresh();
-        }
-        if (areaName === 'sync' && changes.colorOverrides) {
-            Logger.log('Color overrides changed, re-applying...');
-            applyColorOverrides();
         }
 
         // Re-render saved pins/folders when their display reversal changes
@@ -677,16 +615,17 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
     }
     const restoreNewTabFocus = document.activeElement === newTabBtn && document.hasFocus?.() !== false;
     const newTabSpaceId = newTabBtn.closest('.space')?.dataset.spaceId;
-    const projection = list => JSON.stringify(list.map(({ id, name, color, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
-        ({ id, name, color, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs })));
+    const projection = list => JSON.stringify(list.map(({ id, name, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
+        ({ id, name, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs })));
     let needsRender = projection(spaces) !== projection(next);
     const old = spaces;
-    const oldMetadata = new Map(old.map(s => [s.id, { name: s.name, color: s.color, icon: s.icon }]));
+    const oldMetadata = new Map(old.map(s => [s.id, { name: s.name, icon: s.icon }]));
     spaces = next.map(space => {
         const existing = old.find(s => s.id === space.id);
         return existing ? Object.assign(existing, structuredClone(space)) : structuredClone(space);
     });
     spaceSaveQueue.reset(next);
+    reapplySpaceColors();
     for (const space of old) {
         if (!spaces.some(s => s.id === space.id)) {
             const element = getSpaceElement(space.id);
@@ -710,8 +649,14 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
                 element.remove();
             }
         });
+        const currentElement = getSpaceElement(space.id);
+        const currentColor = currentElement?.querySelector('#spaceColorSelect');
+        if (currentColor) currentColor.value = space.color;
+        currentElement?.querySelectorAll('.color-swatch').forEach(swatch => {
+            swatch.classList.toggle('selected', !space.customTint && swatch.dataset.color === space.color);
+        });
         const previous = oldMetadata.get(space.id);
-        if (!previous || previous.name !== space.name || previous.color !== space.color || previous.icon !== space.icon) {
+        if (!previous || previous.name !== space.name || previous.icon !== space.icon) {
             const element = getSpaceElement(space.id);
             disposeEditorsInElement(element);
             element?.remove();
@@ -854,7 +799,6 @@ async function getOwnedTabs(spaceId) {
 function createSpaceElement(space) {
     Logger.log('Creating space element for:', space.id);
     const spaceElement = spaceTemplate.content.cloneNode(true);
-    const sidebarContainer = document.getElementById('sidebar-container');
     const spaceContainer = spaceElement.querySelector('.space');
     spaceContainer.dataset.spaceId = space.id;
     spaceContainer.style.display = space.id === activeSpaceId ? 'flex' : 'none';
@@ -864,33 +808,13 @@ function createSpaceElement(space) {
     spaceIcon.hidden = !getSpaceIcon(space.icon);
     spaceContainer.querySelector('.space-name').setAttribute('aria-keyshortcuts', 'Shift+F10');
 
-    // Set space background color from extension settings
-    // Get the computed value from :root to ensure overrides are applied
-    const root = document.documentElement;
-    const colorVar = `--chrome-${space.color}-color`;
-    const colorDarkVar = `--chrome-${space.color}-color-dark`;
-
-    // Get computed values - this will resolve the CSS variable chain
-    const computedStyle = getComputedStyle(root);
-    let colorValue = computedStyle.getPropertyValue(colorVar).trim();
-    let colorDarkValue = computedStyle.getPropertyValue(colorDarkVar).trim();
-
-    // Fallback if variables aren't set yet
-    if (!colorValue) {
-        colorValue = `var(--chrome-${space.color}-color, rgba(255, 255, 255, 0.1))`;
-    }
-    if (!colorDarkValue) {
-        colorDarkValue = `var(--chrome-${space.color}-color-dark, rgba(255, 255, 255, 0.1))`;
-    }
-
-    sidebarContainer.style.setProperty('--space-bg-color', colorValue);
-    sidebarContainer.style.setProperty('--space-bg-color-dark', colorDarkValue);
+    if (space.id === activeSpaceId) applySpaceTheme(document, space);
 
     // Set up color select
     const colorSelect = spaceElement.getElementById('spaceColorSelect');
     colorSelect.value = space.color;
     colorSelect.addEventListener('change', async () => {
-        try { await mutateSpaceSetting('metadata', { spaceId: space.id, changes: { color: colorSelect.value } }); }
+        try { await mutateSpaceSetting('metadata', { spaceId: space.id, changes: { color: colorSelect.value, customTint: null } }); }
         catch (error) { colorSelect.value = space.color; alert(error.message); }
     });
 
@@ -1359,6 +1283,7 @@ async function createSpaceFromInactive(spaceName, tabToMove) {
             name: spaceName,
             color: spaceColor,
             ...(getSpaceIcon(registryEntry.icon) ? { icon: registryEntry.icon } : {}),
+            ...(normalizeCustomTint(registryEntry.customTint) ? { customTint: normalizeCustomTint(registryEntry.customTint) } : {}),
             spaceBookmarks: spaceBookmarks,
             temporaryTabs: [tabToMove.id],
             lastTab: tabToMove.id,
@@ -3064,6 +2989,7 @@ async function createNewSpace() {
             name: spaceName,
             color: spaceColor,
             ...(getSpaceIcon(registryEntry.icon) ? { icon: registryEntry.icon } : {}),
+            ...(normalizeCustomTint(registryEntry.customTint) ? { customTint: normalizeCustomTint(registryEntry.customTint) } : {}),
             spaceBookmarks: [],
             temporaryTabs: []
         };

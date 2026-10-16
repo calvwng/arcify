@@ -1,3 +1,4 @@
+import { applySpaceTheme } from './sidebar-theme.js';
 import { placeNewTabRow } from './sidebar-new-tab.js';
 import { appendTodayMovePicker } from './today-space-move-ui.js';
 import { appendSavedMovePicker } from './saved-space-move-ui.js';
@@ -180,10 +181,7 @@ export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher, { resto
     // Get space color and update sidebar container background
     const space = spaces.find(s => s.id === spaceId);
     if (space) {
-        // Update background color
-        const sidebarContainer = document.getElementById('sidebar-container');
-        sidebarContainer.style.setProperty('--space-bg-color', `var(--chrome-${space.color}-color, rgba(255, 255, 255, 0.1))`);
-        sidebarContainer.style.setProperty('--space-bg-color-dark', `var(--chrome-${space.color}-color-dark, rgba(255, 255, 255, 0.1))`);
+        applySpaceTheme(document, space);
     }
 
     // Update space switcher

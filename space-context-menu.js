@@ -1,6 +1,7 @@
 import { createContextMenuSession } from './context-menu-session.js';
 import { SPACE_ICONS, getSpaceIcon, isSpaceEmoji } from './space-icons.js';
-import { SPACE_COLORS } from './space-colors.js';
+import { SPACE_COLORS, normalizeCustomTint, normalizeSpaceColor } from './space-colors.js';
+import { getDocumentSpaceTint } from './sidebar-theme.js';
 
 export const spaceDeleteMessage = space => `Delete Space “${space.name}”? This deletes all saved bookmarks and folders in its backing bookmark subtree and closes its owned tabs across all windows. Shared saved Favorites survive. This cannot be undone in Arcify.`;
 
@@ -91,12 +92,50 @@ export function createSpaceContextMenu({ document, roots, getSpace, update, newF
         const choices = icon ? [{ id: null, label: 'No icon', glyph: '∅' }, ...SPACE_ICONS]
             : SPACE_COLORS.map(id => ({ id, label: id[0].toUpperCase() + id.slice(1), glyph: '●' }));
         for (const choice of choices) {
-            const selected = icon ? (getSpaceIcon(space.icon)?.id || null) === choice.id : space.color === choice.id;
-            const control = button(`${choice.glyph} ${choice.label}`, () => void commit(id => update(id, { [icon ? 'icon' : 'color']: choice.id })), grid);
+            const selected = icon ? (getSpaceIcon(space.icon)?.id || null) === choice.id : !normalizeCustomTint(space.customTint) && space.color === choice.id;
+            const control = button(`${choice.glyph} ${choice.label}`, () => void commit(id => update(id,
+                icon ? { icon: choice.id } : { color: choice.id, customTint: null })), grid);
             control.dataset.choice = choice.id || 'none'; control.setAttribute('aria-pressed', String(selected));
             if (!icon) control.style.setProperty('--choice-color', `var(--chrome-${choice.id}-color)`);
         }
         let emojiInput;
+        if (!icon) {
+            const form = document.createElement('form'); form.className = 'space-tint-form';
+            const pickerLabel = document.createElement('label'); pickerLabel.textContent = 'Custom tint';
+            const colorInput = document.createElement('input'); colorInput.type = 'color';
+            colorInput.value = getDocumentSpaceTint(document, space);
+            colorInput.setAttribute('aria-label', 'Pick a custom Space tint');
+            pickerLabel.appendChild(colorInput); form.appendChild(pickerLabel);
+            const hexLabel = document.createElement('label'); hexLabel.textContent = 'Hex color';
+            const hexInput = document.createElement('input'); hexInput.type = 'text'; hexInput.value = colorInput.value;
+            hexInput.autocomplete = 'off'; hexInput.spellcheck = false;
+            hexInput.setAttribute('aria-describedby', 'spaceTintHint');
+            hexLabel.appendChild(hexInput); form.appendChild(hexLabel);
+            const hint = document.createElement('p'); hint.id = 'spaceTintHint'; hint.className = 'space-tint-hint';
+            hint.textContent = 'Use # plus six hex digits. The tint adapts to Light or Dark appearance. Chrome tab groups keep the named preset color.';
+            form.appendChild(hint);
+            colorInput.addEventListener('input', () => {
+                hexInput.value = colorInput.value; hexInput.removeAttribute('aria-invalid'); status.textContent = '';
+            });
+            hexInput.addEventListener('input', () => {
+                const tint = normalizeCustomTint(hexInput.value.trim());
+                if (tint) colorInput.value = tint;
+                hexInput.removeAttribute('aria-invalid'); status.textContent = '';
+            });
+            const save = button('Save custom tint', () => {}, form); save.type = 'submit';
+            form.addEventListener('submit', event => {
+                event.preventDefault();
+                const customTint = normalizeCustomTint(hexInput.value.trim());
+                if (!customTint) {
+                    hexInput.setAttribute('aria-invalid', 'true');
+                    status.textContent = 'Enter a six-digit hex color, such as #8bb3f3.'; hexInput.focus(); return;
+                }
+                void commit(id => update(id, { customTint }));
+            });
+            if (normalizeCustomTint(space.customTint)) button(`Reset to ${normalizeSpaceColor(space.color)} preset`,
+                () => void commit(id => update(id, { customTint: null })), form);
+            panel.insertBefore(form, grid);
+        }
         if (icon) {
             const form = document.createElement('form'); form.className = 'space-emoji-form';
             const label = document.createElement('label'); label.textContent = 'Emoji';
