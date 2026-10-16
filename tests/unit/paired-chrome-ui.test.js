@@ -453,3 +453,21 @@ test('missing fixture creation identity never guesses a tab to attach or clean',
     for (const created of [null, {}, { id: 0 }, { id: '900' }]) await assert.rejects(attachCreatedFixtureTab(created,
         () => assert.fail('No attachment without an exact receipt'), () => assert.fail('No cleanup without an exact receipt')), /exact tab ID/);
 });
+
+
+test('manual web search remains reachable below multiple matched Arcify command types', async () => {
+    const rows = [
+        { type: 'arcify-sidebar-command', title: 'Open Arcify sidebar' },
+        { type: 'arcify-space-action', title: 'Open Arcify Settings' },
+        { type: 'arcify-space-action', title: 'New Folder in Arcify' },
+        { type: 'search-query', title: 'Search for "opn arcfi"' },
+        { type: 'open-tab', title: 'Open Arcify sidebar' }
+    ];
+    let selected = 0; const keys = [];
+    const input = { press: async key => { keys.push(key); selected = key === 'Home' ? 0 : selected + 1; } };
+    const result = await selectResultWithKeyboard(input, async () => rows.map((row, index) => ({ ...row, selected: index === selected })),
+        row => row.type === 'search-query' && row.title === 'Search for "opn arcfi"');
+    assert.deepEqual(keys, ['Home', 'ArrowDown', 'ArrowDown', 'ArrowDown']);
+    assert.equal(result.after[3].selected, true);
+    assert(!keys.includes('Enter'), 'Choosing the manual result never executes a command or web search.');
+});

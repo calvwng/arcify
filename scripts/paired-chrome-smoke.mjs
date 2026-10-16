@@ -1387,7 +1387,9 @@ try {
         await screenshot(sourcePage, 'fuzzy-sidebar-action-first-overlay');
         const input = await sidebarInput(sourcePage);
         try {
-            await ui(sourcePage, 'Choose retained web search below matched action', () => input.asElement().press('ArrowDown'));
+            report.fuzzyManualSelection = await ui(sourcePage, 'Choose retained web search below matched actions', () =>
+                selectResultWithKeyboard(input.asElement(), () => sourcePage.evaluate(readSpotlightRows), row => row.type === 'search-query' && row.title === 'Search for "opn arcfi"'));
+            await saveReport();
             assert.equal((await sourcePage.evaluate(readSpotlightRows)).find(row => row.selected)?.type, 'search-query');
             // Observe the real session registry before stopping its owner. Do not
             // write tracking state or guess a delay to make restart delivery pass.
@@ -1483,9 +1485,9 @@ try {
         assert.deepEqual(logicalRows(await helper.page.evaluate(readSpotlightRows)).map(row => row.title),initialTitles);
         const input = await sidebarInput(helper.page);
         try {
-            await ui(helper.page, 'Explicitly keep web search selected during logical updates', async () => {
-                await input.asElement().press('ArrowDown'); await input.asElement().press('ArrowUp');
-            });
+            report.logicalManualSelection = await ui(helper.page, 'Explicitly keep web search selected during logical updates', () =>
+                selectResultWithKeyboard(input.asElement(), () => helper.page.evaluate(readSpotlightRows), row => row.type === 'search-query' && row.title === 'Search for "logical"'));
+            await saveReport();
             assert.equal((await helper.page.evaluate(readSpotlightRows)).find(row => row.selected)?.type, 'search-query');
             // Observe the real native event stream; no event is synthesized or suppressed.
             await arcifyOptions.evaluate(windowId => {

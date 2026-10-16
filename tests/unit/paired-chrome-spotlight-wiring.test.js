@@ -159,3 +159,14 @@ test('new workflow watches sources/tests and pins every mandatory job without we
     assert.match(runner, /assertNoTargetCrashes\(report.targetLifecycle\)/); assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);
     assert.doesNotMatch(workflow, /continue-on-error:|no-sandbox|disable-web-security|CHROME_DEVEL_SANDBOX/);
 });
+
+
+test('manual search retention observes exact result identity instead of a fixed action count', () => {
+    for (const [start, end, query] of [["await step(stepNames[19]", "await step(stepNames[20]", 'opn arcfi'], ["await step(stepNames[21]", "await step(stepNames[22]", 'logical']]) {
+        const section = runner.slice(runner.indexOf(start), runner.indexOf(end));
+        assert(section.includes('selectResultWithKeyboard(input.asElement()'));
+        assert(section.includes(`row.type === 'search-query' && row.title === 'Search for "${query}"'`));
+        assert(!section.includes("press('ArrowDown')"));
+        assert(section.includes("find(row => row.selected)?.type, 'search-query'"));
+    }
+});
