@@ -1,6 +1,7 @@
 /** Real paired saved Move-to-Space evidence. Importing this module never launches Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { clickFreshResult } from './paired-chrome-ui.mjs';
 import { clickBookmarkFixtureRow, finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { readSpotlightRows, readNativeSidebarRender } from './paired-chrome-sidebar.mjs';
 import { watchTodayInvalidation, expandSavedTodayFolder } from './paired-chrome-today-selection.mjs';
@@ -12,6 +13,15 @@ export const savedMoveAction = folder => `${savedMoveMenu(folder)} [data-action=
 export const savedMoveDestination = (id, folder = false) => `${savedMoveMenu(folder)} [data-action="moveSavedToDestination"][data-space-id="${id}"]`;
 const savedRow = id => `.space.active .tab[data-bookmark-id="${id}"]`;
 const folderRow = id => `.space.active .folder[data-bookmark-id="${id}"] > .folder-header`;
+export async function rightClickSavedMoveRow(page, bookmarkId, folder = false, record = async () => {}) {
+    const selector = folder ? folderRow(bookmarkId) : savedRow(bookmarkId);
+    // A sidebar refresh may replace a row during Puppeteer's pre-input scroll.
+    // Reacquire only when the shared guard proves no input was dispatched.
+    await clickFreshResult(async timeout => {
+        const row = await page.waitForSelector(selector, { visible: true, timeout });
+        return { click: () => row.click({ button: 'right' }), dispose: () => row.dispose() };
+    }, observation => record({ phase: 'saved-move-context-input', bookmarkId, folder, selector, ...observation }));
+}
 const flatten = nodes => nodes.flatMap(node => [node, ...flatten(node.children || [])]);
 const exact = (items, id) => { const matches = items.filter(item => item.id === id); assert.equal(matches.length, 1, `Exactly one identity ${id} is required.`); return matches[0]; };
 const nativeIdentity = ({ id, windowId, url, pendingUrl, title, pinned, incognito, active, splitViewId }) => ({ id, windowId, url, pendingUrl, title, pinned, incognito, active, splitViewId });
@@ -271,8 +281,7 @@ export async function exerciseSavedMove({ apiPage, nativeSidebar, newTabPage, op
     };
     const clear = () => input('Dismiss saved Move with real Escape', () => native.page.keyboard.press('Escape'));
     const picker = async (id, folder = false) => input('Open exact saved context menu and existing-Space chooser', async () => {
-        await native.page.waitForSelector(folder ? folderRow(id) : savedRow(id), { visible: true });
-        await native.page.click(folder ? folderRow(id) : savedRow(id), { button: 'right' });
+        await rightClickSavedMoveRow(native.page, id, folder, observation => checkpoint('saved-move-context-input', observation));
         await native.page.waitForSelector(savedMoveAction(folder), { visible: true }); await native.page.click(savedMoveAction(folder));
         await native.page.waitForSelector(savedMoveDestination(destination.id, folder), { visible: true });
         assert.equal(await native.page.$(savedMoveDestination(source.id, folder)), null, 'Current source is not a destination.');

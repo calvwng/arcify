@@ -8,11 +8,15 @@ const FAVORITE_LIFECYCLE_CASE_INDICES = Object.freeze([0, 1, 2, 36, 32]);
 // Supplemental positive capability coverage never removes full/lifecycle cases.
 export const NATIVE_SPLIT_CASE_NAME = 'Today real drag and keyboard create native Split View pairs without replacing pages';
 const NATIVE_SPLIT_CASE_INDICES = Object.freeze([0, 1, 2, 39]);
+// Case 33 owns its density fixtures and persists Standard/default appearance.
+// Run it unchanged before the native theme/options/recovery/initial-action cases.
+const APPEARANCE_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 33, 46, 47, 48, 49]);
 
 function caseIndicesForMode(mode) {
-    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split',
-        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle or native-split.`);
-    return mode === 'full' ? FULL_CASE_INDICES : mode === 'favorite-lifecycle' ? FAVORITE_LIFECYCLE_CASE_INDICES : NATIVE_SPLIT_CASE_INDICES;
+    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split' || mode === 'appearance-actions',
+        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle, native-split or appearance-actions.`);
+    return mode === 'full' ? FULL_CASE_INDICES : mode === 'favorite-lifecycle' ? FAVORITE_LIFECYCLE_CASE_INDICES :
+        mode === 'native-split' ? NATIVE_SPLIT_CASE_INDICES : APPEARANCE_ACTION_CASE_INDICES;
 }
 
 export function createPairedChromeRunReport(caseNames, mode = 'full') {
@@ -25,7 +29,8 @@ export function createPairedChromeRunReport(caseNames, mode = 'full') {
     const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseIndex === 39 ? NATIVE_SPLIT_CASE_NAME : caseNames[caseIndex] }));
     return {
         runMode: mode,
-        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'native-split' ?
+        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'appearance-actions' ?
+            'Supplemental fresh-profile appearance, theme, options, recovery and initial Spotlight actions coverage; this is not a full-suite result.' : mode === 'native-split' ?
             'Supplemental fresh-profile native Split View positive coverage; this is not a full-suite result.' :
             'Supplemental fresh-profile Favorite lifecycle coverage; this is not a full-suite result.',
         expectedCaseCount: indices.length,

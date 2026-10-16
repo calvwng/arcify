@@ -117,8 +117,9 @@ neither depends on, cancels, or suppresses the other. The supplemental job canno
 replace the full-suite result, and does not retry a failed case in the full job's
 mutated profile.
 
-The accepted modes are `full` (the default when unset), `favorite-lifecycle`, and
-the [supplemental native-Split mode](../tests/NATIVE_SPLIT_CI.md); any other value
+The accepted modes are `full` (the default when unset), `favorite-lifecycle`,
+[supplemental `native-split`](../tests/NATIVE_SPLIT_CI.md), and
+[supplemental `appearance-actions`](appearance-actions-paired-ci.md); any other value
 fails. The current full plan requires all **49** cases, preserving the original
 cases' order and retaining Move, Today-order, theme, recovery and initial
 Spotlight action coverage before Favorite lifecycle receipts:

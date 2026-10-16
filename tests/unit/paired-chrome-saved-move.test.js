@@ -4,7 +4,40 @@ import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
 import { assertSavedMoved, assertSavedMoveUnchanged, assertSavedMoveRejected, assertSavedMoveTrace, assertSavedMoveBookmarkTrace,
     assertSavedMoveReload, savedMoveTree, savedMoveEntry, canonicalSavedMoveBookmarks, installSavedMoveTrace, installSavedMoveBookmarkTrace,
-    serveSavedMoveFixture, savedMoveAction, savedMoveDestination, savedMoveSearchMatches, assertSavedMoveUnsupportedCleanup, assertSavedMoveDurableReload } from '../../scripts/paired-chrome-saved-move.mjs';
+    serveSavedMoveFixture, savedMoveAction, savedMoveDestination, savedMoveSearchMatches, assertSavedMoveUnsupportedCleanup, assertSavedMoveDurableReload,
+    rightClickSavedMoveRow } from '../../scripts/paired-chrome-saved-move.mjs';
+
+function savedTriggerFixture(errors = []) {
+    const calls = [], records = []; let clicks = 0, disposed = 0;
+    return { page: { waitForSelector: async (selector, options) => { calls.push({ selector, options });
+        return { click: async options => { assert.deepEqual(options, { button: 'right' }); const error = errors[clicks++]; if (error) throw error; }, dispose: async () => { disposed++; } }; } },
+        calls, records, record: async state => records.push(state), get clicks() { return clicks; }, get disposed() { return disposed; } };
+}
+const savedTriggerDetached = () => {
+    const error = Error('Node is detached from document');
+    error.stack = 'Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (/runtime/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1314:23)\n    at async CdpElementHandle.scrollIntoView (/runtime/puppeteer-core/lib/puppeteer/cdp/ElementHandle.js:106:13)';
+    return error;
+};
+for (const folder of [false, true]) test(`saved Move right click retains exact identity and source type folder=${folder}`, async () => {
+    const f = savedTriggerFixture(); await rightClickSavedMoveRow(f.page, 'fixture-28', folder, f.record);
+    assert.equal(f.clicks, 1); assert.equal(f.disposed, 1); assert.equal(f.calls[0].options.visible, true);
+    assert.equal(f.calls[0].selector, folder ? '.space.active .folder[data-bookmark-id="fixture-28"] > .folder-header' : '.space.active .tab[data-bookmark-id="fixture-28"]');
+    assert.equal(f.records[0].status, 'clicked'); assert.equal(f.records[0].bookmarkId, 'fixture-28'); assert.equal(f.records[0].folder, folder);
+});
+test('saved Move reacquires a row only after a proven pre-input detach', async () => {
+    const f = savedTriggerFixture([savedTriggerDetached()]); await rightClickSavedMoveRow(f.page, 'exact', false, f.record);
+    assert.equal(f.clicks, 2); assert.equal(f.disposed, 2); assert.equal(new Set(f.calls.map(call => call.selector)).size, 1);
+    assert.deepEqual(f.records.map(record => record.status), ['detached-before-input', 'clicked']);
+});
+for (const error of [Error('Input.dispatchMouseEvent timed out'), Error('Node is detached from document')]) test(`saved Move never replays uncertain input: ${error.message}`, async () => {
+    const f = savedTriggerFixture([error]); await assert.rejects(rightClickSavedMoveRow(f.page, 'exact', false, f.record), value => value === error);
+    assert.equal(f.clicks, 1); assert.equal(f.disposed, 1);
+});
+test('saved Move pre-input replacement remains bounded to three attempts', async () => {
+    const errors = [savedTriggerDetached(), savedTriggerDetached(), savedTriggerDetached()], f = savedTriggerFixture(errors);
+    await assert.rejects(rightClickSavedMoveRow(f.page, 'exact', false, f.record), value => value === errors[2]);
+    assert.equal(f.clicks, 3); assert.equal(f.disposed, 3);
+});
 
 function searchSample() {
     const closed = { id: 'closed', title: 'Distinct closed nonce', url: 'https://test/closed' };
@@ -294,9 +327,14 @@ test('saved Move proof is mandatory in both new full cases without weakening ori
     assert.equal((runner.match(/exerciseSavedMove\(/g) || []).length, 2);
     assert.match(runner, /if \(serveSavedMoveFixture\(request, response\)\) return/);
     assert.match(runner, /assert.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
-    assert.doesNotMatch(runner.slice(runner.indexOf('await step(stepNames[44]'), runner.indexOf('    } // Full-only')), /windowIsolation/);
+    const savedStart = runner.indexOf('await step(stepNames[44]');
+    const savedEnd = runner.indexOf('    } // Shared appearance/actions cases 46–49;', savedStart);
+    assert(savedStart > 0 && savedEnd > savedStart);
+    assert(runner.indexOf('await step(stepNames[45]', savedStart) < savedEnd);
+    assert.doesNotMatch(runner.slice(savedStart, savedEnd), /windowIsolation/);
     assert.match(helper, /assert.equal\(hosting.tab, null\)/); assert.match(helper, /assert.equal\(hosting.windowId, windowId\)/);
     assert.match(helper, /clickBookmarkFixtureRow\(native.page/); assert.match(helper, /button: 'right'/);
+    assert.match(helper, /await rightClickSavedMoveRow\(native.page, id, folder,/);
     for (const proof of ['assertSavedMoved', 'assertSavedMoveTrace', 'assertSavedMoveBookmarkTrace', 'assertTodayMoveNativeQuiet', 'assertSavedMoveReload', 'watchTodayInvalidation']) assert(helper.includes(proof));
     for (const phase of ['changed-folder-descendant-rejected', 'native-pinned-linked-copy-rejected', 'before-saved-move-reload', 'saved-move-witnessed-reload']) assert(helper.includes(phase));
     const attachment = runner.slice(runner.indexOf('async function openSavedMovePage'), runner.indexOf('async function newTabPage'));

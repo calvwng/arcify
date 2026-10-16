@@ -7,8 +7,8 @@ const workflow = readSourceText(new URL('../../.github/workflows/paired-extensio
 const theme = readSourceText(new URL('../../scripts/paired-chrome-space-theme.mjs', import.meta.url));
 
 test('both new theme cases execute exactly once in mandatory full scope before unchanged lifecycle and restart', () => {
-    const start = runner.indexOf("    if (report.runMode === 'full') {\n");
-    const end = runner.indexOf('    } // Full-only cases 3–31, 33–35, 37–38 and 40–49;');
+    const start = runner.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {\n", runner.indexOf("    } // Full-only cases 34–35, 37–38 and 40–45."));
+    const end = runner.indexOf('    } // Shared appearance/actions cases 46–49;');
     assert(start > 0 && end > start);
     for (const [name, index] of [['exerciseSpaceTheme', 46], ['exerciseSpotlightOptionsAppearance', 47]]) {
         assert.equal((runner.match(new RegExp(`${name}\\(`, 'g')) || []).length, 1);
@@ -38,7 +38,7 @@ test('native enum proof requires real setup and restoration rather than a vacuou
     assert.match(theme, /assertThemeFirstPaint\(data, mode, mode\)/);
     assert.doesNotMatch(theme, /dispatchEvent\(|\.value\s*=(?!=)|native\.page\.setViewport|style\.setProperty|emulateFocus/);
 });
-test('workflow watches new evidence/runtime/paint/docs with all three exact peer pins and unchanged security gates', () => {
+test('workflow watches new evidence/runtime/paint/docs with all four exact peer pins and unchanged security gates', () => {
     for (const path of ['scripts/paired-chrome-space-theme.mjs', 'scripts/paired-chrome-spotlight-appearance.mjs',
         'tests/unit/paired-chrome-space-theme.test.js', 'tests/unit/paired-chrome-spotlight-appearance.test.js', 'tests/unit/paired-chrome-theme-wiring.test.js',
         'tests/unit/sidebar-theme.test.js', 'tests/unit/appearance-bootstrap.test.js', 'assets/appearance-bootstrap.js', 'docs/space-themes.md', 'docs/theme-paired-ci.md']) {
@@ -46,7 +46,7 @@ test('workflow watches new evidence/runtime/paint/docs with all three exact peer
     }
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
     assert.equal(pin, 'dae17a24d4e3b90cecd42a19ceeb7322b755370b');
-    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 3);
+    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 4);
     assert.match(runner, /assert\.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);
     assert.match(runner, /assertNoTargetCrashes\(report.targetLifecycle\)/);

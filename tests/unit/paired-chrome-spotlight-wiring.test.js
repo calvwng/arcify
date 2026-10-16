@@ -15,8 +15,8 @@ function adapter(name, end, dependencies) {
 }
 
 test('recovery and initial actions are mandatory additions after all previous full cases and before unchanged endings', () => {
-    const start = runner.indexOf("    if (report.runMode === 'full') {\n");
-    const end = runner.indexOf('    } // Full-only cases 3–31, 33–35, 37–38 and 40–49;');
+    const start = runner.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {\n", runner.indexOf("    } // Full-only cases 34–35, 37–38 and 40–45."));
+    const end = runner.indexOf('    } // Shared appearance/actions cases 46–49;');
     const theme = runner.indexOf('await step(stepNames[47]');
     const recovery = runner.indexOf('await step(stepNames[48]');
     const actions = runner.indexOf('await step(stepNames[49]');
@@ -154,7 +154,7 @@ test('new workflow watches sources/tests and pins every mandatory job without we
         'spotlight-space-actions.js', 'tests/unit/spotlight-space-actions.test.js', 'tests/unit/spotlight-bridge.test.js']) assert(workflow.includes(`- '${path}'`), path);
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
     assert.equal(pin, 'dae17a24d4e3b90cecd42a19ceeb7322b755370b');
-    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 3);
+    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 4);
     assert.match(runner, /assert.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoTargetCrashes\(report.targetLifecycle\)/); assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);
     assert.doesNotMatch(workflow, /continue-on-error:|no-sandbox|disable-web-security|CHROME_DEVEL_SANDBOX/);

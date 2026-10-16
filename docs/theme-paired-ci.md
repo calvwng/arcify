@@ -5,10 +5,12 @@ The full suite retains every previous 45 case and adds two mandatory cases,
 unchanged ordinary-Favorite and browser-restart ending. Recovery and initial
 Spotlight action cases 48/49 now follow both theme cases. The full suite requires
 49 passing cases exactly once in declared order. Independent Favorite lifecycle
-and native Split View jobs still require 5 and 4 cases. Missing, failed, skipped,
+and native Split View jobs still require 5 and 4 cases. The independent
+[appearance/actions job](appearance-actions-paired-ci.md) requires 8 shared cases
+on a fresh profile and never replaces those outcomes. Missing, failed, skipped,
 incomplete or extra evidence fails the existing strict run-plan gates.
 
-All three jobs and the runner pin Spotlight to reviewed, published commit
+All four jobs and the runner pin Spotlight to reviewed, published commit
 `dae17a24d4e3b90cecd42a19ceeb7322b755370b`. After verifying that exact checkout,
 case 47 imports and executes its unchanged
 `test/e2e/options-appearance-evidence.js`. Missing collector code is a failure.
@@ -80,7 +82,7 @@ required assertion fails.
 
 Local validation is limited to pure validators, mocked adapters, source contracts,
 syntax checks and production builds. These checks are not browser acceptance;
-the final combined commit still requires a successful hosted 49/5/4 run.
+the final combined commit still requires successful hosted 49/5/4/8 job results.
 No browser, native helper, privileged installation, security flag or host-policy
 change is used locally. Hosted Chrome keeps its normal namespace sandbox.
 

@@ -18,6 +18,9 @@ the exported case identity and executes after recovery case 48, before the
 unchanged Favorite lifecycle receipts and final browser restart. Every previous
 47 full case remains mandatory; the exact full/lifecycle/native-split plans are
 49/5/4. Existing native sidebar gesture and completeness gates are unchanged.
+The independent [appearance/actions job](appearance-actions-paired-ci.md) also
+requires the same action case after setup, appearance, theme, options and recovery
+(8 cases total), without replacing any of those three existing jobs.
 
 The runner and all three workflow jobs pin reviewed, published Spotlight commit
 `dae17a24d4e3b90cecd42a19ceeb7322b755370b`. Recovery and action evidence remain

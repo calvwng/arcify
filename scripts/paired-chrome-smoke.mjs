@@ -137,7 +137,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -987,7 +987,7 @@ try {
         fixture.windowBBaseline = await windowBState();
         return { windowA: a.windowId, windowB: b.windowId, spaceOrder: a.spaces.map(space => space.id), duplicateBookmarkIds: fixture.bookmarks };
     });
-    // Supplemental lifecycle runs share setup, but never depend on unrelated
+    // Supplemental runs share setup, but never depend on unrelated
     // full-suite cases or retry a failed case in an already-mutated profile.
     if (report.runMode === 'full') {
     await step(stepNames[3], async () => {
@@ -2145,10 +2145,18 @@ try {
         screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
         record:async observation => { report.bookmarkMultiSelection ||= []; report.bookmarkMultiSelection.push(observation); await saveReport(); } }));
 
+    } // Full-only cases 3–31.
+
+    // One shared definition: case 33 owns its fixtures and persists the default
+    // appearance needed by case 46, including on a fresh supplemental profile.
+    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {
     await step(stepNames[33], () => exerciseSidebarAppearance({ apiPage:arcifyOptions,newTabPage,ui,screenshot,
         screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
         record:async observation => { report.sidebarAppearance ||= []; report.sidebarAppearance.push(observation); await saveReport(); } }));
 
+    } // Shared appearance prerequisite: case 33.
+
+    if (report.runMode === 'full') {
     await step(stepNames[34], () => exerciseManagementScroll({ apiPage:arcifyOptions,ui,screenshot,snapshot,poll,fixture,
         record:async observation => { report.managementScroll ||= []; report.managementScroll.push(observation); await saveReport(); },
         nativeSidebar:async () => {
@@ -2209,6 +2217,9 @@ try {
     await step(stepNames[45], () => exerciseSavedMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,ui,screenshot,
         snapshot,bridge,poll,fixture,arcifyId,spotlightId,search,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.savedMoveSyncOn = observation; await saveReport(); } }));
+    } // Full-only cases 34–35, 37–38 and 40–45.
+
+    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {
     await step(stepNames[46], () => exerciseSpaceTheme({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,ui,screenshot,
         screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
         record:async evidence => { report.spaceTheme = evidence; await saveReport(); } }));
@@ -2227,7 +2238,7 @@ try {
     await step(stepNames[49], () => exerciseSpotlightActions({ apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,
         ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,
         record:async evidence => { report.spotlightActions = evidence; await saveReport(); } }));
-    } // Full-only cases 3–31, 33–35, 37–38 and 40–49; preserve the original cases' order.
+    } // Shared appearance/actions cases 46–49; preserve the original full order.
 
     if (report.runMode === 'native-split') {
         await step(NATIVE_SPLIT_CASE_NAME, () => exerciseNativeTodaySplit({browser,apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
@@ -2239,7 +2250,8 @@ try {
                 report.screenshots.push(captured);await saveReport();return captured;
             },
             record:async evidence => { report.nativeSplit=evidence;await saveReport(); } }));
-    } else {
+    }
+    if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {
     await step(stepNames[36], async () => {
         ordinaryFixture = await exerciseOrdinaryFavorites({ browser,apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,
             newTabPage,pageForUrl,ui,screenshot,snapshot,poll,fixture,arcifyId,spotlightId,search,
