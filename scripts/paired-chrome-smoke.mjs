@@ -451,9 +451,9 @@ async function nativePanelState() {
         events: globalThis.__pairedSidebarEvents || []
     }));
 }
-// Earlier native Sidebar cases install these same passive listeners. The narrow
-// fresh-profile mode has not run them: fail rather than reset or double-register
-// existing observations, and never manufacture an onOpened/onClosed receipt.
+// Theme cleanup reloads the API Options realm and retires its old observers.
+// Install in the current fresh realm immediately before recovery in every mode.
+// Never reset existing observations or manufacture an onOpened/onClosed receipt.
 async function prepareRecoverySidebarObservation() {
     await arcifyOptions.evaluate(() => {
         if (globalThis.__pairedSidebarEvents !== undefined) throw new Error('Recovery Sidebar observation must start exactly once in a fresh options realm.');
@@ -2254,10 +2254,8 @@ try {
     });
     } // Shared appearance cases 46–47; preserve the original full order.
 
-    if (report.runMode === 'recovery-actions') {
-        await prepareRecoverySidebarObservation();
-    }
     if (report.runMode === 'full' || report.runMode === 'appearance-actions' || report.runMode === 'recovery-actions') {
+    await prepareRecoverySidebarObservation();
     await step(stepNames[48], () => runHostedOverlayRecovery());
     await step(stepNames[49], () => exerciseSpotlightActions({ apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,
         ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,

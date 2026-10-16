@@ -1,9 +1,11 @@
 import test from 'node:test';
+import vm from 'node:vm';
+import { parseHTML } from 'linkedom';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { assertSpotlightActionEnvironment, serveSpotlightActionFixture, assertSpotlightActionContext, assertSpotlightActionUnchanged,
     assertSpotlightActionNoWrites, assertSpotlightActionInput, assertSpotlightActionRequest, assertSpotlightHelperProof, assertSpotlightActionCommitted,
-    assertSpotlightSettingsOpened, assertSpotlightActionPrompt, SPACE_ACTION_TITLES, SPACE_ACTION_FEATURES } from '../../scripts/paired-chrome-spotlight-actions.mjs';
+    assertSpotlightSettingsOpened, assertSpotlightActionPrompt, installSpotlightActionInputObservation, waitForSpotlightActionCompletion, SPACE_ACTION_TITLES, SPACE_ACTION_FEATURES } from '../../scripts/paired-chrome-spotlight-actions.mjs';
 const PEER = 'b'.repeat(32), OWN = 'a'.repeat(32), URL = 'http://127.0.0.1/same-address';
 const clone = structuredClone;
 const leaf = (id, parentId, index, title = id) => ({ id, parentId, index, title, url: URL, dateAdded: 10 });
@@ -130,4 +132,61 @@ test('settings opens once in source window and preserves counterpart, source and
     const options = { context: s.options.context, arcifyId: OWN, events: [{ type: 'tabs.onCreated', data: [after.tabs.at(-1)] }] };
     assertSpotlightSettingsOpened(before, after, options);
     for (const mutation of [state => state.tabs.at(-1).windowId = 8, state => state.tabs.shift(), state => state.tabs[3].active = false, state => state.bookmarks[0].title = 'changed', state => state.windows[1].focused = true]) { const bad = clone(after); mutation(bad); assert.throws(() => assertSpotlightSettingsOpened(before, bad, options)); }
+});
+
+
+test('overlay Settings completion observes source retirement instead of waiting in the detached input frame', async () => {
+    const { document } = parseHTML('<html><body><div id="arcify-spotlight-host"><iframe></iframe></div><input id="source-draft" value="kept"></body></html>');
+    const calls = [], host = document.getElementById('arcify-spotlight-host'), draft = document.getElementById('source-draft');
+    const page = { waitForFunction: async (predicate, options) => {
+        calls.push('source-retired'); assert.deepEqual(options, { polling: 50 });
+        assert.equal(vm.runInNewContext(`(${predicate})()`, { document }), true);
+    } };
+    host.remove();
+    await waitForSpotlightActionCompletion({ page, surface: {}, command: 'openSettings',
+        waitStatus: () => { throw new Error('waitForFunction failed: frame got detached.'); },
+        waitSettings: async () => calls.push('exact-new-settings') });
+    assert.deepEqual(calls, ['exact-new-settings', 'source-retired']);
+    assert.equal(document.getElementById('source-draft'), draft); assert.equal(draft.value, 'kept');
+});
+
+test('trusted input observation survives frame removal as plain evidence in the original source document', () => {
+    const parent = {}, listeners = {};
+    const { document } = parseHTML('<html><body><button data-testid="spotlight-result" class="selected" data-result-type="arcify-space-action"><span class="arcify-spotlight-result-title">Open Arcify settings</span></button></body></html>');
+    document.addEventListener = (type, listener) => { listeners[type] = listener; };
+    document.removeEventListener = () => {};
+    const realm = vm.createContext({ document, parent });
+    vm.runInContext(`(${installSpotlightActionInputObservation})({ retainInParent: true })`, realm);
+    const row = document.querySelector('button');
+    listeners.click({ target: row, type: 'click', isTrusted: true });
+    // Discard the frame/observer realm, then inspect only the host's retained array.
+    row.remove();
+    const events = JSON.parse(JSON.stringify(parent.__spaceActionInputEvents));
+    assertSpotlightActionInput(events, 'openSettings');
+    assert.deepEqual(Object.keys(parent), ['__spaceActionInputEvents']);
+    assert.equal(events.length, 1); assert.equal(events[0].trusted, true);
+    listeners.click({ target: row, type: 'click', isTrusted: false });
+    assert.equal(parent.__spaceActionInputEvents[1].trusted, false);
+    assert.throws(() => assertSpotlightActionInput(parent.__spaceActionInputEvents, 'openSettings'));
+});
+
+
+for (const command of Object.keys(SPACE_ACTION_TITLES)) test(`${command} keeps its normal live-surface status requirement`, async () => {
+    const page = {}, calls = [];
+    await waitForSpotlightActionCompletion({ page, surface: command === 'openSettings' ? page : {}, command,
+        waitStatus: async (_surface, expected) => { calls.push('status'); assert(expected.includes(command === 'openSettings' ? 'settings opened' : command === 'createSpaceFolder' ? 'Folder created' : command === 'removeCurrentPin' ? 'Saved pin removed' : 'Current tab saved')); },
+        waitSettings: async () => calls.push('settings') });
+    assert.deepEqual(calls, command === 'openSettings' ? ['status', 'settings'] : ['status']);
+});
+
+test('settings completion never masks an uncertain native outcome or an unretired overlay', async () => {
+    for (const failedStage of ['settings', 'source']) {
+        const calls = [], failure = new Error(`failed ${failedStage}`);
+        await assert.rejects(waitForSpotlightActionCompletion({
+            page: { waitForFunction: async () => { calls.push('source'); if (failedStage === 'source') throw failure; } }, surface: {}, command: 'openSettings',
+            waitSettings: async () => { calls.push('settings'); if (failedStage === 'settings') throw failure; },
+            waitStatus: () => { throw new Error('Detached frame must not be touched'); }
+        }), error => error === failure);
+        assert.deepEqual(calls, failedStage === 'settings' ? ['settings'] : ['settings', 'source']);
+    }
 });

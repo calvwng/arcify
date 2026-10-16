@@ -5,6 +5,7 @@ import { assertReloadFixtureProvenance, readFixturePageIdentity } from './paired
 import { FAVORITE_FAVICON_PATH, waitForRetainedFavoriteIcon } from './paired-chrome-favorite-icons.mjs';
 import { requestScopedFavorite } from './paired-chrome-favorites-restart.mjs';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
+import { clickExactSpaceChip } from './paired-chrome-space-click.mjs';
 import { readExpectedXvfbPid, probeNativeCloseTarget, sendOneNativeClose } from './paired-chrome-native-close.mjs';
 
 const sorted = values => [...values].sort((a, b) => a - b);
@@ -515,8 +516,8 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
             }
             for (const spaceId of [fixture.spaces.work, fixture.spaces.personal]) {
                 await ui(sidebar.page, 'Switch Space with real sidebar input', async () => {
-                    const selector = `#spaceSwitcher button[data-space-id="${spaceId}"]`;
-                    await sidebar.page.waitForSelector(selector); await sidebar.page.click(selector);
+                    await clickExactSpaceChip(sidebar.page, spaceId, observation =>
+                        checkpoint('space-chip-input', { sync, spaceId, ...observation }));
                 });
                 await poll(() => snapshot(windowId), value => value.activeSpaceId === spaceId, 'selected logical Space');
                 const before = await read(favorite.id);

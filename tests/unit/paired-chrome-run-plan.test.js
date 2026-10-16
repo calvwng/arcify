@@ -120,19 +120,19 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     const secondEnd = smoke.indexOf('    } // Full-only cases 34–35, 37–38 and 40–45.');
     const actions = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {", appearance + 1);
     const actionsEnd = smoke.indexOf('    } // Shared appearance cases 46–47;');
-    const preparation = smoke.indexOf("    if (report.runMode === 'recovery-actions') {");
+    const preparation = smoke.indexOf('    await prepareRecoverySidebarObservation();');
     const recovery = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions' || report.runMode === 'recovery-actions') {");
     const recoveryEnd = smoke.indexOf('    } // Shared recovery/actions cases 48–49;');
     const lifecycle = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {");
     assert(firstFull > 0 && firstFull < firstEnd && firstEnd < appearance && appearance < appearanceEnd &&
-        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < preparation && preparation < recovery && recovery < recoveryEnd && recoveryEnd < lifecycle);
+        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < lifecycle);
     assert.deepEqual(stepIndices(smoke), fullOrder, 'Every full case definition remains single and in its original order.');
     assert.deepEqual(stepIndices(smoke.slice(0, firstFull)), [0, 1, 2]);
     assert.deepEqual(stepIndices(smoke.slice(firstFull, firstEnd)), Array.from({ length: 29 }, (_, index) => index + 3));
     assert.deepEqual(stepIndices(smoke.slice(appearance, appearanceEnd)), [33]);
     assert.deepEqual(stepIndices(smoke.slice(secondFull, secondEnd)), [34, 35, 37, 38, 40, 41, 42, 43, 44, 45]);
     assert.deepEqual(stepIndices(smoke.slice(actions, actionsEnd)), [46, 47]);
-    assert.deepEqual(stepIndices(smoke.slice(preparation, recovery)), []);
+    assert.deepEqual(stepIndices(smoke.slice(recovery, preparation)), []);
     assert.deepEqual(stepIndices(smoke.slice(recovery, recoveryEnd)), [48, 49]);
     assert.deepEqual(stepIndices(smoke.slice(lifecycle)), [36, 32]);
     assert.match(smoke, /createPairedChromeRunReport\(stepNames, process\.env\.ARCIFY_PAIRED_RUN_MODE\)/);
@@ -158,7 +158,8 @@ async function runOrchestration(mode, failAt = null, definitions = []) {
         report, stepNames: names, NATIVE_SPLIT_CASE_NAME: names[39],
         prepareRecoverySidebarObservation: async () => {
             preparations++;
-            assert.deepEqual(report.executedCaseIndices, [0, 1, 2], 'Observation is prepared only after fresh setup and before recovery.');
+            const order = allPlans.find(([plan]) => plan === mode)[1];
+            assert.deepEqual(report.executedCaseIndices, order.slice(0, order.indexOf(48)), 'Observation is prepared in the current API realm immediately before recovery.');
             if (failAt === 'observation') throw failure;
         },
         step: async (name, callback, options) => {
@@ -173,7 +174,8 @@ async function runOrchestration(mode, failAt = null, definitions = []) {
     });
     if (failAt !== null) await assert.rejects(execute, error => error === failure);
     else await execute;
-    assert.equal(preparations, mode === 'recovery-actions' && (failAt === null || failAt === 'observation' || failAt >= 48) ? 1 : 0);
+    const order = allPlans.find(([plan]) => plan === mode)[1], recoveryIndex = order.indexOf(48);
+    assert.equal(preparations, recoveryIndex !== -1 && (failAt === null || failAt === 'observation' || order.indexOf(failAt) >= recoveryIndex) ? 1 : 0);
     return report;
 }
 for (const [mode, order] of allPlans) {
@@ -356,10 +358,10 @@ for (const [mode, order] of allPlans) {
     });
 }
 
-test('fresh recovery observer preparation failure stops before 48/49 and cannot produce passing evidence', async () => {
-    const report = await runOrchestration('recovery-actions', 'observation');
-    assert.deepEqual(report.executedCaseIndices, [0, 1, 2]);
-    assert.deepEqual(report.checks.slice(3).map(check => check.status), ['not_run', 'not_run']);
+for (const [mode, order] of allPlans.filter(([, order]) => order.includes(48))) test(`${mode} observer preparation failure stops before 48/49 and cannot produce passing evidence`, async () => {
+    const report = await runOrchestration(mode, 'observation');
+    assert.deepEqual(report.executedCaseIndices, order.slice(0, order.indexOf(48)));
+    assert.deepEqual(report.checks.slice(order.indexOf(48)).map(check => check.status), order.slice(order.indexOf(48)).map(() => 'not_run'));
     assert.throws(() => assertPairedChromeRunPassed(report));
 });
 

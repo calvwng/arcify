@@ -53,7 +53,7 @@ export function installSpotlightActionApiObservation() {
     listen(chrome.storage.onChanged, 'storage', (changes, area) => ({ area, changes }));
     globalThis.__spaceActionObservation = { events, stop: () => registrations.forEach(remove => remove()) };
 }
-export function installSpotlightActionInputObservation() {
+export function installSpotlightActionInputObservation({ retainInParent = false } = {}) {
     globalThis.__spaceActionInput?.stop();
     const events = [], registrations = [];
     for (const type of ['input', 'click', 'keydown']) {
@@ -70,7 +70,22 @@ export function installSpotlightActionInputObservation() {
         document.addEventListener(type, listener, true); registrations.push(() => document.removeEventListener(type, listener, true));
     }
     globalThis.__spaceActionInput = { events, stop: () => registrations.forEach(remove => remove()) };
+    // Settings activates another tab, legitimately retiring the overlay iframe.
+    // Retain only passive event data in the unchanged source document, never a
+    // live frame/controller or a replacement event/response transport.
+    (retainInParent ? parent : globalThis).__spaceActionInputEvents = events;
 }
+export async function waitForSpotlightActionCompletion({ page, surface, command, waitStatus, waitSettings }) {
+    assert(commands.includes(command));
+    if (command === 'openSettings' && surface !== page) {
+        await waitSettings();
+        await page.waitForFunction(() => !document.getElementById('arcify-spotlight-host'), { polling: 50 });
+        return;
+    }
+    await waitStatus(surface, { pinCurrentTab: 'Current tab saved as a Space pin.', removeCurrentPin: 'Saved pin removed. All linked tabs stay open as Today.', createSpaceFolder: 'Folder created in the selected Space.', openSettings: 'Arcify settings opened. This tab stays open.' }[command]);
+    if (command === 'openSettings') await waitSettings();
+}
+
 export function readSpotlightActionPrompt() {
     const prompt = document.querySelector('.arcify-space-action-prompt'); if (!prompt) return null;
     const input = prompt.querySelector('input'), confirm = prompt.querySelector('[data-action-confirm]'), cancel = prompt.querySelector('[data-action-cancel]');
@@ -274,9 +289,9 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
         await spotlightOptions.evaluate(() => { globalThis.__spaceActionObservation.events.length = 0; });
         if (surface) await surface.evaluate(() => { globalThis.__spaceActionInput.events.length = 0; });
     };
-    const observed = async surface => ({ events: await apiPage.evaluate(() => globalThis.__spaceActionObservation.events),
+    const observed = async (surface, inputOwner = surface) => ({ events: await apiPage.evaluate(() => globalThis.__spaceActionObservation.events),
         peerEvents: await spotlightOptions.evaluate(() => globalThis.__spaceActionObservation.events),
-        input: surface ? await surface.evaluate(() => globalThis.__spaceActionInput.events) : [] });
+        input: inputOwner ? await inputOwner.evaluate(() => globalThis.__spaceActionInputEvents) : [] });
     const capture = async (page, label) => { const result = await screenshot(page, `spotlight-actions-${label}`, true, { fullPage: false }); assert(result?.filename && result?.capturedAt, 'Action screenshots are mandatory evidence.'); return result; };
     const context = async (tabId, section, bookmarkId) => {
         const before = await read();
@@ -290,7 +305,9 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
         assertMatchedActionFirst(rows, { type: 'arcify-space-action', title: SPACE_ACTION_TITLES[command], query: SPACE_ACTION_QUERIES[command] });
         // Inspect the actual painted row, not just an in-memory action result.
         assert.equal(await surface.$eval('[data-testid="spotlight-result"]', node => node.getBoundingClientRect().width > 0 && node.getBoundingClientRect().height > 0 && getComputedStyle(node).visibility !== 'hidden'), true);
-        await surface.evaluate(installSpotlightActionInputObservation); return { surface, rows };
+        const retainInParent = command === 'openSettings' && surface !== page;
+        await surface.evaluate(installSpotlightActionInputObservation, { retainInParent });
+        return { surface, rows, inputOwner: retainInParent ? page : surface };
     };
     const clickAction = async (surface, command) => clickFreshResult(async timeout => {
         await surface.waitForSelector('[data-result-type="arcify-space-action"]', { visible: true, timeout });
@@ -330,7 +347,7 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
         });
     };
     const commit = async (page, command, sourceContext, { title, keyboard = false } = {}) => {
-        const { surface, rows } = await ready(page, command); let outcome;
+        const { surface, rows, inputOwner } = await ready(page, command); let outcome;
         await ui(page, `Perform ${command} using the visible Spotlight UI`, async () => {
             const before = await read(); await reset(surface);
             if (keyboard) await pressAction(surface); else await clickAction(surface, command);
@@ -342,13 +359,13 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
                 await capture(page, `${command}-explicit-prompt`);
                 if (title && keyboard) await page.keyboard.press('Enter'); else await surface.click(`[data-action-confirm="${command}"]`);
             }
-            await status(surface, { pinCurrentTab: 'Current tab saved as a Space pin.', removeCurrentPin: 'Saved pin removed. All linked tabs stay open as Today.', createSpaceFolder: 'Folder created in the selected Space.', openSettings: 'Arcify settings opened. This tab stays open.' }[command]);
-            if (command === 'openSettings') await poll(() => apiPage.evaluate(() => chrome.tabs.query({})), tabs => tabs.some(tab => !before.tabs.some(previous => previous.id === tab.id) && tab.url === `chrome-extension://${arcifyId}/options.html` && tab.status === 'complete' && !tab.pendingUrl), 'new settings page fully loaded without another navigation');
+            await waitForSpotlightActionCompletion({ page, surface, command, waitStatus: status,
+                waitSettings: () => poll(() => apiPage.evaluate(() => chrome.tabs.query({})), tabs => tabs.some(tab => !before.tabs.some(previous => previous.id === tab.id) && tab.url === `chrome-extension://${arcifyId}/options.html` && tab.status === 'complete' && !tab.pendingUrl), 'new settings page fully loaded without another navigation') });
             const after = await poll(read, state => {
                 const requests = state.journal.filter(entry => { try { const request = JSON.parse(entry.fingerprint); return request.command === command && JSON.stringify(request.context) === JSON.stringify(sourceContext) && entry.response?.ok; } catch { return false; } });
                 return requests.length === 1;
             }, `one confirmed durable ${command} receipt`);
-            const trace = await observed(surface), request = assertSpotlightActionRequest(trace.events, command, sourceContext, spotlightId, title ? { title } : command === 'removeCurrentPin' ? { confirmed: true } : {});
+            const trace = await observed(surface, inputOwner), request = assertSpotlightActionRequest(trace.events, command, sourceContext, spotlightId, title ? { title } : command === 'removeCurrentPin' ? { confirmed: true } : {});
             assertSpotlightActionInput(trace.input, command, { confirmed: Boolean(prompt), ...(title ? { folderTitle: title } : {}) });
             const receipt = after.journal.find(entry => entry.fingerprint === JSON.stringify(request));
             const resultId = receipt.response[command === 'createSpaceFolder' ? 'folderId' : command === 'openSettings' ? 'tabId' : 'bookmarkId'];
