@@ -102,10 +102,18 @@ The other-window claim is a tab-sender rejection test, not evidence for a native
 wrong-window receiver race.
 
 The panel is closed between the six original positive combinations so each
-requires a fresh real opening receipt. An additional fresh-token non-gesture send
-uses explicitly
-`userGesture:false` DevTools evaluation and must fail without a panel, native
-mutation or state change. It is a negative protocol probe, never positive input.
+requires a fresh real opening receipt. The negative probe first observes the
+source's real `navigator.userActivation.isActive` becoming false using only raw
+`userGesture:false` DevTools reads. Its fresh one-use token is prepared afterward;
+expired or stale authorization cannot satisfy the gesture test. The final raw
+non-gesture expression checks inactive status and unchanged document URL/time
+origin immediately before its single send. Renewed activation or document drift
+fails without sending or retrying. Actual activation samples, token preparation,
+raw reply, native baseline and post-send state are saved before assertions.
+The matching reply must be `OPEN_FAILED` with Chrome's user-gesture/action error,
+with no transport error, panel event/context, native mutation or state change.
+A stale-token or authorization error is not a passing negative. This is a
+negative protocol probe, never positive input.
 The observer adds listeners to the existing background Port endpoint only; it
 never creates a receiver connection, sends a reply, wraps a Chrome API or grants
 authority. It retains its original worker object and observation identity for the
@@ -274,3 +282,22 @@ record/claim and selected-Space cleanup assertions remain mandatory. Original
 and final cleanup snapshots are persisted before those assertions, and cleanup
 failures are appended without replacing completed action evidence or an earlier
 acceptance failure. The correction awaits fresh exact-pair hosted verification.
+
+
+## Non-gesture activation expiry regression
+
+Hosted run `38932814713` on Arcify `ad0716a` completed all six fresh native opens,
+existing-panel reuse, native button round trip and both ordinary-tab refusals,
+then failed the final non-gesture check because the response reported success.
+The fixture had just typed the query with genuine input and sent the negative
+without observing activation expiry. `userGesture:false` does not establish
+that a document's earlier transient activation is absent. The recorded timing
+supports residual activation as the cause, but that failed report did not record
+`navigator.userActivation`, so the historical activation value is not proven.
+
+The revised probe uses the same observed-expiry principle as the original
+Sidebar negative case, then prepares a fresh token and checks inactive state
+again in the actual send expression. It preserves all positive proofs and adds
+strict native gesture-error matching and pre-assertion evidence. No runtime,
+permission, browser flag or request-authorization checks change. Fresh hosted
+evidence remains required; the earlier failed job is not an acceptance pass.

@@ -9,7 +9,7 @@ import { finishBookmarkFixture } from '../../scripts/paired-chrome-bookmark-sele
 import { registerFavoriteMessages } from '../../favorite-store.js';
 import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
 import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
-    assertArchiveReopenRequest, waitForArchiveReopenCompletion, readArchiveDestinationDocument, captureArchiveReopenedDestination, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation, readArchiveIntentObservation, observeArchiveDisplayWorker, probeArchiveDisplayRegistration, exerciseArchiveExistingPanel, installArchiveStatusObservation,
+    assertArchiveReopenRequest, waitForArchiveReopenCompletion, readArchiveDestinationDocument, captureArchiveReopenedDestination, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation, readArchiveIntentObservation, observeArchiveDisplayWorker, probeArchiveDisplayRegistration, exerciseArchiveExistingPanel, installArchiveStatusObservation, readArchiveActivation, probeArchiveOpenWithoutGesture, assertArchiveNoGestureRejection,
     readArchiveDocumentStatus, collectArchiveOpenFailure, readArchiveReopenJournal, collectArchiveReopenFailure, withArchiveFailureEvidence,
     readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
     ARCHIVE_FEATURES, ARCHIVE_OPEN_TYPE, ARCHIVE_ENTRY_TYPE } from '../../scripts/paired-chrome-spotlight-archive.mjs';
@@ -1007,3 +1007,89 @@ for (const fault of ['new-opening', 'replacement-context', 'different-capture-do
         const f = existingPanelFixture(fault); await assert.rejects(f.run()); assert.equal(f.calls.filter(value => value === 'trusted-input').length, 1);
         assert.equal(f.calls.filter(value => value === 'stop-status').length, 1); assert.deepEqual(f.checkpoints, []);
     });
+
+function noGestureProbeFixture({ activations = [true, true, false], atPrepare, atBaseline, response, transportError = null, throwAt } = {}) {
+    const calls = [], nativeSends = [], samples = [...activations], state = { activation: true, url: `chrome-extension://${SPOTLIGHT}/newtab.html`, timeOrigin: 1000 };
+    const requestId = 'strict-no-gesture', token = 'fresh-after-expiry';
+    const rejection = response || { type: 'arcify-archive-open', version: 1, requestId, role: 'arcify', ok: false,
+        error: { code: 'OPEN_FAILED', message: '`sidePanel.open()` may only be called in response to a user gesture.' } };
+    const session = { send: async (method, options) => {
+        assert.equal(method, 'Runtime.evaluate'); assert.equal(options.userGesture, false); assert.equal(options.awaitPromise, true); assert.equal(options.returnByValue, true);
+        const sending = options.expression.includes('chrome.runtime.sendMessage'); calls.push(sending ? 'send-evaluation' : 'activation-read');
+        if (throwAt === (sending ? 'send' : 'read')) return { exceptionDetails: { text: 'Original CDP exception' } };
+        if (!sending && samples.length) state.activation = samples.shift();
+        const navigator = { userActivation: { get isActive() { return state.activation; }, hasBeenActive: true } };
+        const result = await vm.runInNewContext(options.expression, { navigator, document: { URL: state.url }, performance: { timeOrigin: state.timeOrigin },
+            chrome: { runtime: { lastError: transportError ? { message: transportError } : undefined, sendMessage: (id, request, done) => {
+                assert.equal(id, ARCIFY); nativeSends.push(copy(request)); calls.push('actual-send'); done(copy(rejection));
+            } } } });
+        return { result: { value: copy(result) } };
+    }, detach: async () => calls.push('detach') };
+    const args = { page: { createCDPSession: async () => { calls.push('session'); return session; }, evaluate: () => assert.fail('No gesture-bearing Puppeteer evaluation.') },
+        poll: async (read, accept) => { for (let count = 0; count < 4; count++) { const value = await read(); if (accept(value)) return value; } throw new Error('Activation never expired'); },
+        prepare: async () => { calls.push('prepare-fresh-token'); assert.equal(state.activation, false); atPrepare?.(state); return { ok: true, archiveActions: { openIntent: token } }; },
+        baseline: async () => { calls.push('baseline'); atBaseline?.(state); return { before: { tabs: [] }, panel: { contexts: [], events: [] } }; }, arcifyId: ARCIFY, requestId };
+    return { run: () => probeArchiveOpenWithoutGesture(args), args, state, calls, nativeSends, rejection };
+}
+test('no-gesture probe waits for observed expiry before a fresh token and atomically sends once without adding activation', async () => {
+    const f = noGestureProbeFixture(), probe = await f.run(); assertArchiveNoGestureRejection(probe);
+    assert.deepEqual(f.calls, ['session', 'activation-read', 'activation-read', 'activation-read', 'prepare-fresh-token', 'baseline', 'send-evaluation', 'actual-send', 'detach']);
+    assert.deepEqual(probe.activationSamples.map(value => value.isActive), [true, true, false]); assert.equal(probe.activation.isActive, false);
+    assert.deepEqual(f.nativeSends, [{ type: 'arcify-archive-open', version: 1, requestId: 'strict-no-gesture', token: 'fresh-after-expiry' }]);
+    assert.deepEqual(probe.response, f.rejection); assert.deepEqual(probe.baseline.panel, { contexts: [], events: [] });
+});
+for (const [name, mutation] of [
+    ['new real activation', state => { state.activation = true; }],
+    ['same-address document reload', state => { state.timeOrigin++; }],
+    ['navigation', state => { state.url = 'https://different.test/'; }]
+]) test(`no-gesture probe refuses to send or retry after ${name} during preparation`, async () => {
+    const f = noGestureProbeFixture({ atPrepare: mutation }), probe = await f.run();
+    assert.equal(probe.sent, false); assert.deepEqual(f.nativeSends, []); assert.throws(() => assertArchiveNoGestureRejection(probe));
+    assert.equal(f.calls.filter(value => value === 'send-evaluation').length, 1); assert.equal(f.calls.at(-1), 'detach');
+});
+test('no-gesture probe atomically guards against activation reacquired during native/store baseline reads', async () => {
+    const f = noGestureProbeFixture({ atBaseline: state => { state.activation = true; } }), probe = await f.run();
+    assert.equal(probe.sent, false); assert.equal(probe.activation.isActive, true); assert.deepEqual(f.nativeSends, []);
+});
+test('activation that never expires fails before any token preparation or actual send', async () => {
+    const f = noGestureProbeFixture({ activations: [true] }); await assert.rejects(f.run(), /Activation never expired/);
+    assert.deepEqual(f.calls, ['session', 'activation-read', 'activation-read', 'activation-read', 'activation-read', 'detach']); assert.deepEqual(f.nativeSends, []);
+});
+for (const throwAt of ['read', 'send']) test(`CDP ${throwAt} failure is not converted into no-gesture refusal or retried`, async () => {
+    const f = noGestureProbeFixture({ throwAt }); await assert.rejects(f.run(), /Non-gesture probe failed/);
+    assert.deepEqual(f.nativeSends, []); assert.equal(f.calls.at(-1), 'detach');
+});
+test('fresh-token preparation failure cannot be mistaken for native gesture enforcement', async () => {
+    const f = noGestureProbeFixture(); f.args.prepare = async () => ({ ok: false, error: { code: 'STALE_ARCHIVE' } });
+    await assert.rejects(f.run()); assert.deepEqual(f.nativeSends, []); assert.equal(f.calls.at(-1), 'detach');
+});
+for (const [name, change] of [
+    ['native acceptance', value => { value.response.ok = true; value.response.displayed = true; }],
+    ['stale token', value => { value.response.error.code = 'STALE_ARCHIVE'; }],
+    ['authorization rejection', value => { value.response.error.code = 'UNAUTHORIZED'; }],
+    ['unrelated native failure', value => { value.response.error.message = 'Window is unavailable'; }],
+    ['wrong response request', value => { value.response.requestId = 'another-request'; }],
+    ['wrong response protocol', value => { value.response.type = 'arcify-sidebar'; }],
+    ['wrong response version', value => { value.response.version = 2; }],
+    ['wrong response role', value => { value.response.role = 'spotlight'; }],
+    ['transport failure', value => { value.transportError = 'Receiving end does not exist'; }],
+    ['active source', value => { value.activation.isActive = true; }],
+    ['missing expiry observation', value => { value.activationSamples = []; }],
+    ['changed document', value => { value.activation.timeOrigin++; }]
+]) test(`no-gesture result oracle rejects ${name}`, async () => {
+    const probe = await noGestureProbeFixture().run(); change(probe); assert.throws(() => assertArchiveNoGestureRejection(probe));
+});
+test('activation reader uses real browser state and treats missing activation API as unavailable', () => {
+    const run = navigator => copy(vm.runInNewContext(`(${readArchiveActivation})()`, { navigator, document: { URL }, performance: { timeOrigin: 50 } }));
+    assert.deepEqual(run({ userActivation: { isActive: false, hasBeenActive: true } }), { isActive: false, hasBeenActive: true, url: URL, timeOrigin: 50 });
+    assert.deepEqual(run({}), { isActive: null, hasBeenActive: null, url: URL, timeOrigin: 50 });
+});
+test('no-gesture wiring records raw evidence before strict native rejection and no-panel assertions', () => {
+    const block = source.slice(source.indexOf("        const origin = await sourcePage('owned-newtab', current); await ready(origin.page);", source.indexOf('export async function exerciseSpotlightArchiveOpen')), source.indexOf('export async function exerciseSpotlightArchiveReopen'));
+    assert.match(block, /probeArchiveOpenWithoutGesture/); assert.match(block, /prepare: \(\) => external\(spotlightOptions, arcifyId, 'archiveContext'/);
+    assert(block.indexOf("checkpoint('non-gesture-archive-open-observed'") < block.indexOf('assertArchiveNoGestureRejection(probe)'));
+    assert.match(block, /assertArchiveNoMutation\(before, after, observed\.events\)/); assert.match(block, /assert\.deepEqual\(panelAfter\.events, panel\.events\)/);
+    assert.match(block, /assert\.deepEqual\(panel\.contexts, \[\]\)/); assert.match(block, /assert\.deepEqual\(panelAfter\.contexts, \[\]\)/);
+    const helper = source.slice(source.indexOf('export async function probeArchiveOpenWithoutGesture'), source.indexOf('export function assertArchiveNoGestureRejection'));
+    assert.doesNotMatch(helper, /page\.evaluate|sleep\(|setTimeout\(|\.press\(|\.click\(|userGesture:\s*true/);
+});

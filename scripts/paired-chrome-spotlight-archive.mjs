@@ -154,6 +154,52 @@ export async function probeArchiveDisplayRegistration({ windowId, requestId }) {
     });
 }
 
+/** All reads use raw non-gesture CDP; Puppeteer evaluation must not renew activation. */
+export function readArchiveActivation() {
+    return { isActive: navigator.userActivation?.isActive ?? null, hasBeenActive: navigator.userActivation?.hasBeenActive ?? null,
+        url: document.URL, timeOrigin: performance.timeOrigin };
+}
+export async function probeArchiveOpenWithoutGesture({ page, poll, prepare, baseline, arcifyId, requestId }) {
+    const session = await page.createCDPSession(), activationSamples = [];
+    try {
+        const expired = await poll(async () => {
+            const value = await evaluateWithoutGesture(session, `(${readArchiveActivation.toString()})()`);
+            assert.equal(typeof value?.isActive, 'boolean'); assert.equal(typeof value.hasBeenActive, 'boolean');
+            assert.equal(typeof value.url, 'string'); assert(Number.isFinite(value.timeOrigin) && value.timeOrigin > 0);
+            if (activationSamples.length) {
+                assert.equal(value.url, activationSamples[0].url); assert.equal(value.timeOrigin, activationSamples[0].timeOrigin);
+            }
+            activationSamples.push(value); return value;
+        }, value => value.isActive === false, 'expired Archive source activation before preparing a fresh negative intent');
+        // Preparing only after observed expiry prevents an old/expired token
+        // from satisfying a negative that must reach Chrome's gesture gate.
+        const context = await prepare();
+        assert.equal(context?.ok, true); assert.equal(typeof context.archiveActions?.openIntent, 'string'); assert(context.archiveActions.openIntent);
+        const before = await baseline();
+        const request = { type: 'arcify-archive-open', version: 1, requestId, token: context.archiveActions.openIntent };
+        const result = await evaluateWithoutGesture(session, `(() => {
+            const activation = (${readArchiveActivation.toString()})();
+            if (activation.isActive !== false || activation.url !== ${JSON.stringify(expired.url)} || activation.timeOrigin !== ${JSON.stringify(expired.timeOrigin)})
+                return { sent: false, activation };
+            return new Promise(resolve => chrome.runtime.sendMessage(${JSON.stringify(arcifyId)}, ${JSON.stringify(request)}, response =>
+                resolve({ sent: true, activation, response, transportError: chrome.runtime.lastError?.message || null })));
+        })()`);
+        return { activationSamples, context, baseline: before, request, ...result };
+    } finally { await session.detach(); }
+}
+export function assertArchiveNoGestureRejection(probe) {
+    assert.equal(probe.sent, true, 'The negative must send once only from the same inactive source document.');
+    assert.equal(probe.activationSamples.at(-1)?.isActive, false); assert.equal(probe.activation.isActive, false);
+    assert.equal(probe.activation.url, probe.activationSamples[0].url); assert.equal(probe.activation.timeOrigin, probe.activationSamples[0].timeOrigin);
+    assert.equal(probe.transportError, null);
+    const response = probe.response;
+    assert.equal(response?.type, 'arcify-archive-open'); assert.equal(response.version, 1);
+    assert.equal(response.requestId, probe.request.requestId); assert.equal(response.role, 'arcify');
+    assert.equal(response.ok, false); assert.notEqual(response.displayed, true);
+    assert.equal(response.error?.code, 'OPEN_FAILED', 'A fresh authorized negative must reach Chrome gesture enforcement.');
+    assert.match(response.error.message, /user (?:gesture|action)/i);
+}
+
 /** Passive DOM input observation survives legitimate retirement of an overlay. */
 export function installArchiveInputObservation() {
     globalThis.__archiveInput?.stop();
@@ -853,17 +899,16 @@ export async function exerciseSpotlightArchiveOpen(adapters) {
         // A real same-extension renderer with a fresh source-bound intent still
         // cannot turn a non-gesture protocol send into an accepted native open.
         const origin = await sourcePage('owned-newtab', current); await ready(origin.page);
-        const context = await external(spotlightOptions, arcifyId, 'archiveContext', { windowId, tabId: origin.tab.id, supportedFeatures: ARCHIVE_FEATURES });
-        assert.equal(context?.ok, true); assert.equal(typeof context.archiveActions?.openIntent, 'string');
-        const before = await settle(); await reset(); const eventCount = (await nativePanel.state()).events.length;
-        const session = await origin.page.createCDPSession();
-        let response;
-        try { response = await evaluateWithoutGesture(session, `chrome.runtime.sendMessage(${JSON.stringify(arcifyId)}, ${JSON.stringify({ type: 'arcify-archive-open', version: 1, requestId: `archive-no-gesture-${evidence.nonce}`, token: context.archiveActions.openIntent })})`); }
-        finally { await session.detach(); }
-        assert.equal(response?.ok, false); assert.notEqual(response?.displayed, true);
-        const after = await read(), observed = await trace(); assertArchiveNoMutation(before, after, observed.events);
-        assert.deepEqual((await nativePanel.state()).contexts, []); assert.equal((await nativePanel.state()).events.length, eventCount);
-        await checkpoint('non-gesture-archive-open-rejected', { before, after, response, observed });
+        const probe = await probeArchiveOpenWithoutGesture({ page: origin.page, poll, arcifyId, requestId: `archive-no-gesture-${evidence.nonce}`,
+            prepare: () => external(spotlightOptions, arcifyId, 'archiveContext', { windowId, tabId: origin.tab.id, supportedFeatures: ARCHIVE_FEATURES }),
+            baseline: async () => { const before = await settle(); await reset(); return { before, panel: await nativePanel.state() }; } });
+        const { before, panel } = probe.baseline, after = await read(), observed = await trace(), panelAfter = await nativePanel.state();
+        // Retain the actual activation, raw reply and native result even when
+        // the strict gesture/refusal assertion fails. No failed send is retried.
+        await checkpoint('non-gesture-archive-open-observed', { probe, after, observed, panelAfter });
+        assertArchiveNoGestureRejection(probe); assertArchiveNoMutation(before, after, observed.events);
+        assert.deepEqual(panel.contexts, []); assert.deepEqual(panelAfter.contexts, []); assert.deepEqual(panelAfter.events, panel.events);
+        await checkpoint('non-gesture-archive-open-rejected', { before, after, response: probe.response, probe, observed });
         assert.equal(evidence.matrix.length, 6);
     }); } catch (error) { primaryError = error; throw error; }
     finally { if (displayObserver) await finishBookmarkFixture([() => displayObserver.stop()], primaryError); }
