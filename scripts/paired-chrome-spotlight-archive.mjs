@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { spotlightSurface } from './paired-chrome-keyboard.mjs';
 import { clickFreshResult, replaceInputText, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
-import { readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
+import { readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture, revealNativeSidebarSpace } from './paired-chrome-sidebar.mjs';
 import { createNavigationFixturePage } from './paired-chrome-spotlight-navigation.mjs';
 import { canonicalSavedMoveBookmarks } from './paired-chrome-saved-move.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
@@ -500,10 +500,15 @@ export async function exerciseSpotlightArchiveOpen(adapters) {
                 const preparation = await trace(); await reset();
                 await capture(origin.page, `${kind}-${method}-open-selected`);
                 await invoke(selected, method);
+                // An explicit fixture interaction reveals the already-selected
+                // long Space chip. The shared helper proves one trusted wheel
+                // and unchanged native selection/ownership; capture stays read-only.
+                const { page } = await nativePanel.resolve();
+                const reveal = await revealNativeSidebarSpace({ page, poll, extensionId: arcifyId, windowId, spaceId: source.id });
+                await checkpoint('native-archive-selected-space-revealed', { kind, method, reveal });
                 // The established adapter proves SIDE_PANEL context, native onOpened,
                 // no regular sidebar tab, nontrivial viewport and exact PNG pixels.
                 const native = await nativePanel.capture(eventCount, `Archive ${kind} ${method} native Side Panel`);
-                const { page } = await nativePanel.resolve();
                 const popup = await poll(() => page.evaluate(readNativeArchivePopup), state => {
                     try { assertNativeArchivePopup(state, { arcifyId, spaceId: source.id, entries: before.archivedTabs }); return true; } catch { return false; }
                 }, 'existing global Archive popup visible inside the actual native Side Panel');

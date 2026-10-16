@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
 import { registerFavoriteMessages } from '../../favorite-store.js';
+import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
 import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
     assertArchiveReopenRequest, waitForArchiveReopenCompletion, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation,
     readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
@@ -349,4 +350,83 @@ test('hosted Archive setup owns a fresh exact-window document, measures wrong-wi
     const archiveCleanup = source.indexOf("if (!entries) return; const existing = await archive({ action: 'list' })", bulkClose);
     const endpointClose = source.indexOf('if (fixtureApi) await apiPage.evaluate(id => chrome.tabs.remove(id), fixtureApi.tab.id)', archiveCleanup);
     assert(bulkClose > 0 && archiveCleanup > bulkClose && endpointClose > archiveCleanup);
+});
+
+
+function archiveRevealFixture(fault = null, alreadyVisible = false) {
+    // Exact geometry from attempt2's native capture timeout; this is a mock
+    // regression, not a claim of browser acceptance or a replacement receipt.
+    const before = { url: `chrome-extension://${ARCIFY}/sidebar.html`, visibility: 'visible', width: 360, height: 869, devicePixelRatio: 1,
+        switcher: { x: 0, y: 809, width: 352, height: 44, visible: true, scrollLeft: 0, scrollWidth: 1182, clientWidth: 352,
+            pointer: { x: 176, y: 831, hitsSwitcher: true } }, selectedSpaces: ['selected'], selectedVisible: false,
+        selectedChip: { x: 387.078125, y: 817, width: 372.75, height: 32, styled: true }, visibleSpaces: ['selected'] };
+    if (alreadyVisible) { before.selectedChip.x = 10; before.selectedVisible = true; }
+    const expected = { extensionId: ARCIFY, spaceId: 'selected' };
+    const planned = planNativeSidebarSpaceReveal(before, expected);
+    const after = copy(before);
+    if (planned) { after.switcher.scrollLeft += planned.deltaX; after.selectedChip.x -= planned.deltaX; after.selectedVisible = true; }
+    if (fault === 'wrong selection') before.selectedSpaces = ['other'];
+    if (fault === 'wrong rendered Space') before.visibleSpaces = ['other'];
+    if (fault === 'hidden panel') before.visibility = 'hidden';
+    const calls = [], checkpoints = [];
+    let renderReads = 0, selectionReads = 0;
+    const selection = { tab: null, windowId: 7, tabs: [{ id: 10, windowId: 7, active: true }],
+        spaces: [{ id: 'selected', temporaryTabs: [10], spaceBookmarks: [] }], activeSpaces: { 7: 'selected' } };
+    const page = { mouse: { move: async (...args) => calls.push(['move', ...args]), wheel: async args => calls.push(['wheel', args]) },
+        evaluate: async fn => {
+            if (fn.name === 'readNativeSidebarRender') return renderReads++ === 0 || fault === 'no actual scroll' ? before : after;
+            if (fn.name === 'readSelection') { const value = copy(selection);
+                if (fault === 'wrong native window') value.windowId = 8;
+                if (fault === 'ordinary sidebar tab') value.tab = { id: 40, windowId: 7 };
+                if (selectionReads++ && fault === 'changed membership') value.spaces[0].temporaryTabs = [];
+                return value;
+            }
+            if (fn.toString().includes('const events = globalThis')) { calls.push(['listen']); return; }
+            if (fn.toString().includes('__stopNativeSidebarRevealWheel')) { calls.push(['stop']); return; }
+            if (fn.toString().includes('__nativeSidebarRevealWheel')) return [{ trusted: fault !== 'untrusted wheel', inSwitcher: true, deltaX: planned.deltaX, deltaY: 0 }];
+            assert.fail(`Unexpected native operation: ${fn}`);
+        } };
+    const native = { context: { contextType: 'SIDE_PANEL', documentId: 'native-document' } };
+    const nativePanel = { resolve: async () => { calls.push(['resolve']); if (fault === 'missing native target') throw new Error('No native target'); return { page }; },
+        capture: async (eventCount, label) => { calls.push(['capture', eventCount, label]);
+            assert.equal(eventCount, 17); assert.equal(checkpoints.length, 1, 'Explicit reveal proof precedes the unchanged capture.');
+            if (fault === 'capture rejected') throw new Error('Native capture failed'); return native;
+        } };
+    const poll = async (read, accept) => { const state = await read(); assert(accept(state), 'Existing strict native reveal readiness must pass'); return state; };
+    const checkpoint = async (phase, data) => { calls.push(['checkpoint']); checkpoints.push({ phase, ...data }); };
+    // Execute the actual hosted boundary, including the real shared reveal
+    // helper. Do not copy its ordering into a separately tested fake adapter.
+    const begin = source.indexOf('                // An explicit fixture interaction reveals');
+    const end = source.indexOf('                const popup = await poll', begin);
+    assert(begin > 0 && end > begin);
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const run = new AsyncFunction('nativePanel', 'poll', 'arcifyId', 'windowId', 'source', 'kind', 'method', 'eventCount', 'checkpoint', 'revealNativeSidebarSpace',
+        `${source.slice(begin, end)}; return { page, native };`);
+    return { calls, checkpoints, planned, page, native,
+        run: () => run(nativePanel, poll, ARCIFY, 7, { id: 'selected' }, 'owned-newtab', 'click', 17, checkpoint, revealNativeSidebarSpace) };
+}
+test('Archive native capture explicitly reveals attempt2 offscreen chip with one genuine wheel before read-only proof', async () => {
+    const value = archiveRevealFixture(); assert.equal(value.planned.deltaX, 397.453125);
+    assert.deepEqual(await value.run(), { page: value.page, native: value.native });
+    assert.deepEqual(value.calls.map(call => call[0]), ['resolve', 'listen', 'move', 'wheel', 'stop', 'checkpoint', 'capture']);
+    assert.deepEqual(value.calls.filter(([type]) => type === 'wheel'), [['wheel', { deltaX: 397.453125, deltaY: 0 }]]);
+    const [checkpoint] = value.checkpoints; assert.equal(checkpoint.phase, 'native-archive-selected-space-revealed');
+    assert.equal(checkpoint.kind, 'owned-newtab'); assert.equal(checkpoint.method, 'click');
+    assert.deepEqual(checkpoint.reveal.selectionBefore, checkpoint.reveal.selectionAfter);
+    assert.equal(checkpoint.reveal.events[0].trusted, true);
+});
+test('already visible native Archive Space receives no wheel or unnecessary selection interaction', async () => {
+    const value = archiveRevealFixture(null, true); await value.run();
+    assert.deepEqual(value.calls.map(call => call[0]), ['resolve', 'checkpoint', 'capture']);
+    assert.equal(value.checkpoints[0].reveal.input, null);
+});
+for (const fault of ['missing native target', 'wrong selection', 'wrong rendered Space', 'hidden panel', 'wrong native window', 'ordinary sidebar tab', 'no actual scroll', 'untrusted wheel', 'changed membership']) test(`Archive reveal refuses ${fault} without accepting or retrying capture`, async () => {
+    const value = archiveRevealFixture(fault); await assert.rejects(value.run());
+    assert(!value.calls.some(([type]) => type === 'capture')); assert.deepEqual(value.checkpoints, []);
+    assert(value.calls.filter(([type]) => type === 'wheel').length <= 1);
+});
+test('Archive reveal cannot turn failed native capture into success or retry it', async () => {
+    const value = archiveRevealFixture('capture rejected'); await assert.rejects(value.run(), /Native capture failed/);
+    assert.equal(value.calls.filter(([type]) => type === 'capture').length, 1);
+    assert.equal(value.calls.filter(([type]) => type === 'wheel').length, 1);
 });
