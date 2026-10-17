@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readSourceText } from '../source-text.js';
 import { collectSpotlightHelperOrigin } from '../../scripts/paired-chrome-helper-origin.mjs';
 import { readNewTabReuseState } from '../../scripts/paired-chrome-newtab.mjs';
 
@@ -12,7 +12,7 @@ function fixture(contextAction) {
 }
 function block(kind) {
     const path = kind === 'navigation' ? 'paired-chrome-spotlight-navigation.mjs' : 'paired-chrome-spotlight-tabs.mjs';
-    const source = readFileSync(new URL(`../../scripts/${path}`, import.meta.url), 'utf8');
+    const source = readSourceText(new URL(`../../scripts/${path}`, import.meta.url));
     const start = source.indexOf(kind === 'navigation' ? '            const helperState = await helper.page.evaluate(readNewTabReuseState);' : '            const state = await aliasHelper.page.evaluate(readNewTabReuseState);');
     assert(start > 0, 'Execute the actual hosted call site, never an inline substitute.');
     const end = kind === 'navigation' ? source.indexOf('            const before = await read(); await reset();', start) : source.indexOf('\n        }\n        await overlay(', start);

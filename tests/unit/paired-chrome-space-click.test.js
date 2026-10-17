@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readSourceText } from '../source-text.js';
 import { clickExactSpaceChip, readSpaceChipGeometry } from '../../scripts/paired-chrome-space-click.mjs';
 
 const sourceFile = 'file:///fixture/scripts/paired-chrome-runtime/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js';
@@ -149,7 +149,7 @@ test('renderer observation records retained/current exact identities, geometry a
     }
 });
 test('Favorite lifecycle uses narrow chip helper only for Space switching and preserves native close', () => {
-    const source = readFileSync(new URL('../../scripts/paired-chrome-ordinary-favorites.mjs', import.meta.url), 'utf8');
+    const source = readSourceText(new URL('../../scripts/paired-chrome-ordinary-favorites.mjs', import.meta.url));
     assert.match(source, /await clickExactSpaceChip\(sidebar\.page, spaceId, observation =>\s*checkpoint\('space-chip-input', \{ sync, spaceId, \.\.\.observation \}\)\)/);
     assert.match(source, /await sidebar\.page\.click\(favoriteSelector\(favoriteId\)\)/);
     assert.equal((source.match(/nativeInput\.sendOneNativeClose\(probe\)/g) || []).length, 1);
@@ -157,7 +157,7 @@ test('Favorite lifecycle uses narrow chip helper only for Space switching and pr
 
 
 test('paired hosted workflow watches the exact Space click helper and regression file', () => {
-    const workflow = readFileSync(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url), 'utf8');
+    const workflow = readSourceText(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url));
     const paths = workflow.split('    paths:\n')[1]?.split('\npermissions:')[0];
     assert(paths, 'The paired pull-request workflow must declare watched paths');
     for (const path of ['scripts/paired-chrome-space-click.mjs', 'tests/unit/paired-chrome-space-click.test.js']) {
