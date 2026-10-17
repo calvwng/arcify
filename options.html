@@ -5,6 +5,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Arcify Settings</title>
+    <meta name="color-scheme" content="light dark">
+    <script src="assets/appearance-bootstrap.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Varela+Round&display=swap" rel="stylesheet">
@@ -36,6 +38,20 @@
             <a href="installation-onboarding.html?replay=1" target="_blank" rel="noopener" class="options-label">Replay the interactive guide</a>
         </section>
 
+        <section class="options-section" aria-labelledby="startupHeading">
+            <h2 id="startupHeading" class="options-section-title">Browser startup</h2>
+            <div class="options-setting-item options-setting-toggle">
+                <div class="options-setting-copy">
+                    <label for="startupLauncherEnabled" class="options-label">Offer Arcify at browser startup</label>
+                    <p id="startupLauncherDescription" class="options-description">Select “Open Arcify sidebar” in an empty, untouched Spotlight new tab at startup when the paired companion is ready. Press Enter while Spotlight has keyboard focus, or click the result. Otherwise, use a small launcher tab. Off by default; takes effect next time you start Chrome. Restored launcher tabs are reused.</p>
+                </div>
+                <div class="toggle-switch-container">
+                    <input type="checkbox" id="startupLauncherEnabled" class="ios-toggle" role="switch" aria-describedby="startupLauncherDescription">
+                    <label for="startupLauncherEnabled" class="toggle-label" aria-hidden="true"></label>
+                </div>
+            </div>
+        </section>
+
         <section class="options-section" aria-labelledby="tabsHeading">
             <h2 id="tabsHeading" class="options-section-title">Tabs &amp; spaces</h2>
             <div class="options-setting-item options-setting-field">
@@ -49,8 +65,18 @@
             </div>
             <div class="options-setting-item options-setting-toggle">
                 <div class="options-setting-copy">
-                    <label for="invertTabOrder" class="options-label">Show new tabs at the top</label>
-                    <p id="invertTabOrderDescription" class="options-description">Turn off to show new tabs at the bottom.</p>
+                    <label for="todayNewTabsAtTop" class="options-label">Show newly opened Today tabs at the top</label>
+                    <p id="todayNewTabsAtTopDescription" class="options-description">New tabs appear below + New Tab. Turn off to add them at the bottom. Tabs opened from a Today tab appear directly below it either way. Existing tabs, saved pins, and folders stay in place.</p>
+                </div>
+                <div class="toggle-switch-container">
+                    <input type="checkbox" id="todayNewTabsAtTop" class="ios-toggle" role="switch" aria-describedby="todayNewTabsAtTopDescription">
+                    <label for="todayNewTabsAtTop" class="toggle-label" aria-hidden="true"></label>
+                </div>
+            </div>
+            <div class="options-setting-item options-setting-toggle">
+                <div class="options-setting-copy">
+                    <label for="invertTabOrder" class="options-label">Reverse saved pin and folder order</label>
+                    <p id="invertTabOrderDescription" class="options-description">Reverse the displayed order of saved pins and folders. Today tabs keep their current order.</p>
                 </div>
                 <div class="toggle-switch-container">
                     <input type="checkbox" id="invertTabOrder" class="ios-toggle" role="switch" aria-describedby="invertTabOrderDescription">
@@ -69,6 +95,16 @@
             </div>
             <div class="options-setting-item options-setting-toggle">
                 <div class="options-setting-copy">
+                    <label for="ordinaryFavoriteTabs" class="options-label">Open Favorites as ordinary tabs</label>
+                    <p id="ordinaryFavoriteTabsDescription" class="options-description">Newly opened or explicitly adopted Favorites stay global across Spaces without a browser pin, so one Ctrl+W closes the page and keeps its saved link. Existing open Favorites keep their current mode. Reload continuity requires the paired Spotlight session to survive. After a full browser restart, saved Favorites appear closed and restored pages are ordinary Space tabs; reopening can create a second page. Close ordinary Favorites before downgrading Arcify.</p>
+                </div>
+                <div class="toggle-switch-container">
+                    <input type="checkbox" id="ordinaryFavoriteTabs" class="ios-toggle" role="switch" aria-describedby="ordinaryFavoriteTabsDescription">
+                    <label for="ordinaryFavoriteTabs" class="toggle-label" aria-hidden="true"></label>
+                </div>
+            </div>
+            <div class="options-setting-item options-setting-toggle">
+                <div class="options-setting-copy">
                     <label for="syncTabGroups" class="options-label">Sync spaces to Chrome tab groups</label>
                     <p id="syncTabGroupsDescription" class="options-description">Mirror space membership, names, colors, and tab order to Chrome groups. Spaces stay saved independently. Turning this off leaves existing groups unchanged.</p>
                 </div>
@@ -77,6 +113,62 @@
                     <label for="syncTabGroups" class="toggle-label" aria-hidden="true"></label>
                 </div>
             </div>
+        </section>
+
+        <section class="options-section" aria-labelledby="sidebarAppearanceHeading">
+            <h2 id="sidebarAppearanceHeading" class="options-section-title">Sidebar appearance</h2>
+            <p class="options-description">Saved on this Chrome profile. Changes appear in every open Arcify sidebar.</p>
+            <div class="options-setting-item options-setting-field">
+                <div class="options-setting-copy">
+                    <label for="themeMode" class="options-label">Appearance</label>
+                    <p id="themeModeDescription" class="options-description">Follow your system, or always use light or dark surfaces. Space tints adapt for readable text. Customize an individual Space from its Theme Color menu.</p>
+                </div>
+                <select id="themeMode" class="options-input" aria-describedby="themeModeDescription" disabled>
+                    <option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option>
+                </select>
+            </div>
+            <div class="options-setting-item options-setting-field">
+                <div class="options-setting-copy">
+                    <label for="favoritesLayout" class="options-label">Favorites layout</label>
+                    <p id="favoritesLayoutDescription" class="options-description">Standard keeps the current expanding buttons and state labels. Compact uses fixed-size, icon-only tiles. Names and open/closed states remain in tooltips and accessible labels.</p>
+                </div>
+                <select id="favoritesLayout" class="options-input" aria-describedby="favoritesLayoutDescription" disabled>
+                    <option value="standard">Standard</option>
+                    <option value="compact">Compact icons</option>
+                </select>
+            </div>
+            <div class="options-setting-item options-setting-field">
+                <div class="options-setting-copy">
+                    <label for="favoriteTileSize" class="options-label">Compact Favorite size</label>
+                    <p id="favoriteTileSizeDescription" class="options-description">36–64 px square tiles. At 44 px, four fit in a 224 px sidebar. Rows keep their tile size even when partly filled.</p>
+                </div>
+                <div class="appearance-range-control">
+                    <input type="range" id="favoriteTileSize" min="36" max="64" step="1" value="44" aria-describedby="favoriteTileSizeDescription" disabled>
+                    <output id="favoriteTileSizeValue" for="favoriteTileSize">44 px</output>
+                </div>
+            </div>
+            <div class="options-setting-item options-setting-field">
+                <div class="options-setting-copy">
+                    <label for="spaceHeaderSize" class="options-label">Space header size</label>
+                    <p id="spaceHeaderSizeDescription" class="options-description">12–20 px name text with matching header controls. Choose 12 px for a smaller, subdued header, or keep the standard 16 px.</p>
+                </div>
+                <div class="appearance-range-control">
+                    <input type="range" id="spaceHeaderSize" min="12" max="20" step="1" value="16" aria-describedby="spaceHeaderSizeDescription" disabled>
+                    <output id="spaceHeaderSizeValue" for="spaceHeaderSize">16 px</output>
+                </div>
+            </div>
+            <div class="options-setting-item options-setting-toggle">
+                <div class="options-setting-copy">
+                    <label for="hideSpaceNames" class="options-label">Hide Space names in switcher</label>
+                    <p id="hideSpaceNamesDescription" class="options-description">Show only icons in the bottom switcher. Hover to see each Space name. Spaces without an icon use a dot; headers and menus keep their names.</p>
+                </div>
+                <div class="toggle-switch-container">
+                    <input type="checkbox" id="hideSpaceNames" class="ios-toggle" role="switch" aria-describedby="hideSpaceNamesDescription" disabled>
+                    <label for="hideSpaceNames" class="toggle-label" aria-hidden="true"></label>
+                </div>
+            </div>
+            <button type="button" id="resetSidebarAppearance" class="appearance-reset" disabled>Reset sidebar appearance</button>
+            <p id="sidebarAppearanceStatus" class="options-description" role="status" aria-live="polite">Standard layout is the default.</p>
         </section>
 
         <section class="options-section" aria-labelledby="archiveHeading">
@@ -102,7 +194,7 @@
 
         <section class="options-section" aria-labelledby="colorsHeading">
             <h2 id="colorsHeading" class="options-section-title">Colors</h2>
-            <p class="options-description">Customize the palette used throughout the extension. Dark variants are generated automatically.</p>
+            <p class="options-description">Customize the shared preset palette. Individual Space tints override these presets. Surfaces adapt to your appearance setting.</p>
             <div class="color-overrides-grid">
                 <div class="color-override-item">
                     <label for="colorGrey" class="color-override-label">Grey</label>
@@ -183,6 +275,27 @@
                     </div>
                 </div>
             </div>
+        </section>
+        <section class="settings-section" aria-labelledby="spotlightBridgeHeading">
+            <h2 id="spotlightBridgeHeading">Spotlight companion</h2>
+            <p>Save each extension’s ID in the other extension. You can start on either side; the first save may show “Awaiting approval” until you save the other side too.</p>
+            <ol>
+                <li>Copy the Spotlight ID from Spotlight’s settings and save it below.</li>
+                <li>Copy this Arcify ID and save it in Spotlight’s settings.</li>
+                <li>Once both IDs are saved, check connection here and refresh status in Spotlight.</li>
+            </ol>
+            <label for="bridgeOwnId">This Arcify extension ID</label>
+            <input id="bridgeOwnId" type="text" readonly spellcheck="false" aria-describedby="bridgeCopyStatus">
+            <button id="bridgeCopyId" type="button">Copy Arcify ID</button>
+            <p id="bridgeCopyStatus" role="status" aria-live="polite">Paste this ID into Spotlight’s connection settings.</p>
+            <label for="bridgePeerId">Spotlight extension ID</label>
+            <input id="bridgePeerId" type="text" maxlength="32" spellcheck="false" autocomplete="off" placeholder="32-letter ID from chrome://extensions">
+            <p>Saved Spotlight ID: <strong id="bridgeSavedPeerId">None</strong>. Check connection uses this saved ID; save again to use an edited ID.</p>
+            <button id="bridgeSave" type="button">Save Spotlight ID and check</button>
+            <button id="bridgeCheck" type="button">Check connection</button>
+            <button id="bridgeDisconnect" type="button">Disconnect</button>
+            <p id="bridgeStatus" role="status" aria-live="polite"></p>
+            <p>Pair only a build you trust: Spotlight can read window tabs and Arcify bookmarks, select spaces, and open or navigate tabs. Enter this Arcify ID in Spotlight settings too.</p>
         </section>
     </main>
 

@@ -37,10 +37,18 @@ export async function getSpaceBookmarkById(space, bookmarkId) {
     return find(folder.id);
 }
 
-export async function removeSpacePin(space, tab) {
+export async function removeSpacePin(space, tab, { beforeWrite = null } = {}) {
     const binding = tab.id ? await Utils.getPinnedTabState(tab.id) : null;
     const bookmarkId = tab.bookmarkId || binding?.bookmarkId;
     if (!bookmarkId) throw new Error('Cannot remove a favorite without its bookmark identity.');
     const bookmark = await getSpaceBookmarkById(space, bookmarkId);
-    if (bookmark) await chrome.bookmarks.remove(bookmark.id);
+    if (beforeWrite) await beforeWrite();
+    if (bookmark) {
+        await chrome.bookmarks.remove(bookmark.id);
+        try { if (beforeWrite) await beforeWrite(); }
+        catch (error) {
+            throw Object.assign(new Error(`The saved pin was removed, but its live tab was not moved. ${error.message} Nothing was retried or recreated.`), { bookmarkRemoved: true });
+        }
+    }
+    return { bookmarkId, removed: Boolean(bookmark) };
 }

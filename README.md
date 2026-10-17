@@ -9,10 +9,22 @@ A Chrome extension that replicates Arc browser's tab management system, providin
 ## Features
 
 - Vertical tab management
+- [Persistent Space reordering with drag and keyboard controls](docs/space-ordering.md)
 - Tab grouping functionality
 - Keyboard shortcuts for quick access
 - Bookmark integration
+- [Saved Favorites shared across Spaces and windows](docs/favorites-drop.md)
+- [Optional ordinary Favorite tabs and reload continuity](docs/ordinary-favorites.md)
+- [Open Spotlight or a new tab from the Today row](docs/sidebar-new-tab.md)
+- [Independent Today insertion and opener order](docs/today-insertion-order.md)
+- [Select Today tabs, move them to a Space, or save a pinned folder](docs/today-tab-selection.md)
+- [Move saved pins and folders between Spaces](docs/saved-space-moves.md)
+- [Adjustable Favorites, Space header sizing, and icon-only Space switcher](docs/sidebar-appearance.md)
+- [Custom keyboard emoji for Space icons](docs/space-context-menu.md)
+- [Custom Space tints and System/Light/Dark appearance](docs/space-themes.md)
+- [Sidebar management scroll and focus](docs/sidebar-management-scroll.md)
 - Clean, minimal interface
+- [Optional one-click startup launcher](docs/startup-launcher.md) (off by default)
 
 ## Development Setup
 
@@ -255,8 +267,24 @@ folders, including folders synced by Chrome, and display their bookmarks as save
 pins. Pinning adds a bookmark; unpinning removes its saved bookmark even if the tab
 has navigated to another URL. Nested bookmark folders remain nested in the space.
 
+The top Favorites strip is a separate profile-local saved list shared across
+Spaces and normal windows. Drag a single bookmark there to save a Favorite and
+open an inactive native pin; the source bookmark stays intact. Closing the live
+tab keeps its icon, clicking reopens it, and **Remove Favorite** is explicit.
+Existing browser pins require explicit adoption. Restarts preserve saved records
+without guessing restored live bindings by URL. Folders are not bulk-opened.
+Paired Spotlight can search closed Favorites. See [saved Favorites behavior and
+limits](docs/favorites-drop.md).
+
 Run `npm run test:unit` for storage, migration, and sync regression tests. Browser
 coverage lives in `tests/e2e/independent-spaces.test.js` alongside the space, tab,
 bookmark, and drag-and-drop suites.
 
 With **Sync spaces to Chrome tab groups** off, right-click a top-level folder and choose **New Folder** to create a child folder. Spaces support two folder levels (parent → child). Turning sync on disables new nested-folder creation and preserves existing folders.
+
+### Optional Spotlight companion
+
+The paired Spotlight fork adds window-aware search over Arcify's authoritative
+spaces without depending on Chrome tab groups. Setup, protocol, and update steps:
+[Spotlight bridge guide](docs/spotlight-bridge.md). Browser verification limits and
+manual acceptance checks: [validation record](docs/bridge-validation.md).
