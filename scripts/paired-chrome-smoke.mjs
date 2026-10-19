@@ -9,6 +9,7 @@ import { exerciseSavedMove, serveSavedMoveFixture } from './paired-chrome-saved-
 import { exerciseNativeNewTabRow, recordNewTabRowEvidence } from './paired-chrome-newtab-row.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
 import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
+import { exerciseBookmarkFallback } from './paired-chrome-bookmark-fallback.mjs';
 import { exerciseMoveToNewWindow } from './paired-chrome-move-window.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
 import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership, seedFocusedReloadSpacePins } from './paired-chrome-ordinary-favorites.mjs';
@@ -65,7 +66,7 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '364479205a8589733943bb2e7d107120f6660c09';
+const PINNED_SPOTLIGHT = 'deb672a415ed58a61ae30c874926b7274615371c';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',
@@ -1140,6 +1141,9 @@ try {
         return { emptySpaceId: fixture.spaces.empty, renderedSidebar, helperTabId: helper.tab.id, destinationTabId: destination.id };
     });
     await step(stepNames[7], async () => {
+        await exerciseBookmarkFallback({apiPage:arcifyOptions,spotlightOptions,arcifyOptions,newTabPage,ui,screenshot,poll,fixture,
+            spotlightId,arcifyId,search,sidebarInput,typeUI,clickUI,snapshot,
+            record:async observation=>{report.bookmarkFallback=observation;await saveReport();}});
         const newtab = await newTabPage('chrome://newtab/');
         await newtab.page.waitForSelector('[data-testid="spotlight-input"]');
         const identity = await newtab.page.evaluate(() => ({ extensionId: chrome.runtime.id, url: location.href, title: document.title }));
@@ -2284,7 +2288,7 @@ try {
             snapshot,poll,fixture,arcifyId,spotlightId,search,
             record:async observation => { report.tabMenus = observation; await saveReport(); } });
         return exerciseMoveToNewWindow({apiPage:arcifyOptions,newTabPage,pageForUrl,nativeSidebar:nativeMoveWindowSidebar,
-            ui,screenshot,snapshot,poll,fixture,
+            ui,screenshot,snapshot,poll,fixture,arcifyId,
             record:async observation=>{report.moveWindow=observation;await saveReport();}});
     });
     await step(stepNames[40], () => exerciseTodayMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,

@@ -44,7 +44,28 @@ export function assertMovedWindowPage(before, after, { tabId, sourceWindowId, sp
     return moved.windowId;
 }
 
-export async function exerciseMoveToNewWindow({apiPage,newTabPage,pageForUrl,nativeSidebar,ui,screenshot,snapshot,poll,fixture,record=async()=>{}}) {
+// Run in an ordinary Arcify Sidebar tab whose browser-attested sender owns
+// the requested window. Options is deliberately not a window-owned sender.
+export async function cleanupMoveWindowFavorites({windowId,sidebarUrl,favoriteId,url}) {
+    const current=await chrome.tabs.getCurrent();
+    if(current?.windowId!==windowId||current.url!==sidebarUrl)throw new Error('Move cleanup requires its exact window-owned Sidebar.');
+    const state=await chrome.runtime.sendMessage({type:'favoriteStore',action:'get',windowId});
+    if(!state?.success)throw new Error(state?.error||'Cannot read fixture Favorites.');
+    const removed=[];
+    for(const item of state.favorites.filter(item=>item.id===favoriteId||item.url===url)){
+        const result=await chrome.runtime.sendMessage({type:'favoriteStore',action:'remove',favoriteId:item.id,windowId});
+        if(!result?.success)throw new Error(result?.error||'Cannot remove fixture Favorite.');
+        removed.push(item.id);
+    }
+    return {senderTabId:current.id,windowId,removed};
+}
+
+export async function recordMoveWindowCleanup(evidence,detail,record) {
+    (evidence.cleanup ||= []).push(detail);
+    await record(structuredClone(evidence));
+}
+
+export async function exerciseMoveToNewWindow({apiPage,newTabPage,pageForUrl,nativeSidebar,ui,screenshot,snapshot,poll,fixture,arcifyId,record=async()=>{}}) {
     assertTabMenuFixtureEnvironment();
     const nonce=randomBytes(16).toString('hex'),base=`${fixture.base}/tab-menu/${nonce}`;
     const owned=new Set(),evidence={nonce,nativePanel:true,checkpoints:[],screenshots:[]};
@@ -121,10 +142,17 @@ export async function exerciseMoveToNewWindow({apiPage,newTabPage,pageForUrl,nat
     }catch(error){primaryError=error;await checkpoint('failed',{message:error.message,stack:error.stack,ownedTabIds:[...owned]}).catch(()=>{});throw error;}
     finally{
         await finishBookmarkFixture([
-            async()=>{const created=(await raw()).favorites.filter(item=>item.id===favoriteId||item.url===`${base}/away`);for(const item of created){const result=await apiPage.evaluate(({favoriteId,windowId})=>chrome.runtime.sendMessage({type:'favoriteStore',action:'remove',favoriteId,windowId}),{favoriteId:item.id,windowId:fixture.windowA});assert.equal(result?.success,true,result?.error);}},
+            async()=>{
+                const created=(await raw()).favorites.filter(item=>item.id===favoriteId||item.url===`${base}/away`);
+                if(!created.length)return;
+                const sidebarUrl=`chrome-extension://${arcifyId}/sidebar.html`;
+                const cleanupSource=await newTabPage(sidebarUrl,fixture.windowA);owned.add(cleanupSource.tab.id);
+                const receipt=await cleanupSource.page.evaluate(cleanupMoveWindowFavorites,{windowId:fixture.windowA,sidebarUrl,favoriteId,url:`${base}/away`});
+                await recordMoveWindowCleanup(evidence,{phase:'favorite-cleanup',...receipt},record);
+            },
             ()=>apiPage.evaluate(async ids=>{const live=new Set((await chrome.tabs.query({})).map(t=>t.id));const present=ids.filter(id=>live.has(id));if(present.length)await chrome.tabs.remove(present);},[...owned]),
             async()=>{if(folderId)await apiPage.evaluate(id=>chrome.bookmarks.removeTree(id),folderId);},
             async()=>{const remaining=(await raw()).tabs.filter(t=>owned.has(t.id));assert.deepEqual(remaining,[]);}
-        ],primaryError,record);
+        ],primaryError,detail=>recordMoveWindowCleanup(evidence,detail,record));
     }
 }
