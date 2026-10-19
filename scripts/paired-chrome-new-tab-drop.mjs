@@ -1,6 +1,8 @@
 /** Hosted native-only extension of the owned Move to New Window fixture. */
 import assert from 'node:assert/strict';
 import { locateFreshDragGeometry } from './paired-chrome-ui.mjs';
+import { favoriteDragInputClient } from './paired-chrome-favorites-marker.mjs';
+import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 
 export function readStickyNewTab() {
     const row=document.getElementById('newTabBtn'),space=row?.closest('.space.active'),port=space?.querySelector('.space-content');
@@ -34,9 +36,45 @@ export function assertNoNewTabDropMutation(before,after) {
     const membership=s=>s.spaces.map(({id,spaceBookmarks,temporaryTabs})=>({id,spaceBookmarks,temporaryTabs}));assert.deepEqual(membership(after),membership(before));
 }
 export function observeNativeNewTabDrop() {
-    const events=[];const listen=event=>{if(events.length<300)events.push({type:event.type,trusted:event.isTrusted,tabId:Number(event.target.closest?.('.tab[data-tab-id]')?.dataset.tabId)||null,target:Boolean(event.target.closest?.('#newTabBtn'))});};
+    const events=[];const listen=event=>{if(events.length<300)events.push({type:event.type,trusted:event.isTrusted,tabId:Number(event.target.closest?.('.tab[data-tab-id]')?.dataset.tabId)||null,target:Boolean(event.target.closest?.('#newTabBtn')),dropEffect:event.dataTransfer?.dropEffect||null});};
     const names=['dragstart','dragenter','dragover','dragleave','drop','dragend'];for(const name of names)document.addEventListener(name,listen,true);
     globalThis.__nativeNewTabDropTrace={events,stop(){for(const name of names)document.removeEventListener(name,listen,true);}};
+}
+
+export function readNativeNewTabDragEvidence() {
+    const row=document.getElementById('newTabBtn');
+    return {events:globalThis.__nativeNewTabDropTrace?.events||[],draggingCount:document.querySelectorAll('.dragging').length,
+        row:{label:row?.querySelector('[data-new-tab-label]')?.textContent,eligible:row?.dataset.windowDrag||null,
+            hover:row?.classList.contains('new-tab-window-hover'),busy:row?.getAttribute('aria-busy')}};
+}
+export function assertNativeNewTabDragCancelled(evidence,{tabId}) {
+    assert.equal(evidence.method,'Input.cancelDragging');assert.equal(evidence.acknowledged,true);assert.equal(evidence.mouseReleased,false);
+    const starts=evidence.events.filter(e=>e.type==='dragstart'),ends=evidence.events.filter(e=>e.type==='dragend');
+    assert.equal(starts.length,1);assert.equal(ends.length,1);
+    for(const event of [starts[0],ends[0]]){assert.equal(event.trusted,true);assert.equal(event.tabId,tabId);}
+    assert(evidence.events.indexOf(starts[0])<evidence.events.indexOf(ends[0]));assert.equal(ends[0].dropEffect,'none');
+    assert(!evidence.events.some(e=>e.type==='drop'),'Cancellation must never deliver a drop.');assert.equal(evidence.draggingCount,0);
+    assert.equal(evidence.row.label,'New Tab');assert.equal(evidence.row.eligible,null);assert.equal(evidence.row.hover,false);assert.equal(evidence.row.busy,'false');
+    return evidence;
+}
+export async function cancelNativeNewTabDrag({page,client,poll,tabId,checkpoint}) {
+    // CDP keyboard Escape does not cancel native HTML dragging. Reuse the
+    // verified mouse session's supported cancellation, not a new CDPSession.
+    await client.send('Input.cancelDragging');
+    const observed=await poll(()=>page.evaluate(readNativeNewTabDragEvidence),
+        e=>e.draggingCount===0&&e.events.some(event=>event.type==='dragend'&&event.trusted&&event.tabId===tabId),'trusted native cancellation before release');
+    const evidence={method:'Input.cancelDragging',acknowledged:true,mouseReleased:false,...observed};
+    await checkpoint('native-cancel-before-release',{tabId,cancellation:evidence,physicalEscapeAsserted:false});
+    assertNativeNewTabDragCancelled(evidence,{tabId});return evidence;
+}
+export async function cancelHeldNewTabDrag(page,client,tabId) {
+    await client.send('Input.cancelDragging').catch(()=>{});
+    const evidence=await page.evaluate(readNativeNewTabDragEvidence).catch(()=>null);
+    const ended=evidence?.draggingCount===0&&evidence.events.some(e=>e.type==='dragend'&&e.trusted&&e.tabId===tabId)
+        &&!evidence.events.some(e=>e.type==='drop');
+    // An acknowledgement without a real dragend cannot authorize mouse.up:
+    // releasing a still-held drag over the target would dispatch a mutation.
+    if(ended)await page.mouse.up();
 }
 
 export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll,sourceId,space,base,create,assign,pageForUrl,state,raw,assertMoved,checkpoint}) {
@@ -55,24 +93,31 @@ export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll
         // before input, never after a successful drop as an implicit retry.
         await ui(page,'Perform one genuine source-to-New-Tab drag',async()=>{
             const g=await locateFreshDragGeometry(page,row(id),target,o=>checkpoint('drop-geometry-input',o));
-            const from=await g.source.boundingBox();assert(from);const baseline=await geometry();let invocation;
+            const from=await g.source.boundingBox();assert(from);const baseline=await geometry();let invocation,cancellation,before,dragError;
+            const client=favoriteDragInputClient(page);
+            const observation=async(phase,detail={})=>{const dragEvidence=await page.evaluate(readNativeNewTabDragEvidence);await checkpoint(phase,{tabId:id,cancel,stale,...detail,dragEvidence});return dragEvidence;};
             await page.evaluate(observeNativeNewTabDrop);
             try{
                 await page.mouse.move(from.x+Math.min(70,from.width/3),from.y+from.height/2);await page.mouse.down();held=true;
                 await page.mouse.move(from.x+Math.min(70,from.width/3)+14,from.y+from.height/2,{steps:6});
                 await poll(()=>page.$eval(row(id),n=>n.classList.contains('dragging')),Boolean,'real source dragstart');
                 const to=await geometry();await page.mouse.move(to.row.x+to.row.width/2,to.row.y+to.row.height/2,{steps:18});
-                const entered=await poll(geometry,s=>s.eligible==='eligible'&&s.hover,'eligible sticky New Tab target');assertStickyNewTab(entered,{stuck:entered.scrollTop>0&&Math.abs(entered.row.y-entered.port.y)<=2,drag:true,baseline});
-                const before=await state(sourcePage);const shot=await screenshot(page,cancel?'new-tab-drop-cancel-hover':'new-tab-drop-native-hover',true);assert(shot);
+                const entered=await poll(geometry,s=>s.eligible==='eligible'&&s.hover,'eligible sticky New Tab target');await observation('sticky-hover-before-validation',{entered,baseline});assertStickyNewTab(entered,{stuck:entered.scrollTop>0&&Math.abs(entered.row.y-entered.port.y)<=2,drag:true,baseline});
+                before=await state(sourcePage);const shot=await screenshot(page,cancel?'new-tab-drop-cancel-hover':'new-tab-drop-native-hover',true);assert(shot);
                 if(cancel){
                     await page.mouse.move(entered.header.x+entered.header.width/2,entered.header.y+entered.header.height/2,{steps:8});
                     await poll(geometry,s=>s.label==='New Tab'&&!s.hover,'leave restores New Tab label');
                     await page.mouse.move(to.row.x+to.row.width/2,to.row.y+to.row.height/2,{steps:8});
                     await poll(geometry,s=>s.label==='Move to new window'&&s.hover,'reenter restores eligible preview');
-                    await page.keyboard.press('Escape');await page.mouse.up();held=false;
+                    cancellation=await cancelNativeNewTabDrag({page,client,poll,tabId:id,checkpoint});
+                    const cancelledState=await state(sourcePage);await observation('cancelled-state-before-release',{before,after:cancelledState,cancellation});
+                    assertNoNewTabDropMutation(before,cancelledState);assert.deepEqual(cancelledState.page,before.page);
+                    await page.mouse.up();held=false;
                     const reset=await poll(geometry,s=>s.label==='New Tab'&&!s.hover&&s.busy==='false','cancel restored ordinary row');assertStickyNewTab(reset,{stuck:reset.scrollTop>0&&Math.abs(reset.row.y-reset.port.y)<=2,baseline});
-                    const after=await state(sourcePage);assertNoNewTabDropMutation(before,after);assert.deepEqual(after.page,before.page);
-                    invocation={cancel:true,before,after,shot};
+                    const after=await state(sourcePage),released=await observation('cancelled-state-after-release',{before,after,cancellation});
+                    assert(!released.events.some(e=>e.type==='drop'),'Mouse release after cancellation must not deliver a late drop.');
+                    assertNoNewTabDropMutation(before,after);assert.deepEqual(after.page,before.page);
+                    invocation={cancel:true,before,after,shot,cancellation,physicalEscapeAsserted:false};
                 }else if(stale){
                     // Explicit fixture-owned native closure models an external
                     // race after eligibility. No request may replay that page.
@@ -80,17 +125,31 @@ export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll
                     await poll(raw,s=>!s.tabs.some(t=>t.id===id)&&s.spaces.every(space=>!space.spaceBookmarks.includes(id)&&!space.temporaryTabs.includes(id)),'fixture native closure and membership cleanup');
                     const external=await raw();await page.mouse.up();held=false;
                     await poll(geometry,s=>s.label==='New Tab'&&!s.hover&&s.busy==='false','stale drag reset');
-                    const after=await raw();assertNoNewTabDropMutation(external,after);invocation={stale:true,external,after,shot};
+                    const after=await raw();await observation('stale-state-before-validation',{external,after});assertNoNewTabDropMutation(external,after);invocation={stale:true,external,after,shot};
                 }else{
                     await page.mouse.up();held=false;
                     const moved=await poll(()=>apiPage.evaluate(id=>chrome.tabs.get(id),id),t=>t.windowId!==sourceId,'exact native drop window');
                     const after=await poll(()=>state(sourcePage,moved.windowId),s=>{try{assertMoved(before,s,{tabId:id,sourceWindowId:sourceId,spaceId:space.id,section:'temporaryTabs'});return true;}catch{return false;}},'native drop preserves exact page and membership');
-                    assertMoved(before,after,{tabId:id,sourceWindowId:sourceId,spaceId:space.id,section:'temporaryTabs'});invocation={before,after,shot};
+                    await observation('moved-state-before-validation',{before,after});assertMoved(before,after,{tabId:id,sourceWindowId:sourceId,spaceId:space.id,section:'temporaryTabs'});invocation={before,after,shot};
                 }
                 const trace=await page.evaluate(()=>{const trace=globalThis.__nativeNewTabDropTrace;trace.stop();return trace.events;});
+                await checkpoint('sticky-drag-trace-before-validation',{tabId:id,cancel,stale,trace});
                 assert(trace.some(e=>e.type==='dragstart'&&e.trusted&&e.tabId===id));if(!cancel&&!stale)assert(trace.some(e=>e.type==='drop'&&e.trusted&&e.target));
                 await checkpoint(cancel?'sticky-drag-cancel':stale?'sticky-drag-stale':'sticky-drag-moved',{...invocation,trace});
-            }finally{if(held)await page.mouse.up();await Promise.allSettled([g.source.dispose(),g.target.dispose()]);await page.evaluate(()=>globalThis.__nativeNewTabDropTrace?.stop());}
+            }catch(error){
+                dragError=error;const failure={tabId:id,cancel,stale,error:error.message,before,cancellation};
+                try{failure.dragEvidence=await page.evaluate(readNativeNewTabDragEvidence);}catch(diagnostic){failure.traceError=diagnostic.message;}
+                try{failure.geometry=await geometry();}catch(diagnostic){failure.geometryError=diagnostic.message;}
+                try{failure.state=await raw();}catch(diagnostic){failure.stateError=diagnostic.message;}
+                try{await checkpoint('sticky-drag-failed-before-cleanup',failure);}catch(diagnostic){error.dragDiagnosticError=diagnostic.message;}
+                throw error;
+            }finally{
+                await finishBookmarkFixture([
+                    async()=>{if(held)await cancelHeldNewTabDrag(page,client,id);},
+                    ()=>Promise.allSettled([g.source.dispose(),g.target.dispose()]),
+                    ()=>page.evaluate(()=>globalThis.__nativeNewTabDropTrace?.stop())
+                ],dragError,detail=>checkpoint('sticky-drag-cleanup-failed',detail));
+            }
         });
     }
     try{
