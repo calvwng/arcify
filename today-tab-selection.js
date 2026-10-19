@@ -52,7 +52,7 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
         status.hidden = !selected.size; status.dataset.count = String(selected.size);
         status.textContent = selected.size > MAX_TODAY_SELECTION
             ? `${selected.size} Today tabs selected. Select at most ${MAX_TODAY_SELECTION} for one action.`
-            : selected.size ? `${selected.size} Today tab${selected.size === 1 ? '' : 's'} selected. Right-click to move to another Space or save in a new pinned folder. Escape clears selection.` : '';
+            : selected.size ? `${selected.size} Today tab${selected.size === 1 ? '' : 's'} selected. Right-click for actions. Escape clears selection.` : '';
     }
     function clear({ keepAnchor = false } = {}) {
         interaction++;

@@ -264,6 +264,11 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
             if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); save.click(); }
         });
         contextMenu.append(save);
+        if (todaySelection.moveHint) {
+            const hint = document.createElement('div'); hint.className = 'context-menu-hint';
+            hint.dataset.action = 'todayMoveHint'; hint.setAttribute('aria-disabled', 'true'); hint.textContent = todaySelection.moveHint;
+            contextMenu.append(hint);
+        }
         appendTodayMovePicker({ document, menu: contextMenu, actions: todaySelection.move, close: closeMenu,
             active: () => session.active, reposition: () => Utils.adjustMenuPosition(contextMenu, x, y) });
     }

@@ -459,7 +459,12 @@ test('Split menu cancellation resumes queued refresh without a native action', a
         await wait(160); assert.equal(live(101), original, 'Frozen rows stay connected during the menu interaction');
         if (exit === 'Escape') clear();
         if (exit === 'outside') event(document.body, 'click');
-        if (exit === 'superseding') await context(6);
+        if (exit === 'superseding') {
+            await context(6);
+            await wait(160);
+            assert.equal(live(101), original, 'The superseding Today menu owns a fresh row-protection hold.');
+            clear(); // Closing that new menu must release both old and new holds.
+        }
         if (exit === 'removed') document.getElementById('tab-context-menu').remove();
         if (['blur', 'hidden', 'pagehide'].includes(exit)) leaveSidebar(exit);
         await wait(260);

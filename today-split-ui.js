@@ -195,8 +195,8 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
             const target = document.createElement('button'); target.type = 'button'; target.className = 'today-split-target';
             targets.set(target, element);
             target.dataset.action = 'createSplitView'; target.textContent = 'Split View'; target.draggable = false;
-            target.setAttribute('aria-label', `Create Split View with ${tab.title || tab.url}`);
-            target.title = 'Drop another Today tab here, or select two Today tabs and click';
+            target.setAttribute('aria-label', `Create Split View with ${tab.title || tab.url}. Select two Today tabs, then click; or drop another Today tab here.`);
+            target.title = 'Select two Today tabs, then click Split View; or drop another Today tab here.';
             element.insertBefore(target, element.querySelector('.tab-close, .tab-remove'));
             target.addEventListener('dragover', handleDrop, true);
             target.addEventListener('drop', handleDrop, true);
@@ -224,6 +224,12 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
         event.preventDefault(); event.stopImmediatePropagation();
         const element = targets.get(target);
         if (!element) { showStatus(STALE); return; }
+        // A Split control is not a row-selection gesture. Never replace an
+        // existing batch with this singleton just to explain missing partners.
+        if (!selection.isSelected(element) || !selection.isBatch()) {
+            showStatus('Select exactly two Today tabs, including this tab, then click Split View. Or drop another Today tab here.');
+            return;
+        }
         const actions = actionsFor(element, selection.freeze(element));
         if (actions?.create) {
             if (document.activeElement === target) element.focus({ preventScroll: true });

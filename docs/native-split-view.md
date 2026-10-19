@@ -18,6 +18,14 @@ methods. Arcify does not embed pages, duplicate tabs, or change the browser.
   split tabs cannot be used to create a pair. Both tabs must have the same native
   window, group and pinned state. No automatic pin/group conversion is attempted.
 
+The hover **Split View** button is the same native pair action and drop target.
+It does not choose a partner automatically. Select exactly two eligible Today
+tabs, then click the button on one of them; alternatively drag one tab onto the
+other tab's target. Clicking with no pair, or outside an existing selection,
+shows Split-specific instructions without replacing the selection or activating
+the row. Selection guidance is action-neutral, avoiding the unrelated Move to
+Space instruction previously painted by a singleton button click.
+
 ## Order and failure handling
 
 Native Split View requires adjacent tabs. If the selected tabs are apart, the

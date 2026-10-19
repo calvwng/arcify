@@ -2841,6 +2841,12 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             if (!isPinned && !isBookmarkOnly && !todaySnapshot) {
                 showFavoritesStatus('The Today row changed. Reopen its menu. Nothing was moved.'); return;
             }
+            // Freeze the selected Today batch before asynchronous menu preparation.
+            // Incidental refresh must not replace its exact rows while tabs.get waits.
+            if (todaySnapshot && !todaySnapshot.error) {
+                const interaction = editorSessions.begin('tab', tab.id);
+                menuSession.onClose(() => { void editorSessions.complete(interaction); });
+            }
             const pinSnapshot = isPinned && tabElement.dataset.bookmarkId ? bookmarkSelection.freeze(tabElement) : null;
             const splitActions = todaySnapshot ? todaySplit.actionsFor(tabElement, todaySnapshot) : null;
             const moveActions = todaySnapshot && !todaySnapshot.error &&
@@ -2864,7 +2870,11 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
                 if (!isBookmarkOnly) muted = Boolean((await chrome.tabs.get(tab.id)).mutedInfo?.muted);
                 actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || todaySnapshot?.entries.length || 1, muted, validate: () => (!todaySnapshot || todaySelection.validate(todaySnapshot)) && (!pinSnapshot || bookmarkSelection.validate(pinSnapshot)) });
             } catch (error) { if (menuSession.active) showFavoritesStatus(error.message); return; }
-            if (!menuSession.active || menuRequest !== tabContextMenuRequest || pendingActiveSpaceId || todaySnapshot && !todaySelection.validate(todaySnapshot) || pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
+            if (!menuSession.active || menuRequest !== tabContextMenuRequest || pendingActiveSpaceId) return;
+            if (todaySnapshot && !todaySelection.validate(todaySnapshot)) {
+                showFavoritesStatus('The Today selection changed. Select the tabs again. Nothing was moved.'); return;
+            }
+            if (pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
             showTabContextMenu(
                 keyboard ? tabElement.getBoundingClientRect().left : e.pageX,
                 keyboard ? tabElement.getBoundingClientRect().bottom : e.pageY,
@@ -2893,10 +2903,11 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
                         await updatePinnedFavicons();
                     } catch (error) { showFavoritesStatus(error.message); }
                 },
-                todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot), move: moveActions } : null,
+                todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot), move: moveActions,
+                    ...(!moveActions ? { moveHint: 'End Split View before moving these selected tabs to another Space. Nothing was moved.' } : {}) } : null,
                 { ...actions, report: showFavoritesStatus },
                 { ...splitActions, keyboard,
-                    ...(splitActions?.create || splitActions?.end || moveActions?.destinations.length || savedMove?.destinations.length ? { beginInteraction: () => {
+                    ...(!todaySnapshot && (splitActions?.create || splitActions?.end || savedMove?.destinations.length) ? { beginInteraction: () => {
                         const session = editorSessions.begin(pinSnapshot ? 'bookmark' : 'tab', pinSnapshot ? tabElement.dataset.bookmarkId : tab.id);
                         return () => { void editorSessions.complete(session); };
                     } } : {})

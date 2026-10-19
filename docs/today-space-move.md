@@ -2,6 +2,21 @@
 
 `moveTodayTabsToSpace` moves 1–100 exact live Today tab IDs from the current logical Space to another existing Space. It retains the current logical Space and native active tab. It never opens, closes, navigates, pins, activates, or transfers a tab to another window; it never changes bookmarks or global Favorites.
 
+## Menu selection and preparation
+
+Right-clicking a selected Today row uses the entire selected batch in visible order.
+Right-clicking an unselected row scopes the menu to that row. The menu holds its
+exact Today rows before awaiting native tab metadata, so incidental repaint cannot
+replace them during preparation. A changed selection is refused as a whole; it is
+never reduced to the clicked tab after the menu opens. A selection containing a
+native Split tab shows an explicit End Split View explanation instead of silently
+omitting movement. Split members remain protected by the background writer.
+
+The local correction has composed DOM/menu/writer regressions, including a
+preparation repaint and interrupted selection. This establishes that race and the
+missing explanation; it does not establish the exact cause in an existing browser
+profile. Native Chrome/Helium acceptance of this correction remains pending.
+
 ## Internal request and response
 
 The sidebar sends one runtime request:

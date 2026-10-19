@@ -161,3 +161,27 @@ test('new session deferral event wins over a delayed initial storage read', asyn
     resolve({ spaceGroupSplitDeferrals: [{ spaceId: 's', windowId: 10, reason: 'native-split' }] }); await settle();
     assert(f.document.getElementById('todaySplitDeferralStatus').hidden);
 });
+
+test('singleton hover Split click gives Split instructions without selecting or activating the row', () => {
+    const f = fixture(); let activated = 0; f.row(1).addEventListener('click', () => activated++);
+    f.event(f.target(1), 'click');
+    assert.deepEqual(f.calls, []); assert.equal(activated, 0); assert.equal(f.selection.isSelected(f.row(1)), false);
+    assert.equal(f.document.getElementById('todaySelectionStatus').hidden, true);
+    assert.match(f.statuses.at(-1), /Select exactly two Today tabs/); assert.doesNotMatch(f.statuses.at(-1), /move to another Space/);
+    assert.match(f.target(1).title, /Select two Today tabs/);
+});
+
+test('hover Split click outside the selected pair preserves that pair instead of replacing it by the clicked singleton', () => {
+    const f = fixture(); f.select([1, 2]); const snapshot = f.selection.freeze(f.row(1));
+    f.event(f.target(3), 'click');
+    assert.equal(f.selection.validate(snapshot), true); assert.deepEqual(f.calls, []);
+    assert.equal(f.selection.isSelected(f.row(1)), true); assert.equal(f.selection.isSelected(f.row(2)), true); assert.equal(f.selection.isSelected(f.row(3)), false);
+    assert.match(f.statuses.at(-1), /including this tab/);
+    assert.doesNotMatch(f.document.getElementById('todaySelectionStatus').textContent, /move to another Space/);
+});
+
+for (const options of [{ids:[1,2,3]}, {ids:[1,2],overrides:{2:{groupId:8}}}, {ids:[1,2],overrides:{2:{splitViewId:4}}}])
+test(`hover Split refuses unsupported batch without changing it: ${JSON.stringify(options)}`, () => {
+    const f = fixture({overrides:options.overrides}); f.select(options.ids); const snapshot=f.selection.freeze(f.row(1));
+    f.event(f.target(1), 'click'); assert.deepEqual(f.calls, []); assert.equal(f.selection.validate(snapshot), true); assert.match(f.statuses.at(-1), /Split View/);
+});
