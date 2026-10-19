@@ -174,3 +174,14 @@ for (const exit of ['Escape', 'outside', 'pointerdown', 'blur', 'hidden', 'pageh
         } finally { closeTabContextMenu(); Object.assign(globalThis, previous); }
     });
 }
+
+test('unbatched rejection exposes the actual reason without inventing proof of no mutation', () => {
+    const result=describeTodayMoveOutcome({success:false,error:'Invalid Today move sender.'},[{tabId:1}],{id:'target',name:'Target'});
+    assert.match(result,/Invalid Today move sender\./);assert.match(result,/result is unknown/);assert.match(result,/nothing was retried/);assert.doesNotMatch(result,/Nothing was moved/);
+});
+test('malformed error receipts retain diagnostic text and never report success or a confirmed no-op', () => {
+    for(const response of [{success:false,error:'The bookmark folder is unavailable.'},{success:false,error:'Permission denied.',batch:{completed:[1]}}]){
+        const result=describeTodayMoveOutcome(response,[{tabId:1}],{id:'target',name:'Target'});
+        assert(result.includes(response.error));assert.match(result,/result is unknown/);assert.doesNotMatch(result,/Nothing was moved|Moved 1 tab/);
+    }
+});

@@ -18,13 +18,23 @@ methods. Arcify does not embed pages, duplicate tabs, or change the browser.
   split tabs cannot be used to create a pair. Both tabs must have the same native
   window, group and pinned state. No automatic pin/group conversion is attempted.
 
-The hover **Split View** button is the same native pair action and drop target.
-It does not choose a partner automatically. Select exactly two eligible Today
-tabs, then click the button on one of them; alternatively drag one tab onto the
-other tab's target. Clicking with no pair, or outside an existing selection,
-shows Split-specific instructions without replacing the selection or activating
-the row. Selection guidance is action-neutral, avoiding the unrelated Move to
-Space instruction previously painted by a singleton button click.
+There is no per-row hover Split button. Select two eligible Today tabs and use
+**Create Split View** in the context menu for mouse or keyboard creation.
+During a genuine single-row Today drag, only other eligible, unsplit rows in
+the same native group reveal a labeled
+**Drop for Split View** zone. This label is not a button and is absent during
+normal hover/focus/selection; ordinary row edges retain their reorder meaning.
+The dragged row and unsupported/batch selections never reveal targets. The
+exact-pair native safety checks and **End Split View** menu action remain.
+
+Native Split membership is shown with numbered **Split View 1**, **Split View 2**
+labels, derived from the rendered browser split IDs rather than selection,
+adjacency or URLs. Two adjacent visible members share a single outline. Separate
+members use individual dashed outlines with the same group label; a hidden or
+out-of-Space partner is explicitly **not shown here**. No outline bridges unrelated
+rows. Numbers are presentation-only for the current sidebar lifetime. Text and
+`currentColor` outlines work with light/dark themes and do not rely on color alone.
+The badge's accessible label names the group and member/visibility relationship.
 
 ## Order and failure handling
 

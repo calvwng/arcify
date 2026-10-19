@@ -48,6 +48,25 @@ Responses are:
 
 After an attempted write fails, a fresh durable membership/snapshot readback and fresh live-tab validation establish the completed IDs. Closed, moved, navigated, split, newly pinned or otherwise changed IDs are not substituted or silently claimed complete. A partially observed or unreadable result is uncertain. The handler never overwrites a possibly committed result as rollback, and never retries the request. The UI should present partial or uncertain results without offering an automatic retry.
 
+A rejected response can lack a batch receipt (for example a sender rejection).
+The UI retains the concrete error as well as the unknown-result/no-retry warning.
+It must not invent a confirmed no-op from that response. This corrects a diagnostic
+loss, not the unconfirmed cause of a particular Helium interaction failure.
+
+For a manual report, distinguish whether clicking **Move to Space** opens the
+destination list, and whether choosing a destination produces **Moving**, a
+confirmation, or an exact error in the sidebar status notice. The normal menu
+and destination view share readable hint spacing and bounded scrolling.
+
+Destination activation starts the guarded action synchronously before closing
+the menu, so focus removal/session close hooks cannot invalidate the captured
+selection before dispatch. A close-hook invalidation regression reproduces the
+old ordering hazard; it does not establish the cause of a native-browser report.
+Isolated phase-correct DOM diagnostics have exercised pointerdown/mousedown,
+focus, pointerup/mouseup/click and keyboard Enter through the actual multi-selected
+menu and Space writer; both dispatched once with exact IDs. Native Helium behavior
+and its exact status/error still require manual confirmation.
+
 ## Persistence, recovery and optional groups
 
 The existing single canonical `spaces` write, Space continuity snapshot, session checkpoint and storage change notifications remain in use. Spotlight continues reading that authority and receiving existing invalidations; no paired protocol changes are required.

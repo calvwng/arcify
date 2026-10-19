@@ -17,7 +17,12 @@ export function describeTodayMoveOutcome(response, entries, destination) {
         batch.destinationSpaceId !== destination.id || typeof batch.uncertain !== 'boolean' ||
         !validIds(batch.completed) || !validIds(batch.remaining) ||
         batch.completed.length + batch.remaining.length !== ids.length ||
-        batch.completed.some(id => batch.remaining.includes(id))) return UNKNOWN;
+        batch.completed.some(id => batch.remaining.includes(id))) {
+        // A sender/schema rejection can carry no batch. Keep its concrete
+        // reason without turning an unproven receipt into a no-op guarantee.
+        const error = response?.success === false && typeof response.error === 'string' ? response.error.trim() : '';
+        return error ? `${error} ${UNKNOWN}` : UNKNOWN;
+    }
     const count = batch.completed.length;
     if (response.success && !batch.uncertain && count === ids.length) {
         return `Moved ${count} tab${count === 1 ? '' : 's'} to Today in “${destination.name}”. You’re still in the current Space.`;
@@ -96,7 +101,10 @@ export function appendSpaceMovePicker({ document, menu, actions, close, active =
         hint.textContent = labels.hint;
         const choices = actions.destinations.map(destination => {
             const choice = item(destination.name, labels.destinationAction, () => {
-                close(); void actions.move(destination);
+                // Start the guarded action while the exact menu/selection is
+                // still owned. Closing can remove focus and run arbitrary
+                // session cleanup hooks; those must not precede validation.
+                try { void actions.move(destination); } finally { close(); }
             });
             choice.dataset.spaceId = destination.id;
             choice.setAttribute('aria-label', labels.destination(destination.name));

@@ -611,16 +611,16 @@ test('session split deferral is scoped to active window/Space and clears when pr
 });
 
 
-test('keyboard split target returns to the live row and never steals newer focus during its request', async () => {
+test('keyboard Split menu returns to the live row and never steals newer focus during its request', async () => {
     clear(); const original = chrome.tabs.createSplit;
     try {
         for (const stealFocus of [false, true]) {
             let release; const waiting = new Promise(resolve => { release = resolve; });
             chrome.tabs.createSplit = async ids => { await waiting; return original(ids); };
             event(live(101), 'click', { ctrlKey: true }); event(live(103), 'click', { ctrlKey: true });
-            const target = live(103).querySelector('.today-split-target'); target.focus();
-            // Browsers synthesize click for Enter/Space on this native button.
-            event(target, 'click'); await wait(10);
+            await splitKeyboardMenu(103);
+            const action = menuItem('createSplitView'); assert.equal(document.activeElement, action);
+            event(action, 'keydown', { key: 'Enter' }); await wait(10);
             assert.equal(document.activeElement, live(103));
             if (stealFocus) document.getElementById('newTabBtn').focus();
             release(); await wait(300);

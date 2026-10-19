@@ -18,6 +18,7 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
     onConsumeDrag = () => {}, clearDropFeedback = () => {} }) {
     const registered = new WeakMap(), targets = new WeakMap();
     let drag = null, pending = false;
+    const groupLabels = new Map();
     let deferrals = [], deferralRevision = 0, visibleDeferral = null;
     const announcedDeferrals = new Set();
     const deferralNotice = document.createElement('div');
@@ -53,8 +54,8 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
         deferralRevision++; receiveDeferrals(changes[DEFERRALS].newValue);
     });
     const Observer = document.defaultView.MutationObserver;
-    if (Observer) new Observer(updateDeferralNotice).observe(document.getElementById('spacesList'), {
-        subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'data-space-id']
+    if (Observer) new Observer(() => { updateDeferralNotice(); updateGroups(); updateDragTargets(); }).observe(document.getElementById('spacesList'), {
+        subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'hidden', 'style', 'data-space-id', 'data-tab-id', 'data-url']
     });
     const supported = () => typeof api?.tabs?.createSplit === 'function' && typeof api?.tabs?.unsplit === 'function';
     function context() {
@@ -88,6 +89,40 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
     function visible(current = context()) {
         const entries = [...document.querySelectorAll(ROW)].map(row => descriptor(row, current)).filter(Boolean);
         return entries.filter(entry => entries.filter(item => item.native.tabId === entry.native.tabId).length === 1);
+    }
+    // Native render metadata supplies membership. Never infer a group from
+    // adjacency, selection, URLs, or DOM attributes supplied by another caller.
+    function updateGroups() {
+        const entries = visible(), groups = new Map();
+        for (const entry of entries.filter(item => hasNativeSplit(item.native))) {
+            const key = `${entry.native.windowId}:${entry.native.splitViewId}`;
+            if (!groupLabels.has(key)) groupLabels.set(key, groupLabels.size + 1);
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(entry);
+        }
+        const presentation = new Map();
+        for (const [key, members] of groups) {
+            const joined = members.length === 2 && members[0].element.parentElement === members[1].element.parentElement &&
+                members[0].element.nextElementSibling === members[1].element;
+            members.forEach((entry, index) => presentation.set(entry.element, {
+                edge: joined ? (index ? 'last' : 'first') : 'separate',
+                text: `Split View ${groupLabels.get(key)}`,
+                detail: joined ? `Member ${index + 1} of 2, adjacent pair.` : members.length === 1
+                    ? 'Partner not shown here.' : `${members.length} members shown separately.`
+            }));
+        }
+        for (const row of document.querySelectorAll(ROW)) {
+            const item = presentation.get(row), edge = item?.edge || '';
+            if ((row.dataset.splitOutline || '') !== edge) {
+                if (edge) row.dataset.splitOutline = edge; else delete row.dataset.splitOutline;
+            }
+            const badge = row.querySelector('.today-split-badge');
+            if (!badge) continue;
+            const text = item ? `${item.text}${edge === 'separate' ? ' · ' + item.detail : ''}` : 'Split View';
+            const label = item ? `${item.text}. ${item.detail} ${BADGE_GUIDANCE}` : `Part of a Split View. ${BADGE_GUIDANCE}`;
+            if (badge.textContent !== text) badge.textContent = text;
+            if (badge.getAttribute('aria-label') !== label) badge.setAttribute('aria-label', label);
+        }
     }
     function pair(entries, action) {
         if (entries.length !== 2 || entries[0].native.tabId === entries[1].native.tabId || entries[0].native.groupId !== entries[1].native.groupId) return false;
@@ -157,15 +192,27 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
     function clearDrag() {
         drag = null;
         document.getElementById('spacesList')?.classList.remove('today-split-dragging');
-        for (const target of document.querySelectorAll(TARGET)) target.classList.remove('today-split-drop-active');
+        for (const target of document.querySelectorAll(TARGET)) {
+            target.classList.remove('today-split-drop-active');
+            target.removeAttribute('data-split-eligible');
+        }
     }
     function startDrag(element) {
         clearDrag();
-        if (!supported()) return;
+        if (!supported() || selection.isBatch()) return;
         const current = context(), entries = visible(current), source = entries.find(entry => entry.element === element);
         if (!source || hasNativeSplit(source.native)) return;
         drag = Object.freeze({ ...current, source, visibleEntries: Object.freeze(entries.map(entry => Object.freeze({ ...entry }))) });
         document.getElementById('spacesList')?.classList.add('today-split-dragging');
+        updateDragTargets();
+    }
+    function updateDragTargets() {
+        if (!drag) return;
+        for (const target of document.querySelectorAll(TARGET)) {
+            const eligible = Boolean(dropOperation(target));
+            if (eligible && target.dataset.splitEligible !== 'true') target.dataset.splitEligible = 'true';
+            else if (!eligible && target.hasAttribute('data-split-eligible')) target.removeAttribute('data-split-eligible');
+        }
     }
     function dropOperation(target) {
         if (!drag) return null;
@@ -192,16 +239,17 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
                 event.preventDefault(); event.stopImmediatePropagation(); clearDrag(); showStatus(NATIVE_SPLIT_MOVE_ERROR);
             }, true);
         } else if (today && supported() && eligible(native)) {
-            const target = document.createElement('button'); target.type = 'button'; target.className = 'today-split-target';
+            const target = document.createElement('span'); target.className = 'today-split-target';
             targets.set(target, element);
-            target.dataset.action = 'createSplitView'; target.textContent = 'Split View'; target.draggable = false;
-            target.setAttribute('aria-label', `Create Split View with ${tab.title || tab.url}. Select two Today tabs, then click; or drop another Today tab here.`);
-            target.title = 'Select two Today tabs, then click Split View; or drop another Today tab here.';
+            target.dataset.action = 'createSplitView'; target.textContent = 'Drop for Split View'; target.draggable = false;
+            target.setAttribute('aria-hidden', 'true');
+            target.title = 'Drop another Today tab here to create Split View. Select two tabs and use the context menu for keyboard access.';
             element.insertBefore(target, element.querySelector('.tab-close, .tab-remove'));
             target.addEventListener('dragover', handleDrop, true);
             target.addEventListener('drop', handleDrop, true);
             target.addEventListener('click', handleClick, true);
         }
+        updateGroups();
     }
     // Capture before any container/Favorites reorder handler. A labeled Split
     // target always consumes its drop, even for a stale, spoofed or repeated drag.
@@ -222,20 +270,8 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
         const target = event.target.closest?.(TARGET);
         if (!target) return;
         event.preventDefault(); event.stopImmediatePropagation();
-        const element = targets.get(target);
-        if (!element) { showStatus(STALE); return; }
-        // A Split control is not a row-selection gesture. Never replace an
-        // existing batch with this singleton just to explain missing partners.
-        if (!selection.isSelected(element) || !selection.isBatch()) {
-            showStatus('Select exactly two Today tabs, including this tab, then click Split View. Or drop another Today tab here.');
-            return;
-        }
-        const actions = actionsFor(element, selection.freeze(element));
-        if (actions?.create) {
-            if (document.activeElement === target) element.focus({ preventScroll: true });
-            void actions.create();
-        }
-        else showStatus(actions?.hint || STALE);
+        // Drag-only affordance: a trailing or synthetic click cannot activate
+        // the row, change selection, or create a pair. Keyboard uses the menu.
     }
     document.addEventListener('click', handleClick, true);
     document.addEventListener('dragend', clearDrag, true);

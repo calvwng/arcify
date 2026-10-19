@@ -77,7 +77,7 @@ for (const change of ['url', 'id', 'membership', 'space', 'root', 'window', 'inv
 
 test('existing split badges refuse dragging and End gathers only the exact registered Today pair', async () => {
     const f = fixture({ overrides: { 1: { splitViewId: 0 }, 2: { splitViewId: 0 } } });
-    assert.equal(f.row(1).querySelector('.today-split-badge').textContent, 'Split View'); assert.equal(f.target(1), null);
+    assert.equal(f.row(1).querySelector('.today-split-badge').textContent, 'Split View 1'); assert.equal(f.target(1), null);
     assert.equal(f.event(f.row(1), 'dragstart').defaultPrevented, true); assert.match(f.statuses.at(-1), /End Split View/);
     const action = f.actions(1); assert.equal(action.create, undefined); await action.end();
     assert.equal(f.calls.length, 1); assert.equal(f.calls[0].action, 'end'); assert.deepEqual(f.calls[0].entries.map(entry => entry.tabId), [1, 2]);
@@ -103,12 +103,14 @@ test('dedicated drop target consumes one exact pair, never bubbles into reorder 
     assert.deepEqual(f.calls[0].entries.map(entry => entry.tabId), [1, 3]); assert.equal(f.document.querySelector('.today-split-dragging'), null);
 });
 
-test('ordinary row drop is untouched; selected-pair click is a keyboard-activatable alternative', async () => {
+test('ordinary row drop is untouched; selected-pair context-menu action remains available', async () => {
     const f = fixture(); let ordinary = 0;
     f.section.addEventListener('drop', () => ordinary++);
     f.ui.startDrag(f.row(1)); f.event(f.row(3), 'drop'); assert.equal(ordinary, 1); assert.deepEqual(f.calls, []);
     f.ui.clearDrag(); f.select([1, 3]); f.event(f.target(3), 'click'); await settle();
-    assert.equal(f.calls.length, 1); assert.match(f.target(3).getAttribute('aria-label'), /Create Split View with Tab 3/);
+    assert.deepEqual(f.calls, [], 'The drag-only span has no click action.');
+    await f.actions(3).create(); // The intentional context-menu action is retained.
+    assert.equal(f.calls.length, 1); assert.equal(f.target(3).tagName, 'SPAN');
 });
 
 for (const change of ['self', 'url', 'hidden', 'move', 'window', 'replacement', 'spoof-target', 'spoof-source', 'group', 'escape', 'blur']) test(`split drop refuses ${change} without fallback reordering`, async () => {
@@ -162,26 +164,73 @@ test('new session deferral event wins over a delayed initial storage read', asyn
     assert(f.document.getElementById('todaySplitDeferralStatus').hidden);
 });
 
-test('singleton hover Split click gives Split instructions without selecting or activating the row', () => {
-    const f = fixture(); let activated = 0; f.row(1).addEventListener('click', () => activated++);
-    f.event(f.target(1), 'click');
-    assert.deepEqual(f.calls, []); assert.equal(activated, 0); assert.equal(f.selection.isSelected(f.row(1)), false);
-    assert.equal(f.document.getElementById('todaySelectionStatus').hidden, true);
-    assert.match(f.statuses.at(-1), /Select exactly two Today tabs/); assert.doesNotMatch(f.statuses.at(-1), /move to another Space/);
-    assert.match(f.target(1).title, /Select two Today tabs/);
+test('Split target is a noninteractive drag-only label, not a hover or keyboard button', () => {
+    const f = fixture(); const target=f.target(1);
+    assert.equal(target.tagName,'SPAN'); assert.equal(target.getAttribute('role'),null); assert.equal(target.getAttribute('tabindex'),null);
+    assert.equal(target.getAttribute('aria-hidden'),'true'); assert.equal(target.textContent,'Drop for Split View');
+    assert.equal(f.row(1).querySelector('button.today-split-target'),null);
 });
 
-test('hover Split click outside the selected pair preserves that pair instead of replacing it by the clicked singleton', () => {
-    const f = fixture(); f.select([1, 2]); const snapshot = f.selection.freeze(f.row(1));
-    f.event(f.target(3), 'click');
-    assert.equal(f.selection.validate(snapshot), true); assert.deepEqual(f.calls, []);
-    assert.equal(f.selection.isSelected(f.row(1)), true); assert.equal(f.selection.isSelected(f.row(2)), true); assert.equal(f.selection.isSelected(f.row(3)), false);
-    assert.match(f.statuses.at(-1), /including this tab/);
-    assert.doesNotMatch(f.document.getElementById('todaySelectionStatus').textContent, /move to another Space/);
+test('clicking a drag-only Split span cannot select or activate a row or create a pair', () => {
+    const f=fixture();let activated=0;f.row(1).addEventListener('click',()=>activated++);
+    f.event(f.target(1),'click');assert.deepEqual(f.calls,[]);assert.deepEqual(f.statuses,[]);assert.equal(activated,0);assert(!f.selection.isSelected(f.row(1)));
+});
+
+test('a trailing Split-target click preserves an unrelated selected pair', () => {
+    const f=fixture();f.select([1,2]);const snapshot=f.selection.freeze(f.row(1));f.event(f.target(3),'click');
+    assert(f.selection.validate(snapshot));assert.deepEqual(f.calls,[]);assert.equal(f.selection.isSelected(f.row(3)),false);
 });
 
 for (const options of [{ids:[1,2,3]}, {ids:[1,2],overrides:{2:{groupId:8}}}, {ids:[1,2],overrides:{2:{splitViewId:4}}}])
-test(`hover Split refuses unsupported batch without changing it: ${JSON.stringify(options)}`, () => {
-    const f = fixture({overrides:options.overrides}); f.select(options.ids); const snapshot=f.selection.freeze(f.row(1));
-    f.event(f.target(1), 'click'); assert.deepEqual(f.calls, []); assert.equal(f.selection.validate(snapshot), true); assert.match(f.statuses.at(-1), /Split View/);
+test(`unsupported Split menu selection still gives its reason: ${JSON.stringify(options)}`, () => {
+    const f=fixture({overrides:options.overrides});f.select(options.ids);const actions=f.actions(1);
+    assert.equal(actions.create,undefined);assert.match(actions.hint,/Split View/);assert.deepEqual(f.calls,[]);
+});
+
+test('drag labels reveal only other eligible same-group unsplit targets and clear on cancellation', () => {
+    const f = fixture({ overrides: { 3: { groupId: 9 }, 4: { splitViewId: 7 } } });
+    assert.equal(f.document.querySelector('[data-split-eligible]'), null);
+    f.ui.startDrag(f.row(1));
+    assert.equal(f.target(1).hasAttribute('data-split-eligible'), false);
+    assert.equal(f.target(2).dataset.splitEligible, 'true');
+    assert.equal(f.target(3).hasAttribute('data-split-eligible'), false);
+    assert.equal(f.target(4), null);
+    f.ui.clearDrag(); assert.equal(f.document.querySelector('[data-split-eligible]'), null);
+    f.select([1, 2]); f.ui.startDrag(f.row(1));
+    assert.equal(f.document.querySelector('[data-split-eligible]'), null);
+    assert.equal(f.document.querySelector('.today-split-dragging'), null);
+});
+
+test('adjacent native pairs share outline edges and distinct text identities without grouping unrelated rows', async () => {
+    const f = fixture({ overrides: { 1: { splitViewId: 0 }, 2: { splitViewId: 0 }, 3: { splitViewId: 8 }, 4: { splitViewId: 8 } } });
+    assert.deepEqual([1,2,3,4].map(id => f.row(id).dataset.splitOutline), ['first','last','first','last']);
+    assert.match(f.row(1).querySelector('.today-split-badge').textContent, /Split View 1$/);
+    assert.match(f.row(3).querySelector('.today-split-badge').textContent, /Split View 2$/);
+    assert.match(f.row(2).querySelector('.today-split-badge').getAttribute('aria-label'), /Member 2 of 2, adjacent pair/);
+    f.section.insertBefore(f.row(3), f.row(2)); await settle();
+    assert.deepEqual([1,2,3,4].map(id => f.row(id).dataset.splitOutline), ['separate','separate','separate','separate']);
+    assert.match(f.row(1).querySelector('.today-split-badge').textContent, /2 members shown separately/);
+    f.row(2).hidden = true; await settle();
+    assert.equal(f.row(2).dataset.splitOutline, undefined);
+    assert.equal(f.row(1).dataset.splitOutline, 'separate');
+    assert.match(f.row(1).querySelector('.today-split-badge').getAttribute('aria-label'), /Partner not shown here/);
+    f.row(2).hidden = false; f.section.insertBefore(f.row(2), f.row(3)); await settle();
+    assert.equal(f.row(1).dataset.splitOutline, 'first'); assert.equal(f.row(2).dataset.splitOutline, 'last');
+    assert.equal(f.calls.length, 0);
+});
+
+test('native identity rather than equal URLs, forged DOM identity or selected adjacency owns outlines', async () => {
+    const f = fixture({ overrides: { 1: { splitViewId: 3 }, 3: { splitViewId: 3 } } });
+    f.select([2,4]); f.row(2).dataset.splitViewId = '3'; await settle();
+    assert.equal(f.row(2).dataset.splitOutline, undefined); assert.equal(f.row(4).dataset.splitOutline, undefined);
+    assert.equal(f.row(1).dataset.splitOutline, 'separate'); assert.equal(f.row(3).dataset.splitOutline, 'separate');
+    assert.match(f.row(1).querySelector('.today-split-badge').textContent, /Split View 1/);
+    assert.match(f.row(3).querySelector('.today-split-badge').textContent, /Split View 1/);
+});
+
+test('stale native drag projection hides targets before any refused drop', async () => {
+ const f=fixture();f.ui.startDrag(f.row(1));assert.equal(f.target(2).dataset.splitEligible,'true');
+ f.row(2).dataset.url='https://changed.test/';await settle();
+ assert.equal(f.document.querySelector('[data-split-eligible]'),null);
+ f.event(f.target(2),'drop');await settle();assert.deepEqual(f.calls,[]);
 });

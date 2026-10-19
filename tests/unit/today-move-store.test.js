@@ -1,3 +1,4 @@
+import { describeTodayMoveOutcome } from '../../today-space-move-ui.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { moveTodayTabsToSpace, registerTodayMoveMessages } from '../../today-move-store.js';
@@ -401,4 +402,12 @@ test('lost acknowledgement recognizes the exact rebased rank checkpoint with pen
         assert.deepEqual(error.batch.completed, [1, 3]); assert.deepEqual(error.batch.remaining, []);
         assert.equal(error.batch.uncertain, false); return true;
     });
+});
+
+test('real sender rejection remains visible through the UI formatter without native mutation', () => {
+    const f=fixture();registerTodayMoveMessages(f.store);let response;
+    f.listeners[0](f.request,{id:'test',tab:{windowId:20}},value=>{response=value;});
+    assert.equal(response.success,false);assert.equal(response.batch,undefined);
+    const text=describeTodayMoveOutcome(response,f.request.entries,{id:'target',name:'Target'});
+    assert.match(text,/Invalid Today move sender/);assert.match(text,/result is unknown/);assert.match(text,/nothing was retried/);assert.doesNotMatch(text,/Nothing was moved/);assert.deepEqual(f.effects,[]);
 });

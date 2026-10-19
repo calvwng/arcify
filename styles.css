@@ -106,6 +106,36 @@ h3 {
     min-width: 150px;
 }
 
+/* Tab actions and their explanations share one readable, viewport-bounded surface. */
+#tab-context-menu {
+    box-sizing: border-box;
+    width: 280px;
+    min-width: 0;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    padding: 6px;
+}
+
+#tab-context-menu .context-menu-item {
+    box-sizing: border-box;
+    min-height: 36px;
+    padding: 9px 12px;
+    border-radius: 5px;
+    font-size: 13px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+#tab-context-menu .context-menu-hint {
+    padding: 8px 12px;
+    margin: 4px 0;
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    color: var(--theme-panel-muted, var(--text-secondary, #666));
+}
+
 .context-menu-item {
     padding: 8px 12px;
     cursor: pointer;
@@ -2197,6 +2227,7 @@ select:focus-visible,
 
 /* Split View has its own labeled target; ordinary row edges still reorder. */
 .today-split-target {
+    display: none;
     flex: 0 0 auto;
     align-self: center;
     border: 1px solid currentColor;
@@ -2206,14 +2237,12 @@ select:focus-visible,
     padding: 3px 6px;
     font-size: 10px;
     line-height: 16px;
-    cursor: pointer;
+    cursor: default;
     opacity: 0;
     pointer-events: none;
 }
-.tab:hover > .today-split-target,
-.tab:focus-within > .today-split-target,
-.tab.today-selected > .today-split-target,
-.today-split-dragging .tab:not(.dragging) > .today-split-target {
+.today-split-dragging .tab:not(.dragging) > .today-split-target[data-split-eligible="true"] {
+    display: inline-flex;
     opacity: 1;
     pointer-events: auto;
 }
@@ -2437,3 +2466,19 @@ select:focus-visible,
 #newTabBtn[data-window-drag="eligible"] .new-tab-window-icon { display: block; }
 #newTabBtn.new-tab-window-hover { background: var(--theme-selected-bg, #d6d6d6); color: var(--theme-selected-text, #222); }
 #newTabBtn[aria-busy="true"] { opacity: 1; }
+
+/* Shared native Split outline; numbered text also distinguishes multiple groups.
+   Separate/partial members get individual dashed outlines, never a false bridge. */
+.tab[data-split-outline]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px dashed currentColor;
+    border-radius: 10px;
+    pointer-events: none;
+}
+.tab[data-split-outline="first"] { margin-bottom: 0; border-radius: 10px 10px 0 0; }
+.tab[data-split-outline="last"] { border-radius: 0 0 10px 10px; }
+.tab[data-split-outline="first"]::after { border-style: solid; border-bottom: 0; border-radius: 10px 10px 0 0; }
+.tab[data-split-outline="last"]::after { border-style: solid; border-top: 0; border-radius: 0 0 10px 10px; }
+.tab[data-split-outline] .today-split-badge { opacity: 1; font-weight: 600; white-space: normal; }

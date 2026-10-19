@@ -14,7 +14,7 @@ let showTabContextMenu,closeTabContextMenu;
 const sidebar=await readFile(new URL('../../sidebar.js',import.meta.url),'utf8');
 const menuBody=sidebar.slice(sidebar.indexOf('const openTabContextMenu = async'),sidebar.indexOf("    tabElement.addEventListener('contextmenu', openTabContextMenu)"));
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
-async function fixture({inverted=false,clicked=3,splitIds=[]}={}){
+async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOnClose=false}={}){
  const ids=inverted?[3,2,1]:[1,2,3];
  const {document,window}=parseHTML(`<html><body><div id="spacesList"><div class="space active" data-space-id="source"><div data-tab-type="temporary" data-today-order-inverted="${inverted}">${ids.map(id=>`<div class="tab" data-tab-id="${id}" data-url="https://same.test/"><div class="tab-details"></div><button class="tab-close">Close</button></div>`).join('')}</div></div></div><div class="new-tab-btn-container"></div><button id="outside">Outside</button></body></html>`);
  const previous={document:globalThis.document,window:globalThis.window,chrome:globalThis.chrome};Object.assign(globalThis,{document,window});
@@ -46,7 +46,7 @@ async function fixture({inverted=false,clicked=3,splitIds=[]}={}){
   try{const batch=await moveTodayTabsToSpace(store,request);context.spaces=store.spaces;return{success:true,batch};}
   catch(error){return{success:false,error:error.message,...(error.batch?{batch:error.batch}:{})};}
  }});
- const deps={document,window,tabMenuActions:{cancelEdit(){}},spaceContextMenu:{close(){}},closeTabContextMenu,createContextMenuSession,
+ const deps={document,window,tabMenuActions:{cancelEdit(){}},spaceContextMenu:{close(){}},closeTabContextMenu,createContextMenuSession:(...args)=>{const session=createContextMenuSession(...args);if(invalidateOnClose)session.onClose(()=>selection.clear());return session;},
   tabElement:row(clicked),tab:native.find(tab=>tab.id===clicked),isPinned:false,isBookmarkOnly:false,todaySelection:selection,bookmarkSelection:{clear(){}},
   todaySplit:split,moveTodaySelection:move,pendingActiveSpaceId:null,showFavoritesStatus:value=>statuses.push(value),chrome:{tabs:{get:()=>tabRead}},
   actionsForTabRow:(element,options)=>({selectionCount:options.selectionCount}),showTabContextMenu,closeTab(){},spaces:context.spaces,
@@ -91,5 +91,32 @@ test('changing the frozen batch after opening the destination picker refuses the
 });
 test('a superseding menu cancels pending preparation and releases both holds once dismissed',async()=>{
  const f=await fixture();try{f.select([1,3]);const first=f.open(),second=f.open();f.release();await Promise.all([first,second]);await tick();assert.equal(f.document.querySelectorAll('#tab-context-menu').length,1);assert.equal(f.sessions.sessions.size,1);closeTabContextMenu();await tick();assert.equal(f.sessions.sessions.size,0);assert.deepEqual(f.calls,[]);
+ }finally{await f.cleanup();}
+});
+
+test('destination starts guarded exact batch before close hooks can invalidate selection', async () => {
+ const f=await fixture({invalidateOnClose:true});try {
+  f.select([1,3]);const opening=f.open();f.release();await opening;
+  f.event(f.document.querySelector('[data-action="moveTodayTabsToSpace"]'),'click');
+  f.event(f.document.querySelector('[data-action="moveTodayToDestination"]'),'click');await tick();
+  assert.equal(f.calls.length,1);assert.deepEqual(f.calls[0].entries.map(entry=>entry.tabId),[1,3]);
+  assert.deepEqual(f.context.spaces[0].temporaryTabs,[2]);assert.deepEqual(f.context.spaces[1].temporaryTabs,[8,1,3]);
+  assert.equal(f.document.getElementById('tab-context-menu'),null);assert(!f.sessions.isActive());
+ }finally{await f.cleanup();}
+});
+
+for (const mode of ['pointer','keyboard']) test(`rendered destination ${mode} activation moves selected Today batch exactly once`, async () => {
+ const f=await fixture();try {
+  f.select([1,3]);const opening=f.open();f.release();await opening;
+  const activate=node=>{if(mode==='keyboard'){f.event(node,'keydown',{key:'Enter'});return;}
+   for(const type of ['pointerdown','mousedown'])f.event(node,type);node.focus();
+   for(const type of ['pointerup','mouseup','click'])f.event(node,type);
+  };
+  activate(f.document.querySelector('[data-action="moveTodayTabsToSpace"]'));
+  const choice=f.document.querySelector('[data-action="moveTodayToDestination"]');assert(choice);
+  activate(choice);f.event(choice,'click');await tick();
+  assert.equal(f.calls.length,1);assert.deepEqual(f.calls[0].entries.map(entry=>entry.tabId),[1,3]);
+  assert.deepEqual(f.context.spaces[0].temporaryTabs,[2]);assert.deepEqual(f.context.spaces[1].temporaryTabs,[8,1,3]);
+  assert.equal(f.context.activeSpaceId,'source');assert.match(f.statuses.at(-1),/Moved 2 tabs/);
  }finally{await f.cleanup();}
 });
