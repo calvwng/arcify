@@ -64,7 +64,7 @@ test('workflow watches new evidence/runtime/paint/docs with all eight exact peer
         assert(workflow.includes(`- '${path}'`), `Missing required workflow watch path: ${path}`);
     }
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
-    assert.equal(pin, 'e2ffbe0982a19eacad23cc803aa42e8e6013c6d0');
+    assert.equal(pin, '364479205a8589733943bb2e7d107120f6660c09');
     assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 8);
     assert.match(runner, /assert\.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);
