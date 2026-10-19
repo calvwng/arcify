@@ -104,3 +104,18 @@ test('Escape cancels a pending description before the Tab dialog is mounted', as
     assert.deepEqual(f.calls.map(call => call.action), ['describe']);
     assert.deepEqual(f.counts(), { begins: 1, ends: 1, refreshes: 0 });
 });
+
+test('Move to New Window sends the captured live identity once; closed/multi rows cannot dispatch', async () => {
+ const f = fixture(); await f.actions(target).moveToNewWindow();
+ assert.deepEqual(f.calls, [{ type: 'moveTabToNewWindow', ...target }]);
+ assert.equal(f.actions(target, { selectionCount: 2 }).moveToNewWindow, undefined);
+ const closed = { ...target, bookmarkId: 'pin' }; delete closed.tabId;
+ assert.equal(f.actions(closed).moveToNewWindow, undefined);
+ f.setContext({ windowId: 11, spaceId: 's' }); await f.actions(target).moveToNewWindow();
+ assert.equal(f.calls.length, 1); assert.match(f.statuses.at(-1), /active Space changed/);
+});
+
+test('Move to New Window rejects changed selection at dispatch without sending a request',async()=>{
+ const f=fixture();let valid=true;const action=f.actions(target,{validate:()=>valid}).moveToNewWindow;valid=false;await action();
+ assert.deepEqual(f.calls,[]);assert.match(f.statuses.at(-1),/selection changed/);
+});

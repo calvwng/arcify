@@ -28,6 +28,7 @@ import { registerTodayFolderMessages } from './today-folder-store.js';
 import { registerTodayMoveMessages } from './today-move-store.js';
 import { registerSavedMoveMessages } from './saved-move-store.js';
 import { registerTabMenuMessages } from './tab-menu-actions.js';
+import { registerMoveTabWindowMessages } from './move-tab-new-window.js';
 import { registerTodaySplitMessages } from './today-split-action.js';
 import { createNativeSplitWriteGuard } from './native-split-safety.js';
 
@@ -42,6 +43,7 @@ registerTodaySplitMessages(spaceStore);
 const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity() });
 favoriteStore.install();
 registerFavoriteMessages(favoriteStore);
+registerMoveTabWindowMessages(spaceStore, favoriteStore);
 const spotlightInvalidation = registerSpotlightBridge(spaceStore);
 registerBookmarkListeners(() => spotlightInvalidation.invalidateAll());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

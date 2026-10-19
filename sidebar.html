@@ -47,7 +47,10 @@
         <div class="new-tab-btn-container">
             <div class="url-copy-toast" id="urlCopyToast">Copied current URL</div>
             <button class="new-tab-btn" id="newTabBtn" type="button" draggable="false" title="Open Spotlight or a new tab" aria-label="New Tab" aria-describedby="spotlightStatus" aria-busy="false" disabled hidden>
-                <span aria-hidden="true">+</span> New Tab
+                <span class="new-tab-symbol" aria-hidden="true">
+                    <svg class="new-tab-plus-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 5v14M5 12h14"/></svg>
+                    <svg class="new-tab-window-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M13 5H4v15h15v-9M13 3h8v8M21 3l-10 10"/></svg>
+                  </span><span class="new-tab-label" data-new-tab-label>New Tab</span>
             </button>
             <div id="spotlightStatus" role="status" aria-live="polite" aria-atomic="true"></div>
         </div>

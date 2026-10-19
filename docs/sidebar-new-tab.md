@@ -54,3 +54,9 @@ of persistent deduplication for a new click after worker/browser restart.
 Run `npm run test:unit` and `npm run build`. Mock DOM/API tests do not establish
 native Chrome or Helium focus/shortcut behavior; paired browser checks are a
 separate layer.
+
+## Sticky placement and live-tab drops
+
+The row stays in its normal Today flow slot, then sticks to the top of the Space content scrollport without covering the Space header or Favorites. Its theme background remains opaque in normal, hover, drag and busy states. Eligible single live-tab drags temporarily offer Move to new window with a fixed-size window/arrow icon. Folders, closed bookmarks, multi-selection and native Split tabs are rejected. Normal New Tab clicks and keyboard activation are unchanged; cancelling or completing a drag cannot synthesize a new launch.
+
+See [Move to New Window](move-to-new-window.md) for exact identity, ownership, partial-failure and no-replay behavior. DOM tests cover lifecycle and source rejection. The prepared hosted case tests real sticky/theme geometry and genuine drag/drop/cancel/stale input in its disposable profile; native acceptance is pending.

@@ -2415,3 +2415,25 @@ select:focus-visible,
     .options-page .toggle-label::before { background: ButtonText; }
     .options-page .ios-toggle:checked + .toggle-label { background: Highlight; }
 }
+
+
+/* The native header/Favorites stay outside this scrollport. The New Tab row
+   keeps its flow slot below Today, then sticks to the scrollport's top edge. */
+.spaces-list, .space, .space-content { min-height: 0; }
+.space-header { flex-shrink: 0; }
+.temporary-tabs { position: relative; flex-shrink: 0; }
+#newTabBtn {
+    position: sticky; top: 0; z-index: 3;
+    background: var(--space-bg-color, #f0f0f0); color: var(--sidebar-text-color, #333);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--sidebar-border-color, #888) 35%, transparent);
+    opacity: 1; line-height: 24px; overflow: hidden;
+}
+#newTabBtn:hover { background: var(--tab-hover-bg, #e4e4e4); }
+#newTabBtn .new-tab-symbol { flex: 0 0 20px; width: 20px; height: 24px; display: flex; align-items: center; }
+#newTabBtn .new-tab-symbol svg { width: 20px; height: 20px; flex-shrink: 0; }
+#newTabBtn .new-tab-label { font-size: inherit; line-height: 24px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#newTabBtn .new-tab-window-icon { display: none; }
+#newTabBtn[data-window-drag="eligible"] .new-tab-plus-icon { display: none; }
+#newTabBtn[data-window-drag="eligible"] .new-tab-window-icon { display: block; }
+#newTabBtn.new-tab-window-hover { background: var(--theme-selected-bg, #d6d6d6); color: var(--theme-selected-text, #222); }
+#newTabBtn[aria-busy="true"] { opacity: 1; }

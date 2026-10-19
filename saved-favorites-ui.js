@@ -89,6 +89,11 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
             menu.appendChild(button);
         };
         item(favoriteId && !tabId ? 'Open Favorite' : 'Go to Tab', () => activate(node));
+        if (tabId) item('Move to New Window', () => run(`move-window:${tabId}`, async () => {
+            if (getWindowId() !== windowId) throw new Error('This window changed. Reopen the menu.');
+            const result = await api.runtime.sendMessage({ type: 'moveTabToNewWindow', windowId, tabId, ...(favoriteId ? { favoriteId } : {}) });
+            if (!result?.success) throw new Error(result?.error || 'Move not confirmed. Check your windows before retrying.');
+        }, 'Tab moved to a new window. Your Favorite is kept.'));
         if (favoriteId && tabId) item('Close Tab (Keep Favorite)', () => run(`close:${favoriteId}`, async () => {
             if (getWindowId() !== windowId) throw new Error('This Favorite’s window changed. Refresh and try again.');
             await request('closeTab', { favoriteId, tabId });

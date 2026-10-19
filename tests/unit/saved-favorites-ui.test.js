@@ -183,3 +183,13 @@ test('saved and native Favorite menus dismiss on external focus loss without act
         }
     } finally { f.ui.dispose(); f.window.HTMLElement.prototype.focus = oldFocus; }
 });
+
+test('Move to New Window dispatches exact saved/native identities and is absent for closed Favorites', async () => {
+ const f = fixture(); await f.ui.refresh();
+ f.menu(f.row('one'), 'Move to New Window'); await tick();
+ assert.deepEqual(f.calls.find(m => m.type === 'moveTabToNewWindow'), { type: 'moveTabToNewWindow', windowId: 1, tabId: 10, favoriteId: 'one' });
+ f.menu(f.container.querySelector('.native-favorite'), 'Move to New Window'); await tick();
+ assert.deepEqual(f.calls.filter(m => m.type === 'moveTabToNewWindow').at(-1), { type: 'moveTabToNewWindow', windowId: 1, tabId: 20 });
+ f.event(f.row('two'), 'contextmenu');
+ assert(![...f.document.querySelectorAll('[role="menuitem"]')].some(n => n.textContent === 'Move to New Window'));
+});

@@ -3,6 +3,7 @@ import { withSavedMoveLock, assertSavedMoveSettled } from './saved-move-lock.js'
 import { normalizeCustomTint } from './space-colors.js';
 import { applySpaceTheme, initializeSpaceColorOverrides } from './sidebar-theme.js';
 import { createSidebarNewTabRow, placeNewTabRow } from './sidebar-new-tab.js';
+import { createNewTabWindowDrop } from './new-tab-window-drop.js';
 import { createContextMenuSession } from './context-menu-session.js';
 import { createSpaceContextMenu, spaceDeleteMessage } from './space-context-menu.js';
 import { getSpaceIcon } from './space-icons.js';
@@ -200,7 +201,7 @@ const tabMenuActions = createTabMenuActions({ document,
     refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
 });
 
-function actionsForTabRow(tabElement, { selectionCount = 1, muted = false } = {}) {
+function actionsForTabRow(tabElement, { selectionCount = 1, muted = false, validate = () => true } = {}) {
     const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
     if (!space || !tabElement.isConnected) throw new Error('This row changed. Reopen its menu.');
     const target = { windowId: currentWindow.id, spaceId: space.id, bookmarkFolderId: space.bookmarkFolderId };
@@ -209,7 +210,10 @@ function actionsForTabRow(tabElement, { selectionCount = 1, muted = false } = {}
         target.bookmarkId = tabElement.dataset.bookmarkId;
         target.parentId = tabElement.parentElement?.closest('.folder')?.dataset.bookmarkId || space.bookmarkFolderId;
     }
-    return tabMenuActions(target, { selectionCount, muted });
+    return tabMenuActions(target, { selectionCount, muted, validate: () => tabElement.isConnected
+        && Number(tabElement.dataset.tabId) === target.tabId
+        && tabElement.closest('.space')?.dataset.spaceId === target.spaceId
+        && (tabElement.dataset.bookmarkId || undefined) === target.bookmarkId && validate() });
 }
 
 function reapplySpaceColors() {
@@ -219,7 +223,7 @@ function reapplySpaceColors() {
 const savedFavoritesUI = createSavedFavoritesUI({
     document, container: document.getElementById('pinnedFavicons'), getWindowId: () => currentWindow?.id,
     onStatus: showFavoritesStatus,
-    onDragStart: element => { isDraggingTab = true; favoritesDragSource.start(element); },
+    onDragStart: element => { isDraggingTab = true; favoritesDragSource.start(element); void newTabWindowDrop.start(); },
     onDragEnd: () => { isDraggingTab = false; favoritesDragSource.clear(); refreshCoordinator.schedule(); }
 });
 
@@ -588,6 +592,21 @@ createSidebarNewTabRow({ button: newTabBtn, status: document.getElementById('spo
         return { windowId: ready ? currentWindow?.id : null, spaceId: activeSpaceId };
     },
     sendRequest: message => chrome.runtime.sendMessage(message)
+});
+const newTabWindowDrop = createNewTabWindowDrop({ button: newTabBtn,
+    getContext: () => ({ windowId: sidebarReady ? currentWindow?.id : null, spaceId: activeSpaceId,
+        bookmarkFolderId: spaces.find(space => space.id === activeSpaceId)?.bookmarkFolderId }),
+    inspectSource: () => favoritesDragSource.inspect(),
+    validateSelection: source => !todaySelection.isBatch() && (!source.selectionSnapshot || bookmarkSelection.validate(source.selectionSnapshot)),
+    getTab: id => chrome.tabs.get(id), sendRequest: message => chrome.runtime.sendMessage(message),
+    settle: () => pendingSpaceSaves, showStatus: showFavoritesStatus,
+    begin: () => { pendingMutationCount++; }, end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); },
+    clearFeedback: () => { sidebarDropFeedback.clear(); favoritesDropFeedback.clear(); if (favoritesPreview) clearFavoritesPreview(); hideAllDropIndicators();
+        document.querySelectorAll('.today-split-drop-active').forEach(node => node.classList.remove('today-split-drop-active')); },
+    consumeDrag: () => { favoritesDragSource.clear(); todaySplit.clearDrag(); bookmarkSelection.clearDragImage();
+        isDraggingTab = false; dragSourceFolderElement = null;
+        document.querySelectorAll('.dragging').forEach(node => node.classList.remove('dragging')); }
 });
 let editorSessions;
 const refreshCoordinator = new RefreshCoordinator({
@@ -1114,6 +1133,7 @@ function setupTabDragHandlers(tabElement, handle = tabElement) {
             event.dataTransfer.effectAllowed = 'copy';
             bookmarkSelection.dragImage(event, started.source.bookmarks.length);
         } else if (tabElement.dataset.bookmarkId && !tabElement.dataset.tabId) event.dataTransfer.effectAllowed = 'copyMove';
+        void newTabWindowDrop.start();
         // Track the source folder (if any) so we can resync collapsed-folder projections after drop.
         dragSourceFolderElement = tabElement.parentElement.closest('.folder');
     });
@@ -2842,7 +2862,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
             try {
                 let muted = false;
                 if (!isBookmarkOnly) muted = Boolean((await chrome.tabs.get(tab.id)).mutedInfo?.muted);
-                actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || 1, muted });
+                actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || todaySnapshot?.entries.length || 1, muted, validate: () => (!todaySnapshot || todaySelection.validate(todaySnapshot)) && (!pinSnapshot || bookmarkSelection.validate(pinSnapshot)) });
             } catch (error) { if (menuSession.active) showFavoritesStatus(error.message); return; }
             if (!menuSession.active || menuRequest !== tabContextMenuRequest || pendingActiveSpaceId || todaySnapshot && !todaySelection.validate(todaySnapshot) || pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
             showTabContextMenu(

@@ -9,6 +9,7 @@ import { exerciseSavedMove, serveSavedMoveFixture } from './paired-chrome-saved-
 import { exerciseNativeNewTabRow, recordNewTabRowEvidence } from './paired-chrome-newtab-row.mjs';
 import { exerciseTodaySelection } from './paired-chrome-today-selection.mjs';
 import { exerciseSpaceContextBasics } from './paired-chrome-space-context.mjs';
+import { exerciseMoveToNewWindow } from './paired-chrome-move-window.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
 import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership, seedFocusedReloadSpacePins } from './paired-chrome-ordinary-favorites.mjs';
 import { normalizeReloadControlWindow } from './paired-chrome-control-window.mjs';
@@ -532,6 +533,45 @@ async function sidebarEnter(page, label) {
 }
 
 // Open through the real authenticated Spotlight command, then identify its native renderer.
+// Only fixture-owned disposable windows may use this native host adapter.
+async function nativeMoveWindowSidebar({ windowId }) {
+    assert(Number.isSafeInteger(windowId) && ![fixture.windowA, fixture.windowB].includes(windowId));
+    const seed = await arcifyOptions.evaluate(id => chrome.tabs.query({ windowId:id }), windowId);
+    assert(seed.length && seed.every(tab => tab.url?.startsWith(`${fixture.base}/tab-menu/`)));
+    await arcifyOptions.evaluate(() => {
+        globalThis.__pairedMoveWindowEvents = [];
+        chrome.sidePanel.onOpened.addListener(info => globalThis.__pairedMoveWindowEvents.push({type: 'opened', ...info}));
+    });
+    const helper = await newTabPage('chrome://newtab/', windowId);
+    const removeLauncher = async () => {
+        const exists = await arcifyOptions.evaluate(id => chrome.tabs.get(id).then(()=>true,()=>false), helper.tab.id);
+        if (exists) await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+    };
+    try {
+        await waitSidebarCommand(helper.page); await search(helper.page, 'Open Arcify sidebar');
+        await helper.page.waitForSelector(`${sidebarSelector}.selected`);
+        await sidebarEnter(helper.page, 'Open native panel in disposable Move to New Window source');
+        await waitSidebarSuccess(helper.page);
+        const proof = await poll(() => arcifyOptions.evaluate(async () => ({
+            contexts:await chrome.runtime.getContexts({contextTypes:['SIDE_PANEL']}), events:globalThis.__pairedMoveWindowEvents
+        })), data => data.events.some(e=>e.windowId===windowId) && data.contexts.some(c=>(c.windowId===windowId || c.windowId===-1) && c.documentUrl===`chrome-extension://${arcifyId}/sidebar.html`), 'native disposable window panel context and opened event');
+        assertNativeSidebarEvidence(proof.contexts, proof.events, {extensionId:arcifyId,windowId});
+        const page = await poll(async () => {
+            const matches=[];
+            for(const target of browser.targets().filter(t=>t.url()===`chrome-extension://${arcifyId}/sidebar.html`)) {
+                const candidate=await target.asPage();
+                const host=await candidate.evaluate(async()=>({tab:await chrome.tabs.getCurrent()||null,windowId:(await chrome.windows.getCurrent()).id}));
+                if(host.tab===null&&host.windowId===windowId)matches.push(candidate);
+            }
+            assert(matches.length<=1);return matches[0]||null;
+        }, Boolean, 'exact native disposable source renderer');
+        const observed=await observePage(page);
+        await poll(()=>observed.evaluate(readNativeSidebarRender),createNativeSidebarReadiness(arcifyId),'real disposable panel render');
+        (report.moveWindowNativeHosts ||= []).push({windowId,proof});await saveReport();
+        return {page:observed,ownedTabIds:[helper.tab.id],removeLauncher};
+    } catch(error) { await removeLauncher().catch(cleanup=>{error.cleanupError=cleanup.message;});throw error; }
+}
+
 async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
     await arcifyOptions.evaluate(() => {
         globalThis.__pairedSidebarEvents = [];
@@ -2239,9 +2279,14 @@ try {
         snapshot,poll,fixture,arcifyId,screenshotBytes:shot=>readFile(resolve(OUTPUT,shot.filename)),
         record:async observation => { report.spaceContextMenus ||= []; report.spaceContextMenus.push(observation); await saveReport(); } }));
 
-    await step(stepNames[38], () => exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
-        snapshot,poll,fixture,arcifyId,spotlightId,search,
-        record:async observation => { report.tabMenus = observation; await saveReport(); } }));
+    await step(stepNames[38], async () => {
+        await exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
+            snapshot,poll,fixture,arcifyId,spotlightId,search,
+            record:async observation => { report.tabMenus = observation; await saveReport(); } });
+        return exerciseMoveToNewWindow({apiPage:arcifyOptions,newTabPage,pageForUrl,nativeSidebar:nativeMoveWindowSidebar,
+            ui,screenshot,snapshot,poll,fixture,
+            record:async observation=>{report.moveWindow=observation;await saveReport();}});
+    });
     await step(stepNames[40], () => exerciseTodayMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,
         snapshot,poll,fixture,arcifyId,spotlightId,search,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayMoveSyncOff = observation; await saveReport(); } }));

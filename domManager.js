@@ -246,6 +246,11 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         addAction('Edit Pinned URL…', tabActions.editUrl, 'editUrl');
         addAction(tabActions.muted ? 'Unmute Tab' : 'Mute Tab', tabActions.mute, 'mute');
         addAction('Duplicate Tab', tabActions.duplicate, 'duplicate');
+        addAction('Move to New Window', tabActions.moveToNewWindow, 'moveToNewWindow');
+    }
+    if (multiple) {
+        const hint = document.createElement('div'); hint.className = 'context-menu-hint';
+        hint.textContent = 'Select one live tab to move to a new window.'; contextMenu.append(hint);
     }
     // --- Menu Items ---
     if (todaySelection) {

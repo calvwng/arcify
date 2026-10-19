@@ -338,7 +338,7 @@ test('existing callbacks retain their reviewed bytes except exact additive route
     // Case 20's reviewed viewport/paint readiness is retained in this receipt;
     // its original refresh and exact native-identity gates are still required.
     const preserved = [...definitions].filter(([index]) => index < 50).sort(([a], [b]) => a - b).map(([, item]) => ({ ...item,
-        callback: item.callback.replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
+        callback: (item.caseIndex === 38 ? item.callback.replace(/^async \(\) => \{\n        await (exerciseTabMenuActions\([\s\S]*?\}\));\n        return exerciseMoveToNewWindow\([\s\S]*?\);\n    \}$/, (_, original) => '() => ' + original.replaceAll('\n            ', '\n        ')) : item.callback).replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightSplitFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
@@ -370,7 +370,7 @@ test('all five original workflow jobs retain reviewed bytes and order except the
     assert.equal(digest(archivePinBytes(jobs[5][0].trimEnd())), '0d01f7440c701db284e286566d4acbd7ba3d590e52e01c8e54435a14aa92875c');
     assert.equal(digest(archivePinBytes(jobs[6][0].trimEnd())), 'aefdebbb6af8c3c11e312ecb716bb5d7c172117a9cffd0df638e3002216b6cdc');
     // Normalize only the reviewed additive Split/display watch paths; event/security configuration is unchanged.
-    const addedWatchPaths = ['archive-display-session.js', 'tests/unit/helpers/archive-display-fixture.js',
+    const addedWatchPaths = ['new-tab-window-drop.js', 'tests/unit/new-tab-window-drop.test.js', 'scripts/paired-chrome-new-tab-drop.mjs', 'tests/unit/paired-chrome-new-tab-drop.test.js', 'scripts/paired-chrome-move-window.mjs', 'move-tab-new-window.js', 'tests/unit/paired-chrome-move-window.test.js', 'tests/unit/move-tab-new-window.test.js', 'archive-display-session.js', 'tests/unit/helpers/archive-display-fixture.js',
         'scripts/paired-chrome-spotlight-split.mjs', 'spotlight-split-actions.js',
         'tests/unit/spotlight-split-actions.test.js', 'tests/unit/paired-chrome-spotlight-split.test.js',
         'tests/unit/paired-chrome-split-wiring.test.js', 'scripts/lib/spotlight-pair-split-*.mjs', 'docs/spotlight-split-actions.md'];

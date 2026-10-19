@@ -44,16 +44,17 @@ export function requestTabEdit(document, { action, value = '', saved = false, si
 
 export function createTabMenuActions({ document, getContext, sendRequest, showStatus, begin = () => {}, end = () => {}, refresh = async () => {}, copy = text => navigator.clipboard.writeText(text) }) {
     let pending = false, editController = null;
-    function actionsFor(target, { selectionCount = 1, muted = false } = {}) {
+    function actionsFor(target, { selectionCount = 1, muted = false, validate = () => true } = {}) {
         const execute = async (action, useCurrent = false) => {
             if (pending || selectionCount > 1) return;
             pending = true; begin(); let attempted = false;
             const editor = ['rename', 'editUrl'].includes(action) && !useCurrent ? new AbortController() : null;
             if (editor) editController = editor;
             const request = async (verb, extra = {}) => {
+                if (verb === 'moveToNewWindow' && !validate()) throw new Error('This selection changed. Reopen its menu before moving.');
                 const context = getContext();
                 if (context.windowId !== target.windowId || context.spaceId !== target.spaceId) throw new Error('The active Space changed. Reopen the menu.');
-                const result = await sendRequest({ type: 'tabMenuAction', ...target, action: verb, ...extra });
+                const result = await sendRequest(verb === 'moveToNewWindow' ? { type: 'moveTabToNewWindow', ...target } : { type: 'tabMenuAction', ...target, action: verb, ...extra });
                 if (!result?.success) throw new Error(result?.error || 'The action could not be confirmed. Check the row before trying again.');
                 return result;
             };
@@ -75,7 +76,7 @@ export function createTabMenuActions({ document, getContext, sendRequest, showSt
                 // Once Save was submitted, later menus cannot cancel or hide its result.
                 if (editController === editor) editController = null;
                 attempted = true; await request(action, extra);
-                showStatus(({ rename: 'Name saved.', editUrl: 'Pinned URL saved. Your open page is unchanged.', mute: extra.value ? 'Tab muted.' : 'Tab unmuted.', duplicate: 'Tab duplicated in this Space.', removePin: 'Pin removed. Open tabs stay open.' })[action]);
+                showStatus(({ rename: 'Name saved.', editUrl: 'Pinned URL saved. Your open page is unchanged.', mute: extra.value ? 'Tab muted.' : 'Tab unmuted.', moveToNewWindow: 'Tab moved to a new window. Saved bookmarks and Favorites are kept.', duplicate: 'Tab duplicated in this Space.', removePin: 'Pin removed. Open tabs stay open.' })[action]);
             } catch (error) { if (!editor?.signal.aborted) showStatus(error.message); }
             finally {
                 if (editController === editor) editController = null;
@@ -85,7 +86,7 @@ export function createTabMenuActions({ document, getContext, sendRequest, showSt
         };
         return { selectionCount, muted, copyLink: () => execute('copyLink'), rename: () => execute('rename'),
             ...(target.bookmarkId ? { editUrl: () => execute('editUrl'), removePin: () => execute('removePin'), ...(target.tabId ? { useCurrentUrl: () => execute('editUrl', true) } : {}) } : {}),
-            ...(target.tabId ? { mute: () => execute('mute'), ...(!target.bookmarkId ? { duplicate: () => execute('duplicate') } : {}) } : {}) };
+            ...(target.tabId ? { ...(selectionCount === 1 ? { moveToNewWindow: () => execute('moveToNewWindow') } : {}), mute: () => execute('mute'), ...(!target.bookmarkId ? { duplicate: () => execute('duplicate') } : {}) } : {}) };
     }
     // Cancel only the unsubmitted editor/description, never an in-flight write.
     actionsFor.cancelEdit = () => editController?.abort();
