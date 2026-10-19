@@ -8,7 +8,7 @@ import { readSourceText } from '../source-text.js';
 import { finishBookmarkFixture } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 import { registerFavoriteMessages } from '../../favorite-store.js';
 import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
-import { assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
+import { installArchiveSelectionObservation,readArchiveSelectionEvidence,assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
     assertArchiveReopenRequest, waitForArchiveReopenCompletion, readArchiveDestinationDocument, captureArchiveReopenedDestination, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation, readArchiveIntentObservation, observeArchiveDisplayWorker, probeArchiveDisplayRegistration, exerciseArchiveExistingPanel, installArchiveStatusObservation, readArchiveActivation, probeArchiveOpenWithoutGesture, assertArchiveNoGestureRejection,
     readArchiveDocumentStatus, collectArchiveOpenFailure, readArchiveReopenJournal, collectArchiveReopenFailure, withArchiveFailureEvidence,
     readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
@@ -1092,4 +1092,26 @@ test('no-gesture wiring records raw evidence before strict native rejection and 
     assert.match(block, /assert\.deepEqual\(panel\.contexts, \[\]\)/); assert.match(block, /assert\.deepEqual\(panelAfter\.contexts, \[\]\)/);
     const helper = source.slice(source.indexOf('export async function probeArchiveOpenWithoutGesture'), source.indexOf('export function assertArchiveNoGestureRejection'));
     assert.doesNotMatch(helper, /page\.evaluate|sleep\(|setTimeout\(|\.press\(|\.click\(|userGesture:\s*true/);
+});
+
+test('passive Archive selection timeline records refresh delivery, query and lost default selection without repairing it or exposing tokens',async()=>{
+ const {document,window}=parseHTML('<html><body><input data-testid="spotlight-input" value="open archive"><div data-testid="spotlight-results"><div data-testid="spotlight-result" data-result-type="arcify-archive-action" class="selected"><span class="arcify-spotlight-result-title">Open Archive</span></div></div></body></html>');
+ document.hasFocus=()=>true;const listeners=new Set();
+ const context=vm.createContext({document,MutationObserver:window.MutationObserver,performance:{now:()=>10},structuredClone,
+  chrome:{runtime:{onMessage:{addListener:fn=>listeners.add(fn),removeListener:fn=>listeners.delete(fn)},sendMessage:()=>assert.fail('No context fetch or action may be sent by observation.')}}});
+ vm.runInContext(`(${installArchiveSelectionObservation.toString()})()`,context);
+ const read=()=>JSON.parse(JSON.stringify(vm.runInContext(`(${readArchiveSelectionEvidence.toString()})()`,context)));
+ assert.equal(read().events[0].type,'installed-before-typing');assert.equal(read().current.query,'open archive');
+ for(const listener of listeners)listener({action:'spotlightArcifyResultsChanged',windowId:7,openIntent:'SECRET-TOKEN'}, {id:SPOTLIGHT});
+ document.querySelector('[data-testid="spotlight-result"]').classList.remove('selected');await new Promise(resolve=>setImmediate(resolve));
+ const evidence=read();assert(evidence.events.some(event=>event.type==='context-refresh-delivery'&&event.windowId===7));
+ assert(evidence.events.some(event=>event.type==='result-mutation'&&event.rows[0].selected===false));assert.equal(evidence.current.rows[0].selected,false);
+ assert(!JSON.stringify(evidence).includes('SECRET-TOKEN'));
+ vm.runInContext('globalThis.__archiveSelectionObservation.stop()',context);assert.equal(listeners.size,0);
+});
+test('Archive readiness retains hard default Enter assertion and captures evidence before typing, assertion and cleanup',()=>{
+ assert.match(source,/archive-selection-before-typing[\s\S]*?await search\(page,query\)/);
+ assert.match(source,/archive-selection-before-default-Enter-assertion[\s\S]*?if \(!entryId\) assertMatchedActionFirst/);
+ assert.match(source,/finally \{[\s\S]*?archive-selection-before-cleanup[\s\S]*?finishBookmarkFixture/);
+ assert.doesNotMatch(installArchiveSelectionObservation.toString(),/sendMessage|dispatchEvent|\.focus\(|\.click\(|selectedIndex\s*=/);
 });

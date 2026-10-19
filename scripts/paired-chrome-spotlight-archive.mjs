@@ -231,6 +231,42 @@ export function readArchiveRows() {
         entryId: row.dataset.archiveEntryId || null, title: row.querySelector('.arcify-spotlight-result-title')?.textContent,
         selected: row.classList.contains('selected'), visible: row.getClientRects().length > 0 && getComputedStyle(row).visibility !== 'hidden' }));
 }
+/** Passive selection timeline; never invokes controllers, sends messages or repairs selection. */
+export function installArchiveSelectionObservation() {
+    globalThis.__archiveSelectionObservation?.stop();
+    const events=[],removals=[],input=document.querySelector('[data-testid="spotlight-input"]');
+    const snapshot=()=>({time:performance.now(),query:input?.value??null,visibility:document.visibilityState,hasFocus:document.hasFocus(),
+        focused:{id:document.activeElement?.id||null,testId:document.activeElement?.dataset?.testid||null},
+        rows:[...document.querySelectorAll('[data-testid="spotlight-result"]')].map(row=>({type:row.dataset.resultType,
+            entryId:row.dataset.archiveEntryId||null,title:row.querySelector('.arcify-spotlight-result-title')?.textContent||'',
+            selected:row.classList.contains('selected')}))});
+    const record=(type,detail={})=>{events.push({type,...detail,...snapshot()});if(events.length>200)events.shift();};
+    for(const type of ['input','keydown','focusin','focusout','visibilitychange']){
+        const listener=event=>record(type,{trusted:event.isTrusted,key:event.key||null});
+        document.addEventListener(type,listener,{capture:true,passive:true});
+        removals.push(()=>document.removeEventListener(type,listener,{capture:true}));
+    }
+    const results=document.querySelector('[data-testid="spotlight-results"]');
+    const observer=new MutationObserver(()=>record('result-mutation'));
+    if(results)observer.observe(results,{subtree:true,childList:true,attributes:true,attributeFilter:['class','data-result-type','data-archive-entry-id']});
+    const runtime=globalThis.chrome?.runtime;
+    if(runtime?.onMessage?.addListener){
+        const listener=(message,sender)=>{
+            if(['spotlightLiveTabsChanged','spotlightArcifyResultsChanged'].includes(message?.action))record('context-refresh-delivery',{
+                action:message.action,windowId:message.windowId??null,removedTabIds:message.removedTabIds||[],senderId:sender?.id||null});
+        };
+        runtime.onMessage.addListener(listener);removals.push(()=>runtime.onMessage.removeListener(listener));
+    }
+    globalThis.__archiveSelectionObservation={events,read:snapshot,runtimeObservationAvailable:Boolean(runtime?.onMessage?.addListener),
+        stop:()=>{observer.disconnect();removals.splice(0).forEach(remove=>remove());}};
+    record('installed-before-typing');
+}
+export function readArchiveSelectionEvidence() {
+    const observation=globalThis.__archiveSelectionObservation;
+    return observation?{current:observation.read(),events:structuredClone(observation.events),runtimeObservationAvailable:observation.runtimeObservationAvailable}:
+        {unavailable:'Selection observation was not installed in this document.'};
+}
+
 /** Passive failure-only reads; never send a request, focus, retry or render UI. */
 export function readArchiveDocumentStatus() {
     return { url: document.URL, visibility: document.visibilityState, hasFocus: document.hasFocus(), readyState: document.readyState,
@@ -604,7 +640,7 @@ async function archiveFixture(adapters, run) {
         session: await chrome.storage.session.get(['activeSpaces', 'archiveBrowserSession']) }));
     const owned = [], roots = [], spaceRoots = [], pages = new Map(), favoriteIds = [];
     const evidence = { nonce, checkpoints: [], matrix: [], complete: false, unitOnly: ['deterministic lost ACK or response', 'mid-storage-callback revocation', 'worker/browser crash during native create', 'Helium and physical keyboard'] };
-    let source, target, entries, overlayPage, fixtureApi, revoked = false, primaryError;
+    let source, target, entries, overlayPage, fixtureApi, revoked = false, primaryError, activeSearch;
     const checkpoint = async (phase, data = {}) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
     const local = async message => { const result = await apiPage.evaluate(message => chrome.runtime.sendMessage({ type: 'spaceStore', ...message }), message); assert.equal(result?.success, true, JSON.stringify(result)); return result; };
     const archive = async message => { const reply = await sendArchiveFixtureRequest(fixtureApi, { type: 'archiveStore', windowId, ...message }); assert.equal(reply?.success, true, JSON.stringify(reply)); return reply.result; };
@@ -656,9 +692,14 @@ async function archiveFixture(adapters, run) {
         return { ...sourceRecord, kind };
     };
     const ready = async (page, { entryId = null, title = ARCHIVE_OPEN_TITLE } = {}) => {
-        await search(page, entryId ? title.replace(/^Reopen /, '') : OPEN_QUERY); const surface = await spotlightSurface(page);
+        const surface=await spotlightSurface(page),query=entryId?title.replace(/^Reopen /,''):OPEN_QUERY;
+        activeSearch={page,surface,query,entryId,title};
+        await surface.evaluate(installArchiveSelectionObservation);
+        await checkpoint('archive-selection-before-typing',{query,entryId,title,selection:await surface.evaluate(readArchiveSelectionEvidence)});
+        await search(page,query);
         const type = entryId ? ARCHIVE_ENTRY_TYPE : ARCHIVE_OPEN_TYPE;
         const rows = await poll(() => surface.evaluate(readArchiveRows), rows => rows.some(row => row.type === type && row.entryId === entryId && row.title === title && row.visible), 'exact visible Archive action result');
+        await checkpoint('archive-selection-before-default-Enter-assertion',{query,entryId,title,selection:await surface.evaluate(readArchiveSelectionEvidence)});
         if (!entryId) assertMatchedActionFirst(await surface.evaluate(readSpotlightRows), { type, title, query: OPEN_QUERY });
         else {
             const input = await surface.$('[data-testid="spotlight-input"]'); assert(input);
@@ -731,6 +772,10 @@ async function archiveFixture(adapters, run) {
         evidence.complete = true; await checkpoint('archive-case-complete'); return evidence;
     } catch (error) { primaryError = error; await checkpoint('archive-case-failed', { error: { message: error.message, stack: error.stack }, owned, roots }).catch(() => {}); throw error; }
     finally {
+        if(activeSearch){
+            let selection;try{selection=await activeSearch.surface.evaluate(readArchiveSelectionEvidence);}catch(error){selection={error:archiveFailureError(error)};}
+            await checkpoint('archive-selection-before-cleanup',{query:activeSearch.query,entryId:activeSearch.entryId,title:activeSearch.title,selection}).catch(()=>{});
+        }
         await finishBookmarkFixture([
             async () => { if (revoked) { await ui(apiPage, 'Restore exact Archive fixture pairing', async () => { const field = await apiPage.$('#bridgePeerId'); assert(field); try { await replaceInputText(apiPage, field, spotlightId); } finally { await field.dispose(); } await apiPage.click('#bridgeSave'); }); await apiPage.waitForSelector('#bridgeStatus[data-state="connected"]'); } },
             async () => { if (adapters.nativePanel && (await adapters.nativePanel.state()).contexts.length) await adapters.nativePanel.close(); },

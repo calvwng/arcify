@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { locateFreshDragGeometry } from './paired-chrome-ui.mjs';
 import { clickBookmarkFixtureRow, finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
+import { favoriteDragInputClient } from './paired-chrome-favorites-marker.mjs';
 import { readTodaySelection, assertTodaySelection } from './paired-chrome-today-selection.mjs';
 
 export { NATIVE_SPLIT_CASE_NAME } from './paired-chrome-run-plan.mjs';
@@ -140,6 +141,49 @@ export function assertNativeSplitKeyboardTrace(events,{tabId,actions}) {
     assert.deepEqual(enters.map(event=>event.action),actions,'Each requested menu action receives exactly one Enter; no replay.');
     assert(enters.every(event=>event.trusted&&event.shift===false&&event.ctrl===false&&event.alt===false&&event.meta===false),'Menu submits must be trusted unmodified Enter input.');
     return events;
+}
+
+/** Passive drag-only affordance evidence; no input or native API calls. */
+export function readNativeSplitAffordances() {
+    return { dragging: document.getElementById('spacesList')?.classList.contains('today-split-dragging') === true,
+        rows: [...document.querySelectorAll('.space.active [data-tab-type="temporary"] .tab[data-tab-id]')].map(row => {
+            const target=row.querySelector('.today-split-target'),badge=row.querySelector('.today-split-badge');
+            const style=target?getComputedStyle(target):null;
+            return {tabId:Number(row.dataset.tabId),target:Boolean(target),eligible:target?.dataset.splitEligible||null,
+                visible:Boolean(target?.getClientRects().length&&style.display!=='none'&&style.visibility!=='hidden'&&Number(style.opacity)>0),
+                outline:row.dataset.splitOutline||null,badge:badge?.textContent||null,label:badge?.getAttribute('aria-label')||null};
+        }) };
+}
+export function assertNativeSplitTargetEligibility(state,{sourceId,targetId,dragging,allowed}) {
+    assert.equal(state.dragging,dragging);const exact=id=>{const found=state.rows.filter(row=>row.tabId===id);assert.equal(found.length,1);return found[0];};
+    const source=exact(sourceId),target=exact(targetId);
+    assert.equal(source.visible,false,'The dragged source never reveals its own target.');assert.equal(source.eligible,null);
+    assert.equal(target.visible,dragging&&allowed);assert.equal(target.eligible,dragging&&allowed?'true':null);
+    if(!dragging)assert(state.rows.every(row=>!row.visible&&row.eligible===null),'Ordinary hover/selection cannot expose Split drop targets.');
+    return state;
+}
+export function assertNativeSplitOutline(state,{tabIds}) {
+    const rows=state.rows.filter(row=>tabIds.includes(row.tabId));assert.equal(rows.length,2);
+    assert.deepEqual(rows.map(row=>row.outline),['first','last'],'Adjacent exact native members share the two outer outline edges.');
+    assert.match(rows[0].badge,/^Split View [1-9]\d*$/);assert.equal(rows[0].badge,rows[1].badge,'Both members name the same numbered group.');
+    rows.forEach((row,index)=>{assert(row.label.includes(row.badge));assert(row.label.includes(`Member ${index+1} of 2, adjacent pair.`));});
+    return rows;
+}
+export function assertNativeSplitCancelled(evidence,{sourceId}) {
+    assert.equal(evidence.method,'Input.cancelDragging');assert.equal(evidence.acknowledged,true);assert.equal(evidence.mouseReleased,false);
+    const starts=evidence.trace.filter(event=>event.type==='dragstart'),ends=evidence.trace.filter(event=>event.type==='dragend');
+    assert.equal(starts.length,1);assert.equal(ends.length,1);
+    for(const event of [starts[0],ends[0]]){assert.equal(event.trusted,true);assert.equal(event.tabId,sourceId);}
+    assert(evidence.trace.indexOf(starts[0])<evidence.trace.indexOf(ends[0]));assert.equal(ends[0].dropEffect,'none');
+    assert(!evidence.trace.some(event=>event.type==='drop'),'Cancellation cannot deliver a drop into a reorder zone.');
+    assert.equal(evidence.dragging,false);return evidence;
+}
+export async function cancelNativeSplitDrag({page,client,poll,sourceId}) {
+    await client.send('Input.cancelDragging');
+    const observed=await poll(()=>page.evaluate(()=>({trace:[...(globalThis.__nativeSplitInputTrace||[])],
+        dragging:Boolean(document.querySelector('.dragging')||document.getElementById('spacesList')?.classList.contains('today-split-dragging'))})),
+        state=>!state.dragging&&state.trace.some(event=>event.type==='dragend'&&event.trusted&&event.tabId===sourceId),'trusted Split drag cancellation before release');
+    return assertNativeSplitCancelled({method:'Input.cancelDragging',acknowledged:true,mouseReleased:false,...observed},{sourceId});
 }
 
 export function assertNativeSplitDragTrace(events,{sourceId,targetId,allowed}) {
@@ -289,12 +333,29 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
     const badges=async ids=>poll(()=>sidebar.page.evaluate(ids=>ids.map(id=>{const row=document.querySelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`),badge=row?.querySelector('.today-split-badge');return {id,visible:Boolean(badge?.getClientRects().length),text:badge?.textContent};}),ids),rows=>rows.every(row=>row.visible&&row.text),'two visible native split badges');
     const capture=async label=>ui(sidebar.page,`Capture ${label}`,()=>screenshot(sidebar.page,label,true));
     const drag=async(sourceId,targetId,{allowed=true}={})=>ui(sidebar.page,allowed?'Drag Today row onto explicit native Split View destination':'Reject incompatible Today split drop without reorder',async()=>{
-        // The destination button is intentionally hidden until native dragstart.
+        // Drop-only targets are absent outside a genuine eligible drag. An
+        // incompatible-group target stays hidden; never release over a row.
+        assertNativeSplitTargetEligibility(await sidebar.page.evaluate(readNativeSplitAffordances),{sourceId,targetId,dragging:false,allowed});
         await sidebar.page.evaluate(()=>{globalThis.__nativeSplitInputTrace.length=0;});
+        const rejectedBaseline=allowed?null:await read();
         const geometry=await locateFreshDragGeometry(sidebar.page,todayRowSelector(sourceId),todayRowSelector(targetId));let mouseDown=false;
         try{
             const {from}=geometry;await sidebar.page.mouse.move(from.x+Math.min(80,from.width/3),from.y+from.height/2);await sidebar.page.mouse.down();mouseDown=true;
             await sidebar.page.mouse.move(from.x+Math.min(80,from.width/3)+12,from.y+from.height/2,{steps:6});
+            await poll(()=>sidebar.page.evaluate(()=>document.getElementById('spacesList')?.classList.contains('today-split-dragging')),Boolean,'one genuine eligible Split dragstart');
+            const affordances=await sidebar.page.evaluate(readNativeSplitAffordances);
+            assertNativeSplitTargetEligibility(affordances,{sourceId,targetId,dragging:true,allowed});
+            if(!allowed){
+                const cancellation=await cancelNativeSplitDrag({page:sidebar.page,client:favoriteDragInputClient(sidebar.page),poll,sourceId});
+                const cancelledState=await read();assertNativeSplitRejected(rejectedBaseline,cancelledState);
+                await checkpoint('native-incompatible-target-hidden-cancelled-before-release',{affordances,cancellation,before:rejectedBaseline,after:cancelledState,physicalEscapeAsserted:false});
+                await sidebar.page.mouse.up();mouseDown=false;
+                const released=await sidebar.page.evaluate(()=>globalThis.__nativeSplitInputTrace);
+                assert(!released.some(event=>event.type==='drop'),'Release after cancellation cannot deliver a late drop.');
+                assertNativeSplitTargetEligibility(await sidebar.page.evaluate(readNativeSplitAffordances),{sourceId,targetId,dragging:false,allowed});
+                const releasedState=await read();assertNativeSplitRejected(rejectedBaseline,releasedState);
+                await checkpoint('native-incompatible-target-cancelled-after-release',{trace:released,before:rejectedBaseline,after:releasedState});return;
+            }
             const target=`${todayRowSelector(targetId)} .today-split-target[data-action="createSplitView"]`;
             await sidebar.page.waitForSelector(target,{visible:true});const handle=await sidebar.page.$(target);let box;
             try{box=await handle.boundingBox();assert(box&&box.width>0&&box.height>0);}finally{await handle.dispose();}
@@ -309,7 +370,15 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
             await sidebar.page.mouse.up();mouseDown=false;
             const trace=await poll(()=>sidebar.page.evaluate(()=>globalThis.__nativeSplitInputTrace),events=>events.some(event=>event.type==='dragend'&&event.trusted),'trusted native dragend');
             assertNativeSplitDragTrace(trace,{sourceId,targetId,allowed});await checkpoint(allowed?'native-drag-delivered':'native-rejected-drag-delivered',{trace});
-        }finally{if(mouseDown)await sidebar.page.mouse.up();await geometry.source.dispose();await geometry.target.dispose();}
+        }finally{
+            if(mouseDown){
+                // A failed assertion cannot authorize releasing a still-held
+                // native drag into an ordinary reorder destination.
+                const cancelled=await cancelNativeSplitDrag({page:sidebar.page,client:favoriteDragInputClient(sidebar.page),poll,sourceId}).catch(()=>null);
+                if(cancelled)await sidebar.page.mouse.up();
+            }
+            await geometry.source.dispose();await geometry.target.dispose();
+        }
     });
     try{
         await option('syncTabGroups',false);await option('invertTabOrder',false);await option('todayNewTabsAtTop',false);
@@ -334,7 +403,7 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         await sidebar.page.waitForFunction(ids=>ids.every(id=>document.querySelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`)),{polling:50},seed);
         const request={tabIds:[seed[0],seed[2]],windowId,spaceId};
         const before=await ui(sidebar.page,'Capture baseline before nonadjacent real drag',read);assert(Math.abs(exactTab(before,seed[0]).index-exactTab(before,seed[2]).index)>1);
-        await drag(seed[0],seed[2]);const created=await awaitPair(request);const pair=assertNativeSplitCreated(before,created,request);await badges(request.tabIds);await capture('native-split-two-today-badges');
+        await drag(seed[0],seed[2]);const created=await awaitPair(request);const pair=assertNativeSplitCreated(before,created,request);await badges(request.tabIds);const outlines=await sidebar.page.evaluate(readNativeSplitAffordances);assertNativeSplitOutline(outlines,request);await checkpoint('native-split-shared-group-outline',{outlines});await capture('native-split-two-today-badges');
         await ui(pages.get(seed[0]),'Capture both native Split View panes and browser chrome',async()=>{
             const native=await captureNativeWindow({nonce,colors:[[248,215,218],[211,244,224]]});await checkpoint('native-split-window-screenshot',{native,pair});
             const views=await Promise.all(request.tabIds.map(async id=>({id,...await pages.get(id).evaluate(()=>({visibility:document.visibilityState,topLevel:window===window.top,frames:document.querySelectorAll('iframe,frame').length,width:innerWidth,height:innerHeight}))})));assert(views.every(view=>view.visibility==='visible'&&view.topLevel&&view.frames===0&&view.width>0));await checkpoint('native-split-real-visible-panes',{views});
@@ -411,7 +480,7 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         await clear();assertNativeSplitRejected(overSelectedBefore,await read());await checkpoint('native-split-three-selection-rejected',{});
 
         // Mismatched native groups are a real incompatible destination; selecting
-        // the Split View button may not silently turn into an ordinary reorder.
+        // an incompatible hidden Split target must not become an ordinary reorder.
         // Chrome's default is the API caller's window, not this sidebar's window:
         // https://developer.chrome.com/docs/extensions/reference/api/tabs#method-group
         const beforeGrouping=await read();
@@ -425,7 +494,7 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         await clear();
         const rejectedBefore=await ui(sidebar.page,'Capture incompatible native group baseline',read);assertNativeSplitIncompatibleSetup(beforeGrouping,rejectedBefore,groupRequest);
         await drag(seed[0],seed[4],{allowed:false});await sidebar.page.waitForFunction(()=>!document.getElementById('spacesList')?.classList.contains('today-split-dragging'),{polling:50});
-        const rejectedAfter=await read();assertNativeSplitRejected(rejectedBefore,rejectedAfter);await checkpoint('native-split-incompatible-drop-rejected',{before:rejectedBefore,after:rejectedAfter});
+        const rejectedAfter=await read();assertNativeSplitRejected(rejectedBefore,rejectedAfter);await checkpoint('native-split-incompatible-target-hidden-cancelled',{before:rejectedBefore,after:rejectedAfter});
         return evidence;
     }catch(error){
         primaryError=error;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {parseHTML} from 'linkedom';
-import {assertNativeSplitCapability,assertNativeSplitPagesPreserved,assertNativeSplitPair,assertUnaffectedSpaceProjection,assertNativeSplitCreated,assertNativeSplitDragTrace,assertNativeSplitEnded,assertNativeSplitRejected,createNativeSplitFixtureGroup,assertNativeSplitIncompatibleSetup,assertSplitTargetFeedback,serveNativeSplitFixture,readNativeSplitMenuAction,assertNativeSplitMenuAction,assertNativeSplitKeyboardTrace,readNativeSplitSidebarState} from '../../scripts/paired-chrome-native-split.mjs';
+import {assertNativeSplitTargetEligibility,assertNativeSplitOutline,assertNativeSplitCancelled,cancelNativeSplitDrag,assertNativeSplitCapability,assertNativeSplitPagesPreserved,assertNativeSplitPair,assertUnaffectedSpaceProjection,assertNativeSplitCreated,assertNativeSplitDragTrace,assertNativeSplitEnded,assertNativeSplitRejected,createNativeSplitFixtureGroup,assertNativeSplitIncompatibleSetup,assertSplitTargetFeedback,serveNativeSplitFixture,readNativeSplitMenuAction,assertNativeSplitMenuAction,assertNativeSplitKeyboardTrace,readNativeSplitSidebarState} from '../../scripts/paired-chrome-native-split.mjs';
 import {validateNativeSplitCapture} from '../../scripts/paired-chrome-native-split-capture.mjs';
 const capability=()=>({createSplit:'function',unsplit:'function',none:-1,major:155});
 test('positive native capability requires both real methods and installed 155+',()=>assertNativeSplitCapability(capability()));
@@ -175,4 +175,41 @@ for (const [name, mutate] of Object.entries({
 })) test(`real split child evidence rejects ${name}`, async () => {
     const { assertNativeSplitChild } = await import('../../scripts/paired-chrome-native-split.mjs');
     const s = childSample(); mutate(s); assert.throws(() => assertNativeSplitChild(s.before, s.after, s.request));
+});
+
+const affordances=()=>({dragging:true,rows:[{tabId:11,target:true,visible:false,eligible:null},{tabId:13,target:true,visible:false,eligible:null}]});
+test('incompatible native group remains hidden and ineligible throughout a genuine drag',()=>{
+ const state=affordances();assertNativeSplitTargetEligibility(state,{sourceId:11,targetId:13,dragging:true,allowed:false});
+ for(const change of [s=>s.rows[1].visible=true,s=>s.rows[1].eligible='true',s=>s.rows[0].visible=true,s=>s.rows[0].eligible='true',s=>s.dragging=false]){
+  const bad=structuredClone(state);change(bad);assert.throws(()=>assertNativeSplitTargetEligibility(bad,{sourceId:11,targetId:13,dragging:true,allowed:false}));
+ }
+ state.rows[1].visible=true;state.rows[1].eligible='true';assertNativeSplitTargetEligibility(state,{sourceId:11,targetId:13,dragging:true,allowed:true});
+ state.dragging=false;assert.throws(()=>assertNativeSplitTargetEligibility(state,{sourceId:11,targetId:13,dragging:false,allowed:true}));
+});
+const cancelledSplit=()=>({method:'Input.cancelDragging',acknowledged:true,mouseReleased:false,dragging:false,trace:[{type:'dragstart',trusted:true,tabId:11},{type:'dragend',trusted:true,tabId:11,dropEffect:'none'}]});
+test('cancelled incompatible drag requires exactly one trusted source start/end and no delivered drop before release',()=>{
+ assertNativeSplitCancelled(cancelledSplit(),{sourceId:11});
+ for(const mutate of [s=>s.trace.push({type:'drop'}),s=>s.trace[1].dropEffect='move',s=>s.trace[0].trusted=false,s=>s.trace[1].tabId=99,s=>s.trace.reverse(),s=>s.trace.push({...s.trace[1]}),s=>s.mouseReleased=true,s=>s.dragging=true,s=>s.acknowledged=false]){
+  const bad=cancelledSplit();mutate(bad);assert.throws(()=>assertNativeSplitCancelled(bad,{sourceId:11}));
+ }
+});
+test('native Split cancellation uses the existing mouse client and verifies actual dragend before any release',async()=>{
+ const calls=[],state=cancelledSplit();const page={evaluate:async()=>({trace:state.trace,dragging:false}),mouse:{up:()=>assert.fail('Cancellation helper must not release input before callers verify state.')}};
+ const client={send:async method=>calls.push(method)};
+ const result=await cancelNativeSplitDrag({page,client,sourceId:11,poll:async(read,accept)=>{const value=await read();assert(accept(value));return value;}});
+ assert.deepEqual(calls,['Input.cancelDragging']);assert.equal(result.mouseReleased,false);
+ const incomplete={evaluate:async()=>({trace:[state.trace[0]],dragging:true})};
+ await assert.rejects(cancelNativeSplitDrag({page:incomplete,client,sourceId:11,poll:async(read,accept)=>{assert.equal(accept(await read()),false);throw new Error('No real dragend');}}),/No real dragend/);
+});
+test('shared native group outline requires two exact adjacent edges and an accessible identical numbered label',()=>{
+ const state={rows:[{tabId:11,outline:'first',badge:'Split View 1',label:'Split View 1. Member 1 of 2, adjacent pair.'},{tabId:12,outline:'last',badge:'Split View 1',label:'Split View 1. Member 2 of 2, adjacent pair.'}]};
+ assertNativeSplitOutline(state,{tabIds:[11,12]});
+ for(const mutate of [s=>s.rows.pop(),s=>s.rows[1].badge='Split View 2',s=>s.rows[0].outline='separate',s=>s.rows[1].label='Split View',s=>s.rows[1].tabId=99]){
+  const bad=structuredClone(state);mutate(bad);assert.throws(()=>assertNativeSplitOutline(bad,{tabIds:[11,12]}));
+ }
+});
+test('incompatible target fixture cancels without aiming/releasing into reorder and checks unchanged state on both sides of release',()=>{
+ const source=readFileSync(new URL('../../scripts/paired-chrome-native-split.mjs',import.meta.url),'utf8');
+ assert.match(source,/if\(!allowed\)\{[\s\S]*?cancelNativeSplitDrag[\s\S]*?assertNativeSplitRejected\(rejectedBaseline,cancelledState\)[\s\S]*?mouse.up\(\)[\s\S]*?assertNativeSplitRejected\(rejectedBaseline,releasedState\)[\s\S]*?return;/);
+ assert.doesNotMatch(source,/if\(!allowed\)\{[\s\S]*?keyboard.press\('Escape'\)/);
 });
