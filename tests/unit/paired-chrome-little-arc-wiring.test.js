@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { readSourceText } from '../source-text.js';
 import { LITTLE_ARC_CASE_NAME, serveLittleArcFixture } from '../../scripts/paired-chrome-little-arc.mjs';
 import { createPairedChromeRunReport } from '../../scripts/paired-chrome-run-plan.mjs';
+import { validateLittleArcAcceptanceContext } from '../../scripts/paired-chrome-little-arc-context.mjs';
 
 const source = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
 const workflow = readSourceText(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url));
@@ -109,7 +110,7 @@ test('native environment guards and explicit source-only requirements remain pre
 const legacyJobNames = ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split',
     'recovery-actions', 'extended-actions', 'archive-actions', 'archive-reopen'];
 const legacyGate = "github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'";
-const littleArcGate = "github.event_name == 'workflow_dispatch' && inputs.acceptance_scope == 'little-arc'";
+const littleArcGate = "(github.event_name == 'workflow_dispatch' && inputs.acceptance_scope == 'little-arc') || (github.event_name == 'pull_request' && github.repository == 'calvwng/arcify' && github.event.number == 75 && github.event.pull_request.number == 75 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'integration/arcify-bridge-v1' && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')";
 const dispatchInput = `    inputs:
       acceptance_scope:
         description: 'Run the legacy suite or only isolated Little Arc acceptance'
@@ -136,20 +137,44 @@ ${dispatchInput}  pull_request:`));
     assert.equal(littleArcJob.match(/^    if: (.*)$/m)?.[1], littleArcGate);
     for (const event_name of ['pull_request', 'push', 'workflow_dispatch', 'schedule']) {
         for (const acceptance_scope of [undefined, '', 'legacy', 'little-arc', 'unknown']) {
-            const context = { github: { event_name }, inputs: { acceptance_scope } };
+            const context = { github: { event_name, repository: 'unselected/unit-fixture', event: {} }, inputs: { acceptance_scope } };
             const selected = event_name === 'workflow_dispatch' && acceptance_scope === 'little-arc';
             assert.equal(new vm.Script(legacyGate).runInNewContext(context), !selected);
             assert.equal(new vm.Script(littleArcGate).runInNewContext(context), selected);
         }
     }
-    const restored = workflow.slice(0, workflow.indexOf('  # Opt-in candidate acceptance only.'))
+    const restored = workflow.slice(0, workflow.indexOf('  # Isolated acceptance:'))
         .replace(dispatchInput, '').replaceAll(`    if: ${legacyGate}\n`, '').replace(/\n$/, '');
     assert.equal(createHash('sha256').update(restored).digest('hex'),
         'ee6bc1245b90a30d2f4ffa17cbeb961f8ce08e95ea65aa4434316194cfc2ab74',
         'Every original workflow byte, including events, permissions, job bodies, pins and order, must be preserved apart from the exact manual opt-in gate.');
 });
 
-test('Little Arc alone uses its exact reviewed companion pin with immutable Arcify dispatch provenance', () => {
+test('the additional job gate selects only the exact same-repository PR and leaves all eight legacy jobs selected', () => {
+    const github = { event_name: 'pull_request', repository: 'calvwng/arcify', event: { number: 75,
+        pull_request: { number: 75,
+            head: { ref: 'integration/arcify-bridge-v1', repo: { full_name: 'calvwng/arcify', fork: true } },
+            base: { ref: 'main', repo: { full_name: 'calvwng/arcify' } } } } };
+    const selected = value => new vm.Script(littleArcGate).runInNewContext({ github: value, inputs: {} });
+    assert.equal(selected(github), true);
+    assert.equal(new vm.Script(legacyGate).runInNewContext({ github, inputs: {} }), true);
+    for (const mutate of [
+        value => { value.event_name = 'pull_request_target'; },
+        value => { value.repository = 'fork/arcify'; },
+        value => { value.event.number = 76; },
+        value => { value.event.pull_request.number = 76; },
+        value => { value.event.pull_request.head.repo.full_name = 'fork/arcify'; },
+        value => { value.event.pull_request.head.ref = 'other-branch'; },
+        value => { value.event.pull_request.base.repo.full_name = 'other/arcify'; },
+        value => { value.event.pull_request.base.ref = 'other-branch'; }
+    ]) {
+        const value = structuredClone(github);
+        mutate(value);
+        assert.equal(selected(value), false, mutate.toString());
+    }
+});
+
+test('Little Arc alone uses its exact reviewed companion pin and shared actual-event provenance guard', () => {
     const legacyPin = source.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})';/)[1];
     const littleArcPin = source.match(/const PINNED_LITTLE_ARC_SPOTLIGHT = '([0-9a-f]{40})';/)?.[1];
     assert(littleArcPin, 'Little Arc must have a reviewed literal full commit ID, never a placeholder or a mutable branch.');
@@ -161,8 +186,9 @@ test('Little Arc alone uses its exact reviewed companion pin with immutable Arci
     }
     assert(littleArcJob.includes(`ARCIFY_SPOTLIGHT_HEAD: ${littleArcPin}\n`));
     assert(littleArcJob.includes(`repository: calvwng/arcify-spotlight\n          ref: ${littleArcPin}\n`));
-    assert.match(littleArcJob, /ARCIFY_TEST_HEAD: \$\{\{ inputs\.expected_arcify_head \}\}/);
-    assert.match(littleArcJob, /ref: \$\{\{ github\.sha \}\}/);
+    assert.match(littleArcJob, /ARCIFY_TEST_HEAD: \$\{\{ github\.event_name == 'pull_request' && github\.event\.pull_request\.head\.sha \|\| inputs\.expected_arcify_head \}\}/);
+    assert.match(littleArcJob, /ref: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/);
+    assert.match(littleArcJob, /ARCIFY_PR_HEAD: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/);
     const guardStart = source.indexOf('    report.environment.arcifyHead = head(ROOT);');
     const guardEnd = source.indexOf('    report.environment.puppeteer = ', guardStart);
     const guard = source.slice(guardStart, guardEnd);
@@ -171,7 +197,12 @@ test('Little Arc alone uses its exact reviewed companion pin with immutable Arci
         const expected = runMode === 'little-arc' ? littleArcPin : legacyPin;
         const context = { assert, report: { runMode, environment: {} }, ROOT: 'main', COMPANION: 'peer',
             PINNED_SPOTLIGHT: legacyPin, PINNED_LITTLE_ARC_SPOTLIGHT: littleArcPin,
-            process: { env: { ARCIFY_TEST_HEAD: 'a'.repeat(40), GITHUB_SHA: 'a'.repeat(40), ARCIFY_SPOTLIGHT_HEAD: littleArcPin, GITHUB_EVENT_NAME: 'workflow_dispatch' } },
+            process: { env: { ARCIFY_TEST_HEAD: 'a'.repeat(40), GITHUB_SHA: 'a'.repeat(40), ARCIFY_SPOTLIGHT_HEAD: littleArcPin,
+                GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REPOSITORY: 'calvwng/arcify' } },
+            readLittleArcAcceptanceContext: (env, actualHead) => validateLittleArcAcceptanceContext(env, {
+                repository: { full_name: 'calvwng/arcify', fork: true },
+                inputs: { acceptance_scope: 'little-arc', expected_arcify_head: 'a'.repeat(40) }
+            }, actualHead),
             head: path => path === 'main' ? 'a'.repeat(40) : expected };
         new vm.Script(guard).runInNewContext(context);
         assert.equal(context.report.environment.expectedSpotlightHead, expected);
@@ -189,7 +220,7 @@ test('Little Arc alone uses its exact reviewed companion pin with immutable Arci
     }
 });
 
-test('manual Little Arc job preserves locked runtimes, normal sandbox, evidence and original failures', () => {
+test('Little Arc job preserves locked runtimes, normal sandbox, evidence and original failures', () => {
     assert.match(workflow, /^permissions:\n  contents: read$/m);
     assert.match(littleArcJob, /runs-on: ubuntu-24\.04\n/);
     assert.match(littleArcJob, /timeout-minutes: 20\n/);
@@ -219,7 +250,6 @@ test('source and build receipts precede the browser and cannot hide head or buil
     assert(provenance >= 0 && provenance < install && install < build && build < browser && browser < upload);
     for (const exact of [
         '[[ "$ARCIFY_TEST_HEAD" =~ ^[0-9a-f]{40}$ ]]',
-        'test "$GITHUB_SHA" = "$ARCIFY_TEST_HEAD"',
         'test "$(git -C arcify rev-parse HEAD)" = "$ARCIFY_TEST_HEAD"',
         'test "$(git -C arcify-spotlight rev-parse HEAD)" = "$ARCIFY_SPOTLIGHT_HEAD"',
         'test -z "$(git -C "$repo" status --porcelain)"',
@@ -231,6 +261,12 @@ test('source and build receipts precede the browser and cannot hide head or buil
     ]) assert(littleArcJob.includes(exact), exact);
     for (const repo of ['arcify', 'arcify-spotlight'])
         assert(littleArcJob.includes(`npm run build --prefix ${repo} 2>&1 | tee "$evidence/${repo}-build.log"`));
+    assert.match(littleArcJob, /readLittleArcAcceptanceContext\(process.env, head\)/);
+    assert.match(littleArcJob, /tee "\$evidence\/event-provenance\.json"/);
+    assert.match(source, /readLittleArcAcceptanceContext\(process.env, report.environment.arcifyHead\)/);
+    assert(littleArcJob.indexOf('test -z "$(git -C "$repo" status --porcelain)"')
+        < littleArcJob.indexOf("node --input-type=module <<'NODE'"),
+    'Reject changed checked-out source before executing its validator.');
     assert.equal((littleArcJob.match(/set -euo pipefail/g) || []).length, 2);
     assert.doesNotMatch(littleArcJob, /\|\| true|catch|exit 0|continue-on-error/);
 });

@@ -1,6 +1,6 @@
 # Little Arc paired-browser acceptance candidate
 
-Status: unpublished, locally prepared acceptance source and manual CI wiring. No native run has been performed. No workflow has been dispatched. This candidate does not authorize publication, installation, dispatch, deployment, or product acceptance.
+Status: the reviewed runtime candidate and companion are published. This bounded test-only PR acceptance follow-up is prepared locally and is not yet published. No native run has been performed for Little Arc. No workflow has been dispatched manually. Source preparation and publication do not establish native acceptance or authorize deployment.
 
 ## Isolated scope
 
@@ -25,50 +25,54 @@ These commands parse source or run unit tests. They do not launch Chrome:
 
 ```sh
 node --check scripts/paired-chrome-little-arc.mjs
+node --check scripts/paired-chrome-little-arc-context.mjs
 node --check scripts/paired-chrome-smoke.mjs
 node --check scripts/paired-chrome-run-plan.mjs
-node --test tests/unit/paired-chrome-little-arc.test.js tests/unit/paired-chrome-little-arc-wiring.test.js tests/unit/paired-chrome-little-arc-provenance.test.js tests/unit/paired-chrome-run-plan.test.js
+node --test tests/unit/paired-chrome-little-arc.test.js tests/unit/paired-chrome-little-arc-wiring.test.js tests/unit/paired-chrome-little-arc-provenance.test.js tests/unit/paired-chrome-little-arc-context.test.js tests/unit/paired-chrome-run-plan.test.js
 npm run test:unit
 npm run build
 git diff --check
 ```
 
-Pure unit fixtures validate assertion rejection paths and run-plan wiring. They are not browser acceptance evidence, even when they contain representative native-looking IDs or input observations.
+Pure unit fixtures validate assertion rejection paths, run-plan wiring, actual event-file parsing, and the hosted receipt shell. They reject cross-repository fork heads, wrong repository/PR/branch/base identities, unsupported events, malformed or mismatched SHAs, missing/malformed event files, changed source, and missing build output. A valid same-repository PR fixture deliberately keeps its merge SHA different from the tested head. Because the authorized repository is itself a fork, its own `fork: true` metadata is accepted; a different head repository is rejected. The receipt test uses disposable clones without commits or network access and loads the candidate validator from the working tree explicitly, without changing clean-tree checks. They are not browser acceptance evidence, even when they contain representative native-looking IDs or input observations.
 
 ## Requirements for a later authorized native run
 
 Do not invoke the browser runner on this cloud workspace or the user's computer. The repository restricts it to its dedicated GitHub Actions environment, using a fresh disposable profile, headed installed Chrome under Xvfb, the ordinary non-root runner user, the isolated reviewed Puppeteer runtime, and Chrome's normal namespace sandbox. Keep every existing launch/security guard. A launch denial is a failed check, not permission to change the sandbox.
 
-Both repositories must contain the reviewed Little Arc changes and must be rebuilt together. The eight legacy jobs and all legacy harness modes retain the published companion pin `c13511fd36d56358156c10336b8961b7ef95d5bc`. Only `little-arc` uses the separate literal candidate pin `57032e53559c0b90a4c26bf9351e730fed5167e8`. A pin alone does not establish that a published pair contains the approved changes: verify exact source provenance, the recorded source/build hashes, both production builds, and the real `transientWindowsV1` capability before accepting a result.
+Both repositories must contain the reviewed Little Arc changes and must be rebuilt together. The eight legacy jobs and all legacy harness modes retain the published companion pin `c13511fd36d56358156c10336b8961b7ef95d5bc`. Only `little-arc` uses the separate literal candidate pin `3b0b178f2c11b3add351c430a1e7734f54f25c8f`. A pin alone does not establish that a published pair contains the approved changes: verify exact source provenance, the recorded source/build hashes, both production builds, and the real `transientWindowsV1` capability before accepting a result.
 
-### Existing-workflow manual route
+### Published baseline and exact acceptance identity
 
-The candidate adds two optional inputs to the existing `.github/workflows/paired-extension-smoke.yml`:
+The published Arcify baseline is PR [#75](https://github.com/calvwng/arcify/pull/75), head `c8e1e69c7c28ef28c874cddcdc84e8dd10abc486`, on `integration/arcify-bridge-v1`. Its source tree is `cf98f802f9cdfd3840b08312d5edef4e5fbbb9d1`, identical to local preparation commit `3ead32f2c38d2e23617ca0d8f4ade20a5cf11c2c`. The published companion is exactly `3b0b178f2c11b3add351c430a1e7734f54f25c8f`. This follow-up changes test wiring, source-context validation, tests, and documentation only; production runtime source and the companion pin remain frozen.
 
-- `acceptance_scope` defaults to `legacy`. Omitted/default/legacy dispatches and every existing automatic event retain all eight original jobs with their original pins and body contents. No automatic trigger or watch path is added or removed.
-- An explicit manual `acceptance_scope=little-arc` selects only the new `little-arc` job. Its selected cases are exactly `[0, 1, 2, 55]`; the eight legacy jobs are deliberately skipped only for that selection. This result cannot stand in for full-suite required checks.
-- `expected_arcify_head` is optional for legacy runs but mandatory for Little Arc. The Little Arc job fails before installation/build/launch unless this is a full 40-character commit SHA equal to the dispatched `github.sha` and the actual Arcify checkout. The companion checkout must match its separate literal SHA. Neither repository is checked out from a mutable branch name by the job.
+The follow-up will have a new Arcify commit ID when published. A later acceptance run must record that exact new event head and actual checkout, not treat the preceding baseline SHA or an equivalent tree as evidence that the new commit passed. Verify the remote PR head and companion before publication/run, and compare them with the retained source, build, and native-browser artifacts afterward.
 
-GitHub documents that an existing workflow can be dispatched against a branch or tag, and the CLI's `--ref` selects the version of the workflow file to run. The CLI reads interactive input definitions from that selected ref, or sends explicit input fields with the selected ref. This permits the candidate version of the existing known workflow to define these inputs without introducing a new workflow file on the default branch. See [GitHub workflow dispatch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch), [the CLI manual](https://cli.github.com/manual/gh_workflow_run), and [the CLI implementation](https://github.com/cli/cli/blob/trunk/pkg/cmd/workflow/run/run.go).
+### Bounded existing pull-request route
 
-A future, separately authorized dispatch would use the following shape. `CANDIDATE_REF` and `APPROVED_MAIN_SHA` are placeholders; substitute the verified remote branch/tag and its full approved main commit SHA. This example has not been executed:
+The existing workflow's triggers and path filters are unchanged. Its additional `little-arc` job may run on the existing `pull_request` event only for PR 75 in `calvwng/arcify`, with head repository `calvwng/arcify`, head branch `integration/arcify-bridge-v1`, and base repository `calvwng/arcify` targeting `main`. Both PR-number fields are checked. The job condition rejects other PRs, head branches, and cross-repository fork PRs before any job installation. `calvwng/arcify` is itself a GitHub fork; that repository-level flag does not disqualify its authorized same-repository head.
 
-```sh
-gh workflow run paired-extension-smoke.yml --repo calvwng/arcify \
-  --ref CANDIDATE_REF \
-  -f acceptance_scope=little-arc \
-  -f expected_arcify_head=APPROVED_MAIN_SHA
-```
+Checkout uses the immutable `github.event.pull_request.head.sha`. The shared source-context validator reads the actual `GITHUB_EVENT_PATH` before installation and again in the harness. It requires the event's full head SHA, declared `ARCIFY_TEST_HEAD` and `ARCIFY_PR_HEAD`, and the actual checkout to agree. It also checks event type, open PR state, repository/number/base/head identity, and the real runner refs. Missing or malformed payloads fail closed. GitHub's actual `GITHUB_SHA` and `GITHUB_REF` retain their pull-request merge provenance; they are recorded separately and are never rewritten or mislabeled as the tested head. See [GitHub pull-request workflow semantics](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request).
 
-If the existing local companion object `57032e53559c0b90a4c26bf9351e730fed5167e8` is later published unchanged, the literal pin is final. If that commit is rewritten or amended, update the Little Arc-only companion checkout, its declared expected head, and the harness's Little Arc pin together; rerun source/build checks, create a new main review commit, and obtain approval for the resulting exact pair before dispatch. Never retarget the eight legacy jobs or their legacy harness pin to accomplish this.
+This is job-level isolation: `little-arc` selects exactly `[0, 1, 2, 55]`. All eight original jobs continue automatically on the PR event, with their original bodies, pins, permissions, ordering, and selection behavior. A green Little Arc job does not imply the complete workflow or required checks passed. Publishing the follow-up on this PR can start all nine jobs through the already existing PR event.
 
-The candidate is local only. Before any later authorized run, confirm that the existing workflow remains active/dispatch-enabled, both exact reviewed commits are available remotely, and the selected Arcify branch or tag resolves to the approved main commit. Pass `acceptance_scope=little-arc` and that full commit as `expected_arcify_head`. If GitHub rejects the candidate-ref inputs, stop and report the original error; do not edit the default branch, dispatch the legacy suite, relax guards, or run a browser elsewhere as a fallback. No remote availability or successful dispatch is asserted here.
+### Retained manual route and current limitation
+
+The earlier assumption that a branch-only version of this workflow could provide an available web dispatch route was incorrect. The workflow is absent from default `main`, and the authenticated Actions page has no `Run workflow` control. GitHub documents that the workflow must exist on the default branch for `workflow_dispatch`; selecting a candidate branch does not remove that prerequisite. The connected GitHub tools also do not expose workflow dispatch. See [GitHub manual-workflow requirements](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow). No default-branch change or alternate browser execution is proposed.
+
+The existing optional inputs are retained for a future separately supported and authorized manual run:
+
+- `acceptance_scope` defaults to `legacy`; omitted/default/legacy dispatches keep the eight original jobs.
+- Explicit `acceptance_scope=little-arc` selects only the Little Arc job and deliberately skips the eight legacy jobs. Only this manual selection isolates the overall workflow.
+- `expected_arcify_head` must be a full 40-character SHA equal to the real dispatch input, `GITHUB_SHA`, and actual checkout. The actual event payload must explicitly select Little Arc. The companion checkout remains the separate fixed SHA above.
+
+If either route is unavailable or rejects the candidate, retain the original failure and stop; do not change the default branch, fabricate event values, relax security/context checks, substitute local browser execution, or claim a skipped job as acceptance. If the companion ever changes, its job checkout, declared expected SHA, and harness literal must be reviewed together; never retarget the legacy jobs as a shortcut.
 
 ### Runtime and evidence gates
 
 The isolated job retains Ubuntu 24.04, Node 22, all three locked `npm ci` installs, the separate Puppeteer 25.12.0 runtime self-test, installed stable Chrome, headed Xvfb, the ordinary non-root runner, and the existing normal namespace sandbox. It does not use the native-Split browser-update step. Workflow permissions remain only `contents: read`, both checkouts disable persisted credentials, and no secrets or new scopes are added.
 
-Before dependency installation, the job records workflow ref/SHA/run identity, expected and actual repository heads, Git tree/blob identities, and SHA-256 hashes of every tracked source file. Clean source trees are required. After both production builds, it verifies those same source hashes and clean trees again and records SHA-256 hashes of all `dist` files. Separate build logs are retained. The harness independently checks the run-mode-specific companion pin and Little Arc's exact reviewed main SHA before its first browser case. These receipts prove what was used, not native acceptance by themselves.
+Before dependency installation, the job records workflow ref/SHA/run identity, actual event ref/SHA, validated event provenance, expected and actual repository heads, Git tree/blob identities, and SHA-256 hashes of every tracked source file. Clean source trees are required. After both production builds, it verifies those same source hashes and clean trees again and records SHA-256 hashes of all `dist` files. Separate build logs are retained. The harness independently checks the run-mode-specific companion pin and Little Arc's exact event-selected Arcify head before its first browser case. These receipts prove what was used, not native acceptance by themselves.
 
 The existing browser command remains `xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight`, with `ARCIFY_PAIRED_RUN_MODE=little-arc` supplied by the isolated job. This command is for a later separately authorized supported runner only; do not execute it locally. A failed checkout, source check, dependency step, build, runtime self-test, sandbox check, or browser case remains a failure. The job uses `pipefail` and always attempts to upload the evidence gathered so far; no same-profile retry or success fallback is added.
 

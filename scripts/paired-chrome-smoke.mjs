@@ -21,6 +21,7 @@ import { exerciseSpotlightNavigation, serveSpotlightNavigationFixture, SPOTLIGHT
 import { exerciseSpotlightTabCommands, serveSpotlightTabFixture, SPOTLIGHT_TAB_CASE_NAME } from './paired-chrome-spotlight-tabs.mjs';
 import { exerciseSpotlightArchiveOpen, exerciseSpotlightArchiveReopen, serveSpotlightArchiveFixture, SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME } from './paired-chrome-spotlight-archive.mjs';
 import { exerciseLittleArc, serveLittleArcFixture, LITTLE_ARC_CASE_NAME } from './paired-chrome-little-arc.mjs';
+import { readLittleArcAcceptanceContext } from './paired-chrome-little-arc-context.mjs';
 import { randomBytes } from 'node:crypto';
 import { exerciseSpaceTheme } from './paired-chrome-space-theme.mjs';
 import { exerciseSpotlightOptionsAppearance } from './paired-chrome-spotlight-appearance.mjs';
@@ -825,9 +826,7 @@ try {
     report.environment.spotlightHead = head(COMPANION);
     report.environment.expectedSpotlightHead = report.runMode === 'little-arc' ? PINNED_LITTLE_ARC_SPOTLIGHT : PINNED_SPOTLIGHT;
     if ('little-arc' === report.runMode) {
-        assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'Little Arc requires its explicit manual acceptance route.');
-        assert.match(process.env.ARCIFY_TEST_HEAD || '', /^[0-9a-f]{40}$/, 'Little Arc requires the full reviewed Arcify commit.');
-        assert.equal(process.env.ARCIFY_TEST_HEAD, process.env.GITHUB_SHA, 'The dispatched workflow must match the reviewed Arcify commit.');
+        report.environment.acceptanceContext = readLittleArcAcceptanceContext(process.env, report.environment.arcifyHead);
         assert.equal(process.env.ARCIFY_SPOTLIGHT_HEAD, PINNED_LITTLE_ARC_SPOTLIGHT, 'Little Arc job must declare the reviewed companion pin.');
     }
     assert.equal(report.environment.spotlightHead, report.environment.expectedSpotlightHead, 'Companion must match the reviewed pinned commit for this run mode.');

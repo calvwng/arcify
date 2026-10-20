@@ -805,21 +805,22 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  # Opt-in candidate acceptance only. Ordinary dispatch and PR jobs above are unchanged.
+  # Isolated acceptance: explicit dispatch or only same-repository PR 75. Legacy jobs above are unchanged.
   little-arc:
     runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.acceptance_scope == 'little-arc'
+    if: (github.event_name == 'workflow_dispatch' && inputs.acceptance_scope == 'little-arc') || (github.event_name == 'pull_request' && github.repository == 'calvwng/arcify' && github.event.number == 75 && github.event.pull_request.number == 75 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'integration/arcify-bridge-v1' && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')
     timeout-minutes: 20
     env:
       CI: 'true'
       ARCIFY_PAIRED_RUN_MODE: little-arc
-      ARCIFY_TEST_HEAD: ${{ inputs.expected_arcify_head }}
+      ARCIFY_TEST_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.expected_arcify_head }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
       ARCIFY_SPOTLIGHT_HEAD: 3b0b178f2c11b3add351c430a1e7734f54f25c8f
     steps:
-      - name: Check out exact dispatched Arcify head
+      - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
           path: arcify
       - name: Check out exact Little Arc Spotlight companion
@@ -836,11 +837,11 @@ jobs:
           mkdir -p "$evidence"
           {
             printf 'workflow-ref=%s\nworkflow-sha=%s\nrun-id=%s\nrun-attempt=%s\n' "$GITHUB_WORKFLOW_REF" "$GITHUB_WORKFLOW_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'event-name=%s\nevent-ref=%s\nevent-sha=%s\n' "$GITHUB_EVENT_NAME" "$GITHUB_REF" "$GITHUB_SHA"
             printf 'expected-arcify=%s\nactual-arcify=%s\n' "$ARCIFY_TEST_HEAD" "$(git -C arcify rev-parse HEAD)"
             printf 'expected-spotlight=%s\nactual-spotlight=%s\n' "$ARCIFY_SPOTLIGHT_HEAD" "$(git -C arcify-spotlight rev-parse HEAD)"
           } | tee "$evidence/source-provenance.txt"
           [[ "$ARCIFY_TEST_HEAD" =~ ^[0-9a-f]{40}$ ]]
-          test "$GITHUB_SHA" = "$ARCIFY_TEST_HEAD"
           test "$(git -C arcify rev-parse HEAD)" = "$ARCIFY_TEST_HEAD"
           test "$(git -C arcify-spotlight rev-parse HEAD)" = "$ARCIFY_SPOTLIGHT_HEAD"
           for repo in arcify arcify-spotlight; do
@@ -848,6 +849,12 @@ jobs:
             git -C "$repo" ls-tree -r --full-tree HEAD > "$evidence/$repo-source-tree.txt"
             (cd "$repo" && git ls-files -z | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/$repo-source-sha256.txt"
           done
+          node --input-type=module <<'NODE' | tee "$evidence/event-provenance.json"
+          import { execFileSync } from 'node:child_process';
+          import { readLittleArcAcceptanceContext } from './arcify/scripts/paired-chrome-little-arc-context.mjs';
+          const head = execFileSync('git', ['-C', 'arcify', 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          console.log(JSON.stringify(readLittleArcAcceptanceContext(process.env, head), null, 2));
+          NODE
       - name: Set up Node
         uses: actions/setup-node@v4
         with:

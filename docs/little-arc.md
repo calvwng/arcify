@@ -1,6 +1,6 @@
 # Little Arc prototype
 
-Status: unpublished cloud implementation. This is not approved for deployment. The existing menu/Split fixes keep their deployment priority.
+Status: published review candidate awaiting Little Arc browser acceptance. This is not approved for deployment. The existing menu/Split fixes keep their deployment priority.
 
 ## Scope
 
@@ -65,11 +65,11 @@ npm run build
 git diff --check
 ```
 
-No native paired-browser acceptance or EVOO/Helium acceptance has been performed. Source-only acceptance cases are isolated in the `little-arc` paired run mode; their requirements and limits are documented in [Little Arc paired CI](little-arc-paired-ci.md). The existing workflow has a local-only, explicit opt-in acceptance mode for this isolated slice; no workflow publication or dispatch has occurred. The repository's paired Chrome fixture is restricted to its dedicated GitHub Actions environment; do not bypass that restriction, change sandbox policy, or label source/DOM tests as native acceptance.
+No native paired-browser acceptance or EVOO/Helium acceptance has been performed. Source-only acceptance cases are isolated in the `little-arc` paired run mode; their requirements and limits are documented in [Little Arc paired CI](little-arc-paired-ci.md). The reviewed runtime candidate and fixed companion are published. A local test-only follow-up adds a bounded same-repository PR 75 route to the existing Little Arc job while retaining its manual input path. On that PR route, the eight legacy jobs continue automatically; only the Little Arc job is isolated. The workflow is absent from default `main`, so the earlier web-dispatch assumption does not apply. No Little Arc native run or manual dispatch has occurred. The repository's paired Chrome fixture is restricted to its dedicated GitHub Actions environment; do not bypass that restriction, change sandbox policy, or label source/DOM tests as native acceptance.
 
-## Before publication or deployment
+## Before native acceptance or deployment
 
 1. Confirm the approved warning and restart boundary in supported native-browser acceptance. Exact-controller same-window recovery is implemented; missing markers and pages restored elsewhere deliberately behave as ordinary restored tabs after session authority is cleared.
 2. Run the prepared `little-arc` source-only cases in a later authorized supported paired Chrome job using the exact patched pair. The cases cover trusted launch, absence of adoption, same-tab/document/form transfer, explicit same-window duplicate-URL recovery after real extension reload, cancelled/stale choices, and controller/unchosen-page preservation. Add or manually verify the remaining native cases: back/forward and login state, source closure, drag-out/replacement, full browser restart, worker termination at every journal boundary, and non-replay after uncertain writes.
 3. Visually verify compact-window/control-tab usability, keyboard access, long titles/URLs, light/dark appearance, and focus after transfer in the supported browser environment.
-4. Re-run the complete paired regression suite on the exact unpublished pair after publication is authorized. Preserve existing menu/Split fixes and their release order.
+4. Re-run the complete paired regression suite on the exact intended release pair once separately authorized. Preserve existing menu/Split fixes and their release order.

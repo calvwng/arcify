@@ -20,6 +20,12 @@ function shellStep(name) {
         .split('\n').map(line => line.replace(/^          /, '')).join('\n');
 }
 const record = shellStep('Record and verify exact source provenance before installation');
+// The disposable clones below contain committed source only. Load this candidate's
+// actual validator from the working tree while keeping the receipt shell intact.
+const moduleImport = "'./arcify/scripts/paired-chrome-little-arc-context.mjs'";
+assert.equal(record.split(moduleImport).length, 2);
+const fixtureRecord = record.replace(moduleImport,
+    JSON.stringify(new URL('../../scripts/paired-chrome-little-arc-context.mjs', import.meta.url).href));
 const build = shellStep('Build the exact pair and retain production hashes');
 // Run only post-build verification against clearly labeled fixture files.
 const verify = 'set -euo pipefail\nevidence="$GITHUB_WORKSPACE/arcify/test-results/paired-chrome-little-arc"\n'
@@ -41,28 +47,63 @@ test('actual hosted receipt shell fails closed on wrong heads and modified or mi
                 { stdio: 'pipe' });
         }
         const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+        const eventPath = join(workspace, 'source-only-event-fixture.json');
+        const repository = { full_name: 'calvwng/arcify', fork: true };
+        const dispatch = { repository, inputs: { acceptance_scope: 'little-arc', expected_arcify_head: head } };
+        writeFileSync(eventPath, JSON.stringify(dispatch));
         env = {
             PATH: process.env.PATH, HOME: workspace, GITHUB_WORKSPACE: workspace,
             GITHUB_WORKFLOW_REF: 'unit-fixture/workflow@refs/heads/unit-fixture',
             GITHUB_WORKFLOW_SHA: head, GITHUB_RUN_ID: 'source-only-unit-fixture', GITHUB_RUN_ATTEMPT: '1',
-            ARCIFY_TEST_HEAD: head, ARCIFY_SPOTLIGHT_HEAD: head, GITHUB_SHA: head
+            ARCIFY_TEST_HEAD: head, ARCIFY_SPOTLIGHT_HEAD: head, GITHUB_SHA: head,
+            GITHUB_REPOSITORY: 'calvwng/arcify', GITHUB_EVENT_NAME: 'workflow_dispatch',
+            GITHUB_REF: 'refs/heads/source-only-unit-fixture', GITHUB_EVENT_PATH: eventPath
         };
-        run(record);
+        run(fixtureRecord);
         for (const overrides of [
             { ARCIFY_TEST_HEAD: '' }, { ARCIFY_TEST_HEAD: 'main' }, { ARCIFY_TEST_HEAD: '0'.repeat(40) },
-            { GITHUB_SHA: '0'.repeat(40) }, { ARCIFY_SPOTLIGHT_HEAD: '0'.repeat(40) }
-        ]) assert.throws(() => run(record, overrides), 'Invalid head identity must fail the exact shell.');
+            { GITHUB_SHA: '0'.repeat(40) }, { ARCIFY_SPOTLIGHT_HEAD: '0'.repeat(40) }, { GITHUB_EVENT_PATH: '' }
+        ]) assert.throws(() => run(fixtureRecord, overrides), 'Invalid head identity must fail the exact shell.');
+        const pr = { action: 'synchronize', number: 75, repository,
+            pull_request: { number: 75, state: 'open',
+                head: { sha: head, ref: 'integration/arcify-bridge-v1', repo: repository },
+                base: { ref: 'main', repo: repository } } };
+        const prEnv = { GITHUB_EVENT_NAME: 'pull_request', GITHUB_SHA: 'b'.repeat(40),
+            GITHUB_REF: 'refs/pull/75/merge', GITHUB_HEAD_REF: 'integration/arcify-bridge-v1',
+            GITHUB_BASE_REF: 'main', ARCIFY_PR_HEAD: head };
+        writeFileSync(eventPath, JSON.stringify(pr));
+        run(fixtureRecord, prEnv);
+        const receipt = JSON.parse(readFileSync(join(workspace, 'arcify', 'test-results',
+            'paired-chrome-little-arc', 'event-provenance.json'), 'utf8'));
+        assert.equal(receipt.githubSha, prEnv.GITHUB_SHA);
+        assert.equal(receipt.pullRequestHead, head);
+        assert.notEqual(receipt.githubSha, receipt.pullRequestHead);
+        for (const mutate of [
+            value => { value.number = 76; },
+            value => { value.pull_request.head.repo = { full_name: 'fork/arcify', fork: true }; },
+            value => { value.pull_request.head.ref = 'other-branch'; },
+            value => { value.pull_request.head.sha = 'main'; },
+            value => { value.pull_request.head.sha = 'b'.repeat(40); }
+        ]) {
+            const invalid = structuredClone(pr);
+            mutate(invalid);
+            writeFileSync(eventPath, JSON.stringify(invalid));
+            assert.throws(() => run(fixtureRecord, prEnv), 'Actual PR receipt shell must reject invalid event payloads.');
+        }
+        writeFileSync(eventPath, '{invalid json');
+        assert.throws(() => run(fixtureRecord, prEnv), 'Malformed event files must fail before installation.');
+        writeFileSync(eventPath, JSON.stringify(dispatch));
 
         const source = join(workspace, 'arcify', 'package.json');
         const original = readFileSync(source);
         writeFileSync(source, `${original}\n`);
-        assert.throws(() => run(record), 'Tracked source edits must fail before dependency installation.');
+        assert.throws(() => run(fixtureRecord), 'Tracked source edits must fail before dependency installation.');
         writeFileSync(source, original);
         const extra = join(workspace, 'arcify-spotlight', 'unreviewed-receipt-fixture.js');
         writeFileSync(extra, '// Source-only test fixture.\n');
-        assert.throws(() => run(record), 'Untracked source additions must fail before installation.');
+        assert.throws(() => run(fixtureRecord), 'Untracked source additions must fail before installation.');
         rmSync(extra);
-        run(record);
+        run(fixtureRecord);
         for (const repo of ['arcify', 'arcify-spotlight']) {
             mkdirSync(join(workspace, repo, 'dist'), { recursive: true });
             writeFileSync(join(workspace, repo, 'dist', 'manifest.json'), '{"unitFixtureOnly":true}\n');
