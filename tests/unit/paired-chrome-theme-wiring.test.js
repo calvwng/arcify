@@ -7,7 +7,7 @@ const workflow = readSourceText(new URL('../../.github/workflows/paired-extensio
 const theme = readSourceText(new URL('../../scripts/paired-chrome-space-theme.mjs', import.meta.url));
 
 test('both new theme cases execute exactly once in mandatory full scope before unchanged lifecycle and restart', () => {
-    const start = runner.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {\n", runner.indexOf("    } // Full-only cases 34–35, 37–38 and 40–45."));
+    const start = runner.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {\n", runner.indexOf("    } // Full-only cases 40–45."));
     const end = runner.indexOf('    } // Shared appearance cases 46–47;');
     assert(start > 0 && end > start);
     for (const [name, index] of [['exerciseSpaceTheme', 46], ['exerciseSpotlightOptionsAppearance', 47]]) {
@@ -57,7 +57,7 @@ test('theme Favorite setup selects the exact source Space through native UI befo
     assert.match(theme, /assert.equal\(targetSpace\(observation.state, spaceId\).lastTab, tabId/);
     assert.doesNotMatch(theme.slice(open, create), /revealSpaceId|\.catch\(|retry/);
 });
-test('workflow watches new evidence/runtime/paint/docs with all eight exact peer pins and unchanged security gates', () => {
+test('workflow watches new evidence/runtime/paint/docs with all nine legacy exact peer pins and unchanged security gates', () => {
     for (const path of ['scripts/paired-chrome-space-theme.mjs', 'scripts/paired-chrome-spotlight-appearance.mjs',
         'tests/unit/paired-chrome-space-theme.test.js', 'tests/unit/paired-chrome-spotlight-appearance.test.js', 'tests/unit/paired-chrome-theme-wiring.test.js',
         'tests/unit/sidebar-theme.test.js', 'tests/unit/appearance-bootstrap.test.js', 'assets/appearance-bootstrap.js', 'docs/space-themes.md', 'docs/theme-paired-ci.md']) {
@@ -65,7 +65,7 @@ test('workflow watches new evidence/runtime/paint/docs with all eight exact peer
     }
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
     assert.equal(pin, 'c13511fd36d56358156c10336b8961b7ef95d5bc');
-    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 8);
+    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 9);
     assert.match(runner, /assert\.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);
     assert.match(runner, /assertNoTargetCrashes\(report.targetLifecycle\)/);

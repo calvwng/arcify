@@ -19,7 +19,8 @@ const extendedActionsOrder = [0, 1, 2, 50, 51];
 const archiveActionsOrder = [0, 1, 2, 52, 53];
 const archiveReopenOrder = [0, 1, 2, 53];
 const littleArcOrder = [0, 1, 2, 55];
-const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39, 54]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder], ['archive-actions', archiveActionsOrder], ['archive-reopen', archiveReopenOrder], ['little-arc', littleArcOrder]];
+const moveDragOrder = [0, 1, 2, 38];
+const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39, 54]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder], ['archive-actions', archiveActionsOrder], ['archive-reopen', archiveReopenOrder], ['little-arc', littleArcOrder], ['move-drag', moveDragOrder]];
 const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 const indices = report => report.expectedCases.map(item => item.caseIndex);
 const stepIndices = source => [...source.matchAll(/await step\(stepNames\[(\d+)\]/g)].map(match => Number(match[1]));
@@ -134,7 +135,11 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     const appearance = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {");
     const appearanceEnd = smoke.indexOf('    } // Shared appearance prerequisite: case 33.');
     const secondFull = smoke.indexOf("    if (report.runMode === 'full') {\n", firstFull + 1);
-    const secondEnd = smoke.indexOf('    } // Full-only cases 34–35, 37–38 and 40–45.');
+    const secondEnd = smoke.indexOf('    } // Full-only cases 34–35 and 37.');
+    const moveDrag = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'move-drag') {");
+    const moveDragEnd = smoke.indexOf('    } // Shared tab-menu and Move/drag case 38.');
+    const thirdFull = smoke.indexOf("    if (report.runMode === 'full') {\n", secondFull + 1);
+    const thirdEnd = smoke.indexOf('    } // Full-only cases 40–45.');
     const actions = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {", appearance + 1);
     const actionsEnd = smoke.indexOf('    } // Shared appearance cases 46–47;');
     const preparation = smoke.indexOf('    await prepareRecoverySidebarObservation();');
@@ -150,12 +155,14 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     const littleArcEnd = smoke.indexOf('    } // Supplemental Little Arc case 55;');
     const lifecycle = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {");
     assert(firstFull > 0 && firstFull < firstEnd && firstEnd < appearance && appearance < appearanceEnd &&
-        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < extended && extended < extendedEnd && extendedEnd < archive && archive < archiveOpenEnd && archiveOpenEnd < archiveReopen && archiveReopen < archiveEnd && archiveEnd < littleArc && littleArc < littleArcEnd && littleArcEnd < lifecycle);
+        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < moveDrag && moveDrag < moveDragEnd && moveDragEnd < thirdFull && thirdFull < thirdEnd && thirdEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < extended && extended < extendedEnd && extendedEnd < archive && archive < archiveOpenEnd && archiveOpenEnd < archiveReopen && archiveReopen < archiveEnd && archiveEnd < littleArc && littleArc < littleArcEnd && littleArcEnd < lifecycle);
     assert.deepEqual(stepIndices(smoke), [...fullOrder.slice(0, -2), 50, 51, 52, 53, 54, 55, ...fullOrder.slice(-2)], 'Every case definition remains single; the original full case order is unchanged.');
     assert.deepEqual(stepIndices(smoke.slice(0, firstFull)), [0, 1, 2]);
     assert.deepEqual(stepIndices(smoke.slice(firstFull, firstEnd)), Array.from({ length: 29 }, (_, index) => index + 3));
     assert.deepEqual(stepIndices(smoke.slice(appearance, appearanceEnd)), [33]);
-    assert.deepEqual(stepIndices(smoke.slice(secondFull, secondEnd)), [34, 35, 37, 38, 40, 41, 42, 43, 44, 45]);
+    assert.deepEqual(stepIndices(smoke.slice(secondFull, secondEnd)), [34, 35, 37]);
+    assert.deepEqual(stepIndices(smoke.slice(moveDrag, moveDragEnd)), [38]);
+    assert.deepEqual(stepIndices(smoke.slice(thirdFull, thirdEnd)), [40, 41, 42, 43, 44, 45]);
     assert.deepEqual(stepIndices(smoke.slice(actions, actionsEnd)), [46, 47]);
     assert.deepEqual(stepIndices(smoke.slice(recovery, preparation)), []);
     assert.deepEqual(stepIndices(smoke.slice(recovery, recoveryEnd)), [48, 49]);
@@ -226,10 +233,10 @@ for (const [mode, order] of allPlans) for (const caseIndex of order) {
 
 test('workflow preserves original jobs and adds independent mandatory fresh-runner acceptance', () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  [a-z-]+:\n|$(?![\s\S]))/gm)];
-    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split', 'recovery-actions', 'extended-actions', 'archive-actions', 'archive-reopen', 'little-arc']);
-    const full = jobs[0][2], lifecycle = jobs[1][2], appearanceActions = jobs[2][2], nativeSplit = jobs[3][2], recoveryActions = jobs[4][2], extendedActions = jobs[5][2], archiveActions = jobs[6][2], archiveReopen = jobs[7][2];
+    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split', 'recovery-actions', 'extended-actions', 'archive-actions', 'archive-reopen', 'move-drag', 'little-arc']);
+    const full = jobs[0][2], lifecycle = jobs[1][2], appearanceActions = jobs[2][2], nativeSplit = jobs[3][2], recoveryActions = jobs[4][2], extendedActions = jobs[5][2], archiveActions = jobs[6][2], archiveReopen = jobs[7][2], moveDrag = jobs[8][2];
     const peerPin = smoke.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
-    for (const job of [full, lifecycle, appearanceActions, nativeSplit, recoveryActions, extendedActions, archiveActions, archiveReopen]) {
+    for (const job of [full, lifecycle, appearanceActions, nativeSplit, recoveryActions, extendedActions, archiveActions, archiveReopen, moveDrag]) {
         assert.match(job, /runs-on: ubuntu-24\.04/);
         assert.match(job, /CI: 'true'/);
         assert.match(job, /ARCIFY_TEST_HEAD: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/);
@@ -339,6 +346,32 @@ test('shared appearance prerequisite owns its fixtures and persists defaults thr
 // Preservation receipts from reviewed Arcify 920c901cead1c497e6f6921952883744d948538c.
 // These hash exact callback text/options and job text, not execution results.
 // A later deliberate change must be reviewed before updating its receipt.
+function originalFavoriteLookupBytes(definition) {
+    if (definition.caseIndex !== 26) return definition.callback;
+    // Normalize only the approved pre-input exact-row lookup repair. The real
+    // gesture, acceptance assertions and every other callback remain hashed.
+    return definition.callback.replace(`            let source,target,mouseDown = false;
+            const geometry = [];
+            const operationBefore = await page.$eval('#pinnedFavicons',element => Number(element.dataset.dropOperation || 0));
+            try {
+                // Only pre-input lookup may reacquire an exact row replaced by
+                // the preceding drop. The real gesture below is never replayed.
+                const located = await locateFreshDragGeometry(page,sourceSelector,'#pinnedFavicons',
+                    observation => geometry.push(observation),{scrollSource:true});
+                ({source,target} = located);
+                const {from,to} = located;`, `            const source = await page.$(sourceSelector),target = await page.$('#pinnedFavicons');
+            assert(source && target);
+            let mouseDown = false;
+            const operationBefore = await page.$eval('#pinnedFavicons',element => Number(element.dataset.dropOperation || 0));
+            try {
+                await source.scrollIntoView();
+                const from = await source.boundingBox(),to = await target.boundingBox();
+                assert(from && to && from.width > 0 && from.height > 0 && to.width > 0 && to.height > 0);`)
+        .replace('observations.push({label,hover,completed,sourceRect:from,targetRect:to,geometry});',
+            'observations.push({label,hover,completed,sourceRect:from,targetRect:to});')
+        .replace('await source?.dispose(); await target?.dispose();',
+            'await source.dispose(); await target.dispose();');
+}
 test('existing callbacks retain their reviewed bytes except exact additive routes and peer helper compatibility', async () => {
     const definitions = new Map();
     for (const [mode] of allPlans) {
@@ -355,7 +388,7 @@ test('existing callbacks retain their reviewed bytes except exact additive route
     // Case 20's reviewed viewport/paint readiness is retained in this receipt;
     // its original refresh and exact native-identity gates are still required.
     const preserved = [...definitions].filter(([index]) => index < 50).sort(([a], [b]) => a - b).map(([, item]) => ({ ...item,
-        callback: (item.caseIndex === 38 ? item.callback.replace(/^async \(\) => \{\n        await (exerciseTabMenuActions\([\s\S]*?\}\));\n        return exerciseMoveToNewWindow\([\s\S]*?\);\n    \}$/, (_, original) => '() => ' + original.replaceAll('\n            ', '\n        ')) : item.callback).replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
+        callback: (item.caseIndex === 38 ? item.callback.replace(/^async \(\) => \{\n        await (exerciseTabMenuActions\([\s\S]*?\}\));\n        return exerciseMoveToNewWindow\([\s\S]*?\);\n    \}$/, (_, original) => '() => ' + original.replaceAll('\n            ', '\n        ')) : originalFavoriteLookupBytes(item)).replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightSplitFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
@@ -384,14 +417,15 @@ test('all five original workflow jobs retain reviewed bytes and order except exa
     assert.equal(jobs[5][1], 'extended-actions');
     assert.equal(jobs[6][1], 'archive-actions');
     assert.equal(jobs[7][1], 'archive-reopen');
-    assert.equal(jobs.length, 9);
-    assert.equal(jobs[8][1], 'little-arc');
+    assert.equal(jobs.length, 10);
+    assert.equal(jobs[8][1], 'move-drag');
+    assert.equal(jobs[9][1], 'little-arc');
     // Existing supplemental jobs retain a56bd14 bytes except this exact peer-pin upgrade.
     const archivePinBytes = source => withoutLittleArcGate(source).replaceAll('c13511fd36d56358156c10336b8961b7ef95d5bc', 'b510b3dbe8cfae6441fbc55a23ce19de30805a6d');
     assert.equal(digest(archivePinBytes(jobs[5][0].trimEnd())), '0d01f7440c701db284e286566d4acbd7ba3d590e52e01c8e54435a14aa92875c');
     assert.equal(digest(archivePinBytes(jobs[6][0].trimEnd())), 'aefdebbb6af8c3c11e312ecb716bb5d7c172117a9cffd0df638e3002216b6cdc');
     // Normalize only the reviewed additive Split/display watch paths; event/security configuration is unchanged.
-    const addedWatchPaths = ['new-tab-window-drop.js', 'tests/unit/new-tab-window-drop.test.js', 'scripts/paired-chrome-new-tab-drop.mjs', 'tests/unit/paired-chrome-new-tab-drop.test.js', 'scripts/paired-chrome-move-window.mjs', 'move-tab-new-window.js', 'tests/unit/paired-chrome-move-window.test.js', 'tests/unit/move-tab-new-window.test.js', 'archive-display-session.js', 'tests/unit/helpers/archive-display-fixture.js',
+    const addedWatchPaths = ['tests/unit/paired-chrome-move-drag-wiring.test.js', 'docs/move-drag-paired-ci.md', 'new-tab-window-drop.js', 'tests/unit/new-tab-window-drop.test.js', 'scripts/paired-chrome-new-tab-drop.mjs', 'tests/unit/paired-chrome-new-tab-drop.test.js', 'scripts/paired-chrome-move-window.mjs', 'move-tab-new-window.js', 'tests/unit/paired-chrome-move-window.test.js', 'tests/unit/move-tab-new-window.test.js', 'archive-display-session.js', 'tests/unit/helpers/archive-display-fixture.js',
         'scripts/paired-chrome-spotlight-split.mjs', 'spotlight-split-actions.js',
         'tests/unit/spotlight-split-actions.test.js', 'tests/unit/paired-chrome-spotlight-split.test.js',
         'tests/unit/paired-chrome-split-wiring.test.js', 'scripts/lib/spotlight-pair-split-*.mjs', 'docs/spotlight-split-actions.md'];

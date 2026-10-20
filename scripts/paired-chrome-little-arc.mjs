@@ -8,6 +8,7 @@ import { createNavigationFixturePage } from './paired-chrome-spotlight-navigatio
 import { canonicalSavedMoveBookmarks } from './paired-chrome-saved-move.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { installSpotlightActionApiObservation } from './paired-chrome-spotlight-actions.mjs';
+import { withLittleArcOpenDiagnostics } from './paired-chrome-little-arc-diagnostics.mjs';
 
 export const LITTLE_ARC_CASE_NAME = 'Little Arc trusted launch and same-tab transfer preserve documents with explicit same-window recovery';
 export const LITTLE_ARC_TITLE = 'Open link in Little Arc';
@@ -310,7 +311,7 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
     for (const adapter of [observePage, ui, screenshot, snapshot, external, poll, search, reloadArcify, record]) assert.equal(typeof adapter, 'function');
     const nonce = randomBytes(16).toString('hex'), originWindowId = fixture.windowA, targetWindowId = fixture.windowB;
     const ownedTabs = new Set(), ownedWindows = new Set(), pages = new Map();
-    const evidence = { nonce, checkpoints: [], setup: [], cleanup: [], realTrustedInput: true, scope: 'Source acceptance for the disposable hosted Chrome profile only',
+    const evidence = { nonce, checkpoints: [], setup: [], cleanup: [], openDiagnostics: [], realTrustedInput: true, scope: 'Source acceptance for the disposable hosted Chrome profile only',
         limits: ['Browser restart with missing controller or cross-window restored pages remains a release blocker.', 'Real extension reload is covered; full browser restore, login state, back/forward, drag-out/replacement and journal-boundary interruption remain separate acceptance work.', 'No OS link handling, user profile, Helium or deployment acceptance is claimed.'] };
     let primaryError, source, overlayPage;
     const checkpoint = async (phase, data = {}) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
@@ -372,6 +373,10 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
     };
     const launch = async (explicit, method) => {
         const prepared = await prepareLaunch(explicit), beforeTargets = new Set(browser.targets());
+        return withLittleArcOpenDiagnostics({ browser, arcifyId, record: async observation => {
+            evidence.openDiagnostics.push({ explicit, method, ...observation });
+            await record(structuredClone(evidence));
+        } }, async () => {
         let before;
         await ui(source.page, `Open exact HTTP link in Little Arc with ${method}`, async () => {
             before = await read(); await prepared.surface.evaluate(installLittleArcInputObservation, { retainInParent: true }); await reset();
@@ -421,6 +426,7 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
         await checkpoint('trusted-little-arc-launch', { explicit, method, before, after, record, rows: prepared.rows, events, input, client, screenshot: await screenshot(page, `Little Arc exact top-level ${method} page`) });
         await closeOverlay(); await writeDraft(record.tabId, page, method);
         return { record, page, controller };
+        });
     };
     const refreshController = async controller => { await ui(controller, 'Refresh exact Little Arc choices', () => controller.click('#refresh')); await poll(() => controller.evaluate(readLittleArcControls), state => state.recoveryHidden ? !state.window.disabled : !state.recovery.disabled, 'refreshed live control choices'); };
     const promote = async (flow, destination) => {

@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 // remain last: it intentionally invalidates the original browser-session IDs.
 const FULL_CASE_INDICES = Object.freeze([...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 37, 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 36, 32]);
 const FAVORITE_LIFECYCLE_CASE_INDICES = Object.freeze([0, 1, 2, 36, 32]);
+// Case 38 owns its tab-menu, native Move and sticky New Tab drag fixtures.
+const MOVE_DRAG_CASE_INDICES = Object.freeze([0, 1, 2, 38]);
 // Supplemental positive capability coverage never removes full/lifecycle cases.
 export const NATIVE_SPLIT_CASE_NAME = 'Today real drag and keyboard create native Split View pairs without replacing pages';
 const NATIVE_SPLIT_CASE_INDICES = Object.freeze([0, 1, 2, 39, 54]);
@@ -22,15 +24,15 @@ const ARCHIVE_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 52, 53]);
 const ARCHIVE_REOPEN_CASE_INDICES = Object.freeze([0, 1, 2, 53]);
 // Unpublished Little Arc source coverage is isolated until native acceptance is authorized.
 const LITTLE_ARC_CASE_INDICES = Object.freeze([0, 1, 2, 55]);
-const ALL_CASE_INDICES = Object.freeze([...new Set([...FULL_CASE_INDICES, ...FAVORITE_LIFECYCLE_CASE_INDICES,
+const ALL_CASE_INDICES = Object.freeze([...new Set([...FULL_CASE_INDICES, ...FAVORITE_LIFECYCLE_CASE_INDICES, ...MOVE_DRAG_CASE_INDICES,
     ...NATIVE_SPLIT_CASE_INDICES, ...APPEARANCE_ACTION_CASE_INDICES, ...RECOVERY_ACTION_CASE_INDICES,
     ...EXTENDED_ACTION_CASE_INDICES, ...ARCHIVE_ACTION_CASE_INDICES, ...ARCHIVE_REOPEN_CASE_INDICES, ...LITTLE_ARC_CASE_INDICES])].sort((a, b) => a - b));
 
 function caseIndicesForMode(mode) {
-    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split' || mode === 'appearance-actions' || mode === 'recovery-actions' || mode === 'extended-actions' || mode === 'archive-actions' || mode === 'archive-reopen' || mode === 'little-arc',
-        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle, native-split, appearance-actions, recovery-actions, extended-actions, archive-actions, archive-reopen or little-arc.`);
+    assert(mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split' || mode === 'appearance-actions' || mode === 'recovery-actions' || mode === 'extended-actions' || mode === 'archive-actions' || mode === 'archive-reopen' || mode === 'move-drag' || mode === 'little-arc',
+        `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle, native-split, appearance-actions, recovery-actions, extended-actions, archive-actions, archive-reopen, move-drag or little-arc.`);
     return mode === 'full' ? FULL_CASE_INDICES : mode === 'favorite-lifecycle' ? FAVORITE_LIFECYCLE_CASE_INDICES :
-        mode === 'native-split' ? NATIVE_SPLIT_CASE_INDICES : mode === 'appearance-actions' ? APPEARANCE_ACTION_CASE_INDICES : mode === 'recovery-actions' ? RECOVERY_ACTION_CASE_INDICES : mode === 'extended-actions' ? EXTENDED_ACTION_CASE_INDICES : mode === 'archive-actions' ? ARCHIVE_ACTION_CASE_INDICES : mode === 'archive-reopen' ? ARCHIVE_REOPEN_CASE_INDICES : LITTLE_ARC_CASE_INDICES;
+        mode === 'native-split' ? NATIVE_SPLIT_CASE_INDICES : mode === 'appearance-actions' ? APPEARANCE_ACTION_CASE_INDICES : mode === 'recovery-actions' ? RECOVERY_ACTION_CASE_INDICES : mode === 'extended-actions' ? EXTENDED_ACTION_CASE_INDICES : mode === 'archive-actions' ? ARCHIVE_ACTION_CASE_INDICES : mode === 'archive-reopen' ? ARCHIVE_REOPEN_CASE_INDICES : mode === 'move-drag' ? MOVE_DRAG_CASE_INDICES : LITTLE_ARC_CASE_INDICES;
 }
 
 export function createPairedChromeRunReport(caseNames, mode = 'full') {
@@ -44,7 +46,8 @@ export function createPairedChromeRunReport(caseNames, mode = 'full') {
     const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseIndex === 39 ? NATIVE_SPLIT_CASE_NAME : caseNames[caseIndex] }));
     return {
         runMode: mode,
-        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'little-arc' ?
+        scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'move-drag' ?
+            'Supplemental fresh-profile tab-menu, native Move to New Window and sticky New Tab drag coverage; this is not Little Arc, full-browser restart or full-suite acceptance.' : mode === 'little-arc' ?
             'Supplemental fresh-profile Little Arc exact-tab launch, transfer and explicit same-window recovery after extension reload; this is not full-browser restart or full-suite acceptance.' : mode === 'archive-reopen' ?
             'Supplemental fresh-profile Spotlight Archive exact-entry reopen coverage; this is not native-panel opening, archive-actions or full-suite acceptance.' : mode === 'archive-actions' ?
             'Supplemental fresh-profile Spotlight Archive native-panel and exact-entry reopen coverage; this is not a full-suite or extended-actions result.' : mode === 'extended-actions' ?

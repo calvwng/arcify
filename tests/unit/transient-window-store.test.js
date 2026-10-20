@@ -843,3 +843,89 @@ for (const malformed of [entry({ originWindowId: null }), entry({ recovered: fal
         assert.equal(f.calls.some(call => call[0] === 'set'), false);
     });
 }
+
+// Passive diagnostics are opt-in worker memory, not journal or API behavior.
+const diagnosticSymbol = Symbol.for('arcify.transient-open.diagnostics.v1');
+const normalizeDiagnosticRun = value => JSON.parse(JSON.stringify(value).replace(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/g, TOKEN));
+async function diagnosedOpen(scenario, sink) {
+    const f = fixture();
+    if (sink !== undefined) Object.defineProperty(globalThis, diagnosticSymbol, { value: sink, configurable: true });
+    const get = f.api.tabs.get, windowGet = f.api.windows.get;
+    let guards = 0;
+    const original = Object.assign(new Error('Never retain https://private.test/secret or token=secret'), { code: 'PAIRING_CHANGED' });
+    f.api.tabs.get = async id => {
+        if (id === 100 && scenario === 'native-controller-read') throw original;
+        const tab = await get(id);
+        if (id === 100 && scenario === 'initial-loading') { tab.url = 'about:blank'; tab.pendingUrl = marker(f.data[KEY].records[0].token); tab.status = 'loading'; }
+        if (id === 100 && scenario === 'split') tab.splitViewId = 0;
+        return tab;
+    };
+    f.api.windows.get = async id => {
+        const result = await windowGet(id);
+        if (id === 20 && scenario === 'loading-event') f.api.tabs.onUpdated.emit(100, { status: 'loading', url: 'https://private.test/secret' });
+        return result;
+    };
+    if (scenario === 'native-web-create') f.api.tabs.create = async () => { throw original; };
+    if (scenario === 'native-window-create') f.api.windows.create = async () => { throw original; };
+    let result, rejection;
+    try {
+        result = await f.run(() => f.store.openUnlocked({ url, originWindowId: 10 }, { beforeMutation: async () => {
+            guards++;
+            if (scenario === 'opening-authority' && guards === 2 || scenario === 'web-authority' && guards === 4) throw original;
+        } }));
+    } catch (cause) { rejection = cause; }
+    finally { delete globalThis[diagnosticSymbol]; }
+    const outcome = normalizeDiagnosticRun({ result: result || null,
+        error: rejection ? { name: rejection.name, code: rejection.code, message: rejection.message } : null,
+        data: f.data, calls: f.calls, tabs: [...f.tabs.values()], windows: [...f.windows.values()], guards,
+        excluded: [...f.tabs.values()].map(tab => [tab.id, f.store.isExcluded(tab)]),
+        listeners: ['onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onReplaced'].map(name => [name, f.api.tabs[name].count()]) });
+    return { outcome, rejection, original };
+}
+for (const scenario of ['success', 'initial-loading', 'loading-event', 'split', 'native-controller-read', 'native-web-create', 'native-window-create', 'opening-authority', 'web-authority']) {
+    test(`passive open diagnostics preserve exact calls, outcomes, quarantine and listener cleanup: ${scenario}`, async () => {
+        const baseline = await diagnosedOpen(scenario);
+        const events = [], observed = await diagnosedOpen(scenario, events);
+        assert.deepEqual(observed.outcome, baseline.outcome);
+        assert(events.length > 0);
+        assert.equal(JSON.stringify(events).includes(url), false);
+        assert.equal(JSON.stringify(events).includes('private.test'), false);
+        assert.equal(JSON.stringify(events).includes('secret'), false);
+        assert.equal(JSON.stringify(events).includes('token'), false);
+        if (scenario === 'success') {
+            assert.equal(events.at(-1).event, 'complete'); assert.equal(events.at(-1).stage, 'ready-journal');
+            assert.equal(events.at(-1).phase, 'ready'); assert.equal(events.at(-1).tabId, 101);
+            assert.equal(events.some(item => item.event === 'rejected'), false);
+        } else {
+            const rejected = events.findLast(item => item.event === 'rejected'); assert(rejected);
+            assert.equal(rejected.error.messageOmitted, true);
+            const expectedStage = { 'initial-loading': 'controller-before-web', 'loading-event': 'web-fence', split: 'controller-before-web',
+                'native-controller-read': 'controller-before-web', 'native-web-create': 'create-web-page',
+                'native-window-create': 'create-controller', 'opening-authority': 'authority-before-controller', 'web-authority': 'authority-before-web-dispatch' }[scenario];
+            assert.equal(rejected.stage, expectedStage);
+            if (scenario === 'opening-authority') assert.equal(observed.rejection, observed.original, 'The existing pre-dispatch error identity must be untouched.');
+            else assert.equal(observed.rejection.code, 'UNCERTAIN_RESULT');
+            if (scenario === 'split') assert.equal(rejected.error.code, 'NATIVE_SPLIT_ACTIVE');
+            if (scenario === 'web-authority') assert.equal(rejected.error.code, 'PAIRING_CHANGED');
+            if (scenario === 'native-controller-read') assert.equal(events.find(item => item.event === 'controller-read-rejected').error.code, 'PAIRING_CHANGED');
+            if (scenario === 'native-web-create') assert.equal(events.find(item => item.event === 'web-create-rejected').error.code, 'PAIRING_CHANGED');
+        }
+        if (scenario === 'initial-loading') {
+            const read = events.findLast(item => item.event === 'controller-read');
+            assert.deepEqual(read.controller, { id: 100, windowId: 20, status: 'loading', pinned: false, incognito: false,
+                splitViewId: -1, url: 'about-blank', pendingUrl: 'exact-marker' });
+        }
+        if (scenario === 'loading-event') {
+            const invalidated = events.find(item => item.event === 'fence-invalidated');
+            assert.equal(invalidated.stage, 'window-before-web'); assert.equal(invalidated.fence, 'web');
+            assert.equal(invalidated.nativeEvent, 'tabs.onUpdated'); assert.equal(invalidated.nativeId, 100);
+            assert.deepEqual(invalidated.changed, ['url', 'status']); assert.equal(invalidated.status, 'loading');
+        }
+    });
+}
+for (const scenario of ['success', 'initial-loading', 'loading-event']) test(`broken diagnostic sink cannot alter ${scenario}`, async () => {
+    const baseline = await diagnosedOpen(scenario);
+    for (const sink of [Object.freeze([]), new Proxy([], { defineProperty() { throw Error('Observer denied'); } })]) {
+        assert.deepEqual((await diagnosedOpen(scenario, sink)).outcome, baseline.outcome);
+    }
+});

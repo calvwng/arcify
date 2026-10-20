@@ -132,7 +132,8 @@ test('only an explicit manual Little Arc selection gates the eight unchanged leg
     assert(workflow.includes(`  workflow_dispatch:
 ${dispatchInput}  pull_request:`));
     const jobNames = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)/gm)].map(match => match[1]);
-    assert.deepEqual(jobNames, [...legacyJobNames, 'little-arc']);
+    assert.deepEqual(jobNames, [...legacyJobNames, 'move-drag', 'little-arc']);
+    assert.equal(jobSource('move-drag').match(/^    if: (.*)$/m)?.[1], legacyGate);
     for (const name of legacyJobNames) assert.equal(jobSource(name).match(/^    if: (.*)$/m)?.[1], legacyGate);
     assert.equal(littleArcJob.match(/^    if: (.*)$/m)?.[1], littleArcGate);
     for (const event_name of ['pull_request', 'push', 'workflow_dispatch', 'schedule']) {
@@ -143,7 +144,10 @@ ${dispatchInput}  pull_request:`));
             assert.equal(new vm.Script(littleArcGate).runInNewContext(context), selected);
         }
     }
-    const restored = workflow.slice(0, workflow.indexOf('  # Isolated acceptance:'))
+    // Exclude only the new supplemental job and its two exact watch paths.
+    const restored = workflow.slice(0, workflow.indexOf('  # Supplemental fresh-profile case 38:'))
+        .replace("      - 'tests/unit/paired-chrome-move-drag-wiring.test.js'\n", '')
+        .replace("      - 'docs/move-drag-paired-ci.md'\n", '')
         .replace(dispatchInput, '').replaceAll(`    if: ${legacyGate}\n`, '').replace(/\n$/, '');
     assert.equal(createHash('sha256').update(restored).digest('hex'),
         'ee6bc1245b90a30d2f4ffa17cbeb961f8ce08e95ea65aa4434316194cfc2ab74',

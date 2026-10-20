@@ -150,14 +150,18 @@ export async function clickFreshResult(locate, record = async () => {}, {
 // handles may be reacquired; a connected hidden row or arbitrary API error fails.
 // This helper never starts or retries a drag.
 export async function locateFreshDragGeometry(page, sourceSelector, targetSelector, record = async () => {}, {
-    maxAttempts = 3, pause = ms => new Promise(resolve => setTimeout(resolve, ms))
+    maxAttempts = 3, scrollSource = false, pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 } = {}) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        let source, target, retained = false;
+        let source, target, retained = false, scrolling = false;
         try {
             source = await page.$(sourceSelector); target = await page.$(targetSelector);
             if (!source || !target) throw new Error('Exact drag source and destination must exist.');
-            await target.scrollIntoView();
+            // Favorites keeps a fixed destination strip while the saved source
+            // row may need scrolling. Other callers retain destination scrolling.
+            scrolling = true;
+            await (scrollSource ? source : target).scrollIntoView();
+            scrolling = false;
             const from = await source.boundingBox(), to = await target.boundingBox();
             const isCurrent = (element, selector) => element.isConnected && element === document.querySelector(selector);
             const sourceCurrent = await source.evaluate(isCurrent, sourceSelector);
@@ -174,19 +178,21 @@ export async function locateFreshDragGeometry(page, sourceSelector, targetSelect
             }
         } catch (error) {
             // scrollIntoView checks attachment before any mouse input. It can
-            // lose the target between lookup and the later connectivity reads.
+            // lose the scrolled row between lookup and the later connectivity reads.
             // Require both the locked-driver origin and a fresh detached/replaced
             // DOM proof; generic errors and uncertain input are never replayed.
             // The driver's CDP scroll can fall back to its API scroll method;
             // either path checks attachment before dispatching any mouse input.
-            const preInputScroll = error.message === 'Node is detached from document'
+            const preInputScroll = scrolling && error.message === 'Node is detached from document'
                 && /^Error: Node is detached from document\n    at CdpElementHandle\.assertConnectedElement \(([^\n]*)\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js:\d+:\d+\)\n(?:    at async CdpElementHandle\.scrollIntoView \(\1\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js:\d+:\d+\)\n    at async CdpElementHandle\.<anonymous> \(\1\/puppeteer-core\/lib\/puppeteer\/api\/ElementHandle\.js:\d+:\d+\)\n)?    at async CdpElementHandle\.scrollIntoView \(\1\/puppeteer-core\/lib\/puppeteer\/cdp\/ElementHandle\.js:\d+:\d+\)/.test(error.stack || '')
                 && !/Input\.dispatch|Mouse\.click|mouse\.click|CdpMouse/.test(error.stack || '');
-            if (!preInputScroll || !target) throw error;
-            const targetCurrent = await target.evaluate((element, selector) =>
-                element.isConnected && element === document.querySelector(selector), targetSelector);
-            if (targetCurrent) throw error;
-            await record({ attempt, targetCurrent, status: 'detached-during-scroll-before-input', error: error.message });
+            const scrolled = scrollSource ? source : target;
+            if (!preInputScroll || !scrolled) throw error;
+            const current = await scrolled.evaluate((element, selector) =>
+                element.isConnected && element === document.querySelector(selector), scrollSource ? sourceSelector : targetSelector);
+            if (current) throw error;
+            await record({ attempt, [scrollSource ? 'sourceCurrent' : 'targetCurrent']: current,
+                status: 'detached-during-scroll-before-input', error: error.message });
             if (attempt === maxAttempts) throw error;
         } finally {
             if (!retained) {

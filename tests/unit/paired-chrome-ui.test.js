@@ -12,9 +12,14 @@ function dragGeometryHarness(states = [{}]) {
         if (state.missing === side) return null;
         const handle = {
             async scrollIntoView() { calls.push([attempt,side,'scroll']); if (state.error) throw state.error; },
-            async boundingBox() { calls.push([attempt,side,'measure']); return state.hidden === side ? null : {x:1,y:2,width:100,height:32}; },
+            async boundingBox() {
+                calls.push([attempt,side,'measure']);
+                if (state.measureError) throw state.measureError;
+                return state.hidden === side ? null : {x:1,y:2,width:100,height:32};
+            },
             async evaluate(predicate, actualSelector) {
                 assert.equal(actualSelector,selector);
+                if (state.evaluateError) throw state.evaluateError;
                 const element = { isConnected: state.detached !== side };
                 const old = globalThis.document;
                 globalThis.document = {querySelector: () => state.replaced === side ? {} : element};
@@ -445,6 +450,64 @@ test('a driver detachment stack cannot authorize lookup when the observed target
     assert.equal(h.records.length, 0);
 });
 
+test('Favorite geometry scrolls only the source and retains both exact handles before any input', async () => {
+    const h = dragGeometryHarness();
+    const result = await locateFreshDragGeometry(h.page, '#source', '#target', h.record, {scrollSource: true, pause: h.pause});
+    assert.equal(result.source, h.handles[0]); assert.equal(result.target, h.handles[1]);
+    assert.deepEqual(h.calls.filter(item => item.includes('scroll')), [[0, 'source', 'scroll']]);
+    assert.equal(h.calls.filter(item => item.includes('dispose')).length, 0);
+});
+for (const errorFactory of [detachedScrollError, fallbackDetachedScrollError]) {
+    for (const reason of ['detached', 'replaced']) test(`Favorite source ${reason} during ${errorFactory.name} reacquires both exact handles before input`, async () => {
+        const h = dragGeometryHarness([{error: errorFactory(), [reason]: 'source'}, {}]);
+        const result = await locateFreshDragGeometry(h.page, '#source', '#target', h.record, {scrollSource: true, pause: h.pause});
+        assert.equal(result.source, h.handles[2]); assert.equal(result.target, h.handles[3]);
+        assert.equal(h.records[0].status, 'detached-during-scroll-before-input');
+        assert.equal(h.records[0].sourceCurrent, false);
+        assert.equal(h.records[1].sourceCurrent, true); assert.equal(h.records[1].targetCurrent, true);
+        assert.deepEqual(h.calls.filter(item => item.includes('scroll')), [[0, 'source', 'scroll'], [1, 'source', 'scroll']]);
+        assert.equal(h.calls.filter(item => item.includes('dispose')).length, 2);
+    });
+}
+test('Favorite source scroll detachment fails after three lookups without starting a gesture', async () => {
+    const error = fallbackDetachedScrollError(), h = dragGeometryHarness([{error, detached: 'source'}]);
+    await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, {scrollSource: true, pause: h.pause}), value => value === error);
+    assert.equal(h.records.length, 3);
+    assert.equal(h.calls.filter(item => item.includes('lookup')).length, 6);
+    assert.equal(h.calls.filter(item => item.includes('dispose')).length, 6);
+    assert.equal(h.calls.filter(item => item[0] === 'pause').length, 2);
+});
+for (const [name, mutate, state] of [
+    ['unproven error message', error => { error.stack = `Error: ${error.message}`; }, {detached: 'source'}],
+    ['unrelated driver path', error => { error.stack = error.stack.replaceAll('/puppeteer-core/', '/other-driver/'); }, {detached: 'source'}],
+    ['uncertain input frame', error => { error.stack += '\n    at CdpMouse.down (Input.js:1:1)'; }, {detached: 'source'}],
+    ['still-current source', () => {}, {}],
+    ['only the destination detached', () => {}, {detached: 'target'}]
+]) test(`Favorite source scroll does not reacquire on ${name}`, async () => {
+    const error = fallbackDetachedScrollError(); mutate(error);
+    const h = dragGeometryHarness([{error, ...state}]);
+    await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, {scrollSource: true, pause: h.pause}), value => value === error);
+    assert.equal(h.calls.filter(item => item.includes('lookup')).length, 2);
+    assert.equal(h.calls.filter(item => item[0] === 'pause').length, 0);
+});
+for (const phase of ['measurement', 'identity read', 'recording']) test(`a detachment-shaped ${phase} failure cannot trigger a Favorite source-scroll retry`, async () => {
+    const error = detachedScrollError();
+    const h = dragGeometryHarness([{detached: 'source',
+        ...(phase === 'measurement' ? {measureError: error} : {}),
+        ...(phase === 'identity read' ? {evaluateError: error} : {})}]);
+    const record = phase === 'recording' ? async () => { throw error; } : h.record;
+    await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', record, {scrollSource: true, pause: h.pause}), value => value === error);
+    assert.equal(h.calls.filter(item => item.includes('lookup')).length, 2);
+    assert.equal(h.calls.filter(item => item[0] === 'pause').length, 0);
+});
+for (const state of [{hidden: 'source'}, {hidden: 'target'}, {missing: 'source'}, {missing: 'target'}, {error: new Error('CDP failed')}]) {
+    test(`Favorite source-scroll geometry never retries a non-detachment readiness failure: ${JSON.stringify(state)}`, async () => {
+        const h = dragGeometryHarness([state]);
+        await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, {scrollSource: true, pause: h.pause}));
+        assert.equal(h.calls.filter(item => item.includes('lookup')).length, 2);
+        assert.equal(h.calls.filter(item => item[0] === 'pause').length, 0);
+    });
+}
 
 test('successful fixture tab attachment transfers the creation receipt without cleanup', async () => {
     const receipt = { id: 900, windowId: 2 }, result = { tab: receipt, page: {} }, removed = [];

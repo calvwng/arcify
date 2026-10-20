@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readSourceText } from '../source-text.js';
 import { assertSavedBookmarkFavorite } from '../../scripts/paired-chrome-favorites.mjs';
 const state = () => ({windowId:1,activeSpaceId:'work',spaces:[{id:'work',tabIds:[1]}],
     bookmarks:[{id:'saved',parentId:'root',url:'https://same.test/',title:'Saved'},{id:'equal-url',parentId:'root',url:'https://same.test/',title:'Other'}],
@@ -21,4 +22,26 @@ test('repeat preserves saved Favorite identity and independent saved metadata',(
     assert.throws(()=>assertSavedBookmarkFavorite(before,after,{bookmarkId:'saved',newTab:false,expectedTabId:2}));
     after.favorites[0].id='favorite';after.favorites[0].title='Changed';
     assert.throws(()=>assertSavedBookmarkFavorite(before,after,{bookmarkId:'saved',newTab:false,expectedTabId:2}));
+});
+
+test('case 26 uses bounded exact-source geometry before one real gesture and retains Favorite acceptance assertions', () => {
+    const source = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
+    const start = source.indexOf('await step(stepNames[26],');
+    const end = source.indexOf('await step(stepNames[27],', start);
+    assert(start >= 0 && end > start);
+    const fixture = source.slice(start, end);
+    const drag = fixture.slice(fixture.indexOf('const dragToFavorites ='), fixture.indexOf('\n        try {', fixture.indexOf('const dragToFavorites =')));
+    assert.match(fixture, /const row = id => `\.space\[data-space-id="\$\{fixture\.spaces\.work\}"\] \[data-bookmark-id="\$\{id\}"\]`/);
+    assert.match(drag, /locateFreshDragGeometry\(page,sourceSelector,'#pinnedFavicons',\s*observation => geometry\.push\(observation\),\{scrollSource:true\}\)/);
+    assert(drag.indexOf('locateFreshDragGeometry(') < drag.indexOf('page.mouse.move('));
+    assert.equal((drag.match(/page\.mouse\.down\(\)/g) || []).length, 1);
+    assert.doesNotMatch(drag, /\b(?:for|while)\s*\(|dispatchEvent\(|\.dragAndDrop\(/);
+    assert.match(drag, /Number\(strip\.dataset\.dropOperation\) === previous\+1 && strip\.dataset\.dropState === 'success' && strip\.getAttribute\('aria-busy'\) === 'false'/);
+    assert.match(drag, /else assert\.equal\(await page\.\$eval\('#pinnedFavicons',element => Number\(element\.dataset\.dropOperation \|\| 0\)\),operationBefore\)/);
+    assert.match(drag, /assert\.equal\(hover\.highlighted,allowed\)/);
+    assert.match(drag, /observations\.push\(\{label,hover,completed,sourceRect:from,targetRect:to,geometry\}\)/);
+    assert.match(fixture, /assertSavedBookmarkFavorite\(first,repeated,\{bookmarkId:saved\.one,newTab:false,expectedTabId:favorite\.id\}\)/);
+    assert.match(fixture, /assertSavedBookmarkFavorite\(repeated,second,\{bookmarkId:saved\.two,newTab:true\}\)/);
+    assert.match(fixture, /assert\.notEqual\(other\.id,favorite\.id\)/);
+    assert.match(fixture, /assert\.deepEqual\(rejected,second,'A folder drag must not expand, open, move, or remove anything\.'\)/);
 });

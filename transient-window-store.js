@@ -1,4 +1,5 @@
 import { assertNotNativeSplit } from './native-split-safety.js';
+import { createTransientOpenDiagnostic } from './transient-window-diagnostics.js';
 
 export const TRANSIENT_WINDOW_SESSION_KEY = 'transientWindowSession';
 const VERSION = 1, MAX_RECORDS = 128, MAX_MEMBERS = 2048, MAX_TOTAL_MEMBERS = 8192;
@@ -248,9 +249,11 @@ export function createTransientWindowStore({ api = chrome } = {}) {
         assertNotNativeSplit(tab);
         return tab;
     }
-    async function getController(entry) {
+    async function getController(entry, diagnostic = null) {
         let tab;
-        try { tab = await api.tabs.get(entry.controllerTabId); } catch { throw stale(); }
+        try { tab = await api.tabs.get(entry.controllerTabId); }
+        catch (cause) { diagnostic?.rejected(cause, 'controller-read-rejected'); throw stale(); }
+        diagnostic?.controller(tab, marker(entry.token));
         if (tab?.id !== entry.controllerTabId || tab.windowId !== entry.windowId || markerToken(tab) !== entry.token
             || tab.url && tab.url !== marker(entry.token) || tab.pendingUrl && tab.pendingUrl !== marker(entry.token)
             || tab.incognito !== false || tab.pinned !== false) throw stale();
@@ -259,21 +262,21 @@ export function createTransientWindowStore({ api = chrome } = {}) {
     }
     // Native browser operations cannot be locked. Events fence awaited reads and
     // journal writes; listeners are removed immediately before our own dispatch.
-    function fence(tabIds, windowIds, controllerTabId = null, selectionTabId = null) {
+    function fence(tabIds, windowIds, controllerTabId = null, selectionTabId = null, diagnostic = null, label = null) {
         let invalidated = false;
-        const removals = [], mark = () => { invalidated = true; };
+        const removals = [], mark = (event, id, update) => { invalidated = true; diagnostic?.fence(label, event, id, update); };
         const listen = (event, callback) => {
             if (!event?.addListener || !event?.removeListener) return;
             event.addListener(callback); removals.push(() => event.removeListener(callback));
         };
-        for (const name of ['onRemoved', 'onAttached', 'onDetached']) listen(api.tabs?.[name], id => { if (tabIds.includes(id)) mark(); });
-        listen(api.tabs?.onReplaced, (added, removed) => { if (tabIds.includes(added) || tabIds.includes(removed)) mark(); });
+        for (const name of ['onRemoved', 'onAttached', 'onDetached']) listen(api.tabs?.[name], id => { if (tabIds.includes(id)) mark(`tabs.${name}`, id); });
+        listen(api.tabs?.onReplaced, (added, removed) => { if (tabIds.includes(added) || tabIds.includes(removed)) mark('tabs.onReplaced', removed); });
         listen(api.tabs?.onUpdated, (id, update) => {
             if (tabIds.includes(id) && (!object(update)
                 || ['pinned', 'splitViewId', 'windowId', 'incognito'].some(key => key in update)
-                || (id === controllerTabId || id === selectionTabId) && (['url', 'pendingUrl'].some(key => key in update) || update.status === 'loading'))) mark();
+                || (id === controllerTabId || id === selectionTabId) && (['url', 'pendingUrl'].some(key => key in update) || update.status === 'loading'))) mark('tabs.onUpdated', id, update);
         });
-        listen(api.windows?.onRemoved, id => { if (windowIds.includes(id)) mark(); });
+        listen(api.windows?.onRemoved, id => { if (windowIds.includes(id)) mark('windows.onRemoved', id); });
         return { assert() { if (invalidated) throw stale(); }, stop() { removals.splice(0).forEach(remove => remove()); } };
     }
     async function initialize() {
@@ -343,48 +346,70 @@ export function createTransientWindowStore({ api = chrome } = {}) {
         const entry = { token, originWindowId: request.originWindowId, windowId: null, controllerTabId: null,
             tabId: null, memberTabIds: [], phase: 'opening' };
         records.push(entry); changed();
-        const openingFence = fence([], [request.originWindowId]);
+        const diagnostic = createTransientOpenDiagnostic(entry);
+        const openingFence = fence([], [request.originWindowId], null, null, diagnostic, 'opening');
         let created;
         try {
-            await save(); await origin();
+            diagnostic?.stage('opening-journal'); await save();
+            diagnostic?.stage('origin-before-controller'); await origin();
             // Pairing/controller authority can change during every awaited read,
             // including the pending journal write. The guard is the last
             // persisted authority read; only synchronous checks follow it.
-            await beforeMutation(); openingFence.assert(); assertHealthy();
+            diagnostic?.stage('authority-before-controller'); await beforeMutation();
+            diagnostic?.stage('opening-fence'); openingFence.assert();
+            diagnostic?.stage('health-before-controller'); assertHealthy();
+            diagnostic?.stage('origin-exclusion-before-controller');
             if (windowKnown(request.originWindowId)) throw stale();
             openingFence.stop();
+            diagnostic?.stage('create-controller');
             try { created = await api.windows.create({ url: marker(token), type: 'normal', width: 900, height: 720, focused: true, incognito: false }); }
-            catch { return await quarantine(entry, uncertain()); }
-        } finally { openingFence.stop(); }
+            catch (cause) { diagnostic?.rejected(cause); return await quarantine(entry, uncertain()); }
+        } catch (cause) { diagnostic?.rejected(cause); throw cause; }
+        finally { openingFence.stop(); }
         if (nativeId(created?.id)) extraWindows.add(created.id);
         for (const tab of Array.isArray(created?.tabs) ? created.tabs : []) if (nativeId(tab?.id)) extraIds.add(tab.id);
         try {
+            diagnostic?.stage('validate-created-window');
             if (!nativeId(created?.id) || !normal(created, created.id) || created.id === request.originWindowId
                 || !Array.isArray(created.tabs) || created.tabs.length !== 1) throw uncertain();
             const controller = created.tabs[0];
+            diagnostic?.stage('validate-created-controller');
+            diagnostic?.controller(controller, marker(token));
             if (!nativeId(controller?.id) || controller.windowId !== created.id || markerToken(controller) !== token
                 || entry.windowId !== null && (entry.windowId !== created.id || entry.controllerTabId !== controller.id)) throw uncertain();
             entry.windowId = created.id; entry.controllerTabId = controller.id; include(entry, controller.id); changed();
             // Journal exact returned controller/window IDs before any web tab.
-            await save();
-            const webFence = fence([entry.controllerTabId], [request.originWindowId, entry.windowId], entry.controllerTabId);
+            diagnostic?.stage('controller-journal'); await save();
+            const webFence = fence([entry.controllerTabId], [request.originWindowId, entry.windowId], entry.controllerTabId, null, diagnostic, 'web');
             let page;
             try {
-                await beforeMutation(); await origin(); await getWindow(entry.windowId); await getController(entry);
-                await beforeMutation();
-                webFence.assert(); assertHealthy();
+                diagnostic?.stage('authority-before-web-reads'); await beforeMutation();
+                diagnostic?.stage('origin-before-web'); await origin();
+                diagnostic?.stage('window-before-web'); await getWindow(entry.windowId);
+                diagnostic?.stage('controller-before-web'); await getController(entry, diagnostic);
+                diagnostic?.stage('authority-before-web-dispatch'); await beforeMutation();
+                diagnostic?.stage('web-fence'); webFence.assert();
+                diagnostic?.stage('health-before-web'); assertHealthy();
+                diagnostic?.stage('phase-before-web');
                 if (entry.phase !== 'opening' || windowKnown(request.originWindowId)) throw uncertain();
                 webFence.stop();
+                diagnostic?.stage('create-web-page');
                 try { page = await api.tabs.create({ windowId: entry.windowId, url: request.url, active: true, pinned: false }); }
-                catch { throw uncertain(); }
+                catch (cause) { diagnostic?.rejected(cause, 'web-create-rejected'); throw uncertain(); }
             } finally { webFence.stop(); }
+            diagnostic?.stage('validate-created-page');
             if (nativeId(page?.id) && page.id !== entry.controllerTabId) { entry.tabId = page.id; include(entry, page.id); }
             if (!nativeId(entry.tabId) || page.windowId !== entry.windowId) throw uncertain();
-            await getPage(entry); await getController(entry); await getWindow(entry.windowId);
+            diagnostic?.stage('page-after-create'); await getPage(entry);
+            diagnostic?.stage('controller-after-create'); await getController(entry, diagnostic);
+            diagnostic?.stage('window-after-create'); await getWindow(entry.windowId);
+            diagnostic?.stage('phase-after-create');
             if (entry.phase !== 'opening') throw uncertain();
-            entry.phase = 'ready'; changed(); await save();
+            entry.phase = 'ready'; changed();
+            diagnostic?.stage('ready-journal'); await save();
+            diagnostic?.complete();
             return copy(entry);
-        } catch (cause) { return quarantine(entry, cause.code === 'UNCERTAIN_RESULT' ? cause : uncertain()); }
+        } catch (cause) { diagnostic?.rejected(cause); return quarantine(entry, cause.code === 'UNCERTAIN_RESULT' ? cause : uncertain()); }
     }
     // Explicitly select an observed orphan member, without moving or admitting
     // it. The pending journal is uncertain so interruption cannot auto-select a

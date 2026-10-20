@@ -163,7 +163,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'move-drag' ? 'test-results/paired-chrome-move-drag' : report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -2023,14 +2023,16 @@ try {
         const observations = [];
         const dragToFavorites = async (sourceSelector,label,allowed) => ui(page,label,async () => {
             await page.waitForSelector(sourceSelector);
-            const source = await page.$(sourceSelector),target = await page.$('#pinnedFavicons');
-            assert(source && target);
-            let mouseDown = false;
+            let source,target,mouseDown = false;
+            const geometry = [];
             const operationBefore = await page.$eval('#pinnedFavicons',element => Number(element.dataset.dropOperation || 0));
             try {
-                await source.scrollIntoView();
-                const from = await source.boundingBox(),to = await target.boundingBox();
-                assert(from && to && from.width > 0 && from.height > 0 && to.width > 0 && to.height > 0);
+                // Only pre-input lookup may reacquire an exact row replaced by
+                // the preceding drop. The real gesture below is never replayed.
+                const located = await locateFreshDragGeometry(page,sourceSelector,'#pinnedFavicons',
+                    observation => geometry.push(observation),{scrollSource:true});
+                ({source,target} = located);
+                const {from,to} = located;
                 const x = from.x+Math.min(40,from.width/2),y = from.y+from.height/2;
                 const tx = to.x+Math.min(35,to.width/2),ty = to.y+to.height/2;
                 await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
@@ -2055,10 +2057,10 @@ try {
                 else assert.equal(await page.$eval('#pinnedFavicons',element => Number(element.dataset.dropOperation || 0)),operationBefore);
                 const completed = await page.evaluate(() => ({status:document.getElementById('favoritesDropStatus')?.textContent,
                     operation:document.getElementById('pinnedFavicons').dataset.dropOperation,state:document.getElementById('pinnedFavicons').dataset.dropState}));
-                observations.push({label,hover,completed,sourceRect:from,targetRect:to});
+                observations.push({label,hover,completed,sourceRect:from,targetRect:to,geometry});
             } finally {
                 if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
-                await source.dispose(); await target.dispose();
+                await source?.dispose(); await target?.dispose();
             }
         });
         try {
@@ -2297,6 +2299,11 @@ try {
         snapshot,poll,fixture,arcifyId,screenshotBytes:shot=>readFile(resolve(OUTPUT,shot.filename)),
         record:async observation => { report.spaceContextMenus ||= []; report.spaceContextMenus.push(observation); await saveReport(); } }));
 
+    } // Full-only cases 34–35 and 37.
+
+    // Case 38 owns its data and native onOpened observer; no earlier menu,
+    // appearance, recovery or Little Arc case is a prerequisite.
+    if (report.runMode === 'full' || report.runMode === 'move-drag') {
     await step(stepNames[38], async () => {
         await exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
             snapshot,poll,fixture,arcifyId,spotlightId,search,
@@ -2305,6 +2312,9 @@ try {
             ui,screenshot,snapshot,poll,fixture,arcifyId,
             record:async observation=>{report.moveWindow=observation;await saveReport();}});
     });
+    } // Shared tab-menu and Move/drag case 38.
+
+    if (report.runMode === 'full') {
     await step(stepNames[40], () => exerciseTodayMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,
         snapshot,poll,fixture,arcifyId,spotlightId,search,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayMoveSyncOff = observation; await saveReport(); } }));
@@ -2323,7 +2333,7 @@ try {
     await step(stepNames[45], () => exerciseSavedMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,ui,screenshot,
         snapshot,bridge,poll,fixture,arcifyId,spotlightId,search,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.savedMoveSyncOn = observation; await saveReport(); } }));
-    } // Full-only cases 34–35, 37–38 and 40–45.
+    } // Full-only cases 40–45.
 
     if (report.runMode === 'full' || report.runMode === 'appearance-actions') {
     await step(stepNames[46], () => exerciseSpaceTheme({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,ui,screenshot,

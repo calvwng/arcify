@@ -108,7 +108,7 @@ test('dedicated real nonce HTTP route precedes generic handler and never serves 
 
 for (const mode of ['archive-actions', 'archive-reopen']) test(`${mode} remains an isolated mandatory Archive job with all sandbox and exact-head gates`, () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  [a-z-]+:\n|$(?![\s\S]))/gm)];
-    assert.equal(jobs.length, 9); const selected = jobs.filter(job => job[1] === mode); assert.equal(selected.length, 1); const job = selected[0][2];
+    assert.equal(jobs.length, 10); const selected = jobs.filter(job => job[1] === mode); assert.equal(selected.length, 1); const job = selected[0][2];
     assert(job.includes(`ARCIFY_PAIRED_RUN_MODE: ${mode}\n`)); assert.match(job, /timeout-minutes: 20\n/); assert.match(job, /CI: 'true'/);
     assert.match(job, /persist-credentials: false/); assert.match(job, /npm test --prefix arcify\/scripts\/paired-chrome-runtime/); assert.match(job, /set -o pipefail/);
     assert(job.includes(`tee test-results/paired-chrome-${mode}/runner.log`)); assert(job.includes(`name: paired-chrome-${mode}-` + '${{ github.run_id }}-${{ github.run_attempt }}'));
