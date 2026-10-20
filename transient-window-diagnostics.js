@@ -4,7 +4,7 @@
 export const TRANSIENT_OPEN_DIAGNOSTIC_KEY = 'arcify.transient-open.diagnostics.v1';
 export const TRANSIENT_OPEN_DIAGNOSTIC_LIMIT = 256;
 const errorCodes = new Set(['STALE_TRANSIENT', 'UNCERTAIN_RESULT', 'INVALID_TRANSIENT_REGISTRY',
-    'TRANSIENT_STORAGE_UNAVAILABLE', 'NATIVE_SPLIT_ACTIVE', 'UNPAIRED', 'UNAUTHORIZED',
+    'TRANSIENT_STORAGE_UNAVAILABLE', 'TRANSIENT_CONTROLLER_TIMEOUT', 'NATIVE_SPLIT_ACTIVE', 'UNPAIRED', 'UNAUTHORIZED',
     'FEATURE_UNAVAILABLE', 'UNSUPPORTED_FEATURE', 'PAIRING_CHANGED']);
 const id = value => Number.isSafeInteger(value) && value > 0 ? value : null;
 const status = value => ['loading', 'complete', 'unloaded'].includes(value) ? value : null;

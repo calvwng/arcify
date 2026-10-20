@@ -29,7 +29,7 @@ function fixture(initial) {
             create: async options => {
                 calls.push(['windowCreate', clone(options)]);
                 const window = { id: nextWindow++, type: 'normal', incognito: false };
-                const tab = { id: nextTab++, windowId: window.id, url: options.url, pinned: false, incognito: false, splitViewId: -1 };
+                const tab = { id: nextTab++, windowId: window.id, url: options.url, status: 'complete', pinned: false, incognito: false, splitViewId: -1 };
                 windows.set(window.id, window); tabs.set(tab.id, tab); api.tabs.onCreated.emit(clone(tab));
                 return { ...clone(window), tabs: [clone(tab)] };
             },
@@ -899,8 +899,8 @@ for (const scenario of ['success', 'initial-loading', 'loading-event', 'split', 
         } else {
             const rejected = events.findLast(item => item.event === 'rejected'); assert(rejected);
             assert.equal(rejected.error.messageOmitted, true);
-            const expectedStage = { 'initial-loading': 'controller-before-web', 'loading-event': 'web-fence', split: 'controller-before-web',
-                'native-controller-read': 'controller-before-web', 'native-web-create': 'create-web-page',
+            const expectedStage = { 'initial-loading': 'controller-initial-readiness', 'loading-event': 'web-fence', split: 'controller-initial-readiness',
+                'native-controller-read': 'controller-initial-readiness', 'native-web-create': 'create-web-page',
                 'native-window-create': 'create-controller', 'opening-authority': 'authority-before-controller', 'web-authority': 'authority-before-web-dispatch' }[scenario];
             assert.equal(rejected.stage, expectedStage);
             if (scenario === 'opening-authority') assert.equal(observed.rejection, observed.original, 'The existing pre-dispatch error identity must be untouched.');
@@ -928,4 +928,165 @@ for (const scenario of ['success', 'initial-loading', 'loading-event']) test(`br
     for (const sink of [Object.freeze([]), new Proxy([], { defineProperty() { throw Error('Observer denied'); } })]) {
         assert.deepEqual((await diagnosedOpen(scenario, sink)).outcome, baseline.outcome);
     }
+});
+
+const heldOperation = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+function loadingControllerFixture() {
+    const f = fixture(), create = f.api.windows.create;
+    f.api.windows.create = async options => {
+        const result = await create(options), tab = f.tabs.get(result.tabs[0].id);
+        Object.assign(tab, { url: '', pendingUrl: options.url, status: 'loading' });
+        return { ...result, tabs: [clone(tab)] };
+    };
+    const update = changes => {
+        const tab = f.tabs.get(100); Object.assign(tab, changes);
+        f.api.tabs.onUpdated.emit(100, clone(changes), clone(tab));
+    };
+    const commit = () => update({ url: f.tabs.get(100).pendingUrl || f.tabs.get(100).url, pendingUrl: '', status: 'loading' });
+    const complete = () => update({ status: 'complete' });
+    const listenerCounts = () => [f.api.windows.onRemoved.count(), ...['onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onReplaced'].map(name => f.api.tabs[name].count())];
+    const originalListeners = listenerCounts();
+    const assertNoWeb = () => {
+        assert.equal(f.calls.filter(call => call[0] === 'windowCreate').length, 1);
+        assert.equal(f.calls.filter(call => call[0] === 'tabCreate').length, 0);
+        assert.equal(registry(f).records[0].phase, 'uncertain'); assert.equal(registry(f).records[0].tabId, null);
+        assert.equal(f.store.isExcluded(100), true);
+        assert.equal(mutations(f).some(call => ['move', 'update', 'tabRemove', 'windowRemove'].includes(call[0])), false);
+        assert.deepEqual(listenerCounts(), originalListeners);
+    };
+    return { f, update, commit, complete, assertNoWeb, assertClean: () => assert.deepEqual(listenerCounts(), originalListeners) };
+}
+for (const loadingStart of ['pending', 'about-blank', 'committed']) test(`initial ${loadingStart} controller finishes its one exact marker load before strict web fence`, async () => {
+    const c = loadingControllerFixture(), { f } = c, create = f.api.windows.create;
+    f.api.windows.create = async options => {
+        const result = await create(options), tab = f.tabs.get(100);
+        if (loadingStart === 'about-blank') tab.url = 'about:blank';
+        if (loadingStart === 'committed') { tab.url = options.url; tab.pendingUrl = ''; }
+        return { ...result, tabs: [clone(tab)] };
+    };
+    const set = f.api.storage.session.set;
+    f.api.storage.session.set = async patch => {
+        await set(patch);
+        if (patch[KEY].records[0].windowId !== null && patch[KEY].records[0].phase === 'opening') {
+            if (loadingStart !== 'committed') c.commit();
+            c.complete();
+        }
+    };
+    const record = await f.open(); assert.equal(record.phase, 'ready');
+    assert.deepEqual(mutations(f).map(call => call[0]), ['windowCreate', 'tabCreate']); c.assertClean();
+});
+
+test('initial completion during an in-flight loading read requires a second exact fresh read before web create', async () => {
+    const c = loadingControllerFixture(), { f } = c, get = f.api.tabs.get;
+    let reads = 0;
+    f.api.tabs.get = async id => {
+        const result = await get(id);
+        if (id === 100 && ++reads === 1) { c.commit(); c.complete(); return result; }
+        return result;
+    };
+    const record = await f.open(); assert.equal(record.phase, 'ready'); assert.equal(reads, 4);
+    assert.deepEqual(mutations(f).map(call => call[0]), ['windowCreate', 'tabCreate']); c.assertClean();
+});
+
+for (const fault of ['foreign-url-returned-to-marker', 'pending-navigation', 'controller-removed', 'controller-replaced', 'controller-detached', 'origin-removed', 'pinned', 'split', 'same-marker-reload']) {
+    test(`startup journal race ${fault} remains quarantined with no web dispatch`, async () => {
+        const c = loadingControllerFixture(), { f } = c, set = f.api.storage.session.set;
+        f.api.storage.session.set = async patch => {
+            await set(patch);
+            if (patch[KEY].records[0].windowId !== null && patch[KEY].records[0].phase === 'opening') {
+                const expected = f.tabs.get(100).pendingUrl;
+                if (fault === 'foreign-url-returned-to-marker') { c.update({ url: 'https://elsewhere.test/' }); c.update({ url: expected, pendingUrl: '', status: 'complete' }); }
+                if (fault === 'pending-navigation') c.update({ pendingUrl: 'https://elsewhere.test/' });
+                if (fault === 'controller-removed') f.api.tabs.onRemoved.emit(100);
+                if (fault === 'controller-replaced') f.api.tabs.onReplaced.emit(200, 100);
+                if (fault === 'controller-detached') f.api.tabs.onDetached.emit(100, { oldWindowId: 20 });
+                if (fault === 'origin-removed') f.api.windows.onRemoved.emit(10);
+                if (fault === 'pinned') c.update({ pinned: true });
+                if (fault === 'split') c.update({ splitViewId: 0 });
+                if (fault === 'same-marker-reload') { c.commit(); c.complete(); c.update({ url: expected, status: 'loading' }); }
+            }
+        };
+        await assert.rejects(f.open(), { code: 'UNCERTAIN_RESULT' }); c.assertNoWeb();
+    });
+}
+
+test('authority revoked while waiting is re-read after readiness and prevents the only web dispatch', async () => {
+    const c = loadingControllerFixture(), { f } = c, get = f.api.tabs.get;
+    let authorized = true, guards = 0;
+    f.api.tabs.get = async id => {
+        const result = await get(id);
+        if (id === 100 && result.status === 'loading') { authorized = false; c.commit(); c.complete(); }
+        return result;
+    };
+    await assert.rejects(f.run(() => f.store.openUnlocked({ url, originWindowId: 10 }, { beforeMutation: async () => {
+        guards++; if (!authorized) throw Object.assign(Error('Pairing revoked'), { code: 'UNAUTHORIZED' });
+    } })), { code: 'UNCERTAIN_RESULT' });
+    assert.equal(guards, 3); c.assertNoWeb();
+});
+
+for (const change of [{ url: 'same-marker' }, { status: 'loading' }, { pendingUrl: 'https://elsewhere.test/' }]) {
+    test('completed startup hands off into unchanged strict fencing through the last authority await', async () => {
+        const c = loadingControllerFixture(), { f } = c, set = f.api.storage.session.set;
+        f.api.storage.session.set = async patch => { await set(patch); if (patch[KEY].records[0].phase === 'opening' && patch[KEY].records[0].windowId !== null) { c.commit(); c.complete(); } };
+        let guards = 0;
+        await assert.rejects(f.run(() => f.store.openUnlocked({ url, originWindowId: 10 }, { beforeMutation: async () => {
+            if (++guards === 4) c.update(change.url === 'same-marker' ? { url: f.tabs.get(100).url } : change);
+        } })), { code: 'UNCERTAIN_RESULT' });
+        assert.equal(guards, 4); c.assertNoWeb();
+    });
+}
+
+test('readiness timeout during held native read permanently prevents late web creation and restart replay', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const c = loadingControllerFixture(), { f } = c, get = f.api.tabs.get, readStarted = heldOperation(), held = heldOperation();
+    f.api.tabs.get = async id => { if (id === 100) { readStarted.resolve(); return held.promise; } return get(id); };
+    const opening = f.open(), rejected = assert.rejects(opening, { code: 'UNCERTAIN_RESULT' });
+    await readStarted.promise; t.mock.timers.tick(5000); await rejected; c.assertNoWeb();
+    const tab = f.tabs.get(100); Object.assign(tab, { url: tab.pendingUrl, pendingUrl: '', status: 'complete' });
+    held.resolve(clone(tab)); await Promise.resolve(); await Promise.resolve(); c.assertNoWeb();
+    f.api.tabs.get = get; await f.makeStore().initialize();
+    assert.equal((await f.store.listUnlocked())[0].phase, 'uncertain'); c.assertNoWeb();
+});
+
+test('adverse event during held controller journal causes no unhandled readiness rejection or later create', async () => {
+    const c = loadingControllerFixture(), { f } = c, set = f.api.storage.session.set, held = heldOperation(), journalStarted = heldOperation();
+    f.api.storage.session.set = async patch => {
+        await set(patch);
+        if (patch[KEY].records[0].phase === 'opening' && patch[KEY].records[0].windowId !== null) { journalStarted.resolve(); await held.promise; }
+    };
+    const opening = f.open(), rejected = assert.rejects(opening, { code: 'UNCERTAIN_RESULT' });
+    await journalStarted.promise; c.update({ url: 'https://elsewhere.test/' });
+    await new Promise(resolve => setImmediate(resolve)); held.resolve(); await rejected; c.assertNoWeb();
+});
+
+test('controller journal failure clears startup observation and never retries or creates the web page', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const c = loadingControllerFixture(), { f } = c, set = f.api.storage.session.set;
+    f.api.storage.session.set = async patch => {
+        if (patch[KEY].records[0].windowId !== null) throw Error('Journal unavailable');
+        return set(patch);
+    };
+    await assert.rejects(f.open(), { code: 'UNCERTAIN_RESULT' });
+    assert.equal(mutations(f).filter(call => call[0] === 'tabCreate').length, 0); c.assertClean();
+    t.mock.timers.tick(10000); c.assertClean();
+    f.api.storage.session.set = set; await f.makeStore().initialize();
+    assert.equal((await f.store.listUnlocked())[0].phase, 'uncertain');
+    assert.equal(mutations(f).filter(call => call[0] === 'windowCreate').length, 1);
+});
+
+test('an event at strict-fence installation cannot escape the overlapping startup observer', async () => {
+    const c = loadingControllerFixture(), { f } = c, set = f.api.storage.session.set;
+    f.api.storage.session.set = async patch => {
+        await set(patch);
+        if (patch[KEY].records[0].phase === 'opening' && patch[KEY].records[0].windowId !== null) { c.commit(); c.complete(); }
+    };
+    const add = f.api.tabs.onRemoved.addListener; let installations = 0;
+    f.api.tabs.onRemoved.addListener = listener => {
+        add(listener);
+        // Opening fence, startup observer, then strict web fence. At this instant
+        // the strict fence has not yet attached its onUpdated listener.
+        if (++installations === 3) c.update({ url: f.tabs.get(100).url, status: 'loading' });
+    };
+    await assert.rejects(f.open(), { code: 'UNCERTAIN_RESULT' });
+    assert.equal(installations, 3); c.assertNoWeb();
 });

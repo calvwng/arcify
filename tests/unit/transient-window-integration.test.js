@@ -40,7 +40,7 @@ function fixture() {
         windows: { onRemoved: event(), async get(id) { if (!windows.has(id)) throw new Error('closed window'); return copy(windows.get(id)); },
             async getAll() { return [...windows.values()].map(window => ({ ...copy(window), tabs: copy([...tabs.values()].filter(tab => tab.windowId === window.id)) })); },
             async create(options) { mutations.push(['windowCreate', copy(options)]); const window = { id: nextWindow++, type: 'normal', incognito: false };
-                windows.set(window.id, window); const controller = { id: nextId++, windowId: window.id, url: options.url, index: 0, groupId: -1, pinned: false, incognito: false };
+                windows.set(window.id, window); const controller = { id: nextId++, windowId: window.id, url: options.url, status: 'complete', index: 0, groupId: -1, pinned: false, incognito: false };
                 tabs.set(controller.id, controller);
                 // Realistic ordering: onCreated happens before windows.create resolves.
                 api.tabs.onCreated.emit({ ...controller, url: '', pendingUrl: options.url });

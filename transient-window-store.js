@@ -1,5 +1,6 @@
 import { assertNotNativeSplit } from './native-split-safety.js';
 import { createTransientOpenDiagnostic } from './transient-window-diagnostics.js';
+import { observeInitialTransientController } from './transient-controller-readiness.js';
 
 export const TRANSIENT_WINDOW_SESSION_KEY = 'transientWindowSession';
 const VERSION = 1, MAX_RECORDS = 128, MAX_MEMBERS = 2048, MAX_TOTAL_MEMBERS = 8192;
@@ -378,25 +379,36 @@ export function createTransientWindowStore({ api = chrome } = {}) {
             if (!nativeId(controller?.id) || controller.windowId !== created.id || markerToken(controller) !== token
                 || entry.windowId !== null && (entry.windowId !== created.id || entry.controllerTabId !== controller.id)) throw uncertain();
             entry.windowId = created.id; entry.controllerTabId = controller.id; include(entry, controller.id); changed();
-            // Journal exact returned controller/window IDs before any web tab.
-            diagnostic?.stage('controller-journal'); await save();
-            const webFence = fence([entry.controllerTabId], [request.originWindowId, entry.windowId], entry.controllerTabId, null, diagnostic, 'web');
+            // Cover the first marker commit before the first post-create yield.
+            // A loading controller is not yet a navigation-stable authority.
+            const startup = observeInitialTransientController({ api, controller, windowId: entry.windowId,
+                originWindowId: request.originWindowId, marker: marker(token), diagnostic });
             let page;
             try {
-                diagnostic?.stage('authority-before-web-reads'); await beforeMutation();
-                diagnostic?.stage('origin-before-web'); await origin();
-                diagnostic?.stage('window-before-web'); await getWindow(entry.windowId);
-                diagnostic?.stage('controller-before-web'); await getController(entry, diagnostic);
-                diagnostic?.stage('authority-before-web-dispatch'); await beforeMutation();
-                diagnostic?.stage('web-fence'); webFence.assert();
-                diagnostic?.stage('health-before-web'); assertHealthy();
-                diagnostic?.stage('phase-before-web');
-                if (entry.phase !== 'opening' || windowKnown(request.originWindowId)) throw uncertain();
-                webFence.stop();
-                diagnostic?.stage('create-web-page');
-                try { page = await api.tabs.create({ windowId: entry.windowId, url: request.url, active: true, pinned: false }); }
-                catch (cause) { diagnostic?.rejected(cause, 'web-create-rejected'); throw uncertain(); }
-            } finally { webFence.stop(); }
+                // Journal exact returned controller/window IDs before any web tab.
+                diagnostic?.stage('controller-journal'); await save();
+                diagnostic?.stage('controller-initial-readiness'); await startup.wait();
+                // Synchronous overlap: no event or awaited read can fall between
+                // startup observation and the unchanged strict navigation fence.
+                const webFence = fence([entry.controllerTabId], [request.originWindowId, entry.windowId], entry.controllerTabId, null, diagnostic, 'web');
+                try {
+                    startup.assert(); startup.stop();
+                    diagnostic?.stage('controller-ready-strict-fence');
+                    diagnostic?.stage('authority-before-web-reads'); await beforeMutation();
+                    diagnostic?.stage('origin-before-web'); await origin();
+                    diagnostic?.stage('window-before-web'); await getWindow(entry.windowId);
+                    diagnostic?.stage('controller-before-web'); await getController(entry, diagnostic);
+                    diagnostic?.stage('authority-before-web-dispatch'); await beforeMutation();
+                    diagnostic?.stage('web-fence'); webFence.assert();
+                    diagnostic?.stage('health-before-web'); assertHealthy();
+                    diagnostic?.stage('phase-before-web');
+                    if (entry.phase !== 'opening' || windowKnown(request.originWindowId)) throw uncertain();
+                    webFence.stop();
+                    diagnostic?.stage('create-web-page');
+                    try { page = await api.tabs.create({ windowId: entry.windowId, url: request.url, active: true, pinned: false }); }
+                    catch (cause) { diagnostic?.rejected(cause, 'web-create-rejected'); throw uncertain(); }
+                } finally { webFence.stop(); }
+            } finally { startup.stop(); }
             diagnostic?.stage('validate-created-page');
             if (nativeId(page?.id) && page.id !== entry.controllerTabId) { entry.tabId = page.id; include(entry, page.id); }
             if (!nativeId(entry.tabId) || page.windowId !== entry.windowId) throw uncertain();
