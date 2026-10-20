@@ -1,3 +1,4 @@
+import { assertNotTransient } from './transient-safety.js';
 import { observeArchiveCreate } from './archive-create-settlement.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
@@ -124,13 +125,14 @@ export class ArchiveStore {
         await chrome.storage.local.set({ [ARCHIVE_KEY]: entries.filter(value => value.entryId !== entry.entryId) });
         return { entryId: entry.entryId };
     }
-    async addUnlocked(data) {
+    async addUnlocked(data, { beforeWrite = async () => {} } = {}) {
         if (!record(data) || !data.url || !data.name || !data.spaceId || isStartupLauncherUrl(data.url)) return null;
         const entries = await this.listUnlocked();
         const existing = entries.find(entry => entry.url === data.url);
         if (existing) return { entry: existing, added: false };
         const entry = { ...copy(data), entryId: crypto.randomUUID(), archivedAt: Date.now() };
         const next = [...entries, entry].sort((a, b) => b.archivedAt - a.archivedAt).slice(0, 100);
+        await beforeWrite();
         await chrome.storage.local.set({ [ARCHIVE_KEY]: next });
         return { entry, added: true };
     }
@@ -141,8 +143,10 @@ export class ArchiveStore {
         return matches[0];
     }
     async window(windowId) {
+        assertNotTransient(this.store, { windowId });
         if (!nativeId(windowId)) stale();
         const window = await chrome.windows.get(windowId);
+        assertNotTransient(this.store, { windowId });
         if (window?.id !== windowId || window.type !== 'normal' || window.incognito) stale();
     }
     async rootUnlocked(space) {
@@ -161,6 +165,7 @@ export class ArchiveStore {
         const active = tabs.filter(tab => tab.windowId === windowId && tab.active && !tab.incognito);
         if (active.length !== 1) stale();
         const tab = active[0];
+        assertNotTransient(this.store, { windowId, tab });
         const context = { windowId, spaceId: space.id, bookmarkFolderId: space.bookmarkFolderId,
             sourceTabId: tab.id, sourceUrl: tab.url || tab.pendingUrl || '' };
         if (tab.pendingUrl && tab.pendingUrl !== context.sourceUrl) stale();
@@ -169,12 +174,15 @@ export class ArchiveStore {
         return context;
     }
     async viewUnlocked(windowId) {
+        await this.window(windowId);
         const entries = await this.listUnlocked(), context = await this.contextUnlocked(windowId);
         return { context, entries: entries.map(entry => ({ entry, bookmarkFolderId: this.store.spaces.find(space => space.id === entry.spaceId)?.bookmarkFolderId || null })) };
     }
     async targetUnlocked(request, tabId = null, { assigned = false, beforeMutation = async () => {}, settlement = null } = {}) {
         return fencedArchiveRead(request, async () => {
             settlement?.assert();
+            assertNotTransient(this.store, { windowId: request.windowId, tabId: request.context?.sourceTabId });
+            assertNotTransient(this.store, { tabId });
             if (!record(request.context) || request.context.windowId !== request.windowId) stale();
             const entry = this.resolve(await this.listUnlocked(), request.expected);
             const space = this.space(entry.spaceId, request.bookmarkFolderId);
@@ -188,12 +196,14 @@ export class ArchiveStore {
             await beforeMutation();
             const tabs = await chrome.tabs.query({});
             const source = tabs.filter(tab => tab.windowId === request.windowId && tab.active);
+            assertNotTransient(this.store, { windowId: request.windowId, tab: source[0] });
             if (source.length !== 1 || source[0].id !== request.context.sourceTabId || source[0].incognito
                 || (source[0].url || source[0].pendingUrl || '') !== request.context.sourceUrl
                 || source[0].pendingUrl && source[0].pendingUrl !== request.context.sourceUrl
                 || this.store.active[request.windowId] !== request.context.spaceId) stale();
             const tab = tabId ? tabs.find(tab => tab.id === tabId) : null;
             if (tabId) {
+                assertNotTransient(this.store, { windowId: request.windowId, tab });
                 if (!tab || tab.windowId !== request.windowId || tab.pinned || tab.incognito
                     || this.store.isGlobalTab(tab) || isStartupLauncherTab(tab) || binding?.bookmarkId) stale();
                 assertNotNativeSplit(tab);
@@ -241,6 +251,9 @@ export class ArchiveStore {
     async reopenUnlocked(request, { beforeMutation = async () => {} } = {}) {
         await beforeMutation();
         if (!record(request) || !id(request.requestId) || !record(request.expected) || !nativeId(request.windowId)) stale();
+        assertNotTransient(this.store, { windowId: request.windowId, tabId: request.context?.sourceTabId });
+        await this.window(request.windowId);
+        assertNotTransient(this.store, { windowId: request.windowId, tabId: request.context?.sourceTabId });
         const sessionId = await this.sessionUnlocked();
         let claims = await this.claimsUnlocked();
         const previous = id(request.expected.entryId) && claims[request.expected.entryId];
@@ -325,6 +338,7 @@ export class ArchiveStore {
                     await this.contextUnlocked(request.windowId, request.context);
                     await this.rootUnlocked(space);
                     const live = await chrome.tabs.get(tab.id);
+                    assertNotTransient(this.store, { windowId: request.windowId, tab: live });
                     if (!live || live.windowId !== request.windowId || live.incognito || live.pinned || this.store.isGlobalTab(live)) stale();
                     assertNotNativeSplit(live);
                     settlement?.verify(live);
@@ -347,6 +361,7 @@ export class ArchiveStore {
                     await beforeMutation();
                     await this.contextUnlocked(request.windowId, focusRequest.context);
                     const live = await chrome.tabs.get(tab.id);
+                    assertNotTransient(this.store, { windowId: request.windowId, tab: live });
                     if (!live || live.windowId !== request.windowId || live.incognito || live.pinned || this.store.isGlobalTab(live)) stale();
                     assertNotNativeSplit(live);
                 }, tab.id);
@@ -360,6 +375,7 @@ export class ArchiveStore {
                     await beforeMutation();
                     await this.contextUnlocked(request.windowId, activatedRequest.context);
                     const live = await chrome.tabs.get(tab.id);
+                    assertNotTransient(this.store, { windowId: request.windowId, tab: live });
                     if (!live || live.windowId !== request.windowId || !live.active || live.incognito || live.pinned || this.store.isGlobalTab(live)) stale();
                     assertNotNativeSplit(live);
                 }, tab.id);
@@ -387,10 +403,12 @@ export class ArchiveStore {
     async archiveUnlocked(request, { automatic = false, protectedUrlKeys = new Set() } = {}) {
         const resolve = async () => {
             const { tabId, windowId, spaceId, bookmarkFolderId, url } = request;
+            assertNotTransient(this.store, { windowId, tabId });
             await this.window(windowId);
             const space = this.space(spaceId, bookmarkFolderId); await this.rootUnlocked(space);
             const bindings = await Utils.getPinnedTabStates();
             const tab = await chrome.tabs.get(tabId), owners = locations(this.store, tabId);
+            assertNotTransient(this.store, { windowId, tab });
             if (!tab || tab.id !== tabId || tab.windowId !== windowId || tab.url !== url || tab.incognito || tab.pinned
                 || this.store.isGlobalTab(tab) || isStartupLauncherTab(tab) || owners.length !== 1 || owners[0].space.id !== spaceId) stale();
             assertNotNativeSplit(tab);
@@ -399,7 +417,7 @@ export class ArchiveStore {
             return tab;
         };
         const tab = await resolve();
-        const result = await this.addUnlocked({ url: tab.url, name: tab.title || tab.url, spaceId: request.spaceId });
+        const result = await this.addUnlocked({ url: tab.url, name: tab.title || tab.url, spaceId: request.spaceId }, { beforeWrite: resolve });
         if (!result) return { archived: false };
         await resolve();
         await chrome.tabs.remove(tab.id);

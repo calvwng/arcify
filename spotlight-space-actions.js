@@ -16,7 +16,7 @@ const currentUrl = tab => tab?.url || tab?.pendingUrl || '';
 // not a content tab to pin or infer a previous-page action from.
 export const isBrowserNewTab = url => ['chrome://newtab', 'chrome://newtab/'].includes(url.split(/[?#]/)[0]);
 const safeLive = (store, tab) => tab && !tab.incognito && !tab.pinned && !hasNativeSplit(tab)
-    && !store.isGlobalTab?.(tab.id) && !isStartupLauncherTab(tab) && !isPracticeUrl(currentUrl(tab))
+    && !store.isTransientTab?.(tab) && !store.isGlobalTab?.(tab.id) && !isStartupLauncherTab(tab) && !isPracticeUrl(currentUrl(tab))
     && !isBrowserNewTab(currentUrl(tab)) && isSafeUrl(currentUrl(tab)) && (!tab.pendingUrl || tab.pendingUrl === currentUrl(tab));
 const locations = (store, id) => store.spaces.flatMap(space => ['temporaryTabs', 'spaceBookmarks'].flatMap(section =>
     (space[section] || []).flatMap(member => member === id ? [{ space, section }] : [])));
@@ -31,7 +31,7 @@ function selectedSpace(store, windowId, expected = null) {
 async function readRoot(store, windowId, expected) {
     const space = selectedSpace(store, windowId, expected);
     const window = await chrome.windows.get(windowId);
-    if (window?.id !== windowId || window.type !== 'normal' || window.incognito) throw stale();
+    if (window?.id !== windowId || window.type !== 'normal' || window.incognito || store.isTransientWindow?.(window.id)) throw stale();
     const folder = await getSpaceBookmarkFolder(space);
     // A name-based lookup may not choose among duplicate Arcify roots.
     const roots = (await chrome.bookmarks.search({ title: 'Arcify' })).filter(node => !node.url);
@@ -166,7 +166,7 @@ function createActionGuard(store, request, beforeMutation) {
             else if (!same(linkedCopies, copyIdentity)) throw stale();
             for (const windowId of new Set(linked.map(tab => tab.windowId))) {
                 const window = await chrome.windows.get(windowId);
-                if (window?.id !== windowId || window.type !== 'normal' || window.incognito) throw stale();
+                if (window?.id !== windowId || window.type !== 'normal' || window.incognito || store.isTransientWindow?.(window.id)) throw stale();
             }
         }
         await beforeMutation();

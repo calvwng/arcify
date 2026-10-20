@@ -1,3 +1,4 @@
+import { assertNotTransient, isTransientTab } from './transient-safety.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { assertNotNativeSplit, assertNativeSplitMembershipPreserved } from './native-split-safety.js';
@@ -44,10 +45,14 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             throw new Error('Choose 1–100 ordinary Today tabs and another existing Space. Nothing was moved.');
         }
         const { windowId, spaceId, bookmarkFolderId, destinationSpaceId, destinationBookmarkFolderId, inverted, entries } = request;
+        assertNotTransient(store, { windowId });
+        for (const entry of entries) assertNotTransient(store, { tabId: entry.tabId });
         const ids = entries.map(entry => entry.tabId), selected = new Set(ids);
         const batch = { total: ids.length, completed: [], remaining: [...ids], uncertain: false, destinationSpaceId };
         let staged = false, writeAttempted = false, beforeSpaces, beforeRanks, beforeQueue, expectedRanks, expectedSourceIds, expectedTargetIds;
         const getSpaces = () => {
+            assertNotTransient(store, { windowId });
+            for (const entry of entries) assertNotTransient(store, { tabId: entry.tabId });
             const source = store.spaces.filter(space => space.id === spaceId);
             const target = store.spaces.filter(space => space.id === destinationSpaceId);
             if (source.length !== 1 || target.length !== 1 || source[0].bookmarkFolderId !== bookmarkFolderId ||
@@ -59,7 +64,7 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             return { source: source[0], target: target[0] };
         };
         const validLive = (tab, entry, bindings) => tab?.id === entry.tabId && tab.windowId === windowId && !tab.incognito && !tab.pinned &&
-            !isStartupLauncherTab(tab) && !store.isGlobalTab?.(tab.id) && !store.isGlobalTab?.(tab) &&
+            !isStartupLauncherTab(tab) && !isTransientTab(store, tab) && !store.isGlobalTab?.(tab.id) && !store.isGlobalTab?.(tab) &&
             !bindings[tab.id]?.bookmarkId && !store.provisional?.has(tab.id) && !store.recoveryCandidates?.has(tab.id) &&
             tab.url === entry.url && (!tab.pendingUrl || tab.pendingUrl === entry.url);
         async function validate(owner = spaceId) {
@@ -76,6 +81,7 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             getSpaces();
             for (const entry of entries) {
                 const matches = tabs.filter(tab => tab.id === entry.tabId), tab = matches[0];
+                assertNotTransient(store, { windowId, tab });
                 assertNotNativeSplit(tab);
                 if (matches.length !== 1 || !validLive(tab, entry, bindings) || !ownsToday(store.spaces, owner, entry.tabId)) throw changed();
             }
@@ -83,6 +89,8 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             const ordered = current[owner === spaceId ? 'source' : 'target'].temporaryTabs.filter(id => selected.has(id));
             if (!sameIds(inverted ? [...ordered].reverse() : ordered, ids)) throw changed();
             await beforeMutation({ membershipStaged: staged, writeAttempted });
+            getSpaces();
+            for (const tab of tabs.filter(tab => selected.has(tab.id))) assertNotTransient(store, { windowId, tab });
             return tabs;
         }
         try {

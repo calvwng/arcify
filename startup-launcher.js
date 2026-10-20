@@ -12,6 +12,7 @@ const RETRY_WINDOW_MS = 30000;
 // for a real click in that tab. Session storage survives service-worker suspension.
 export function registerStartupLauncher(browser = globalThis.chrome, {
     setTimer = setTimeout, clearTimer = clearTimeout, now = Date.now,
+    beforeWindowRead = async () => {}, isExcludedWindow = () => false,
     reportError = error => console.warn('Arcify startup launcher:', error),
     prepareSuggestion = tab => prepareStartupSuggestion(browser, tab),
     offerSuggestion = context => offerStartupSuggestion(browser, context)
@@ -34,8 +35,11 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
     const readState = async () => (await browser.storage.session.get(STARTUP_LAUNCHER_SESSION))[STARTUP_LAUNCHER_SESSION];
     const writeState = state => browser.storage.session.set({ [STARTUP_LAUNCHER_SESSION]: state });
     const isEnabled = async () => (await browser.storage.sync.get({ [STARTUP_LAUNCHER_SETTING]: false }))[STARTUP_LAUNCHER_SETTING] === true;
-    const normalWindows = async () => (await browser.windows.getAll({ windowTypes: ['normal'] }))
-        .filter(window => window.type === 'normal' && !window.incognito);
+    const normalWindows = async () => {
+        await beforeWindowRead();
+        return (await browser.windows.getAll({ windowTypes: ['normal'] }))
+            .filter(window => window.type === 'normal' && !window.incognito && !isExcludedWindow(window.id));
+    };
     const clearWake = async () => {
         clearTimer(timer);
         timer = undefined;

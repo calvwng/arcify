@@ -36,11 +36,18 @@ export function isFavoriteUrl(value) {
     try { return ['http:', 'https:'].includes(new URL(value).protocol); }
     catch { return false; }
 }
+export function isTransientUrl(value) {
+    if (typeof value !== 'string' || value.length > 8192 || !/^https?:\/\/[^/]/i.test(value) || /[\s\\\x00-\x1f\x7f]/.test(value)) return false;
+    try {
+        const url = new URL(value);
+        return ['http:', 'https:'].includes(url.protocol) && Boolean(url.hostname) && !url.username && !url.password;
+    } catch { return false; }
+}
 const commandFields = {
     splitActionContext: ['tabId'], createSplitView: ['context', 'target'], endSplitView: ['context'],
     archiveContext: ['tabId'], reopenArchivedTab: ['context', 'viewId', 'entryId'],
     hello: [], snapshot: [], invalidate: [], activateSpace: ['spaceId'], activateTab: ['tabId'],
-    openTab: ['url', 'spaceId'], navigateTab: ['tabId', 'url'],
+    openTransient: ['url'], openTab: ['url', 'spaceId'], navigateTab: ['tabId', 'url'],
     openBookmark: ['spaceId', 'bookmarkId'], openFavorite: ['favoriteId'], launch: ['mode'], startupSuggestion: ['tabId'],
     actionContext: ['tabId'], openSettings: ['context'], createSpaceFolder: ['context', 'title'],
     pinCurrentTab: ['context'], removeCurrentPin: ['context', 'confirmed'],
@@ -145,6 +152,7 @@ export function validateRequest(message, commands) {
         || message.command === 'openTab' && message.spaceId !== undefined && !isId(message.spaceId)
         || ['activateTab', 'navigateTab', 'startupSuggestion', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext', 'splitActionContext'].includes(message.command) && !isTabId(message.tabId)
         || ['openTab', 'navigateTab'].includes(message.command) && !isSafeUrl(message.url)
+        || message.command === 'openTransient' && !isTransientUrl(message.url)
         || message.command === 'openBookmark' && !isId(message.bookmarkId)
         || message.command === 'openFavorite' && !isId(message.favoriteId)
         || message.command === 'launch' && !['current-tab', 'new-tab'].includes(message.mode))

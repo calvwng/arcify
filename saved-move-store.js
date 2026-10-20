@@ -1,3 +1,4 @@
+import { assertNotTransient } from './transient-safety.js';
 import { getSpaceBookmarkFolder, getSpaceBookmarkTree } from './space-bookmarks.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { Utils } from './utils.js';
@@ -65,12 +66,15 @@ async function verifySpaces(spaces, journal, { active = null } = {}) {
 }
 function leafMap(journal) { return new Map(journal.roots.flatMap(flatten).filter(node => node.url !== null).map(node => [node.id, node])); }
 async function readLive(store, journal, spaces, { recovering = false, moved = [] } = {}) {
+    assertNotTransient(store, { windowId: journal.request.windowId });
+    for (const entry of journal.request.entries) assertNotTransient(store, { tabId: entry.tabId });
     const leaves = leafMap(journal), windows = new Map();
     const describe = (tabs, bindings) => {
         const copies = [];
         for (const tab of tabs) {
             const binding = bindings[tab.id], bookmark = leaves.get(binding?.bookmarkId);
             if (!bookmark || store.isGlobalTab?.(tab) || store.isGlobalTab?.(tab.id)) continue;
+            assertNotTransient(store, { tab });
             assertNotNativeSplit(tab);
             const expected = moved.includes(journal.rootByBookmark[bookmark.id]) ? journal.request.destinationSpaceId : journal.request.spaceId;
             if (!positive(tab.id) || tab.pinned || tab.incognito || isStartupLauncherTab(tab) || binding.pinnedUrl !== bookmark.url ||
@@ -85,6 +89,7 @@ async function readLive(store, journal, spaces, { recovering = false, moved = []
     for (const [windowId, window] of windows) if (window?.id !== windowId || window.type !== 'normal' || window.incognito) fail();
     const bindings = await Utils.getPinnedTabStates(), tabs = await chrome.tabs.query({});
     const copies = describe(tabs, bindings);
+    assertNotTransient(store, { windowId: journal.request.windowId });
     if (!same(copies, initial)) fail();
     if (journal.live) {
         // Closed captured copies do not authorize replacements. The final native
@@ -271,6 +276,8 @@ export async function recoverSavedMove(store) {
 export function moveSavedItemsToSpace(store, request) {
     return store.run(() => withSavedMoveLock(() => Utils._serializePinnedStateOp(async () => {
         validateRequest(request);
+        assertNotTransient(store, { windowId: request.windowId });
+        for (const entry of request.entries) assertNotTransient(store, { tabId: entry.tabId });
         const existing = (await chrome.storage.local.get(SAVED_MOVE_JOURNAL_KEY))[SAVED_MOVE_JOURNAL_KEY];
         if (existing) blocked();
         const journal = { version: 1, operationId: crypto.randomUUID(), phase: 'prepared', request: clone(request) };
@@ -313,6 +320,7 @@ export function moveSavedItemsToSpace(store, request) {
         const session = await chrome.storage.session.get(SESSION_KEY);
         if (session[SESSION_KEY] !== undefined && !id(session[SESSION_KEY])) fail('Saved-move session tracking is invalid. Reload the extension before retrying.');
         journal.sessionToken = session[SESSION_KEY] || crypto.randomUUID();
+        await readLive(store, journal, store.spaces);
         if (!session[SESSION_KEY]) await chrome.storage.session.set({ [SESSION_KEY]: journal.sessionToken });
         let prepared = false, attempted = false;
         const validate = async (expected = [], moved = []) => {

@@ -22,7 +22,8 @@ function fixture() {
         sidePanel: { setPanelBehavior: async () => {} }, commands: { onCommand: event },
         alarms: { onAlarm: event, create: async (...args) => alarms.push(args) },
         storage: { onChanged: event, local: { get: async () => local, set: async () => {} } },
-        tabs: { onActivated: event, onUpdated: event, onRemoved: event, query: async () => tabs,
+        windows: { onRemoved: event },
+        tabs: { onCreated: event, onActivated: event, onUpdated: event, onRemoved: event, query: async () => tabs,
             get: async id => tabs.find(tab => tab.id === id), remove: async id => removed.push(id) },
         bookmarks: { search: async () => [], getChildren: async () => structuredClone(bookmarkNodes),
             create: async data => { const node = { ...data, id: 'created' }; bookmarkCreates.push(node); bookmarkNodes.push(node); return node; } }
@@ -32,8 +33,11 @@ function fixture() {
     const context = { chrome, console, createNativeSplitWriteGuard, enqueueBookmarkOperation, registerTourMessages() {}, registerBookmarkListeners() {}, registerSpotlightBridge() {},
         registerStartupLauncher() { launcherRegistered++; },
         isStartupLauncherTab: tab => isStartupLauncherTab(tab, chrome), ownerOf, projectLiveTabTitles, isProtectedFavorite: () => false,
+        createTransientWindowStore: () => ({ initialize: async () => {}, observe() {}, observeRemoved() {}, observeWindowRemoved() {},
+            observeReplacement() {}, observeDetached() {}, flushObservedUnlocked: async () => {}, isExcluded: () => false, isTransientWindow: () => false }),
+        registerTransientControlMessages() {},
         createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTodayMoveMessages() {}, registerSavedMoveMessages() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {}, registerMoveTabWindowMessages() {}, registerArchiveMessages() {},
-        SpaceStore: class { archiveStore = { archiveUnlocked: async request => { archives.push({ url: request.url, spaceId: request.spaceId }); removed.push(request.tabId); } }; spaces = [{ id: 'home', bookmarkFolderId: 'home-folder', spaceBookmarks: [], temporaryTabs: [1, 2] }]; install() {} async run(fn) { return fn(); } isGlobalTab(tab) { return globals.has(tab.id); } async dispatch(message) { actions.push(message); return this.spaces; } },
+        SpaceStore: class { isTransientTab() { return false; } isTransientWindow() { return false; } archiveStore = { archiveUnlocked: async request => { archives.push({ url: request.url, spaceId: request.spaceId }); removed.push(request.tabId); } }; spaces = [{ id: 'home', bookmarkFolderId: 'home-folder', spaceBookmarks: [], temporaryTabs: [1, 2] }]; install() {} async run(fn) { return fn(); } isGlobalTab(tab) { return globals.has(tab.id); } async dispatch(message) { actions.push(message); return this.spaces; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: true, autoArchiveIdleMinutes: 10 }),
             getPinnedTabStates: async () => ({}), addArchivedTab: async tab => archives.push(tab) },
         Logger: { log() {}, error(error) { throw error; } } };

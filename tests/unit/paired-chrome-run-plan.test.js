@@ -7,6 +7,8 @@ import { createPairedChromeRunReport, beginPairedChromeCase, assertPairedChromeR
 
 const smoke = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
 const workflow = readSourceText(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url));
+const littleArcLegacyGate = "    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'\n";
+const withoutLittleArcGate = source => source.replace(littleArcLegacyGate, '');
 const namesBlock = smoke.match(/const stepNames = \[([\s\S]*?)\n\];/)[1];
 const names = [...namesBlock.matchAll(/^\s*'([^']*)',?$/gm)].map(match => match[1]);
 const fullOrder = [...Array.from({ length: 32 }, (_, index) => index), 33, 34, 35, 37, 38, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 36, 32];
@@ -16,7 +18,8 @@ const recoveryActionsOrder = [0, 1, 2, 48, 49];
 const extendedActionsOrder = [0, 1, 2, 50, 51];
 const archiveActionsOrder = [0, 1, 2, 52, 53];
 const archiveReopenOrder = [0, 1, 2, 53];
-const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39, 54]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder], ['archive-actions', archiveActionsOrder], ['archive-reopen', archiveReopenOrder]];
+const littleArcOrder = [0, 1, 2, 55];
+const allPlans = [['full', fullOrder], ['favorite-lifecycle', lifecycleOrder], ['native-split', [0, 1, 2, 39, 54]], ['appearance-actions', appearanceActionsOrder], ['recovery-actions', recoveryActionsOrder], ['extended-actions', extendedActionsOrder], ['archive-actions', archiveActionsOrder], ['archive-reopen', archiveReopenOrder], ['little-arc', littleArcOrder]];
 const digest = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex');
 const indices = report => report.expectedCases.map(item => item.caseIndex);
 const stepIndices = source => [...source.matchAll(/await step\(stepNames\[(\d+)\]/g)].map(match => Number(match[1]));
@@ -49,6 +52,17 @@ test('Favorite lifecycle explicitly reports only setup, native close/reload, the
     assert.match(report.checks[3].name, /native Ctrl\+W/);
     assert.match(report.checks[4].name, /Full same-profile browser restart/);
     assert.deepEqual(JSON.parse(JSON.stringify(report)), report);
+});
+
+test('Little Arc is a separate four-case extension-reload plan with an opt-in manual workflow route', () => {
+    const report = createPairedChromeRunReport(names, 'little-arc');
+    assert.equal(report.expectedCaseCount, 4);
+    assert.deepEqual(indices(report), littleArcOrder);
+    assert.match(report.scope, /explicit same-window recovery after extension reload/);
+    assert.match(report.scope, /not full-browser restart or full-suite acceptance/);
+    assert(!indices(createPairedChromeRunReport(names)).includes(55));
+    assert.match(workflow, /ARCIFY_PAIRED_RUN_MODE:\s*little-arc/);
+    assert.match(smoke, /report\.runMode === 'little-arc' \? 'test-results\/paired-chrome-little-arc'/);
 });
 
 test('unknown, empty and malformed modes fail closed rather than silently choosing a subset', () => {
@@ -132,10 +146,12 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     const archiveOpenEnd = smoke.indexOf('    } // Native Archive opening remains mandatory in archive-actions.');
     const archiveReopen = smoke.indexOf("    if (report.runMode === 'archive-actions' || report.runMode === 'archive-reopen') {");
     const archiveEnd = smoke.indexOf('    } // Supplemental Archive cases 52–53;');
+    const littleArc = smoke.indexOf("    if (report.runMode === 'little-arc') {");
+    const littleArcEnd = smoke.indexOf('    } // Supplemental Little Arc case 55;');
     const lifecycle = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {");
     assert(firstFull > 0 && firstFull < firstEnd && firstEnd < appearance && appearance < appearanceEnd &&
-        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < extended && extended < extendedEnd && extendedEnd < archive && archive < archiveOpenEnd && archiveOpenEnd < archiveReopen && archiveReopen < archiveEnd && archiveEnd < lifecycle);
-    assert.deepEqual(stepIndices(smoke), [...fullOrder.slice(0, -2), 50, 51, 52, 53, 54, ...fullOrder.slice(-2)], 'Every case definition remains single; the original full case order is unchanged.');
+        appearanceEnd < secondFull && secondFull < secondEnd && secondEnd < actions && actions < actionsEnd && actionsEnd < recovery && recovery < preparation && preparation < recoveryEnd && recoveryEnd < extended && extended < extendedEnd && extendedEnd < archive && archive < archiveOpenEnd && archiveOpenEnd < archiveReopen && archiveReopen < archiveEnd && archiveEnd < littleArc && littleArc < littleArcEnd && littleArcEnd < lifecycle);
+    assert.deepEqual(stepIndices(smoke), [...fullOrder.slice(0, -2), 50, 51, 52, 53, 54, 55, ...fullOrder.slice(-2)], 'Every case definition remains single; the original full case order is unchanged.');
     assert.deepEqual(stepIndices(smoke.slice(0, firstFull)), [0, 1, 2]);
     assert.deepEqual(stepIndices(smoke.slice(firstFull, firstEnd)), Array.from({ length: 29 }, (_, index) => index + 3));
     assert.deepEqual(stepIndices(smoke.slice(appearance, appearanceEnd)), [33]);
@@ -147,6 +163,7 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     assert.deepEqual(stepIndices(smoke.slice(archive, archiveEnd)), [52, 53]);
     assert.deepEqual(stepIndices(smoke.slice(archive, archiveOpenEnd)), [52]);
     assert.deepEqual(stepIndices(smoke.slice(archiveReopen, archiveEnd)), [53]);
+    assert.deepEqual(stepIndices(smoke.slice(littleArc, littleArcEnd)), [55]);
     assert.deepEqual(stepIndices(smoke.slice(lifecycle)), [36, 32]);
     assert.match(smoke, /createPairedChromeRunReport\(stepNames, process\.env\.ARCIFY_PAIRED_RUN_MODE\)/);
     assert.match(smoke, /const check = beginPairedChromeCase\(report, name\)/);
@@ -209,7 +226,7 @@ for (const [mode, order] of allPlans) for (const caseIndex of order) {
 
 test('workflow preserves original jobs and adds independent mandatory fresh-runner acceptance', () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  [a-z-]+:\n|$(?![\s\S]))/gm)];
-    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split', 'recovery-actions', 'extended-actions', 'archive-actions', 'archive-reopen']);
+    assert.deepEqual(jobs.map(match => match[1]), ['paired-chrome', 'favorite-lifecycle', 'appearance-actions', 'native-split', 'recovery-actions', 'extended-actions', 'archive-actions', 'archive-reopen', 'little-arc']);
     const full = jobs[0][2], lifecycle = jobs[1][2], appearanceActions = jobs[2][2], nativeSplit = jobs[3][2], recoveryActions = jobs[4][2], extendedActions = jobs[5][2], archiveActions = jobs[6][2], archiveReopen = jobs[7][2];
     const peerPin = smoke.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
     for (const job of [full, lifecycle, appearanceActions, nativeSplit, recoveryActions, extendedActions, archiveActions, archiveReopen]) {
@@ -244,13 +261,13 @@ test('workflow preserves original jobs and adds independent mandatory fresh-runn
     assert.match(recoveryActions, /name: paired-chrome-recovery-actions-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
     assert.match(recoveryActions, /path: arcify\/test-results\/paired-chrome-recovery-actions\//);
     assert.match(recoveryActions, /timeout-minutes: 20\n/);
-    assert.doesNotMatch(recoveryActions, /vendor-update|native-split-update|retry|if: (?!always\(\))/);
+    assert.doesNotMatch(withoutLittleArcGate(recoveryActions), /vendor-update|native-split-update|retry|if: (?!always\(\))/);
     assert.match(extendedActions, /ARCIFY_PAIRED_RUN_MODE: extended-actions/);
     assert.match(extendedActions, /tee test-results\/paired-chrome-extended-actions\/runner\.log/);
     assert.match(extendedActions, /name: paired-chrome-extended-actions-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
     assert.match(extendedActions, /path: arcify\/test-results\/paired-chrome-extended-actions\//);
     assert.match(extendedActions, /timeout-minutes: 20\n/);
-    assert.doesNotMatch(extendedActions, /vendor-update|native-split-update|retry|if: (?!always\(\))/);
+    assert.doesNotMatch(withoutLittleArcGate(extendedActions), /vendor-update|native-split-update|retry|if: (?!always\(\))/);
     assert.match(workflow, /^permissions:\n  contents: read$/m);
     for (const path of ['scripts/paired-chrome-run-plan.mjs', 'tests/unit/paired-chrome-run-plan.test.js', 'docs/appearance-actions-paired-ci.md', 'docs/recovery-actions-paired-ci.md', 'docs/extended-actions-paired-ci.md']) {
         assert(workflow.includes(`      - '${path}'`), `Changes to ${path} must trigger all jobs.`);
@@ -331,7 +348,7 @@ test('existing callbacks retain their reviewed bytes except exact additive route
             else definitions.set(definition.caseIndex, definition);
         }
     }
-    assert.deepEqual([...definitions.keys()].sort((a, b) => a - b), Array.from({ length: 55 }, (_, index) => index));
+    assert.deepEqual([...definitions.keys()].sort((a, b) => a - b), Array.from({ length: 56 }, (_, index) => index));
     // Normalize only these reviewed additive harness lines. The reviewed case 36 control-window setup
     // is retained in its new receipt; other original bodies/options/names stay unchanged. New wiring has its
     // own executable mocked-adapter tests in paired-chrome-extended-wiring.
@@ -342,6 +359,7 @@ test('existing callbacks retain their reviewed bytes except exact additive route
             .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightSplitFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
+            .replace('            if (serveLittleArcFixture(request, response)) return;\n', '')
             // Only the exact additive case 7 route is normalized; its original callback bytes remain guarded.
             .replace("        await exerciseBookmarkFallback({apiPage:arcifyOptions,spotlightOptions,arcifyOptions,newTabPage,ui,screenshot,poll,fixture,\n            spotlightId,arcifyId,search,sidebarInput,typeUI,clickUI,snapshot,\n            record:async observation=>{report.bookmarkFallback=observation;await saveReport();}});\n", '')
             .replace('        helperNavigation:true,\n', '') }));
@@ -351,7 +369,7 @@ test('existing callbacks retain their reviewed bytes except exact additive route
     assert.equal(digest(names.slice(0, 50)), '82b76b57d9a4a3fcefa59ea4db2f52af9664a1d5693b2efff89405c32827c36c');
 });
 
-test('all five original workflow jobs retain reviewed bytes and order except the exact peer-pin upgrade', () => {
+test('all five original workflow jobs retain reviewed bytes and order except exact peer-pin and manual Little Arc gate additions', () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  (?:[a-z-]+:|#)|$(?![\s\S]))/gm)];
     const receipts = [
         ['paired-chrome', '804ad3202df17883340f7790dadf5d86e73d8120cbe73f6a22c05856b4c40e52'],
@@ -361,14 +379,15 @@ test('all five original workflow jobs retain reviewed bytes and order except the
         ['recovery-actions', 'ef0ee6ab8d6275b1509f56446bc011c1e10b99c968b459ec8997f2f0ab328c5f']
     ];
     // Only this exact reviewed companion upgrade is excluded from legacy bytes.
-    const legacyPinBytes = source => source.replaceAll('c13511fd36d56358156c10336b8961b7ef95d5bc', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
+    const legacyPinBytes = source => withoutLittleArcGate(source).replaceAll('c13511fd36d56358156c10336b8961b7ef95d5bc', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
     assert.deepEqual(jobs.slice(0, 5).map(match => [match[1], digest(legacyPinBytes(match[0].trimEnd()))]), receipts);
     assert.equal(jobs[5][1], 'extended-actions');
     assert.equal(jobs[6][1], 'archive-actions');
     assert.equal(jobs[7][1], 'archive-reopen');
-    assert.equal(jobs.length, 8);
+    assert.equal(jobs.length, 9);
+    assert.equal(jobs[8][1], 'little-arc');
     // Existing supplemental jobs retain a56bd14 bytes except this exact peer-pin upgrade.
-    const archivePinBytes = source => source.replaceAll('c13511fd36d56358156c10336b8961b7ef95d5bc', 'b510b3dbe8cfae6441fbc55a23ce19de30805a6d');
+    const archivePinBytes = source => withoutLittleArcGate(source).replaceAll('c13511fd36d56358156c10336b8961b7ef95d5bc', 'b510b3dbe8cfae6441fbc55a23ce19de30805a6d');
     assert.equal(digest(archivePinBytes(jobs[5][0].trimEnd())), '0d01f7440c701db284e286566d4acbd7ba3d590e52e01c8e54435a14aa92875c');
     assert.equal(digest(archivePinBytes(jobs[6][0].trimEnd())), 'aefdebbb6af8c3c11e312ecb716bb5d7c172117a9cffd0df638e3002216b6cdc');
     // Normalize only the reviewed additive Split/display watch paths; event/security configuration is unchanged.
@@ -376,9 +395,10 @@ test('all five original workflow jobs retain reviewed bytes and order except the
         'scripts/paired-chrome-spotlight-split.mjs', 'spotlight-split-actions.js',
         'tests/unit/spotlight-split-actions.test.js', 'tests/unit/paired-chrome-spotlight-split.test.js',
         'tests/unit/paired-chrome-split-wiring.test.js', 'scripts/lib/spotlight-pair-split-*.mjs', 'docs/spotlight-split-actions.md'];
-    const originalEvents = addedWatchPaths.reduce((source, path) => source.replace(`      - '${path}'\n`, ''), workflow.slice(0, workflow.indexOf('jobs:')));
+    const originalEvents = addedWatchPaths.reduce((source, path) => source.replace(`      - '${path}'\n`, ''), workflow.slice(0, workflow.indexOf('jobs:')))
+        .replace(/  workflow_dispatch:\n    inputs:[\s\S]*?(?=  pull_request:)/, '  workflow_dispatch:\n');
     assert.equal(digest(originalEvents), '1bc18e330dfd97cfdca18fa5cb05a035dd3061ed1a61e182c82019aee5d1e1d1');
-    // No shared conditions or workflow event/security changes can hide a job.
+    // Only the explicit manual Little Arc selection may suppress legacy jobs; no other shared gates are permitted.
     assert.equal(workflow.match(/^permissions:\n  contents: read$/gm)?.length, 1);
     assert.doesNotMatch(workflow, /pull_request_target:|\bneeds:|continue-on-error:|fail-fast:|strategy:|secrets\.|permissions:\s*write|concurrency:/);
 });

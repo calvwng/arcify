@@ -1,3 +1,4 @@
+import { assertNotTransient } from './transient-safety.js';
 import { Utils } from './utils.js';
 import { getSpaceBookmarkById } from './space-bookmarks.js';
 import { assertNotNativeSplit } from './native-split-safety.js';
@@ -13,6 +14,7 @@ export function moveTabToNewWindow(store, favorites, request) {
     return store.run(async () => {
         if (!request || request.type !== 'moveTabToNewWindow' || !positive(request.tabId) || !positive(request.windowId)
             || Object.keys(request).some(k => !['type', 'windowId', 'tabId', 'spaceId', 'bookmarkFolderId', 'bookmarkId', 'parentId', 'favoriteId'].includes(k))) throw new Error('Select one live tab to move to a new window.');
+        assertNotTransient(store, { windowId: request.windowId, tabId: request.tabId });
         const spaceTarget = request.spaceId !== undefined;
         if (spaceTarget ? !text(request.spaceId) || !text(request.bookmarkFolderId) || request.favoriteId !== undefined
             || request.bookmarkId !== undefined && (!text(request.bookmarkId) || !text(request.parentId))
@@ -21,9 +23,11 @@ export function moveTabToNewWindow(store, favorites, request) {
                 || request.favoriteId !== undefined && !text(request.favoriteId)) throw stale();
         let ownerId = null;
         async function resolve() {
+            assertNotTransient(store, { windowId: request.windowId, tabId: request.tabId });
             const sourceWindow = await chrome.windows.get(request.windowId);
             if (sourceWindow.type !== 'normal' || sourceWindow.incognito) throw stale();
             const tab = await chrome.tabs.get(request.tabId);
+            assertNotTransient(store, { windowId: request.windowId, tab });
             if (tab.id !== request.tabId || tab.windowId !== request.windowId || tab.incognito || isStartupLauncherTab(tab)) throw stale();
             assertNotNativeSplit(tab);
             if (spaceTarget) {
@@ -55,6 +59,7 @@ export function moveTabToNewWindow(store, favorites, request) {
             if (request.bookmarkId ? binding?.bookmarkId !== request.bookmarkId : binding?.bookmarkId) throw stale();
         }
         const last = await chrome.tabs.get(request.tabId);
+        assertNotTransient(store, { windowId: request.windowId, tab: last });
         assertNotNativeSplit(last);
         if (last.windowId !== before.windowId || last.pinned !== before.pinned || last.incognito) throw stale();
         let created;
@@ -64,6 +69,7 @@ export function moveTabToNewWindow(store, favorites, request) {
             if (!positive(created?.id) || created.id === request.windowId || created.type !== 'normal' || created.incognito) throw stale();
             const readDestination = async ({ allowPinChange = false } = {}) => {
                 const tab = await chrome.tabs.get(before.id);
+                assertNotTransient(store, { windowId: created.id, tab });
                 if (tab.id !== before.id || tab.windowId !== created.id || tab.incognito
                     || !allowPinChange && tab.pinned !== before.pinned) throw stale();
                 assertNotNativeSplit(tab);

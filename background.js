@@ -2,7 +2,6 @@ import { registerTourMessages } from './tour-state.js';
 import { registerStartupLauncher } from './startup-launcher.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 registerTourMessages();
-registerStartupLauncher();
 /**
  * Background Service Worker (Manifest V3) - Core extension orchestrator
  *
@@ -31,16 +30,31 @@ import { registerTabMenuMessages } from './tab-menu-actions.js';
 import { registerMoveTabWindowMessages } from './move-tab-new-window.js';
 import { registerTodaySplitMessages } from './today-split-action.js';
 import { createNativeSplitWriteGuard } from './native-split-safety.js';
+import { createTransientWindowStore } from './transient-window-store.js';
+import { registerTransientControlMessages } from './transient-window-actions.js';
 
 const spaceStore = new SpaceStore();
+spaceStore.transientWindows = createTransientWindowStore();
+// Observe native identity before ordinary lifecycle handlers queue adoption.
+chrome.tabs.onCreated.addListener(tab => spaceStore.transientWindows.observe(tab));
+chrome.tabs.onUpdated.addListener((_id, _change, tab) => spaceStore.transientWindows.observe(tab));
+chrome.tabs.onDetached?.addListener((id, info) => spaceStore.transientWindows.observe({ id, windowId: info.oldWindowId }));
+chrome.windows.onRemoved.addListener(id => {
+    spaceStore.transientWindows.observeWindowRemoved(id);
+    spaceStore.run(() => spaceStore.transientWindows.flushObservedUnlocked()).catch(console.error);
+});
 spaceStore.install();
+registerTransientControlMessages(spaceStore);
+registerStartupLauncher(chrome, { beforeWindowRead: () => spaceStore.transientWindows.initialize(),
+    isExcludedWindow: id => spaceStore.isTransientWindow(id) });
 registerArchiveMessages(spaceStore);
 registerTodayFolderMessages(spaceStore);
 registerTodayMoveMessages(spaceStore);
 registerSavedMoveMessages(spaceStore);
 registerTabMenuMessages(spaceStore);
 registerTodaySplitMessages(spaceStore);
-const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity() });
+const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity({ isTransientTab: tab => spaceStore.isTransientTab(tab),
+    isTransientWindow: id => spaceStore.isTransientWindow(id) }) });
 favoriteStore.install();
 registerFavoriteMessages(favoriteStore);
 registerMoveTabWindowMessages(spaceStore, favoriteStore);
@@ -273,7 +287,7 @@ async function runAutoArchiveCheck() {
         const tabsToArchive = [];
 
         for (const tab of tabs) {
-            if (isStartupLauncherTab(tab)) continue;
+            if (isStartupLauncherTab(tab) || spaceStore.isTransientTab(tab)) continue;
             // Skip audible, active, or recently active tabs
             if (tab.audible || tab.active) {
                 await updateTabLastActivity(tab.id); // Update activity for active/audible tabs
@@ -311,7 +325,7 @@ async function runAutoArchiveCheck() {
                 const spaceId = ownerOf(spaceStore.spaces, current.id)?.id;
                 const currentProtectedIds = new Set(spaceStore.spaces.flatMap(space => space.spaceBookmarks));
                 if (!spaceId || current.windowId !== tab.windowId || current.incognito || current.active || current.audible
-                    || isStartupLauncherTab(current) || spaceStore.isGlobalTab(current)
+                    || isStartupLauncherTab(current) || spaceStore.isGlobalTab(current) || spaceStore.isTransientTab(current)
                     || isProtectedFavorite(current, currentProtectedIds, await Utils.getPinnedTabStates(), protectedUrlKeys)) return;
                 const space = spaceStore.spaces.find(space => space.id === spaceId);
                 await spaceStore.archiveStore.archiveUnlocked({ tabId: current.id, windowId: current.windowId,

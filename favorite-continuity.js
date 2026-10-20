@@ -67,7 +67,12 @@ export function validContinuityState(state) {
 
 // Single writer: FavoriteStore invokes these methods while holding SpaceStore's
 // queue. This is a local exact-ID mirror, never a URL-based restore mechanism.
-export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitnessRequest } = {}) {
+export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitnessRequest,
+    isTransientTab = () => false, isTransientWindow = () => false } = {}) {
+    const excluded = tab => Boolean(isTransientTab(tab) || tab && typeof tab === 'object'
+        && (isTransientTab(tab.id) || isTransientWindow(tab.windowId)));
+    const allowedEntry = entry => !isTransientWindow(entry.windowId) && !excluded(entry.tabId);
+    const excludeState = state => ({ ...state, bindings: state.bindings.filter(allowedEntry), attempts: state.attempts.filter(allowedEntry) });
     let current = null, selection = null, recoveredSelection = null, selectionDirty = false, provenIdentity = null;
     const config = async () => {
         const values = await api.storage.local.get([PEER_KEY, PAIRING_GENERATION_KEY]);
@@ -89,6 +94,8 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
     };
     async function save({ state, items, spaceSessionUpdate, selectedContext = selection, beforeWrite = null }, recovery = null) {
         if (!validContinuityState(state)) throw new Error('Invalid exact Favorite continuity state.');
+        state = excludeState(state);
+        if (selectedContext) selectedContext = { ...selectedContext, windows: selectedContext.windows.filter(allowedEntry) };
         if (beforeWrite) await beforeWrite();
         const pairing = await ensureGeneration(await config());
         if (!current || !same(current, pairing) || current.revision >= Number.MAX_SAFE_INTEGER) current = newCurrent(pairing);
@@ -159,12 +166,12 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         const windows = [];
         for (const [key, spaceId] of Object.entries(activeSpaces)) {
             const windowId = Number(key);
-            if (!isWindowId(windowId) || !spaces.some(space => space.id === spaceId)) continue;
+            if (!isWindowId(windowId) || isTransientWindow(windowId) || !spaces.some(space => space.id === spaceId)) continue;
             const candidates = live.filter(tab => tab.windowId === windowId && selectionAnchor(tab));
             const anchor = candidates.find(tab => tab.active) || candidates[0];
             if (!anchor) continue;
             const window = await api.windows.get(windowId);
-            if (window?.id === windowId && window.type === 'normal' && !window.incognito)
+            if (window?.id === windowId && window.type === 'normal' && !window.incognito && selectionAnchor(anchor))
                 windows.push({ windowId, spaceId, tabId: anchor.id });
         }
         const nextSelection = { version: 1, windows: windows.sort((a, b) => a.windowId - b.windowId) };
@@ -178,7 +185,7 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         await save({ state, items, spaceSessionUpdate, selectedContext: nextSelection, beforeWrite });
         selectionDirty = false;
     }
-    const selectionAnchor = tab => tab && !tab.incognito && !isStartupLauncherTab(tab, api)
+    const selectionAnchor = tab => tab && !excluded(tab) && !tab.incognito && !isStartupLauncherTab(tab, api)
         && ![tab.url, tab.pendingUrl].some(url => /^(chrome|moz)-extension:/.test(url || ''));
     async function recoverSelection(spaces) {
         const active = {};
@@ -188,7 +195,7 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
             const tab = live.get(entry.tabId);
             if (!spaces.some(space => space.id === entry.spaceId) || !selectionAnchor(tab) || tab.windowId !== entry.windowId) continue;
             const window = await api.windows.get(entry.windowId);
-            if (window?.id === entry.windowId && window.type === 'normal' && !window.incognito) active[entry.windowId] = entry.spaceId;
+            if (window?.id === entry.windowId && window.type === 'normal' && !window.incognito && selectionAnchor(tab)) active[entry.windowId] = entry.spaceId;
         }
         recoveredSelection = null;
         return active;
@@ -225,9 +232,10 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
                     const live = new Map((await api.tabs.query({})).map(tab => [tab.id, tab]));
                     const windows = new Map();
                     const exact = async entry => {
+                        if (!allowedEntry(entry)) return false;
                         if (entry.tabId === null) return true; // Uncertain create still blocks duplicate retry.
                         const tab = live.get(entry.tabId);
-                        if (!tab || tab.windowId !== entry.windowId || tab.incognito || isStartupLauncherTab(tab, api)
+                        if (!tab || excluded(tab) || tab.windowId !== entry.windowId || tab.incognito || isStartupLauncherTab(tab, api)
                             || entry.mode !== 'ordinary' && !tab.pinned) return false;
                         if (!windows.has(tab.windowId)) {
                             // A failed lookup is uncertainty, not proof of a closed
@@ -236,7 +244,7 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
                             windows.set(tab.windowId, await api.windows.get(tab.windowId));
                         }
                         const window = windows.get(tab.windowId);
-                        return window?.id === entry.windowId && window.type === 'normal' && !window.incognito;
+                        return window?.id === entry.windowId && window.type === 'normal' && !window.incognito && !excluded(tab);
                     };
                     state = empty();
                     for (const entry of journal.state.bindings) if (await exact(entry)) state.bindings.push(copy(entry));
@@ -250,7 +258,7 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
                             if (!selectionAnchor(tab) || tab.windowId !== entry.windowId) continue;
                             if (!windows.has(entry.windowId)) windows.set(entry.windowId, await api.windows.get(entry.windowId));
                             const window = windows.get(entry.windowId);
-                            if (window?.id === entry.windowId && window.type === 'normal' && !window.incognito) selected.push(entry);
+                            if (window?.id === entry.windowId && window.type === 'normal' && !window.incognito && selectionAnchor(tab)) selected.push(entry);
                         }
                         selection.windows = selected;
                     }
@@ -267,6 +275,8 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
         // never seeds the unproven durable candidate into a fresh Spotlight.
         const proven = current ? { epoch: current.epoch, generation: current.generation } : null;
         if (!current) current = newCurrent(await ensureGeneration(await config()));
+        state = excludeState(state);
+        if (selection) selection.windows = selection.windows.filter(allowedEntry);
         try { await save({ state, items }, recovery); }
         catch (error) {
             if (!recovery || !['STALE_RECEIPT', 'UNAUTHORIZED', 'UNAVAILABLE', 'TIMEOUT', 'INVALID_RESPONSE', 'UNSUPPORTED'].includes(error.code)) throw error;

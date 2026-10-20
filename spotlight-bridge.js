@@ -15,23 +15,28 @@ import { readTabActionContext, runTabAction } from './spotlight-tab-actions.js';
 import { readSpaceActionContext, runSpaceAction } from './spotlight-space-actions.js';
 import { SPLIT_ACTIONS_FEATURE, SPLIT_ACTION_COMMANDS, ARCHIVE_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
-const COMMANDS = ['splitActionContext', ...SPLIT_ACTION_COMMANDS, 'archiveContext', 'reopenArchivedTab', 'hello', 'snapshot', 'activateSpace', 'activateTab', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
+const COMMANDS = ['splitActionContext', ...SPLIT_ACTION_COMMANDS, 'archiveContext', 'reopenArchivedTab', 'hello', 'snapshot', 'activateSpace', 'activateTab', 'openTransient', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
 const JOURNAL_KEY = 'spotlightBridgeRequests';
 
 // Only reads Arcify's authoritative model. Group IDs/names never enter the protocol.
 export async function getBridgeSnapshot(store, windowId) {
     const window = await chrome.windows.get(windowId);
-    if (window.incognito || window.type && window.type !== 'normal') throw bridgeError('INVALID_WINDOW', 'Choose a normal browser window.');
+    if (window.incognito || window.type && window.type !== 'normal' || store.isTransientWindow?.(windowId)) throw bridgeError('INVALID_WINDOW', 'Choose a normal browser window.');
     return store.run(() => readBridgeSnapshot(store, windowId));
 }
 
 async function readBridgeSnapshot(store, windowId) {
+    // The queue hydrates transient ownership. A cold-worker check before run()
+    // cannot yet prove that this window is ordinary.
+    if (store.isTransientWindow?.(windowId)) throw bridgeError('INVALID_WINDOW', 'Use Open in Space from the Little Arc control tab.');
     if (await store.discoverBookmarkSpaces()) await store.persist();
     // Reconcile ownership before projecting either Spaces or Favorites.
     const favorites = store.favoriteStore ? (await store.favoriteStore.read(windowId)).favorites : null;
     if (store.favoriteStore?.ownershipPersistence?.refresh) await store.favoriteStore.ownershipPersistence.refresh({
         state: store.favoriteStore.state, items: store.favoriteStore.items });
-    const live = (await chrome.tabs.query({ windowId })).filter(tab => !isStartupLauncherTab(tab));
+    const sampled = await (store.queryTabs ? store.queryTabs({ windowId }) : chrome.tabs.query({ windowId }));
+    if (store.isTransientWindow?.(windowId)) throw bridgeError('INVALID_WINDOW', 'Use Open in Space from the Little Arc control tab.');
+    const live = sampled.filter(tab => !isStartupLauncherTab(tab) && !store.isTransientTab?.(tab));
     const byId = new Map(live.map(tab => [tab.id, tab]));
     const [bindings, overrides] = await Promise.all([Utils.getPinnedTabStates(), Utils.getTabNameOverrides()]);
     const spaces = store.spaces.map(space => ({
@@ -85,6 +90,12 @@ async function readBridgeSnapshot(store, windowId) {
 // Use the same activate/assign operations as the sidebar; never replace stored spaces.
 export async function runBridgeAction(store, request, snapshot, { beforeMutation = async () => {} } = {}) {
     const { command, windowId } = request;
+    if (store.isTransientWindow?.(windowId)) throw bridgeError('INVALID_WINDOW', 'Use Open in Space from the Little Arc control tab.');
+    if (command === 'openTransient') {
+        if (!store.transientWindows) throw bridgeError('UNSUPPORTED_COMMAND', 'This Arcify build does not support Little Arc.');
+        const record = await store.transientWindows.openUnlocked({ url: request.url, originWindowId: windowId }, { beforeMutation });
+        return { tabId: record.tabId, transientWindowId: record.windowId, token: record.token };
+    }
     const spaceId = request.spaceId || snapshot.activeSpaceId;
     const findSpace = id => {
         const space = snapshot.spaces.find(s => s.id === id);
@@ -98,6 +109,7 @@ export async function runBridgeAction(store, request, snapshot, { beforeMutation
     };
     const focus = async tabId => {
         const tab = await chrome.tabs.get(tabId);
+        if (store.isTransientTab?.(tab)) throw bridgeError('STALE_TAB', 'This page is still in Little Arc.');
         if (tab.windowId !== windowId) throw bridgeError('STALE_TAB', 'This tab moved to another window.');
         await beforeMutation();
         await chrome.tabs.update(tabId, { active: true });
@@ -122,6 +134,7 @@ export async function runBridgeAction(store, request, snapshot, { beforeMutation
             return { tabId: await focus(tab.id) };
         }
         const current = await chrome.tabs.get(tab.id);
+        if (store.isTransientTab?.(current)) throw bridgeError('STALE_TAB', 'Use Open in Space from the Little Arc control tab.');
         if (current.windowId !== windowId) throw bridgeError('STALE_TAB', 'This tab moved to another window.');
         await beforeMutation();
         await chrome.tabs.update(tab.id, { url: request.url });
@@ -316,6 +329,7 @@ export function registerSpotlightBridge(store) {
 function commandCapabilities(request, browser, store) {
     return request.command === 'hello' ? { capabilities: [
         ...(typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : []),
+        ...(store.transientWindows ? ['transientWindowsV1'] : []),
         ...(nativeSplitAvailable(browser) && request.supportedFeatures?.includes(SPLIT_ACTIONS_FEATURE) ? [SPLIT_ACTIONS_FEATURE] : []),
         ...(store.archiveStore && request.supportedFeatures?.includes(ARCHIVE_ACTIONS_FEATURE) ? [ARCHIVE_ACTIONS_FEATURE] : []),
         ...(request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE) ? [SPACE_ACTIONS_FEATURE] : []),

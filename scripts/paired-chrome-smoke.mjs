@@ -20,6 +20,7 @@ import { exerciseSpotlightActions, serveSpotlightActionFixture, SPOTLIGHT_ACTION
 import { exerciseSpotlightNavigation, serveSpotlightNavigationFixture, SPOTLIGHT_NAVIGATION_CASE_NAME } from './paired-chrome-spotlight-navigation.mjs';
 import { exerciseSpotlightTabCommands, serveSpotlightTabFixture, SPOTLIGHT_TAB_CASE_NAME } from './paired-chrome-spotlight-tabs.mjs';
 import { exerciseSpotlightArchiveOpen, exerciseSpotlightArchiveReopen, serveSpotlightArchiveFixture, SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME } from './paired-chrome-spotlight-archive.mjs';
+import { exerciseLittleArc, serveLittleArcFixture, LITTLE_ARC_CASE_NAME } from './paired-chrome-little-arc.mjs';
 import { randomBytes } from 'node:crypto';
 import { exerciseSpaceTheme } from './paired-chrome-space-theme.mjs';
 import { exerciseSpotlightOptionsAppearance } from './paired-chrome-spotlight-appearance.mjs';
@@ -67,6 +68,8 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
 const PINNED_SPOTLIGHT = 'c13511fd36d56358156c10336b8961b7ef95d5bc';
+// Isolated candidate pin: all legacy run modes retain PINNED_SPOTLIGHT unchanged.
+const PINNED_LITTLE_ARC_SPOTLIGHT = '3b0b178f2c11b3add351c430a1e7734f54f25c8f';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',
@@ -122,7 +125,8 @@ const stepNames = [
     'Spotlight tab commands preserve exact live and saved identities through trusted input',
     'Spotlight Open Archive requires trusted input and the existing popup in the native Side Panel',
     'Spotlight Archive reopens exact same-address entries in their original Space and source window without replay',
-    'Spotlight Split and End Split keep exact left and right source panes and original documents'
+    'Spotlight Split and End Split keep exact left and right source panes and original documents',
+    'Little Arc trusted launch and same-tab transfer preserve documents with explicit same-window recovery'
 ];
 assert.equal(stepNames[49], SPOTLIGHT_ACTION_CASE_NAME, 'Initial Spotlight action case must retain its reviewed identity.');
 assert.equal(stepNames[50], SPOTLIGHT_NAVIGATION_CASE_NAME, 'Spotlight navigation case must retain its reviewed identity.');
@@ -130,16 +134,19 @@ assert.equal(stepNames[51], SPOTLIGHT_TAB_CASE_NAME, 'Spotlight tab-command case
 assert.equal(stepNames[52], SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, 'Spotlight Archive opening case must retain its identity.');
 assert.equal(stepNames[54], SPOTLIGHT_SPLIT_CASE_NAME, 'Spotlight Split case retains its mandatory source-pane identity.');
 assert.equal(stepNames[53], SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME, 'Spotlight Archive reopen case must retain its identity.');
+assert.equal(stepNames[55], LITTLE_ARC_CASE_NAME, 'Little Arc case retains its isolated exact-tab recovery identity.');
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',
     verification: 'Real Chrome with both production extension builds; no mocked Chrome APIs or transport.',
     environment: { githubActions: true, chromeMode: 'headed Chrome under Xvfb virtual display', runnerOS: process.env.RUNNER_OS, node: process.version,
-        workflowSha: process.env.GITHUB_SHA, requestedArcifyHead: process.env.ARCIFY_TEST_HEAD,
+        workflowSha: process.env.GITHUB_SHA, workflowFileSha: process.env.GITHUB_WORKFLOW_SHA,
+        workflowRef: process.env.GITHUB_WORKFLOW_REF, requestedArcifyHead: process.env.ARCIFY_TEST_HEAD,
         pullRequestHead: process.env.ARCIFY_PR_HEAD || null, githubRunId: process.env.GITHUB_RUN_ID,
         imageOS: process.env.ImageOS, imageVersion: process.env.ImageVersion, runnerUid: process.getuid?.() },
     screenshots: [], diagnostics: [], targetLifecycle: [],
     limits: [
+        'Little Arc supplemental coverage proves only its selected extension-reload scenario; it is not full-browser restart, missing-marker recovery, Helium or full-suite acceptance.',
         'Space theme and Spotlight options require real hosted input, screenshots and passive first-paint evidence. System preference changes use Chrome rendering-media emulation; native OS color picker, physical OS appearance changes and Helium remain manual.',
         'Space emoji proof uses trusted Chrome text input and genuine Ctrl+V from the disposable fixture clipboard; OS emoji picker, IME candidate windows/composition, physical typing and Helium remain manual. Icon-only names retain native title and accessibility labels with real hover/focus; browser-chrome tooltip painting is not captured by page screenshots.',
         'Outside-focus menu checks use ordinary sidebar.html tabs and a separate disposable localhost browser window with trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; actual native-panel external focus and Helium remain manual.',
@@ -155,7 +162,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -816,7 +823,14 @@ await mkdir(OUTPUT, { recursive: true });
 try {
     report.environment.arcifyHead = head(ROOT);
     report.environment.spotlightHead = head(COMPANION);
-    assert.equal(report.environment.spotlightHead, PINNED_SPOTLIGHT, 'Companion must match the reviewed pinned commit.');
+    report.environment.expectedSpotlightHead = report.runMode === 'little-arc' ? PINNED_LITTLE_ARC_SPOTLIGHT : PINNED_SPOTLIGHT;
+    if ('little-arc' === report.runMode) {
+        assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch', 'Little Arc requires its explicit manual acceptance route.');
+        assert.match(process.env.ARCIFY_TEST_HEAD || '', /^[0-9a-f]{40}$/, 'Little Arc requires the full reviewed Arcify commit.');
+        assert.equal(process.env.ARCIFY_TEST_HEAD, process.env.GITHUB_SHA, 'The dispatched workflow must match the reviewed Arcify commit.');
+        assert.equal(process.env.ARCIFY_SPOTLIGHT_HEAD, PINNED_LITTLE_ARC_SPOTLIGHT, 'Little Arc job must declare the reviewed companion pin.');
+    }
+    assert.equal(report.environment.spotlightHead, report.environment.expectedSpotlightHead, 'Companion must match the reviewed pinned commit for this run mode.');
     if (process.env.ARCIFY_TEST_HEAD) assert.equal(report.environment.arcifyHead, process.env.ARCIFY_TEST_HEAD);
     report.environment.puppeteer = JSON.parse(await readFile(resolve(ROOT, 'scripts/paired-chrome-runtime/node_modules/puppeteer-core/package.json'), 'utf8')).version;
     assert.equal(report.environment.puppeteer, '25.12.0', 'Paired CI must use its isolated, reviewed browser driver.');
@@ -994,6 +1008,7 @@ try {
     await step(stepNames[2], async () => {
         const titles = { '/source-a': 'Pair Source A', '/alpha': 'Pair Alpha Target', '/source-b': 'Pair Source B', '/beta': 'Pair Beta Target', '/duplicate': 'Pair Shared URL', '/current-navigation': 'Pair Current Navigation', '/helper-open': 'Pair Helper Open', '/sync-off-open': 'Pair Sync Off Open', '/journal-open': 'Pair Journal Open', '/sidebar-match': 'Open Arcify sidebar', '/logical-one': 'Logical Tab One', '/logical-two': 'Logical Tab Two', '/today-selection-one': 'Today Selection One', '/today-selection-two': 'Today Selection Two', '/today-selection-four': 'Today Selection Four', '/today-selection-five': 'Today Selection Five', '/today-selection-six': 'Today Selection Six' };
         server = createServer((request, response) => {
+            if (serveLittleArcFixture(request, response)) return;
             if (serveSpotlightActionFixture(request, response)) return;
             if (serveSpotlightNavigationFixture(request, response)) return;
             if (serveSpotlightTabFixture(request, response)) return;
@@ -2382,6 +2397,15 @@ try {
         },
         record:async evidence => { report.spotlightSplit=evidence;await saveReport(); } }));
     } // Mandatory Spotlight case 54 extends the existing Chrome 155 fresh-profile route.
+    if (report.runMode === 'little-arc') {
+    await step(stepNames[55], () => exerciseLittleArc({ browser, observePage, apiPage:arcifyOptions, spotlightOptions, ui, screenshot,
+        snapshot, external, poll, fixture, arcifyId, spotlightId, search,
+        reloadArcify:async () => {
+            const reloaded = await reloadPairedExtension('arcify');
+            return { apiPage:reloaded.arcifyOptions, evidence:reloaded.evidence };
+        },
+        record:async evidence => { report.littleArc=evidence;await saveReport(); } }));
+    } // Supplemental Little Arc case 55; all pre-existing case plans and legacy job bodies/pins are preserved.
     if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {
     await step(stepNames[36], async () => {
         await normalizeReloadControlWindow({ apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,pageForUrl,arcifyId,spotlightId,sourceWindowId:fixture.windowA,counterpartWindowId:fixture.windowB,

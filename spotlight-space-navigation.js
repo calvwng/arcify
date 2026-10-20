@@ -15,7 +15,7 @@ const url = tab => tab?.url || tab?.pendingUrl || '';
 const locations = (store, id) => store.spaces.flatMap(space => ['temporaryTabs', 'spaceBookmarks'].flatMap(section =>
     (space[section] || []).flatMap(member => member === id ? [{ space, section }] : [])));
 const safeTab = (store, tab) => tab && !tab.incognito && !tab.pinned && !hasNativeSplit(tab)
-    && !store.isGlobalTab?.(tab) && !store.isGlobalTab?.(tab.id) && !isStartupLauncherTab(tab)
+    && !store.isTransientTab?.(tab) && !store.isGlobalTab?.(tab) && !store.isGlobalTab?.(tab.id) && !isStartupLauncherTab(tab)
     && !isPracticeUrl(url(tab)) && !isBrowserNewTab(url(tab)) && isSafeUrl(url(tab))
     && (!tab.pendingUrl || tab.pendingUrl === url(tab)) && !store.provisional?.has(tab.id) && !store.recoveryCandidates?.has(tab.id);
 function exactSpace(store, identity) {
@@ -86,7 +86,7 @@ function createGuard(store, request, beforeMutation) {
     const guard = async () => fencedRead(async () => {
         const source = await root(store, context), target = await root(store, request.destination);
         const window = await chrome.windows.get(request.windowId);
-        if (window?.id !== request.windowId || window.type !== 'normal' || window.incognito) throw stale();
+        if (window?.id !== request.windowId || window.type !== 'normal' || window.incognito || store.isTransientWindow?.(window.id)) throw stale();
         const states = await Utils.getPinnedTabStates(), overrides = await Utils.getTabNameOverrides();
         if (request.command === 'moveCurrentTodayTab' && Boolean(await readTodayOrderInverted()) !== request.inverted) throw stale();
         await beforeMutation();

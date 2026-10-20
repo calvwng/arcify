@@ -95,7 +95,7 @@ test('dedicated real nonce HTTP route precedes generic handler and never serves 
     const source = runner.slice(runner.indexOf('server = createServer('), runner.indexOf('await new Promise(resolve => server.listen'));
     assert(source.includes('if (serveSpotlightArchiveFixture(request, response)) return;')); assert(source.indexOf('serveSpotlightArchiveFixture') < source.indexOf('const title = titles[path]'));
     let handler; const noRoute = () => false;
-    new vm.Script(source).runInNewContext({ createServer: value => { handler = value; }, URL, titles: {}, serveSpotlightSplitFixture: noRoute, serveSpotlightArchiveFixture,
+    new vm.Script(source).runInNewContext({ createServer: value => { handler = value; }, URL, titles: {}, serveLittleArcFixture: noRoute, serveSpotlightSplitFixture: noRoute, serveSpotlightArchiveFixture,
         serveSpotlightActionFixture: noRoute, serveSpotlightNavigationFixture: noRoute, serveSpotlightTabFixture: noRoute, overlayRecoveryFixtureResponse: () => null,
         serveNativeSplitFixture: noRoute, serveTabMenuFixture: noRoute, serveTodayMoveFixture: noRoute, serveSavedMoveFixture: noRoute, serveTodayOrderFixture: noRoute, serveOrdinaryFavoriteFixture: noRoute, serveFavoriteIconFixture: noRoute });
     const responses = [];
@@ -108,12 +108,12 @@ test('dedicated real nonce HTTP route precedes generic handler and never serves 
 
 for (const mode of ['archive-actions', 'archive-reopen']) test(`${mode} remains an isolated mandatory Archive job with all sandbox and exact-head gates`, () => {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  [a-z-]+:\n|$(?![\s\S]))/gm)];
-    assert.equal(jobs.length, 8); const selected = jobs.filter(job => job[1] === mode); assert.equal(selected.length, 1); const job = selected[0][2];
+    assert.equal(jobs.length, 9); const selected = jobs.filter(job => job[1] === mode); assert.equal(selected.length, 1); const job = selected[0][2];
     assert(job.includes(`ARCIFY_PAIRED_RUN_MODE: ${mode}\n`)); assert.match(job, /timeout-minutes: 20\n/); assert.match(job, /CI: 'true'/);
     assert.match(job, /persist-credentials: false/); assert.match(job, /npm test --prefix arcify\/scripts\/paired-chrome-runtime/); assert.match(job, /set -o pipefail/);
     assert(job.includes(`tee test-results/paired-chrome-${mode}/runner.log`)); assert(job.includes(`name: paired-chrome-${mode}-` + '${{ github.run_id }}-${{ github.run_attempt }}'));
     assert(job.includes(`path: arcify/test-results/paired-chrome-${mode}/`)); assert.match(job, /if: always\(\)/);
-    assert.doesNotMatch(job, /vendor-update|native-split-update|needs:|continue-on-error:|strategy:|secrets\.|no-sandbox|disable-web-security|retry|if: (?!always\(\))/);
+    assert.doesNotMatch(job.replace("    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'\n", ''), /vendor-update|native-split-update|needs:|continue-on-error:|strategy:|secrets\.|no-sandbox|disable-web-security|retry|if: (?!always\(\))/);
     assert(runner.includes(`report.runMode === '${mode}' ? 'test-results/paired-chrome-${mode}'`));
     for (const path of ['scripts/paired-chrome-spotlight-archive.mjs', 'tests/unit/paired-chrome-spotlight-archive.test.js', 'tests/unit/paired-chrome-archive-wiring.test.js', 'docs/archive-actions-paired-ci.md', 'spotlight-archive-actions.js', 'archive-store.js', 'archive-client.js', 'archive-intent-ui.js', 'archive-display-session.js', 'tests/unit/helpers/archive-display-fixture.js', 'tests/unit/archive-intent-ui.test.js', 'tests/unit/archive-popup.test.js', 'docs/archive-operations.md', 'tests/unit/spotlight-archive*.test.js', 'tests/unit/archive-store*.test.js', 'scripts/lib/spotlight-pair-archive-*.mjs']) assert(workflow.includes(`- '${path}'`), path);
 });

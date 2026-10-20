@@ -1,3 +1,4 @@
+import { assertNotTransient, isTransientTab } from './transient-safety.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { Utils } from './utils.js';
 import { assertNotNativeSplit } from './native-split-safety.js';
@@ -9,7 +10,12 @@ const partial = (message, error, code = 'PARTIAL_COMMIT') => Object.assign(new E
 // infer identity from a URL or dispatch back into the SpaceStore queue.
 export async function saveLiveSpacePin(store, { space, tabId, title, url }, { beforeWrite } = {}) {
     const state = { bookmarkId: null, bindingCommitted: false, membershipCommitted: false };
-    const guard = () => beforeWrite?.(state);
+    const guard = async () => {
+        await beforeWrite?.(state);
+        assertNotTransient(store, { tabId });
+        const live = await chrome.tabs.get(tabId);
+        assertNotTransient(store, { tab: live });
+    };
     const children = await chrome.bookmarks.getChildren(space.bookmarkFolderId);
     const ids = children.map(node => String(node.id));
     try {
@@ -59,9 +65,10 @@ export async function removeSavedSpacePin(store, { getSpace, bookmarkId }, { bef
         const states = await Utils.getPinnedTabStates();
         for (const [key, binding] of Object.entries(states)) if (binding.bookmarkId === bookmarkId) linked.add(Number(key));
         const tabs = await chrome.tabs.query({});
-        for (const live of tabs) if (linked.has(live.id)) assertNotNativeSplit(live);
+        for (const live of tabs) if (linked.has(live.id)) { assertNotTransient(store, { tab: live }); assertNotNativeSplit(live); }
         getSpace();
         await beforeWrite?.(state);
+        for (const live of tabs) if (linked.has(live.id)) assertNotTransient(store, { tab: live });
     };
     await guard();
     try { await chrome.bookmarks.remove(bookmarkId); }
@@ -79,7 +86,7 @@ export async function removeSavedSpacePin(store, { getSpace, bookmarkId }, { bef
             if (binding.bookmarkId !== bookmarkId || store.isGlobalTab?.(liveId) || !space.spaceBookmarks.includes(liveId)) continue;
             let live;
             try { live = await chrome.tabs.get(liveId); } catch { continue; }
-            if (!live.pinned && !live.incognito) affected.push(liveId);
+            if (!live.pinned && !live.incognito && !isTransientTab(store, live)) affected.push(liveId);
         }
         state.affected = affected;
         if (stopOnPartial) {
@@ -110,12 +117,12 @@ export async function removeSavedSpacePin(store, { getSpace, bookmarkId }, { bef
         }
         await Utils._serializeTabNameOp(async () => {
             const names = await Utils.getTabNameOverrides();
-            if (stopOnPartial) await guard();
+            await guard();
             for (const liveId of affected) delete names[liveId];
             await Utils.saveTabNameOverrides(names);
             state.aliasesRemoved = true;
         });
-        await store.persist(stopOnPartial ? { skipGroupSync: true, beforeWrite: guard } : undefined);
+        await store.persist({ ...(stopOnPartial ? { skipGroupSync: true } : {}), beforeWrite: guard });
     } catch (error) {
         throw partial('The saved pin was removed, but its live display could not be fully refreshed.', error);
     }

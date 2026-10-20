@@ -1,3 +1,4 @@
+import { assertNotTransient } from './transient-safety.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { Utils } from './utils.js';
@@ -33,11 +34,15 @@ export function saveTodayTabsInNewFolder(store, request) {
             new Set(entries.map(entry => entry.tabId)).size !== entries.length) {
             throw new Error('Choose 1–100 Today tabs with supported URLs and a folder name of 1–256 characters. Nothing was saved.');
         }
+        assertNotTransient(store, { windowId });
+        for (const entry of entries) assertNotTransient(store, { tabId: entry.tabId });
         const result = { folderId: null, title, total: entries.length, completed: [], created: [], failedTabId: null, uncertain: false, cleanupUncertain: false };
         const bookmarkOrderInverted = Boolean(await Utils.getInvertTabOrder());
         let folderAttempted = false;
         const bound = new Map();
         const getSpace = () => {
+            assertNotTransient(store, { windowId });
+            for (const entry of entries) assertNotTransient(store, { tabId: entry.tabId });
             const space = store.spaces.find(item => item.id === spaceId);
             if (!space || space.bookmarkFolderId !== bookmarkFolderId || store.active[windowId] !== spaceId) throw changed();
             return space;
@@ -52,6 +57,7 @@ export function saveTodayTabsInNewFolder(store, request) {
             if (expectedBookmarkId ? binding?.bookmarkId !== expectedBookmarkId || binding?.pinnedUrl !== entry.url : binding?.bookmarkId) throw changed();
             let tab;
             try { tab = await chrome.tabs.get(entry.tabId); } catch { throw changed(); }
+            assertNotTransient(store, { windowId, tab });
             assertNotNativeSplit(tab);
             if (!tab || tab.id !== entry.tabId || tab.windowId !== windowId || tab.incognito || tab.pinned || isStartupLauncherTab(tab) ||
                 tab.url !== entry.url || (tab.pendingUrl && tab.pendingUrl !== entry.url)) throw changed();
@@ -73,6 +79,7 @@ export function saveTodayTabsInNewFolder(store, request) {
         async function validateAll() {
             await validateContext();
             for (const entry of entries) await validateTab(entry);
+            getSpace();
         }
         async function releaseBinding(entry, bookmarkId) {
             // Remove only the binding this operation just wrote. A concurrently
@@ -140,6 +147,7 @@ export function saveTodayTabsInNewFolder(store, request) {
                 const originalTemporary = [...space.temporaryTabs];
                 let membershipChanged = false;
                 try {
+                    await validateTab(entry);
                     await Utils.setPinnedTabState(entry.tabId, { bookmarkId, pinnedUrl: entry.url }, { onlyIfUnboundOrMatching: true });
                     await validateContext(); await validateTab(entry, { bindingId: bookmarkId });
                     space.temporaryTabs = space.temporaryTabs.filter(id => id !== entry.tabId);

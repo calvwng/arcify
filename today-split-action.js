@@ -1,3 +1,4 @@
+import { assertNotTransient } from './transient-safety.js';
 import { Utils } from './utils.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { mergeVisibleOrder } from './sidebar-tabs.js';
@@ -42,6 +43,8 @@ export async function runTodaySplitActionCore(store, request, { beforeBoundary =
         if (!nativeSplitAvailable()) throw new Error('Native Split View is unavailable in this browser. Chrome 155 or a compatible Helium build is required.');
         const { action, windowId, spaceId, entries } = request;
         const getSpace = () => {
+            assertNotTransient(store, { windowId });
+            for (const entry of entries) assertNotTransient(store, { tabId: entry.tabId });
             const space = store.spaces.find(item => item.id === spaceId);
             if (!space || space.bookmarkFolderId !== request.bookmarkFolderId || store.active[windowId] !== spaceId) throw changed();
             for (const entry of entries) {
@@ -55,6 +58,7 @@ export async function runTodaySplitActionCore(store, request, { beforeBoundary =
         const boundary = async (expected, expectedOrder, phase) => {
             assertFresh();
             await beforeBoundary({ expected, expectedOrder, canonical, phase, transition });
+            getSpace();
             assertFresh();
         };
         async function resolve(expected = entries, expectedOrder = null, after = false) {
@@ -66,6 +70,7 @@ export async function runTodaySplitActionCore(store, request, { beforeBoundary =
             const live = (await chrome.tabs.query({ windowId })).sort((a, b) => a.index - b.index); assertFresh();
             const pair = expected.map(entry => {
                 const matches = live.filter(tab => tab.id === entry.tabId), tab = matches[0];
+                assertNotTransient(store, { windowId, tab });
                 if (matches.length !== 1 || !tab || tab.windowId !== windowId || tab.incognito || tab.pinned ||
                     isStartupLauncherTab(tab) || bindings[tab.id]?.bookmarkId || tab.url !== entry.url ||
                     tab.pendingUrl && tab.pendingUrl !== entry.url || tab.index !== entry.index || tab.groupId !== entry.groupId ||
@@ -117,7 +122,7 @@ export async function runTodaySplitActionCore(store, request, { beforeBoundary =
                     // into a whole-window reorder before the native split is formed.
                     transition.persistenceStarted = true;
                     await boundary(expected, expectedOrder, 'beforePersist');
-                    await store.persist({ skipGroupSync: true, ...(transition.guarded ? { beforeWrite: () => boundary(expected, expectedOrder, 'persistWrite') } : {}) });
+                    await store.persist({ skipGroupSync: true, ...(transition.guarded || store.transientWindows ? { beforeWrite: () => boundary(expected, expectedOrder, 'persistWrite') } : {}) });
                     await boundary(expected, expectedOrder, 'afterPersist');
                 }
             }

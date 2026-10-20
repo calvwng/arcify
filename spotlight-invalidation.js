@@ -47,7 +47,7 @@ export function registerSpotlightInvalidation(store) {
             const peerId = settings[PEER_KEY];
             if (!isExtensionId(peerId)) { queued.clear(); return; }
             const windows = (await chrome.windows.getAll({ windowTypes: ['normal'], populate: true }))
-                .filter(window => isWindowId(window.id) && window.type === 'normal' && !window.incognito);
+                .filter(window => isWindowId(window.id) && window.type === 'normal' && !window.incognito && !store.isTransientWindow?.(window.id));
             if (stopped || currentGeneration !== generation) return;
             const live = new Set(windows.map(window => window.id));
             for (const windowId of queued) if (!live.has(windowId)) queued.delete(windowId);

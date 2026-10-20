@@ -65,7 +65,7 @@ function createGuard(store, request, beforeMutation) {
             for (const tab of linked) trackedTabs.add(tab.id);
             for (const id of new Set(linked.map(tab => tab.windowId))) {
                 const window = await chrome.windows.get(id);
-                if (window?.id !== id || window.type !== 'normal' || window.incognito) throw stale();
+                if (window?.id !== id || window.type !== 'normal' || window.incognito || store.isTransientWindow?.(window.id)) throw stale();
             }
         }
         if (transition.duplicateId) trackedTabs.add(transition.duplicateId);

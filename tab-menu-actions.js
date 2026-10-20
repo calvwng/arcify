@@ -1,3 +1,4 @@
+import { assertNotTransient, isTransientTab } from './transient-safety.js';
 import { getSpaceBookmarkById } from './space-bookmarks.js';
 import { readTodayOrderInverted } from './today-order.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
@@ -27,17 +28,19 @@ export function runTabMenuAction(store, request) {
 // Queue-free core: the sidebar and paired bridge each hold SpaceStore.run once.
 // Guards run after awaited reads, immediately before every consequential write.
 export async function runTabMenuActionCore(store, request, { beforeWrite = null, transition = {} } = {}) {
-    const guard = () => beforeWrite?.(transition);
+    const checkTransient = () => assertNotTransient(store, { windowId: request?.windowId, tabId: request?.tabId });
+    const guard = async () => { await beforeWrite?.(transition); checkTransient(); };
     const write = async (operation, committed = () => {}) => {
         await guard(); transition.attempted = true;
         const result = await operation(); transition.committed = true; committed(result); return result;
     };
-    const persist = () => { transition.persistenceStarted = true; return store.persist(beforeWrite ? { skipGroupSync: true, beforeWrite: guard } : undefined); };
+    const persist = () => { transition.persistenceStarted = true; return store.persist({ ...(beforeWrite ? { skipGroupSync: true } : {}), beforeWrite: guard }); };
     if (!request || Object.keys(request).some(key => !['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'tabId', 'bookmarkId', 'parentId', 'expected', 'value'].includes(key)) ||
         !ACTIONS.has(request.action) || !integer(request.windowId) || !id(request.spaceId) || !id(request.bookmarkFolderId) ||
         request.type !== undefined && request.type !== 'tabMenuAction' || request.tabId !== undefined && !integer(request.tabId) || request.bookmarkId !== undefined && !id(request.bookmarkId) ||
         request.parentId !== undefined && !id(request.parentId) || !request.tabId && !request.bookmarkId) throw new Error('Invalid tab action.');
     const { action, windowId, spaceId, bookmarkId, tabId } = request;
+    checkTransient();
     if (['rename', 'editUrl'].includes(action) && (!request.expected || typeof request.expected !== 'object' || Array.isArray(request.expected))) throw stale();
     if (action === 'rename' && (typeof request.value !== 'string' || request.value.trim().length > 256 || /[\u0000-\u001f\u007f]/.test(request.value))) throw new Error('Use a name of up to 256 characters without control characters.');
     const value = action === 'editUrl' ? normalizeTabMenuUrl(request.value) : action === 'rename' ? request.value.trim() : request.value;
@@ -45,6 +48,7 @@ export async function runTabMenuActionCore(store, request, { beforeWrite = null,
     if (action === 'mute' && typeof value !== 'boolean') throw new Error('Invalid mute setting.');
     if (['editUrl', 'removePin'].includes(action) && !bookmarkId || ['mute', 'duplicate'].includes(action) && !tabId || action === 'duplicate' && bookmarkId) throw new Error('This action is unavailable for that row.');
     const getSpace = () => {
+        checkTransient();
         const space = store.spaces.find(item => item.id === spaceId);
         if (!space || space.bookmarkFolderId !== request.bookmarkFolderId || store.active[windowId] !== spaceId) throw stale();
         return space;
@@ -67,6 +71,7 @@ export async function runTabMenuActionCore(store, request, { beforeWrite = null,
             binding = await Utils.getPinnedTabState(tabId);
             if (bookmarkId ? binding?.bookmarkId !== bookmarkId : binding?.bookmarkId) throw stale();
             try { tab = await chrome.tabs.get(tabId); } catch { throw stale(); }
+            assertNotTransient(store, { windowId, tab });
             if (tab.id !== tabId || tab.windowId !== windowId || tab.incognito || tab.pinned || isStartupLauncherTab(tab)) throw stale();
         }
         const expected = bookmark ? { title: bookmark.title, url: bookmark.url, parentId: bookmark.parentId }
@@ -114,6 +119,7 @@ export async function runTabMenuActionCore(store, request, { beforeWrite = null,
             await store.readTodayPlacement(beforeWrite ? { getOrder: readTodayOrderInverted } : undefined);
             const tabs = await chrome.tabs.query({});
             const space = getSpace(), live = tabs.find(tab => tab.id === duplicate.id);
+            assertNotTransient(store, { windowId, tab: live });
             if (!live || live.windowId !== windowId || live.pinned || live.incognito || isStartupLauncherTab(live) || store.isGlobalTab?.(live.id)) throw stale();
             const source = tabs.find(tab => tab.id === tabId);
             assertNotNativeSplit(source); assertNotNativeSplit(live);
@@ -130,7 +136,7 @@ export async function runTabMenuActionCore(store, request, { beforeWrite = null,
     }
     if (action === 'removePin') {
         await resolve();
-        await removeSavedSpacePin(store, { getSpace, bookmarkId });
+        await removeSavedSpacePin(store, { getSpace, bookmarkId }, { beforeWrite: guard });
         return {};
     }
     // Recheck immediately before Chrome's non-transactional bookmark write.
@@ -149,7 +155,7 @@ export async function runTabMenuActionCore(store, request, { beforeWrite = null,
                 if (binding.bookmarkId !== bookmarkId || store.isGlobalTab?.(liveId) || !target.space.spaceBookmarks.includes(liveId)) continue;
                 let live;
                 try { live = await chrome.tabs.get(liveId); } catch { continue; }
-                if (live.pinned || live.incognito) continue;
+                if (live.pinned || live.incognito || isTransientTab(store, live)) continue;
                 states[key] = { ...binding, pinnedUrl: newUrl };
             }
             await write(() => Utils.savePinnedTabStates(states), () => { transition.bindingsCommitted = true; });
@@ -160,7 +166,7 @@ export async function runTabMenuActionCore(store, request, { beforeWrite = null,
             const names = await Utils.getTabNameOverrides();
             const states = await Utils.getPinnedTabStates();
             for (const [key, binding] of Object.entries(states)) {
-                if (binding.bookmarkId === bookmarkId && target.space.spaceBookmarks.includes(Number(key)) && !store.isGlobalTab?.(Number(key))
+                if (binding.bookmarkId === bookmarkId && target.space.spaceBookmarks.includes(Number(key)) && !store.isGlobalTab?.(Number(key)) && !isTransientTab(store, Number(key))
                 && (!beforeWrite || transition.affected?.includes(Number(key)))) delete names[key];
             }
             await write(() => Utils.saveTabNameOverrides(names), () => { transition.aliasesCommitted = true; });
