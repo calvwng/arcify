@@ -411,3 +411,65 @@ test('real sender rejection remains visible through the UI formatter without nat
     const text=describeTodayMoveOutcome(response,f.request.entries,{id:'target',name:'Target'});
     assert.match(text,/Invalid Today move sender/);assert.match(text,/result is unknown/);assert.match(text,/nothing was retried/);assert.doesNotMatch(text,/Nothing was moved/);assert.deepEqual(f.effects,[]);
 });
+
+test('a later exact duplicate restore clears an earlier exhausted recovery candidate before the next Today move', async () => {
+    const f=fixture(),beforeTabs=structuredClone(f.tabs),beforeNodes=structuredClone(f.nodes);
+    f.store.recoveryCandidates=new Set([1,3]);
+    f.store.restoreWindowKeys=new Map([[10,'window-ten']]);
+    f.store.savedWindows=[{key:'window-ten',tabs:f.tabs.filter(tab=>tab.windowId===10).map(({index,url,pinned})=>({index,url,pinned}))}];
+    f.store.restoreQueue=[{spaceId:'source',section:'temporaryTabs',order:10,url:'https://same.test/',windowKey:'window-ten',tabIndex:2,nameOverride:'Recovered exact counterpart'}];
+    // Candidate 1 cannot consume the position-2 record. Candidate 3 can, later
+    // in the same persist pass. No matching unresolved record then remains.
+    await f.store.persist();
+    assert.equal(f.store.restoreQueue.length,0);
+    const result=await f.move();
+    assert.deepEqual(result.completed,[1,3]);assert.equal(result.uncertain,false);
+    assert.equal(f.store.recoveryCandidates.has(1),false);
+    assert.equal(f.store.recoveryCandidates.has(3),false);
+    assert.deepEqual(f.session.spaceRecoveryCandidates,[]);
+    assert(f.local.spaceTabSnapshot.some(record=>record.tabId===1&&record.spaceId==='target'));
+    assert.equal(f.local.tabNameOverridesById[3],'Recovered exact counterpart');
+    assert.deepEqual(f.tabs,beforeTabs);assert.deepEqual(f.nodes,beforeNodes);
+});
+
+test('genuinely unresolved equal-URL recovery stays protected after persistence and cannot move as ordinary Today', async () => {
+    const f=fixture(),beforeTabs=structuredClone(f.tabs);
+    f.store.recoveryCandidates=new Set([1,3]);
+    const pending={spaceId:'target',section:'temporaryTabs',order:3,url:'https://same.test/',windowKey:'unknown-window',tabIndex:0,
+        pinnedState:{bookmarkId:'unresolved-pin'},nameOverride:'Unresolved saved identity'};
+    f.store.restoreQueue=[structuredClone(pending)];
+    await f.store.persist();
+    assert.deepEqual(f.store.restoreQueue,[pending]);assert.deepEqual([...f.store.recoveryCandidates],[1,3]);
+    assert.equal(f.local.pinnedTabStatesById[1],undefined);assert.equal(f.local.pinnedTabStatesById[3],undefined);
+    const count=writes(f).length,before=structuredClone(f.store.spaces);
+    await assert.rejects(f.move(),error=>error.code==='TODAY_RECOVERY_PENDING'&&error.batch.completed.length===0&&!error.batch.uncertain);
+    assert.equal(writes(f).length,count);assert.deepEqual(f.store.spaces,before);assert.deepEqual(f.tabs,beforeTabs);
+});
+
+test('blank provisional recovery remains protected even when the restore queue is empty', async () => {
+    const f=fixture();f.store.recoveryCandidates.add(3);f.store.provisional.add(3);
+    f.tabs.find(tab=>tab.id===3).url='';
+    await f.store.persist();
+    assert(f.store.recoveryCandidates.has(3));assert(f.store.provisional.has(3));
+    await assert.rejects(f.move());
+});
+
+test('registered Today move reports a bounded recovery reason code without exposing tab URLs or titles', async () => {
+    const f=fixture();f.store.recoveryCandidates.add(3);registerTodayMoveMessages(f.store);
+    const listener=f.listeners[0];
+    const response=await new Promise(resolve=>listener(f.request,{id:'test',url:'chrome-extension://test/sidebar.html'},resolve));
+    assert.equal(response.success,false);assert.equal(response.code,'TODAY_RECOVERY_PENDING');
+    assert.match(response.error,/being matched to their saved Spaces/);
+    assert.equal(response.batch.uncertain,false);assert.deepEqual(response.batch.completed,[]);
+    assert(!JSON.stringify(response).includes('https://same.test/'));assert.equal(writes(f).length,0);
+});
+
+for (const state of ['closed', 'foreign-window']) test(`a ${state} recovery candidate reports stale selection rather than pending restoration`, async () => {
+    const f=fixture();f.store.recoveryCandidates.add(3);
+    if(state==='closed')f.tabs.splice(f.tabs.findIndex(tab=>tab.id===3),1);
+    else f.tabs.find(tab=>tab.id===3).windowId=20;
+    const before=structuredClone(f.store.spaces);
+    await assert.rejects(f.move(),error=>error.code===undefined&&/Select the tabs again/.test(error.message)&&
+        error.batch.completed.length===0&&!error.batch.uncertain);
+    assert.deepEqual(f.store.spaces,before);assert.equal(writes(f).length,0);
+});

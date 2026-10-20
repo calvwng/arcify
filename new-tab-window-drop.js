@@ -12,7 +12,7 @@ export function createNewTabWindowDrop({ button, getContext, inspectSource, vali
     const document = button.ownerDocument, view = document.defaultView;
     const label = button.querySelector('[data-new-tab-label]');
     const normalTitle = button.title, normalLabel = button.getAttribute('aria-label');
-    let drag = null, generation = 0, pending = null, suppressClick = false, wanted = false;
+    let drag = null, generation = 0, pending = null, suppressClick = false, hovered = false;
     function paint(active = false, hovered = false) {
         if (active) button.dataset.windowDrag = 'eligible'; else delete button.dataset.windowDrag;
         button.classList.toggle('new-tab-window-hover', Boolean(active && hovered));
@@ -20,7 +20,7 @@ export function createNewTabWindowDrop({ button, getContext, inspectSource, vali
         button.setAttribute('aria-label', active ? 'Move to new window' : normalLabel);
         button.title = active ? 'Move this live tab to a new window' : normalTitle;
     }
-    function clear() { if (drag) suppressClick = true; generation++; drag = null; wanted = false; paint(); }
+    function clear() { if (drag) suppressClick = true; generation++; drag = null; hovered = false; paint(); }
     function valid(source) {
         const element = source?.element, context = getContext();
         if (!live(source) || !element?.isConnected || element.matches('.folder') || !validateSelection(source)
@@ -37,32 +37,38 @@ export function createNewTabWindowDrop({ button, getContext, inspectSource, vali
         const current = inspectSource()?.source;
         return current?.element === source.element && current.tabId === source.tabId && valid(source);
     }
+    function updatePreview() {
+        if (drag?.eligible && !stillDragging(drag.source)) { clear(); return; }
+        // Eligibility owns the label/icon throughout the drag. Pointer entry
+        // only owns the separate drop highlight, never the available action.
+        paint(Boolean(!pending && drag?.eligible), hovered);
+    }
     async function start() {
         clear(); suppressClick = false;
         if (pending || button.disabled || button.getAttribute('aria-busy') === 'true') return;
         const source = inspectSource()?.source;
         if (!valid(source)) return;
         const token = generation, snapshot = Object.freeze({ ...source });
-        drag = { source: snapshot, eligible: false }; wanted = true;
+        drag = { source: snapshot, eligible: false };
         try {
             const tab = await getTab(snapshot.tabId);
             assertNotNativeSplit(tab);
             if (token !== generation || !stillDragging(snapshot) || tab.id !== snapshot.tabId || tab.windowId !== snapshot.windowId || tab.incognito) return;
-            drag.eligible = true; paint(wanted, button.classList.contains('new-tab-window-hover'));
+            drag.eligible = true; updatePreview();
         } catch { if (token === generation) clear(); }
     }
     function over(event) {
         event.stopPropagation(); suppressClick = true; clearFeedback();
-        wanted = true;
+        hovered = true;
         const allowed = !pending && drag?.eligible && stillDragging(drag.source);
         if (event.dataTransfer) event.dataTransfer.dropEffect = allowed ? 'move' : 'none';
         // Reject even invalid row drops locally; do not let a sortable ancestor
         // reinterpret the New Tab button as an ordering destination.
-        event.preventDefault(); paint(allowed, allowed);
+        event.preventDefault(); updatePreview();
     }
     function leave(event) {
         if (button.contains(event.relatedTarget)) return;
-        wanted = false; paint();
+        hovered = false; updatePreview();
     }
     function drop(event) {
         event.preventDefault(); event.stopImmediatePropagation(); clearFeedback(); suppressClick = true;
@@ -99,7 +105,7 @@ export function createNewTabWindowDrop({ button, getContext, inspectSource, vali
     }, true);
     button.addEventListener('pointerdown', () => { if (!drag && !pending) suppressClick = false; }, true);
     button.addEventListener('keydown', event => { if (!drag && !pending && ['Enter', ' '].includes(event.key)) suppressClick = false; }, true);
-    document.addEventListener('dragover', event => { if (button.contains(event.target)) suppressClick = true; else { wanted = false; paint(); } }, true);
+    document.addEventListener('dragover', event => { if (button.contains(event.target)) suppressClick = true; else { hovered = false; updatePreview(); } }, true);
     document.addEventListener('drop', event => { if (!button.contains(event.target)) clear(); }, true);
     document.addEventListener('dragend', clear, true);
     document.addEventListener('keydown', event => { if (event.key === 'Escape') clear(); }, true);

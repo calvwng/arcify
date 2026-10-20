@@ -83,6 +83,10 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
                 const matches = tabs.filter(tab => tab.id === entry.tabId), tab = matches[0];
                 assertNotTransient(store, { windowId, tab });
                 assertNotNativeSplit(tab);
+                if (matches.length === 1 && tab?.id === entry.tabId && tab.windowId === windowId &&
+                    ownsToday(store.spaces, owner, entry.tabId) && store.recoveryCandidates?.has(entry.tabId)) throw Object.assign(new Error(
+                    'Some selected tabs are still being matched to their saved Spaces. Choose fully restored Today tabs and try again.'
+                ), { code: 'TODAY_RECOVERY_PENDING' });
                 if (matches.length !== 1 || !validLive(tab, entry, bindings) || !ownsToday(store.spaces, owner, entry.tabId)) throw changed();
             }
             const current = getSpaces();
@@ -191,7 +195,9 @@ export function registerTodayMoveMessages(store) {
         }
         moveTodayTabsToSpace(store, message).then(
             batch => respond({ success: true, batch }),
-            error => respond({ success: false, error: error.message, ...(error.batch ? { batch: error.batch } : {}) })
+            error => respond({ success: false, error: error.message,
+                ...(error.code === 'TODAY_RECOVERY_PENDING' ? { code: error.code } : {}),
+                ...(error.batch ? { batch: error.batch } : {}) })
         );
         return true;
     });

@@ -480,6 +480,14 @@ export class SpaceStore {
         for (const tab of tabs.values()) if (tab.pinned || this.isGlobalTab(tab) || this.isTransientTab(tab)) this.forgetTab(tab.id);
         for (const id of this.recoveryCandidates) if (tabs.has(id)) this.track(tabs.get(id));
         this.restoreQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId) && !isStartupLauncherUrl(t.url) && !this.isTransientTab(t.tabId));
+        // A later candidate can consume the final record for an earlier one's
+        // URL in this pass. Recheck after all matching/filtering, so the earlier
+        // tab is not persisted as unresolved once no applicable record remains.
+        // Keep genuinely ambiguous records and blank provisional tabs protected.
+        for (const id of this.recoveryCandidates) {
+            const tab = tabs.get(id), url = tab?.url || tab?.pendingUrl;
+            if (url && !this.restoreQueue.some(record => record.url === url)) this.recoveryCandidates.delete(id);
+        }
         const metadata = await chrome.storage.local.get(['pinnedTabStatesById', 'tabNameOverridesById']);
         const pinnedStates = metadata.pinnedTabStatesById || {};
         const overrides = metadata.tabNameOverridesById || {};

@@ -23,7 +23,7 @@ function fixture(kind='live') {
 for(const kind of ['live','bookmark','saved','native'])test(`single ${kind} drag sends only exact movement once and suppresses post-drop clicks`,async()=>{
  const f=fixture(kind);await f.controller.start();const before=f.button.outerHTML;
  const over=f.event(f.button,'dragover');assert.equal(over.dataTransfer.dropEffect,'move');assert.match(f.button.textContent,/Move to new window/);
- f.event(f.button,'dragleave');assert.equal(f.button.textContent,'New Tab');assert(!f.button.classList.contains('new-tab-window-hover'));
+ f.event(f.button,'dragleave');assert.equal(f.button.textContent,'Move to new window');assert(!f.button.classList.contains('new-tab-window-hover'));
  f.event(f.button,'dragenter');assert.match(f.button.textContent,/Move to new window/);assert(f.button.classList.contains('new-tab-window-hover'));
  let ancestor=0;f.button.parentElement.addEventListener('drop',()=>ancestor++);
  f.event(f.button,'drop');const pending=f.controller.pending;f.event(f.button,'drop');f.event(f.button,'click');f.event(f.document,'dragend');await pending;
@@ -33,9 +33,47 @@ for(const kind of ['live','bookmark','saved','native'])test(`single ${kind} drag
  f.event(f.button,'click');assert.equal(f.counts().launches,0);f.event(f.button,'pointerdown');f.event(f.button,'click');assert.equal(f.counts().launches,1);
  assert.equal(f.button.querySelector('[data-new-tab-label]').tagName,'SPAN');assert(before.includes('data-new-tab-label'));
 });
+test('eligible drag advertises New Window before entering its target and keeps the preview anywhere in the sidebar',async()=>{
+ const f=fixture();await f.controller.start();
+ assert.equal(f.button.textContent,'Move to new window');assert.equal(f.button.dataset.windowDrag,'eligible');
+ assert.equal(f.button.classList.contains('new-tab-window-hover'),false);
+ f.event(f.element,'dragover');assert.equal(f.button.textContent,'Move to new window');
+ assert.equal(f.button.dataset.windowDrag,'eligible');assert.equal(f.button.classList.contains('new-tab-window-hover'),false);
+ f.event(f.button,'dragover');assert.equal(f.button.classList.contains('new-tab-window-hover'),true);
+ f.event(f.button,'dragleave');assert.equal(f.button.textContent,'Move to new window');
+ assert.equal(f.button.classList.contains('new-tab-window-hover'),false);assert.deepEqual(f.calls,[]);
+});
+for(const cancel of ['dragend','Escape','blur','pagehide','clear'])test(`${cancel} clears an advertised eligible drag before any target entry`,async()=>{
+ const f=fixture();await f.controller.start();assert.equal(f.button.textContent,'Move to new window');
+ if(cancel==='clear')f.controller.clear();else if(cancel==='Escape')f.event(f.document,'keydown',{key:'Escape'});
+ else f.event(['blur','pagehide'].includes(cancel)?f.window:f.document,cancel);
+ assert.equal(f.button.textContent,'New Tab');assert.equal(f.button.dataset.windowDrag,undefined);
+ assert.equal(f.button.classList.contains('new-tab-window-hover'),false);assert.deepEqual(f.calls,[]);
+});
+test('stale source or selection removes advertised eligibility during an outside dragover',async()=>{
+ for(const change of [f=>f.setSelection(false),f=>f.element.remove(),f=>f.context.spaceId='other']){
+  const f=fixture();await f.controller.start();change(f);f.event(f.document,'dragover');
+  assert.equal(f.button.textContent,'New Tab');assert.equal(f.button.dataset.windowDrag,undefined);assert.deepEqual(f.calls,[]);
+ }
+});
+test('unsupported native Split, incognito or batch selection never advertises an available window move',async()=>{
+ for(const change of [f=>f.setRead(async()=>({id:7,windowId:10,splitViewId:0})),f=>f.setRead(async()=>({id:7,windowId:10,incognito:true})),f=>f.setSelection(false)]){
+  const f=fixture();change(f);await f.controller.start();f.event(f.document,'dragover');
+  assert.equal(f.button.textContent,'New Tab');assert.equal(f.button.dataset.windowDrag,undefined);
+  assert.equal(f.button.classList.contains('new-tab-window-hover'),false);assert.deepEqual(f.calls,[]);
+ }
+});
+test('an outside drop or hidden sidebar restores the ordinary row without a move',async()=>{
+ for(const cancel of ['drop','visibilitychange']){
+  const f=fixture();await f.controller.start();
+  if(cancel==='visibilitychange')Object.defineProperty(f.document,'hidden',{value:true,configurable:true});
+  f.event(f.document,cancel);assert.equal(f.button.textContent,'New Tab');assert.equal(f.button.dataset.windowDrag,undefined);assert.deepEqual(f.calls,[]);
+ }
+});
 for(const kind of ['folder','bookmarks','closed'])test(`rejects ${kind} without move or sortable fallback`,async()=>{
  const f=fixture(kind);if(kind==='closed'){f.original.kind='bookmark';f.original.tabId=null;delete f.element.dataset.tabId;}
- await f.controller.start();const over=f.event(f.button,'dragover');assert.equal(over.dataTransfer.dropEffect,'none');
+ await f.controller.start();assert.equal(f.button.textContent,'New Tab');assert.equal(f.button.dataset.windowDrag,undefined);
+ const over=f.event(f.button,'dragover');assert.equal(over.dataTransfer.dropEffect,'none');
  f.event(f.button,'drop');await tick();assert.deepEqual(f.calls,[]);assert.equal(f.counts().consumes,0);assert.equal(f.button.textContent,'New Tab');
 });
 for(const cancel of ['dragend','Escape','blur','pagehide'])test(`${cancel} fences a late eligibility read and restores ordinary New Tab`,async()=>{

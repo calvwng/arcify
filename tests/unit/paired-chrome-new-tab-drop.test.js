@@ -8,6 +8,12 @@ function geometry({stuck=false,drag=false}={}) {return{count:1,flowSlot:true,ins
 for(const stuck of [false,true])for(const drag of [false,true])test(`native sticky oracle accepts correct geometry stuck=${stuck} drag=${drag}`,()=>{
  assertStickyNewTab(geometry({stuck,drag}),{stuck,drag,baseline:geometry()});
 });
+test('native preview oracle requires label and icon before target entry with highlight reserved for hover',()=>{
+ const preview=geometry({drag:true});preview.hover=false;
+ assertStickyNewTab(preview,{drag:true,hovered:false,baseline:geometry()});
+ const old=structuredClone(preview);old.label='New Tab';assert.throws(()=>assertStickyNewTab(old,{drag:true,hovered:false}));
+ const premature=structuredClone(preview);premature.hover=true;assert.throws(()=>assertStickyNewTab(premature,{drag:true,hovered:false}));
+});
 for(const [name,change] of [
  ['transparent surface',s=>s.pixels[3]=180],['translucent busy state',s=>s.opacity=.7],['covering header',s=>s.header.bottom=120],['covering Favorites',s=>s.favorites.bottom=120],
  ['not sticky',s=>s.position='relative'],['floating above scrollport',s=>s.row.y=50],['stuck below edge',s=>s.row.y=110],['duplicate row',s=>s.count=2],['sortable child',s=>s.insideSortable=true],
@@ -36,6 +42,8 @@ test('hosted drag coverage is mandatory, uses real input without replay, and ret
  assert.match(source,/await drag\(id,\{stale:true\}\)/);assert.match(source,/t.windowId!==sourceId/);assert.match(source,/assertMoved\(before,after/);
  assert.match(source,/e.type==='drop'&&e.trusted&&e.target/);assert.match(source,/ids.filter\(id=>live.has\(id\)\)/);
  assert.doesNotMatch(source,/dispatchEvent|setDragInterception|no-sandbox|setBypassCSP/);
+ assert.match(source,/sticky-preview-before-target-entry/);
+ assert(source.indexOf("observation('sticky-preview-before-target-entry'")<source.indexOf("'eligible sticky New Tab target'"));
 });
 
 

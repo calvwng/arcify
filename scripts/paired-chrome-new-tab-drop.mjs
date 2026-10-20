@@ -18,14 +18,15 @@ export function readStickyNewTab() {
         count:document.querySelectorAll('#newTabBtn').length,flowSlot:space?.querySelector('.temp-header')?.nextElementSibling===row,
         insideSortable:Boolean(row?.closest('.tabs-container')),busy:row?.getAttribute('aria-busy')};
 }
-export function assertStickyNewTab(state,{stuck=false,drag=false,baseline=null}={}) {
+export function assertStickyNewTab(state,{stuck=false,drag=false,hovered=drag,baseline=null}={}) {
     assert.equal(state.count,1);assert(state.flowSlot);assert(!state.insideSortable);assert.equal(state.position,'sticky');
     assert(state.row.width>=80&&state.row.height>=24);assert.equal(state.opacity,1);assert.equal(state.pixels?.[3],255,'Sticky surfaces must remain opaque.');
     assert(state.row.y>=state.port.y-1);assert(state.row.y>=state.header.bottom-1);assert(state.row.y>=state.favorites.bottom-1,'New Tab must never cover the fixed Favorites/header.');
     if(stuck){assert(state.scrollTop>0);assert(Math.abs(state.row.y-state.port.y)<=2,'Reached row must stick to the actual tab scrollport.');}
     else if(state.scrollTop===0)assert(state.row.y>=state.divider.bottom-1,'Normal flow stays below Today divider.');
     assert.equal(state.label,drag?'Move to new window':'New Tab');
-    if(drag){assert(state.hover);assert.equal(state.eligible,'eligible');assert.equal(state.plus,'none');assert.notEqual(state.windowIcon,'none');}
+    assert.equal(state.hover,Boolean(drag&&hovered));
+    if(drag){assert.equal(state.eligible,'eligible');assert.equal(state.plus,'none');assert.notEqual(state.windowIcon,'none');}
     if(baseline){assert(Math.abs(state.row.height-baseline.row.height)<=.5);assert(Math.abs(state.row.width-baseline.row.width)<=.5,'Drag label/icon cannot shift row geometry.');}
     return state;
 }
@@ -101,12 +102,16 @@ export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll
                 await page.mouse.move(from.x+Math.min(70,from.width/3),from.y+from.height/2);await page.mouse.down();held=true;
                 await page.mouse.move(from.x+Math.min(70,from.width/3)+14,from.y+from.height/2,{steps:6});
                 await poll(()=>page.$eval(row(id),n=>n.classList.contains('dragging')),Boolean,'real source dragstart');
+                const preview=await poll(geometry,s=>s.eligible==='eligible'&&s.label==='Move to new window'&&!s.hover,'eligible preview before pointer enters New Tab');
+                assertStickyNewTab(preview,{stuck:preview.scrollTop>0&&Math.abs(preview.row.y-preview.port.y)<=2,drag:true,hovered:false,baseline});
+                await observation('sticky-preview-before-target-entry',{preview,baseline});
                 const to=await geometry();await page.mouse.move(to.row.x+to.row.width/2,to.row.y+to.row.height/2,{steps:18});
                 const entered=await poll(geometry,s=>s.eligible==='eligible'&&s.hover,'eligible sticky New Tab target');await observation('sticky-hover-before-validation',{entered,baseline});assertStickyNewTab(entered,{stuck:entered.scrollTop>0&&Math.abs(entered.row.y-entered.port.y)<=2,drag:true,baseline});
                 before=await state(sourcePage);const shot=await screenshot(page,cancel?'new-tab-drop-cancel-hover':'new-tab-drop-native-hover',true);assert(shot);
                 if(cancel){
                     await page.mouse.move(entered.header.x+entered.header.width/2,entered.header.y+entered.header.height/2,{steps:8});
-                    await poll(geometry,s=>s.label==='New Tab'&&!s.hover,'leave restores New Tab label');
+                    const left=await poll(geometry,s=>s.label==='Move to new window'&&s.eligible==='eligible'&&!s.hover,'leave removes highlight but preserves available action');
+                    assertStickyNewTab(left,{stuck:left.scrollTop>0&&Math.abs(left.row.y-left.port.y)<=2,drag:true,hovered:false,baseline});
                     await page.mouse.move(to.row.x+to.row.width/2,to.row.y+to.row.height/2,{steps:8});
                     await poll(geometry,s=>s.label==='Move to new window'&&s.hover,'reenter restores eligible preview');
                     cancellation=await cancelNativeNewTabDrag({page,client,poll,tabId:id,checkpoint});

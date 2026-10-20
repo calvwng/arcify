@@ -69,6 +69,16 @@ and its exact status/error still require manual confirmation.
 
 ## Persistence, recovery and optional groups
 
+An unresolved session-recovery candidate is deliberately ineligible for ordinary
+Today Move: its visible Space may still be provisional while saved identity is
+matched. It returns the static `TODAY_RECOVERY_PENDING` reason without exposing
+page data. Persistence revisits candidate flags after all matches have run; a
+later exact match consuming the final matching record cannot leave an earlier
+live tab permanently flagged. Genuinely pending matches and blank provisional
+tabs remain protected. This corrects a synthetic reproduced lifecycle defect;
+the user's later snapshot alone does not prove that their flags were exhausted
+at the time of the original rejection.
+
 The existing single canonical `spaces` write, Space continuity snapshot, session checkpoint and storage change notifications remain in use. Spotlight continues reading that authority and receiving existing invalidations; no paired protocol changes are required.
 
 The local `spaceRankCheckpoint` is ordering bookkeeping, not another membership list. Its versioned rank list and SHA-256 digest bind it to the exact complete durable tab snapshot. It is written atomically with that snapshot so a failed session write cannot resurrect stale pre-move ranks, including coincident old/new ordinals. Startup uses it only with a live `spaceSession` and a verified digest; absent, malformed or snapshot-mismatched checkpoints retain the legacy session fallback. Unproven browser-restart recovery ignores the local checkpoint.
