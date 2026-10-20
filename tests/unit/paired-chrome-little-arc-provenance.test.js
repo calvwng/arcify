@@ -2,11 +2,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readSourceText } from '../source-text.js';
+import { parseGitStatus, recordSpotlightProvenance, verifySpotlightProvenance } from '../../scripts/paired-chrome-little-arc-provenance.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const workflow = readSourceText(new URL('../../.github/workflows/paired-extension-smoke.yml', import.meta.url));
@@ -24,13 +25,51 @@ const record = shellStep('Record and verify exact source provenance before insta
 // actual validator from the working tree while keeping the receipt shell intact.
 const moduleImport = "'./arcify/scripts/paired-chrome-little-arc-context.mjs'";
 assert.equal(record.split(moduleImport).length, 2);
+const provenanceCommand = 'arcify/scripts/paired-chrome-little-arc-provenance.mjs';
+const fixtureProvenanceCommand = JSON.stringify(fileURLToPath(new URL('../../scripts/paired-chrome-little-arc-provenance.mjs', import.meta.url)));
 const fixtureRecord = record.replace(moduleImport,
-    JSON.stringify(new URL('../../scripts/paired-chrome-little-arc-context.mjs', import.meta.url).href));
+    JSON.stringify(new URL('../../scripts/paired-chrome-little-arc-context.mjs', import.meta.url).href))
+    .replaceAll(provenanceCommand, fixtureProvenanceCommand);
 const build = shellStep('Build the exact pair and retain production hashes');
 // Run only post-build verification against clearly labeled fixture files.
 const verify = 'set -euo pipefail\nevidence="$GITHUB_WORKSPACE/arcify/test-results/paired-chrome-little-arc"\n'
-    + build.slice(build.indexOf('for repo in arcify arcify-spotlight; do'));
+    + build.slice(build.indexOf('for repo in arcify arcify-spotlight; do')).replaceAll(provenanceCommand, fixtureProvenanceCommand);
 assert(!/npm |xvfb|test:paired-chrome/.test(record + verify));
+
+function fixtureGit(root, args) {
+    return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+function writeFixture(root, path, text) {
+    const full = join(root, path);
+    mkdirSync(join(full, '..'), { recursive: true });
+    writeFileSync(full, text);
+}
+function createCompanionFixture(workspace) {
+    const companion = join(workspace, 'arcify-spotlight');
+    mkdirSync(companion);
+    fixtureGit(companion, ['init', '--quiet']);
+    for (const [path, text] of Object.entries({
+        '.gitignore': 'node_modules/\ndist/\n.env\n',
+        'package.json': '{"private":true,"fixtureOnly":true}\n',
+        'package-lock.json': '{"lockfileVersion":3,"fixtureOnly":true}\n',
+        'src/runtime.js': '// Protected source-only fixture.\n',
+        'node_modules/pkg/bin/tool.js': '// Source-only tool fixture, never executed.\n',
+        'node_modules/pkg/index.js': '// Pinned dependency fixture.\n',
+        'node_modules/@fixture/darwin-arm64/binary': 'Source-only Darwin binary fixture.\n'
+    })) writeFixture(companion, path, text);
+    mkdirSync(join(companion, 'node_modules', '.bin'));
+    symlinkSync('../pkg/bin/tool.js', join(companion, 'node_modules', '.bin', 'tool'));
+    fixtureGit(companion, ['add', '--force', '.']);
+    // Commit only this disposable test repository; never the user checkout.
+    fixtureGit(companion, ['-c', 'user.name=Source Fixture', '-c', 'user.email=fixture@example.invalid',
+        '-c', 'commit.gpgsign=false', 'commit', '--quiet', '-m', 'Source-only provenance fixture']);
+    return companion;
+}
+function replacePlatformDependencies(companion) {
+    rmSync(join(companion, 'node_modules', '@fixture', 'darwin-arm64'), { recursive: true });
+    writeFixture(companion, 'node_modules/@fixture/linux-x64/binary', 'Source-only Linux binary fixture.\n');
+    writeFixture(companion, 'node_modules/pkg/index.js', '// Locked installation replacement fixture.\n');
+}
 
 test('actual hosted receipt shell fails closed on wrong heads and modified or missing sources', {
     skip: process.platform === 'win32' ? 'The hosted receipt shell targets Ubuntu Bash.' : false
@@ -41,11 +80,11 @@ test('actual hosted receipt shell fails closed on wrong heads and modified or mi
     });
     let env;
     try {
-        // Clone existing local commits without creating commits or using a network remote.
-        for (const repo of ['arcify', 'arcify-spotlight']) {
-            execFileSync('git', ['clone', '--quiet', '--local', '--no-hardlinks', root, join(workspace, repo)],
-                { stdio: 'pipe' });
-        }
+        // Clone main source locally. The companion is a clearly labeled disposable
+        // Git fixture with tracked platform dependencies, matching the pinned layout.
+        execFileSync('git', ['clone', '--quiet', '--local', '--no-hardlinks', root, join(workspace, 'arcify')], { stdio: 'pipe' });
+        const companion = createCompanionFixture(workspace);
+        const spotlightHead = fixtureGit(companion, ['rev-parse', 'HEAD']).trim();
         const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
         const eventPath = join(workspace, 'source-only-event-fixture.json');
         const repository = { full_name: 'calvwng/arcify', fork: true };
@@ -55,7 +94,7 @@ test('actual hosted receipt shell fails closed on wrong heads and modified or mi
             PATH: process.env.PATH, HOME: workspace, GITHUB_WORKSPACE: workspace,
             GITHUB_WORKFLOW_REF: 'unit-fixture/workflow@refs/heads/unit-fixture',
             GITHUB_WORKFLOW_SHA: head, GITHUB_RUN_ID: 'source-only-unit-fixture', GITHUB_RUN_ATTEMPT: '1',
-            ARCIFY_TEST_HEAD: head, ARCIFY_SPOTLIGHT_HEAD: head, GITHUB_SHA: head,
+            ARCIFY_TEST_HEAD: head, ARCIFY_SPOTLIGHT_HEAD: spotlightHead, GITHUB_SHA: head,
             GITHUB_REPOSITORY: 'calvwng/arcify', GITHUB_EVENT_NAME: 'workflow_dispatch',
             GITHUB_REF: 'refs/heads/source-only-unit-fixture', GITHUB_EVENT_PATH: eventPath
         };
@@ -108,12 +147,17 @@ test('actual hosted receipt shell fails closed on wrong heads and modified or mi
             mkdirSync(join(workspace, repo, 'dist'), { recursive: true });
             writeFileSync(join(workspace, repo, 'dist', 'manifest.json'), '{"unitFixtureOnly":true}\n');
         }
+        replacePlatformDependencies(companion);
         run(verify);
         const evidence = join(workspace, 'arcify', 'test-results', 'paired-chrome-little-arc');
         for (const repo of ['arcify', 'arcify-spotlight']) {
             assert.match(readFileSync(join(evidence, `${repo}-build-sha256.txt`), 'utf8'),
                 /^[0-9a-f]{64}  dist\/manifest\.json\n$/);
         }
+        const dependencyChanges = JSON.parse(readFileSync(join(evidence, 'arcify-spotlight-dependency-content-changes.json'), 'utf8'));
+        assert(dependencyChanges.some(change => change.path.includes('darwin-arm64') && change.after === null));
+        assert(dependencyChanges.some(change => change.path.includes('linux-x64') && change.before === null));
+        assert.match(readFileSync(join(evidence, 'arcify-spotlight-post-build-git-status.txt'), 'utf8'), /darwin-arm64/);
         writeFileSync(source, `${original}\n`);
         assert.throws(() => run(verify), 'Source changed after receipt recording must fail.');
         writeFileSync(source, original);
@@ -125,4 +169,75 @@ test('actual hosted receipt shell fails closed on wrong heads and modified or mi
     } finally {
         rmSync(workspace, { recursive: true, force: true });
     }
+});
+
+
+test('Spotlight dependency exception remains exact and rejects source changes, staged changes, and symlink escapes', {
+    skip: process.platform === 'win32' ? 'The hosted verifier targets Ubuntu filesystem and Git semantics.' : false
+}, () => {
+    const mutations = [
+        ['runtime edit', root => writeFixture(root, 'src/runtime.js', 'changed')],
+        ['lockfile edit', root => writeFixture(root, 'package-lock.json', 'changed')],
+        ['manifest edit', root => writeFixture(root, 'package.json', 'changed')],
+        ['source deletion', root => rmSync(join(root, 'src/runtime.js'))],
+        ['source addition', root => writeFixture(root, 'src/new.js', 'unexpected')],
+        ['similar root prefix', root => writeFixture(root, 'node_modules-other/extra.js', 'unexpected')],
+        ['ignored nested dependency source', root => writeFixture(root, 'src/node_modules/extra.js', 'unexpected')],
+        ['ignored environment source', root => writeFixture(root, '.env', 'unexpected')],
+        ['rename source into dependencies', root => {
+            fixtureGit(root, ['mv', 'src/runtime.js', 'node_modules/moved-runtime.js']);
+        }],
+        ['staged dependency change', root => {
+            writeFixture(root, 'node_modules/pkg/index.js', 'staged');
+            fixtureGit(root, ['add', '--force', 'node_modules/pkg/index.js']);
+        }],
+        ['dependency root symlink', root => {
+            renameSync(join(root, 'node_modules'), join(root, '..', 'outside-dependencies'));
+            symlinkSync('../outside-dependencies', join(root, 'node_modules'));
+        }],
+        ['nested symlink escape', root => symlinkSync('../src', join(root, 'node_modules', 'escape'))],
+        ['bin symlink escape', root => {
+            rmSync(join(root, 'node_modules', '.bin', 'tool'));
+            symlinkSync('../../src/runtime.js', join(root, 'node_modules', '.bin', 'tool'));
+        }],
+        ['dangling dependency symlink', root => symlinkSync('missing', join(root, 'node_modules', 'broken'))]
+    ];
+    for (const [label, mutate] of mutations) {
+        const workspace = mkdtempSync(join(tmpdir(), 'little-arc-dependencies-unit-'));
+        try {
+            const root = createCompanionFixture(workspace), evidence = join(workspace, 'evidence');
+            mkdirSync(evidence);
+            recordSpotlightProvenance(root, evidence);
+            replacePlatformDependencies(root);
+            assert.equal(verifySpotlightProvenance(root, evidence).status, 'passed', 'Valid npm-style replacements and internal .bin link pass.');
+            mutate(root);
+            assert.throws(() => verifySpotlightProvenance(root, evidence), label);
+            assert.equal(typeof readFileSync(join(evidence, 'arcify-spotlight-post-build-git-status.z'), 'utf8'), 'string');
+        } finally { rmSync(workspace, { recursive: true, force: true }); }
+    }
+});
+
+test('pre-install companion provenance never allows dependency modifications or extra source', {
+    skip: process.platform === 'win32' ? 'The hosted verifier targets Ubuntu filesystem and Git semantics.' : false
+}, () => {
+    for (const path of ['node_modules/pkg/index.js', 'node_modules/untracked.js', 'package-lock.json',
+        'src/runtime.js', '.env', 'src/node_modules/extra.js', 'dist/unexpected.js']) {
+        const workspace = mkdtempSync(join(tmpdir(), 'little-arc-preinstall-unit-'));
+        try {
+            const root = createCompanionFixture(workspace), evidence = join(workspace, 'evidence');
+            mkdirSync(evidence);
+            writeFixture(root, path, 'unexpected pre-install edit');
+            assert.throws(() => recordSpotlightProvenance(root, evidence), path);
+        } finally { rmSync(workspace, { recursive: true, force: true }); }
+    }
+});
+
+test('NUL Git status parsing preserves both rename paths, spaces, and newlines', () => {
+    assert.deepEqual(parseGitStatus('R  node_modules/new name.js\0src/old name.js\0?? node_modules/new\nfile.js\0'), [
+        { status: 'R ', paths: ['node_modules/new name.js', 'src/old name.js'] },
+        { status: '??', paths: ['node_modules/new\nfile.js'] }
+    ]);
+    assert.deepEqual(parseGitStatus(''), []);
+    assert.throws(() => parseGitStatus(' M node_modules/file.js'));
+    assert.throws(() => parseGitStatus('R  node_modules/file.js\0'));
 });

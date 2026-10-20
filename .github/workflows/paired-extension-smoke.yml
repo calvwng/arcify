@@ -855,6 +855,7 @@ jobs:
           const head = execFileSync('git', ['-C', 'arcify', 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
           console.log(JSON.stringify(readLittleArcAcceptanceContext(process.env, head), null, 2));
           NODE
+          node arcify/scripts/paired-chrome-little-arc-provenance.mjs record arcify-spotlight "$evidence"
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -880,8 +881,16 @@ jobs:
           npm run build --prefix arcify 2>&1 | tee "$evidence/arcify-build.log"
           npm run build --prefix arcify-spotlight 2>&1 | tee "$evidence/arcify-spotlight-build.log"
           for repo in arcify arcify-spotlight; do
-            test -z "$(git -C "$repo" status --porcelain)"
-            (cd "$repo" && sha256sum --check "$evidence/$repo-source-sha256.txt") > "$evidence/$repo-source-verification.txt"
+            git -C "$repo" status --porcelain=v1 -z --untracked-files=all > "$evidence/$repo-post-build-git-status.z"
+            git -C "$repo" status --porcelain=v1 --untracked-files=all > "$evidence/$repo-post-build-git-status.txt"
+          done
+          for repo in arcify arcify-spotlight; do
+            if [ "$repo" = arcify ]; then
+              test -z "$(git -C "$repo" status --porcelain)"
+              (cd "$repo" && sha256sum --check "$evidence/$repo-source-sha256.txt") > "$evidence/$repo-source-verification.txt"
+            else
+              node arcify/scripts/paired-chrome-little-arc-provenance.mjs verify "$repo" "$evidence" > "$evidence/$repo-source-verification.txt"
+            fi
             test -f "$repo/dist/manifest.json"
             (cd "$repo" && find dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/$repo-build-sha256.txt"
           done

@@ -267,6 +267,12 @@ test('source and build receipts precede the browser and cannot hide head or buil
     assert(littleArcJob.indexOf('test -z "$(git -C "$repo" status --porcelain)"')
         < littleArcJob.indexOf("node --input-type=module <<'NODE'"),
     'Reject changed checked-out source before executing its validator.');
+    assert.match(littleArcJob, /node arcify\/scripts\/paired-chrome-little-arc-provenance\.mjs record arcify-spotlight "\$evidence"/);
+    assert.match(littleArcJob, /if \[ "\$repo" = arcify \]; then\n              test -z "\$\(git -C "\$repo" status --porcelain\)"/);
+    assert.match(littleArcJob, /node arcify\/scripts\/paired-chrome-little-arc-provenance\.mjs verify "\$repo" "\$evidence"/);
+    assert.match(littleArcJob, /status --porcelain=v1 -z --untracked-files=all > "\$evidence\/\$repo-post-build-git-status.z"/);
+    assert(littleArcJob.indexOf('$repo-post-build-git-status.z') < littleArcJob.indexOf('if [ "$repo" = arcify ]; then'),
+        'Retain complete status for both checkouts before post-build verification can fail.');
     assert.equal((littleArcJob.match(/set -euo pipefail/g) || []).length, 2);
     assert.doesNotMatch(littleArcJob, /\|\| true|catch|exit 0|continue-on-error/);
 });
