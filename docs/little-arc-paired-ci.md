@@ -1,6 +1,6 @@
 # Little Arc paired-browser acceptance candidate
 
-Status: the reviewed runtime candidate, companion, and bounded PR acceptance route are published. The first Little Arc job passed exact-source/event checks and both production builds, then stopped at the post-build dependency-provenance check before Chrome launched. No native run has been performed for Little Arc. No workflow has been dispatched manually. A narrowly scoped test-only provenance correction is prepared locally; publication and build success do not establish native acceptance or authorize deployment.
+Status: the startup correction at `f735701eeb885e126968b87f6c8dae2047a3a3b8` completed both trusted native launches and first same-tab promotion. The run then established that full extension reload removes the controller, invalidating this harness's original surviving-controller assumption. The approved test-only correction below verifies missing-controller ordinary-tab fallback. Intact-controller recovery remains explicitly native-unverified. See [reload boundary and exact cleanup evidence](little-arc-reload-boundary.md). A later exact-head hosted run is required; source tests and build success are not native acceptance. No workflow has been dispatched manually.
 
 ## Isolated scope
 
@@ -11,9 +11,9 @@ The scenario is intended to establish:
 - A trusted Spotlight action opens one compact normal window with an exact controller and a separate live top-level HTTP(S) page.
 - The transient page and its controller are absent from Space/Favorite ownership and ordinary snapshots before explicit promotion.
 - A separate, trusted controller choice moves the same native page into the selected Space's Today section while retaining its original document nonce and typed form value.
-- A genuinely observed extension reload clears session authority. The intact controller proves only its own window; the controller requires an explicit live-tab choice even when two pages have the same URL.
-- Recovery selection alone makes no native move, close, activation, or Space/Favorite adoption. The subsequent promotion moves only the chosen exact tab.
-- Cancelled and stale choices do not silently recover, transfer, or adopt a tab. The controller, an unchosen equal-URL page, and unrelated ordinary-window state are preserved.
+- A genuinely observed full extension reload clears session authority and removes the original controller without replacement. Both equal-URL HTTP pages retain their exact IDs, window, documents and form state while becoming distinct ordinary Today members.
+- Continuous native observation in the unaffected companion rejects replay, clone, transfer, closure and navigation effects on surviving pages; unrelated saved state and window B remain unchanged.
+- Launch cancellation remains covered. Intact-controller orphan recovery, abandoned/stale recovery choices and chosen-only recovered promotion are explicitly reported not-run/native-unverified, never passed by this different boundary case.
 
 The module must fail on missing capability, absent evidence, stale exact IDs, untrusted input, failed reload proof, unexpected adoption, replacement documents, or uncertain outcomes. It must not synthesize a successful runtime response, erase session storage to simulate reload, match tabs by URL, recreate a controller, or close unknown pages during cleanup.
 
@@ -25,11 +25,12 @@ These commands parse source or run unit tests. They do not launch Chrome:
 
 ```sh
 node --check scripts/paired-chrome-little-arc.mjs
+node --check scripts/paired-chrome-little-arc-reload.mjs
 node --check scripts/paired-chrome-little-arc-context.mjs
 node --check scripts/paired-chrome-little-arc-provenance.mjs
 node --check scripts/paired-chrome-smoke.mjs
 node --check scripts/paired-chrome-run-plan.mjs
-node --test tests/unit/paired-chrome-little-arc.test.js tests/unit/paired-chrome-little-arc-wiring.test.js tests/unit/paired-chrome-little-arc-provenance.test.js tests/unit/paired-chrome-little-arc-context.test.js tests/unit/paired-chrome-run-plan.test.js
+node --test tests/unit/paired-chrome-little-arc-reload.test.js tests/unit/paired-chrome-little-arc.test.js tests/unit/paired-chrome-little-arc-wiring.test.js tests/unit/paired-chrome-little-arc-provenance.test.js tests/unit/paired-chrome-little-arc-context.test.js tests/unit/paired-chrome-run-plan.test.js
 npm run test:unit
 npm run build
 git diff --check
@@ -81,7 +82,7 @@ The dependency root must remain a real directory. Internal npm `.bin` links are 
 
 The existing browser command remains `xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight`, with `ARCIFY_PAIRED_RUN_MODE=little-arc` supplied by the isolated job. This command is for a later separately authorized supported runner only; do not execute it locally. A failed checkout, source check, dependency step, build, runtime self-test, sandbox check, or browser case remains a failure. The job uses `pipefail` and always attempts to upload the evidence gathered so far; no same-profile retry or success fallback is added.
 
-Results belong under `test-results/paired-chrome-little-arc/`. A successful result must include the complete case report, trusted-input and actual message/native-event observations, exact IDs, durable ownership before/after state, reload worker/view replacement proof, live document/form comparisons, required screenshots, and unchanged window B evidence. Missing, failed, skipped, or incomplete evidence cannot pass the selected run.
+Results belong under `test-results/paired-chrome-little-arc/`. A successful result must include the complete case report, trusted-input and actual message/native-event observations, exact IDs, durable ownership before/after state, reload worker/view replacement proof, continuous peer-observer identity/integrity, exact missing-controller and ordinary-adoption evidence, live document/form comparisons, separately attributed onboarding cleanup, required screenshots, and unchanged window B evidence. The five native-unverified intact-controller recovery subcases remain outside the executed count and visible in the report. Missing, failed, skipped, or incomplete evidence cannot pass the selected run.
 
 ## Limits even after a successful run
 

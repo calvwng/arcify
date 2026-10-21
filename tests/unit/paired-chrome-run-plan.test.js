@@ -59,7 +59,7 @@ test('Little Arc is a separate four-case extension-reload plan with an opt-in ma
     const report = createPairedChromeRunReport(names, 'little-arc');
     assert.equal(report.expectedCaseCount, 4);
     assert.deepEqual(indices(report), littleArcOrder);
-    assert.match(report.scope, /explicit same-window recovery after extension reload/);
+    assert.match(report.scope, /missing-controller ordinary-tab fallback after full extension reload; intact-controller recovery remains native-unverified/);
     assert.match(report.scope, /not full-browser restart or full-suite acceptance/);
     assert(!indices(createPairedChromeRunReport(names)).includes(55));
     assert.match(workflow, /ARCIFY_PAIRED_RUN_MODE:\s*little-arc/);

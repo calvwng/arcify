@@ -48,7 +48,7 @@ export function createPairedChromeRunReport(caseNames, mode = 'full') {
         runMode: mode,
         scope: mode === 'full' ? 'Full paired-extension suite.' : mode === 'move-drag' ?
             'Supplemental fresh-profile tab-menu, native Move to New Window and sticky New Tab drag coverage; this is not Little Arc, full-browser restart or full-suite acceptance.' : mode === 'little-arc' ?
-            'Supplemental fresh-profile Little Arc exact-tab launch, transfer and explicit same-window recovery after extension reload; this is not full-browser restart or full-suite acceptance.' : mode === 'archive-reopen' ?
+            'Supplemental fresh-profile Little Arc exact-tab launch, transfer and missing-controller ordinary-tab fallback after full extension reload; intact-controller recovery remains native-unverified; this is not full-browser restart or full-suite acceptance.' : mode === 'archive-reopen' ?
             'Supplemental fresh-profile Spotlight Archive exact-entry reopen coverage; this is not native-panel opening, archive-actions or full-suite acceptance.' : mode === 'archive-actions' ?
             'Supplemental fresh-profile Spotlight Archive native-panel and exact-entry reopen coverage; this is not a full-suite or extended-actions result.' : mode === 'extended-actions' ?
             'Supplemental fresh-profile Spotlight Space navigation and tab-command coverage; this is not a full-suite, recovery or appearance result.' : mode === 'recovery-actions' ?

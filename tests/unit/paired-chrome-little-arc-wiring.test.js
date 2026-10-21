@@ -99,7 +99,9 @@ test('native environment guards and explicit source-only requirements remain pre
     assert.match(source, /process\.env\.GITHUB_ACTIONS !== 'true' \|\| process\.env\.CI !== 'true'/);
     assert.match(source, /process\.getuid\?\.\(\) === 0/);
     const docs = readSourceText(new URL('../../docs/little-arc-paired-ci.md', import.meta.url));
-    assert.match(docs, /No native run has been performed/);
+    assert.match(docs, /completed both trusted native launches and first same-tab promotion/);
+    assert.match(docs, /Intact-controller recovery remains explicitly native-unverified/);
+    assert.match(docs, /A later exact-head hosted run is required/);
     assert.match(docs, /No workflow has been dispatched/);
     assert.match(docs, /acceptance_scope=little-arc/);
     assert.match(docs, /pin alone does not establish/);

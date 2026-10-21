@@ -9,8 +9,11 @@ import { canonicalSavedMoveBookmarks } from './paired-chrome-saved-move.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { installSpotlightActionApiObservation } from './paired-chrome-spotlight-actions.mjs';
 import { withLittleArcOpenDiagnostics } from './paired-chrome-little-arc-diagnostics.mjs';
+import { LITTLE_ARC_NATIVE_UNVERIFIED, installLittleArcReloadObservation, readLittleArcReloadObservation, stopLittleArcReloadObservation,
+    assertLittleArcReloadObservation, readLittleArcReloadDocument, assertLittleArcReloadDocument, claimLittleArcReloadOnboarding,
+    assertLittleArcReloadOnboardingUnchanged, assertLittleArcMissingControllerReload } from './paired-chrome-little-arc-reload.mjs';
 
-export const LITTLE_ARC_CASE_NAME = 'Little Arc trusted launch and same-tab transfer preserve documents with explicit same-window recovery';
+export const LITTLE_ARC_CASE_NAME = 'Little Arc trusted launch and same-tab transfer preserve documents with missing-controller reload fallback';
 export const LITTLE_ARC_TITLE = 'Open link in Little Arc';
 export const LITTLE_ARC_TYPE = 'arcify-transient-action';
 const SESSION_KEY = 'transientWindowSession';
@@ -305,32 +308,34 @@ export async function attachLittleArcControllerTargets({ targets, controllerTabI
     return { controller: await observePage(match.page), controllerTarget: match.target, pageTarget: remaining[0] };
 }
 
+export async function readLittleArcRawState() {
+        const local = await chrome.storage.local.get(['spaces', 'spaceTabSnapshot', 'pinnedTabStatesById', 'persistentFavorites', 'archivedTabs']);
+        const session = await chrome.storage.session.get(['activeSpaces', 'favoriteSession', 'transientWindowSession', 'spotlightBridgeRequests']);
+        return { tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, pinned, incognito, active, groupId, splitViewId }) => ({ id, windowId, index, url, pendingUrl: pendingUrl || null, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1 })).sort((a,b) => a.id-b.id),
+            windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, width, height }) => ({ id, type, incognito, focused, width, height })).sort((a,b) => a.id-b.id),
+            groups: (await chrome.tabGroups.query({})).sort((a,b) => a.id-b.id), spaces: local.spaces || [], savedSnapshot: local.spaceTabSnapshot || [], bindings: local.pinnedTabStatesById || {}, favorites: local.persistentFavorites || [], archivedTabs: local.archivedTabs || [],
+            sessionPresence: { registry: Object.hasOwn(session, 'transientWindowSession'), journal: Object.hasOwn(session, 'spotlightBridgeRequests') },
+            journal: Object.hasOwn(session, 'spotlightBridgeRequests') ? session.spotlightBridgeRequests : [], favoriteSession: session.favoriteSession || null, activeSpaces: session.activeSpaces || {}, registry: Object.hasOwn(session, 'transientWindowSession') ? session.transientWindowSession : { version: 1, records: [] }, bookmarks: await chrome.bookmarks.getTree() };
+}
+
 /** No positive transport adapter: open, recover and promote originate only in genuine visible UI. */
 export async function exerciseLittleArc({ browser, observePage, apiPage, spotlightOptions, ui, screenshot, snapshot, external, poll, fixture, arcifyId, spotlightId, search, reloadArcify, record = async () => {} }) {
     assertLittleArcEnvironment();
     for (const adapter of [observePage, ui, screenshot, snapshot, external, poll, search, reloadArcify, record]) assert.equal(typeof adapter, 'function');
     const nonce = randomBytes(16).toString('hex'), originWindowId = fixture.windowA, targetWindowId = fixture.windowB;
     const ownedTabs = new Set(), ownedWindows = new Set(), pages = new Map();
-    const evidence = { nonce, checkpoints: [], setup: [], cleanup: [], openDiagnostics: [], realTrustedInput: true, scope: 'Source acceptance for the disposable hosted Chrome profile only',
-        limits: ['Browser restart with missing controller or cross-window restored pages remains a release blocker.', 'Real extension reload is covered; full browser restore, login state, back/forward, drag-out/replacement and journal-boundary interruption remain separate acceptance work.', 'No OS link handling, user profile, Helium or deployment acceptance is claimed.'] };
-    let primaryError, source, overlayPage;
+    const evidence = { nonce, nativeUnverified: LITTLE_ARC_NATIVE_UNVERIFIED.map(name => ({ name, status: 'not-run', nativeValidated: false, reason: 'Full extension reload removes the controller. An intact restored controller requires separate native acceptance.' })), checkpoints: [], setup: [], cleanup: [], openDiagnostics: [], realTrustedInput: true, scope: 'Source acceptance for the disposable hosted Chrome profile only',
+        limits: ['Browser restart with missing controller or cross-window restored pages remains a release blocker.', 'Real extension reload tests missing-controller ordinary adoption only, not intact-controller recovery. Full browser restore, login state, back/forward, drag-out/replacement and journal-boundary interruption remain separate acceptance work.', 'No OS link handling, user profile, Helium or deployment acceptance is claimed.'] };
+    let primaryError, source, overlayPage, reloadObserverBefore, reloadOnboarding;
     const checkpoint = async (phase, data = {}) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
     const setup = async (label, action) => { const result = await action(); evidence.setup.push({ label, result }); await record(structuredClone(evidence)); return result; };
     const local = async message => { const result = await apiPage.evaluate(message => chrome.runtime.sendMessage({ type: 'spaceStore', ...message }), message); assert.equal(result.success, true, JSON.stringify(result)); return result; };
     const settle = () => local({ action: 'get' });
-    const raw = () => apiPage.evaluate(async () => {
-        const local = await chrome.storage.local.get(['spaces', 'spaceTabSnapshot', 'pinnedTabStatesById', 'persistentFavorites', 'archivedTabs']);
-        const session = await chrome.storage.session.get(['activeSpaces', 'favoriteSession', 'transientWindowSession', 'spotlightBridgeRequests']);
-        return { tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, pinned, incognito, active, groupId, splitViewId }) => ({ id, windowId, index, url, pendingUrl: pendingUrl || null, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1 })).sort((a,b) => a.id-b.id),
-            windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, width, height }) => ({ id, type, incognito, focused, width, height })).sort((a,b) => a.id-b.id),
-            groups: (await chrome.tabGroups.query({})).sort((a,b) => a.id-b.id), spaces: local.spaces || [], savedSnapshot: local.spaceTabSnapshot || [], bindings: local.pinnedTabStatesById || {}, favorites: local.persistentFavorites || [], archivedTabs: local.archivedTabs || [],
-            journal: session.spotlightBridgeRequests || [], favoriteSession: session.favoriteSession || null, activeSpaces: session.activeSpaces || {}, registry: session.transientWindowSession || { version: 1, records: [] }, bookmarks: await chrome.bookmarks.getTree() };
-    });
+    const raw = () => apiPage.evaluate(readLittleArcRawState);
     const read = async () => { await settle(); const state = await raw(); state.pageStates = Object.fromEntries(await Promise.all([...pages].map(async ([id,page]) => [id, await page.evaluate(readLittleArcPage)]))); state.snapshots = { [originWindowId]: await snapshot(originWindowId), [targetWindowId]: await snapshot(targetWindowId) }; return state; };
     const original = await raw(), oldApiTab = await apiPage.evaluate(() => chrome.tabs.getCurrent());
     const reset = () => apiPage.evaluate(() => { globalThis.__spaceActionObservation.events.length = 0; });
     const trace = () => apiPage.evaluate(() => globalThis.__spaceActionObservation.events);
-    const recordByToken = (state, token) => exact(state.registry.records, token, 'token');
     const writeDraft = async (id, page, label) => {
         await ui(page, `Type unsaved ${label} form state`, async () => {
             const input = await page.$('#little-arc-draft'); assert(input); try { await replaceInputText(page, input, `Unsubmitted ${label} ${nonce}`); } finally { await input.dispose(); }
@@ -474,82 +479,98 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
         await setup('Close the first completed fixture controller by its exact ID', () => apiPage.evaluate(id => chrome.tabs.remove(id), first.record.controllerTabId));
         ownedTabs.delete(first.record.controllerTabId); ownedWindows.delete(first.record.windowId);
 
-        const recovery = await launch(true, 'Enter');
-        const twin = await createNavigationFixturePage({ browser, apiPage, observePage, poll, windowId: recovery.record.windowId, url: recovery.page.url() });
-        ownedTabs.add(twin.tab.id); await writeDraft(twin.tab.id, twin.page, 'same-address unchosen twin');
-        await setup('Keep two independently created same-address native pages for recovery', async () => ({ ids: [recovery.record.tabId, twin.tab.id], windowId: recovery.record.windowId }));
-        const beforeReload = await read(); assertLittleArcExcluded(beforeReload, [recovery.record.controllerTabId, recovery.record.tabId, twin.tab.id]);
-        assert.equal(exact(beforeReload.tabs, twin.tab.id).url, exact(beforeReload.tabs, recovery.record.tabId).url);
-        assert.notEqual(beforeReload.pageStates[twin.tab.id].documentId, beforeReload.pageStates[recovery.record.tabId].documentId);
+        const reloadFlow = await launch(true, 'Enter');
+        const twin = await createNavigationFixturePage({ browser, apiPage, observePage, poll, windowId: reloadFlow.record.windowId, url: reloadFlow.page.url() });
+        ownedTabs.add(twin.tab.id); await writeDraft(twin.tab.id, twin.page, 'same-address ordinary survivor');
+        await setup('Keep two independently created same-address native pages across full extension reload', async () => ({ ids: [reloadFlow.record.tabId, twin.tab.id], windowId: reloadFlow.record.windowId }));
+        const beforeReload = await read(); assertLittleArcExcluded(beforeReload, [reloadFlow.record.controllerTabId, reloadFlow.record.tabId, twin.tab.id]);
+        const settings = await apiPage.evaluate(async () => ({ ...(await chrome.storage.sync.get('onboardingVersion')), version: chrome.runtime.getManifest().version }));
+        const oldReloadApiTab = await apiPage.evaluate(() => chrome.tabs.getCurrent());
+        await spotlightOptions.evaluate(installLittleArcReloadObservation, { nonce });
+        reloadObserverBefore = await spotlightOptions.evaluate(readLittleArcReloadObservation);
+        assertLittleArcReloadObservation(reloadObserverBefore, reloadObserverBefore, spotlightId);
+        evidence.reloadBoundary = { before: beforeReload, observerBefore: reloadObserverBefore, settings };
+        await record(structuredClone(evidence));
+        // Exactly one real full extension reload. Chrome closes extension tabs;
+        // do not reload/recreate a controller or substitute a worker restart.
         const reloaded = await reloadArcify(); assertLittleArcReload(reloaded.evidence, arcifyId); assert(reloaded.apiPage); apiPage = reloaded.apiPage;
         await apiPage.evaluate(installSpotlightActionApiObservation); await apiPage.evaluate(installLittleArcGroupObservation);
-        // Real extension reload invalidates extension documents. Reload this same
-        // native control tab, never recreate it or delete its session registry.
-        await setup('Reload the surviving exact control document after observed extension reload', async () => { await recovery.controller.reload({ waitUntil: 'domcontentloaded' }); return { tabId: recovery.record.controllerTabId }; });
-        assert.equal((await recovery.controller.evaluate(() => chrome.tabs.getCurrent())).id, recovery.record.controllerTabId);
-        await poll(() => recovery.controller.evaluate(readLittleArcControls), controls => !controls.recoveryHidden && !controls.recovery.disabled, 'explicit same-window orphan recovery choices');
-        const afterReload = await read(), orphan = recordByToken(afterReload, recovery.record.token), orphanControls = await recovery.controller.evaluate(readLittleArcControls);
-        assertLittleArcRecoveryControls(orphanControls, orphan, [recovery.record.tabId, twin.tab.id]); assertLittleArcExcluded(afterReload, orphan.memberTabIds);
-        assertLittleArcSavedUnchanged(beforeReload, afterReload);
-        for (const [id, state] of Object.entries(beforeReload.pageStates)) assert.deepEqual(afterReload.pageStates[id], state, 'Actual extension reload cannot reload live web documents.');
-        await checkpoint('real-reload-orphan-with-duplicate-urls', { before: beforeReload, after: afterReload, controls: orphanControls, reload: reloaded.evidence, screenshot: await screenshot(recovery.controller, 'No page or destination preselected after real reload') });
-
-        // Abandon a selected recovery option via the existing Refresh choices UI.
-        let abandonBefore;
-        await ui(recovery.controller, 'Abandon a recovery choice without submitting it', async () => {
-            abandonBefore = await read(); await recovery.controller.evaluate(installLittleArcInputObservation); await reset();
-            await selectExact(recovery.controller, '#recovery-page', twin.tab.id); await recovery.controller.click('#refresh');
-            await recovery.controller.waitForFunction(() => document.getElementById('recovery-page').value === '', { polling: 50 });
-        });
-        const abandoned = await read(), abandonEvents = await trace();
-        assert.deepEqual(controlRequests(abandonEvents), []); assert.deepEqual(tabMutations(abandonEvents), []); assert.deepEqual(abandoned.registry, abandonBefore.registry);
-        assertLittleArcNoEffects(abandonBefore, abandoned, abandonEvents);
-        await checkpoint('recovery-choice-abandoned', { before: abandonBefore, after: abandoned, events: abandonEvents, input: await recovery.controller.evaluate(() => globalThis.__littleArcInputEvents) });
-
-        // A real native pin makes a still-visible selected ID stale. This setup
-        // mutation is recorded separately and finishes before action observation.
-        await ui(recovery.controller, 'Choose exact recovery page before native stale-state setup', () => selectExact(recovery.controller, '#recovery-page', twin.tab.id));
-        await setup('Pin only the selected fixture twin to invalidate its cached recovery choice', () => apiPage.evaluate(id => chrome.tabs.update(id, { pinned: true }), twin.tab.id));
-        const staleBefore = await read();
-        await ui(recovery.controller, 'Reject the stale exact recovery choice once', async () => {
-            await recovery.controller.evaluate(installLittleArcInputObservation); await reset(); await recovery.controller.click('#recover');
-            await recovery.controller.waitForFunction(() => document.getElementById('recover').disabled && !document.getElementById('status').textContent.includes('Remembering') && document.getElementById('status').textContent.length > 0, { polling: 50 });
-        });
-        const staleAfter = await read(), staleEvents = await trace(), staleControls = await recovery.controller.evaluate(readLittleArcControls);
-        assertLittleArcControlRequest(staleEvents, { action: 'recover', record: orphan, tabId: twin.tab.id, arcifyId });
-        assertLittleArcTrustedInput(await recovery.controller.evaluate(() => globalThis.__littleArcInputEvents), { action: 'recover' });
-        assert.deepEqual(staleAfter.registry, staleBefore.registry); assert.equal(staleControls.promoteDisabled, true); assert.equal(staleControls.recoverDisabled, true);
-        assertLittleArcNoEffects(staleBefore, staleAfter, staleEvents); assertLittleArcExcluded(staleAfter, orphan.memberTabIds);
-        await checkpoint('stale-exact-recovery-choice-rejected', { before: staleBefore, after: staleAfter, events: staleEvents, controls: staleControls });
-        await setup('Unpin only the fixture twin and reload the same blocked control document', async () => { await apiPage.evaluate(id => chrome.tabs.update(id, { pinned: false }), twin.tab.id); await recovery.controller.reload({ waitUntil: 'domcontentloaded' }); return { tabId: twin.tab.id, controllerTabId: orphan.controllerTabId }; });
-        await poll(() => recovery.controller.evaluate(readLittleArcControls), controls => !controls.recoveryHidden && !controls.recovery.disabled, 'fresh explicit recovery choices after stale rejection');
-        assertLittleArcRecoveryControls(await recovery.controller.evaluate(readLittleArcControls), recordByToken(await read(), orphan.token), [recovery.record.tabId, twin.tab.id]);
-        let chosenBefore;
-        await ui(recovery.controller, 'Remember the explicitly chosen duplicate native ID without moving it', async () => {
-            chosenBefore = await read(); await recovery.controller.evaluate(installLittleArcInputObservation); await reset();
-            await selectExact(recovery.controller, '#recovery-page', twin.tab.id); await recovery.controller.click('#recover');
-            await recovery.controller.waitForFunction(() => document.getElementById('status').textContent.startsWith('Page selected. Nothing moved.'), { polling: 50 });
-        });
-        const chosenAfter = await read(), chosenEvents = await trace(), chosenInput = await recovery.controller.evaluate(() => globalThis.__littleArcInputEvents);
-        assertLittleArcTrustedInput(chosenInput, { action: 'recover', selectedId: twin.tab.id });
-        const recovered = assertLittleArcRecovered(chosenBefore, chosenAfter, { record: recordByToken(chosenBefore, orphan.token), chosenId: twin.tab.id, events: chosenEvents, arcifyId });
-        const chosenControls = await recovery.controller.evaluate(readLittleArcControls); assert.equal(chosenControls.window.value, ''); assert.equal(chosenControls.space.value, ''); assert.equal(chosenControls.promoteDisabled, true);
-        await checkpoint('explicit-recovery-records-selection-only', { before: chosenBefore, after: chosenAfter, events: chosenEvents, input: chosenInput, controls: chosenControls });
-        // Deliberately promote the twin, not the pre-reload original page.
-        await promote({ ...recovery, record: recovered, page: twin.page }, { windowId: originWindowId, spaceId: target.id, bookmarkFolderId: target.bookmarkFolderId });
-        const final = await read(); assertLittleArcExcluded(final, [recovery.record.tabId, recovery.record.controllerTabId]);
-        assert.equal(exact(final.tabs, recovery.record.tabId).windowId, recovery.record.windowId);
-        assert.equal(exact(final.tabs, twin.tab.id).windowId, originWindowId);
-        await checkpoint('unchosen-page-and-controller-preserved', { final, chosenId: twin.tab.id, unchosenId: recovery.record.tabId, controllerTabId: recovery.record.controllerTabId });
-    } catch (error) { primaryError = error; try { await checkpoint('failed', { error: { message: error.message, stack: error.stack }, ownedTabIds: [...ownedTabs], ownedWindowIds: [...ownedWindows] }); } catch {} throw error; }
+        const newApiTab = await apiPage.evaluate(() => chrome.tabs.getCurrent());
+        let afterReload = await poll(read, state => [reloadFlow.record.tabId, twin.tab.id].every(id => owner(state, id).length === 1), 'both surviving exact native IDs have ordinary Space ownership');
+        afterReload.snapshots[reloadFlow.record.windowId] = await snapshot(reloadFlow.record.windowId);
+        const observerAfter = await poll(() => spotlightOptions.evaluate(readLittleArcReloadObservation), value => {
+            const observed = assertLittleArcReloadObservation(reloadObserverBefore, value, spotlightId);
+            if (settings.onboardingVersion === settings.version) return true;
+            const created = observed.filter(event => event.type === 'tabs.onCreated'
+                && (event.data[0].pendingUrl || event.data[0].url) === `chrome-extension://${arcifyId}/installation-onboarding.html`);
+            assert(created.length <= 1, 'Duplicate onboarding creations are not cleanup authority.');
+            return created.length === 1;
+        }, 'the expected onboarding creation within the continuously observed reload');
+        const nativeEvents = assertLittleArcReloadObservation(reloadObserverBefore, observerAfter, spotlightId);
+        Object.assign(evidence.reloadBoundary, { after: afterReload, observerAfter, nativeEvents, reload: reloaded.evidence });
+        await record(structuredClone(evidence));
+        let onboardingId = null;
+        if (settings.onboardingVersion !== settings.version) {
+            const onboardingUrl = `chrome-extension://${arcifyId}/installation-onboarding.html`;
+            const created = nativeEvents.filter(event => event.type === 'tabs.onCreated' && (event.data[0].pendingUrl || event.data[0].url) === onboardingUrl);
+            assert.equal(created.length, 1, 'Require the exact reload-created onboarding event, never a URL-only cleanup guess.');
+            const id = created[0].data[0].id;
+            const match = await poll(async () => {
+                const matches = [];
+                for (const target of browser.targets().filter(target => target.type() === 'page' && target.url() === onboardingUrl)) {
+                    const page = await target.page(); let witness;
+                    try { witness = await page.evaluate(readLittleArcReloadDocument); }
+                    catch (error) { if (/Execution context was destroyed|Cannot find context with specified id/.test(error.message)) continue; throw error; }
+                    if (!witness) continue;
+                    assert.equal(witness.tab.id, id, 'A same-address onboarding tab cannot replace the observed native ID.');
+                    if (witness.readyState !== 'complete') continue;
+                    assertLittleArcReloadDocument(witness, { id, windowId: oldReloadApiTab.windowId, url: onboardingUrl, extensionId: arcifyId });
+                    matches.push({ page, witness });
+                }
+                assert(matches.length <= 1); return matches[0] || null;
+            }, Boolean, 'the exact observed onboarding tab and its actual extension document');
+            afterReload = await read(); afterReload.snapshots[reloadFlow.record.windowId] = await snapshot(reloadFlow.record.windowId);
+            const receipt = claimLittleArcReloadOnboarding({ before: beforeReload, after: afterReload, events: nativeEvents, settings,
+                witness: match.witness, arcifyId, windowId: oldReloadApiTab.windowId });
+            reloadOnboarding = { page: match.page, receipt }; onboardingId = receipt.id;
+            evidence.reloadBoundary.onboarding = receipt;
+        }
+        // Read every page/ownership witness again after onboarding document validation.
+        afterReload = await read(); afterReload.snapshots[reloadFlow.record.windowId] = await snapshot(reloadFlow.record.windowId);
+        // Capture through final identity validation too; an intervening event cannot be hidden.
+        const finalObserver = await spotlightOptions.evaluate(readLittleArcReloadObservation);
+        const finalEvents = assertLittleArcReloadObservation(reloadObserverBefore, finalObserver, spotlightId);
+        Object.assign(evidence.reloadBoundary, { after: afterReload, observerAfter: finalObserver, nativeEvents: finalEvents });
+        const result = assertLittleArcMissingControllerReload(beforeReload, afterReload, { record: reloadFlow.record, twinId: twin.tab.id,
+            oldApiTabId: oldReloadApiTab.id, newApiTabId: newApiTab.id, onboardingId, arcifyId, windowB: targetWindowId, events: finalEvents });
+        assertLittleArcSavedUnchanged(beforeReload, afterReload, finalEvents);
+        await checkpoint('real-reload-missing-controller-ordinary-survivors', { before: beforeReload, after: afterReload, result,
+            observerBefore: reloadObserverBefore, observerAfter: finalObserver, nativeEvents: finalEvents, reload: reloaded.evidence,
+            onboarding: reloadOnboarding?.receipt || null, screenshot: await screenshot(twin.page, 'Same native HTTP page and unsaved form after controller removal') });
+    } catch (error) { primaryError = error; if (reloadObserverBefore) { evidence.reloadBoundary ||= {}; try { evidence.reloadBoundary.observerAtFailure = await spotlightOptions.evaluate(readLittleArcReloadObservation); } catch (capture) { evidence.reloadBoundary.observerCaptureError = capture.message; } } try { await checkpoint('failed', { error: { message: error.message, stack: error.stack }, ownedTabIds: [...ownedTabs], ownedWindowIds: [...ownedWindows] }); } catch {} throw error; }
     finally {
         await finishBookmarkFixture([
             closeOverlay,
+            async () => {
+                if (!reloadOnboarding) return;
+                const { page, receipt } = reloadOnboarding;
+                assertLittleArcReloadOnboardingUnchanged(await page.evaluate(readLittleArcReloadDocument), receipt);
+                await apiPage.evaluate(async receipt => {
+                    const tab = await chrome.tabs.get(receipt.id);
+                    const contexts = await chrome.runtime.getContexts({ contextTypes: ['TAB'], tabIds: [receipt.id] });
+                    if (chrome.runtime.id !== receipt.extensionId || tab.id !== receipt.id || tab.windowId !== receipt.windowId || tab.url !== receipt.url || tab.pendingUrl
+                        || tab.pinned !== false || tab.incognito !== false || (tab.splitViewId ?? -1) !== -1 || (tab.groupId ?? -1) !== -1
+                        || contexts.length !== 1 || contexts[0].documentId !== receipt.documentIds[0]) throw new Error('Reload onboarding identity changed before exact cleanup.');
+                    await chrome.tabs.remove(receipt.id);
+                }, receipt);
+                evidence.cleanup.push({ removedReloadOnboardingTabId: receipt.id, receipt });
+            },
             async () => { const alive = await apiPage.evaluate(() => chrome.tabs.query({})); const ids = [...ownedTabs].filter(id => alive.some(tab => tab.id === id)); if (ids.length) await apiPage.evaluate(ids => chrome.tabs.remove(ids), ids); evidence.cleanup.push({ removedExactTabIds: ids }); pages.clear(); },
             async () => { const alive = await apiPage.evaluate(() => chrome.windows.getAll()); for (const id of ownedWindows) if (alive.some(window => window.id === id)) { const tabs = await apiPage.evaluate(id => chrome.tabs.query({ windowId: id }), id); assert(tabs.every(tab => ownedTabs.has(tab.id)), 'Never remove an untracked page during fixture cleanup.'); await apiPage.evaluate(id => chrome.windows.remove(id), id); evidence.cleanup.push({ removedExactWindowId: id }); } },
             async () => { const alive = await apiPage.evaluate(() => chrome.tabs.query({})); for (const tab of original.tabs.filter(tab => tab.active && alive.some(current => current.id === tab.id))) await apiPage.evaluate(id => chrome.tabs.update(id, { active: true }), tab.id); for (const [id, spaceId] of Object.entries(original.activeSpaces)) await local({ action: 'activate', windowId: Number(id), spaceId }); const focused = original.windows.find(window => window.focused); if (focused && (await apiPage.evaluate(() => chrome.windows.getAll())).some(window => window.id === focused.id)) await apiPage.evaluate(id => chrome.windows.update(id, { focused: true }), focused.id); await settle(); },
             async () => { const final = await raw(), currentApiTab = await apiPage.evaluate(() => chrome.tabs.getCurrent()); const expected = original.tabs.filter(tab => tab.id !== oldApiTab.id).map(tab => tab.id).concat(currentApiTab.id).sort((a,b) => a-b); assert.deepEqual(final.tabs.map(tab => tab.id), expected, 'Only the real reload may replace the harness options tab; no fixture page may leak.'); assertLittleArcSavedUnchanged(original, final); evidence.cleanup.push({ verified: true, currentApiTabId: currentApiTab.id, finalTabIds: final.tabs.map(tab => tab.id) }); await record(structuredClone(evidence)); },
-            () => apiPage.evaluate(() => { globalThis.__littleArcGroupObservation?.stop(); globalThis.__spaceActionObservation?.stop(); })
+            () => apiPage.evaluate(() => { globalThis.__littleArcGroupObservation?.stop(); globalThis.__spaceActionObservation?.stop(); }),
+            () => spotlightOptions.evaluate(stopLittleArcReloadObservation)
         ], primaryError, async failure => { evidence.cleanup.push(failure); await record(structuredClone(evidence)); });
     }
     return evidence;

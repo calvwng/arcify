@@ -127,7 +127,7 @@ const stepNames = [
     'Spotlight Open Archive requires trusted input and the existing popup in the native Side Panel',
     'Spotlight Archive reopens exact same-address entries in their original Space and source window without replay',
     'Spotlight Split and End Split keep exact left and right source panes and original documents',
-    'Little Arc trusted launch and same-tab transfer preserve documents with explicit same-window recovery'
+    'Little Arc trusted launch and same-tab transfer preserve documents with missing-controller reload fallback'
 ];
 assert.equal(stepNames[49], SPOTLIGHT_ACTION_CASE_NAME, 'Initial Spotlight action case must retain its reviewed identity.');
 assert.equal(stepNames[50], SPOTLIGHT_NAVIGATION_CASE_NAME, 'Spotlight navigation case must retain its reviewed identity.');
@@ -135,7 +135,7 @@ assert.equal(stepNames[51], SPOTLIGHT_TAB_CASE_NAME, 'Spotlight tab-command case
 assert.equal(stepNames[52], SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, 'Spotlight Archive opening case must retain its identity.');
 assert.equal(stepNames[54], SPOTLIGHT_SPLIT_CASE_NAME, 'Spotlight Split case retains its mandatory source-pane identity.');
 assert.equal(stepNames[53], SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME, 'Spotlight Archive reopen case must retain its identity.');
-assert.equal(stepNames[55], LITTLE_ARC_CASE_NAME, 'Little Arc case retains its isolated exact-tab recovery identity.');
+assert.equal(stepNames[55], LITTLE_ARC_CASE_NAME, 'Little Arc case explicitly names its missing-controller reload boundary.');
 const report = {
     ...createPairedChromeRunReport(stepNames, process.env.ARCIFY_PAIRED_RUN_MODE),
     schemaVersion: 1, startedAt: new Date().toISOString(), status: 'running',

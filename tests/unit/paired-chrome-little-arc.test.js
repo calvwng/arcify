@@ -71,14 +71,15 @@ function reload() {
 }
 
 test('Little Arc module is import-safe and requires the ordinary hosted CI environment at execution', () => {
-    assert.equal(LITTLE_ARC_CASE_NAME, 'Little Arc trusted launch and same-tab transfer preserve documents with explicit same-window recovery');
+    assert.equal(LITTLE_ARC_CASE_NAME, 'Little Arc trusted launch and same-tab transfer preserve documents with missing-controller reload fallback');
     assert.doesNotThrow(() => assertLittleArcEnvironment({ GITHUB_ACTIONS: 'true', CI: 'true' }, 1001));
     for (const [env, uid] of [[{},1001],[{ CI:'true' },1001],[{ GITHUB_ACTIONS:'true', CI:'true' },0],[{ GITHUB_ACTIONS:'true', CI:'true' },null]]) assert.throws(() => assertLittleArcEnvironment(env, uid));
     const source = readFileSync(new globalThis.URL('../../scripts/paired-chrome-little-arc.mjs', import.meta.url), 'utf8');
     assert(!/puppeteer|\.launch\s*\(|execFile|spawn\s*\(|dispatchEvent|\.select\s*\(/.test(source));
     assert(!/storage\.session\.(?:remove|clear|set)\(/.test(source), 'Reload acceptance must not manufacture session loss.');
     assert(source.includes('await reloadArcify()')); assert(source.includes('assertLittleArcReload(reloaded.evidence, arcifyId)'));
-    assert(source.includes("await recovery.controller.evaluate(() => chrome.tabs.getCurrent())"));
+    assert(source.includes("assertLittleArcMissingControllerReload(beforeReload, afterReload"));
+    assert(!source.includes("recovery.controller.reload"));
     assert(source.includes('tabs.every(tab => ownedTabs.has(tab.id))'), 'Window cleanup must prove all surviving exact members are owned.');
     assert(!/pageForUrl|find\([^\n]*\.url\(\)/.test(source), 'Fixture targets cannot be selected by URL.');
 });
