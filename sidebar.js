@@ -1,5 +1,33 @@
+import { createArchiveIntentConsumer, setArchivePopupOpen } from './archive-intent-ui.js';
+import { withSavedMoveLock, assertSavedMoveSettled } from './saved-move-lock.js';
+import { normalizeCustomTint } from './space-colors.js';
+import { applySpaceTheme, initializeSpaceColorOverrides } from './sidebar-theme.js';
+import { createSidebarNewTabRow, placeNewTabRow } from './sidebar-new-tab.js';
+import { createNewTabWindowDrop } from './new-tab-window-drop.js';
+import { createContextMenuSession } from './context-menu-session.js';
+import { createSpaceContextMenu, spaceDeleteMessage } from './space-context-menu.js';
+import { getSpaceIcon } from './space-icons.js';
+import { projectSpaceOrder } from './space-order.js';
+import { createSpaceSwitcher } from './space-switcher.js';
+import { resolveSidebarDrop, insertAtSidebarDrop } from './sidebar-drop-target.js';
+import { createSidebarDropFeedback } from './sidebar-drop-feedback.js';
+import { createFavoritesDragSource, createSavedBookmarkFavoriteDrop, releaseCompletedFavoriteReceipt, describeBookmarkBatchOutcome } from './favorites-drop.js';
+import { createBookmarkSelection } from './bookmark-selection.js';
+import { createTodayTabSelection } from './today-tab-selection.js';
+import { createTodayFolderAction } from './today-folder-ui.js';
+import { createTodaySpaceMoveAction } from './today-space-move-ui.js';
+import { createSavedSpaceMoveAction, captureSavedSelectionMove, captureSavedFolderMove, openSavedFolderContextMenu } from './saved-space-move-ui.js';
+import { createTodaySplitUI } from './today-split-ui.js';
+import { assertNotNativeSplit } from './native-split-safety.js';
+import { createSavedFavoritesUI } from './saved-favorites-ui.js';
+import { resolveFavoritesDrop } from './favorites-drop-target.js';
+import { createFavoritesDropFeedback } from './favorites-drop-feedback.js';
+import { createFavoritesStatus } from './favorites-status.js';
+import { FAVORITE_ICON_CACHE_KEY } from './favorite-icons.js';
+import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { getSpaceBookmarkById, getSpaceBookmarkFolder, getSpaceBookmarkTree, removeSpacePin } from './space-bookmarks.js';
 import { initSidebarTour } from './sidebar-tour.js';
+import { initializeSidebarAppearance } from './sidebar-appearance.js';
 /**
  * Sidebar - Main extension UI and tab/space management
  * 
@@ -18,9 +46,12 @@ import { ChromeHelper } from './chromeHelper.js';
 import { spaceRequest } from './space-client.js';
 import { SpacePatchQueue } from './space-patch-queue.js';
 import { RefreshCoordinator } from './refresh-coordinator.js';
+import { captureSidebarViewport, createActiveTabReveal } from './sidebar-viewport.js';
 import { EditSessionRegistry } from './edit-sessions.js';
 import { isProtectedFavorite } from './favorite-safety.js';
-import { selectWindowSpaceTabs, mergeVisibleOrder, mergeCapturedTemporaryOrder, canonicalOrderFromDisplay, saveBookmarkOperation } from './sidebar-tabs.js';
+import { getTabRowAction } from './tab-row-action.js';
+import { createTabMenuActions } from './tab-menu-ui.js';
+import { selectWindowSpaceTabs, reconcileWindowPinOrder, mergeVisibleOrder, mergeCapturedTemporaryOrder, canonicalOrderFromDisplay, saveBookmarkOperation } from './sidebar-tabs.js';
 import { ownerOf } from './space-store.js';
 import { canCreateFolder, createFolder } from './folder-policy.js';
 import { loadFolderCollapsed, saveFolderCollapsed } from './folder-state.js';
@@ -33,9 +64,9 @@ import {
     activateTabInDOM,
     activateSpaceInDOM,
     showTabContextMenu,
+    closeTabContextMenu,
     showArchivedTabsPopup,
     setupQuickPinListener,
-    getDragAfterElement,
     getSpaceElement,
     getContainers,
     getTabElement,
@@ -43,8 +74,6 @@ import {
     getTempContainer,
     clearAllActiveStates,
     hideAllDropIndicators,
-    showDropIndicator,
-    getDropPosition,
     handleEmptyContainerDrop
 } from './domManager.js';
 import { BookmarkUtils } from './bookmark-utils.js';
@@ -61,20 +90,88 @@ const spaceTemplate = document.getElementById('spaceTemplate');
 // Global state
 let spaces = [];
 let activeSpaceId = null;
+let archiveDisplayRevision = 0, archiveIntentConsumer = null;
+const invalidateArchiveDisplay = () => { archiveDisplayRevision++; archiveIntentConsumer?.invalidate(); };
+// Session selection may arrive before the selected bookmark-space is adopted.
+// Keep the intent separate so missing metadata cannot erase it via fallback.
+let pendingActiveSpaceId = null;
 let previousSpaceId = null;
 let isCreatingSpace = false;
 let isOpeningBookmark = false;
 let isDraggingTab = false;
+let isDraggingSpace = false;
 let pendingMutationCount = 0;
+let tabContextMenuRequest = 0;
 let currentWindow = null;
 let defaultSpaceName = 'Home';
 let showAllOpenTabsInCollapsedFolders = false; // default Arc behavior is false (active-only)
 let activeChromeTabId = null;
+// Detached renders must not overwrite a folder toggle made while they await
+// storage. This also fences direct refreshes outside the coordinator.
+let folderStateGeneration = 0;
+const activeTabReveal = createActiveTabReveal({ getContext: () => ({
+    tabId: activeChromeTabId, spaceId: activeSpaceId,
+    content: getSpaceElement(activeSpaceId)?.querySelector('.space-content')
+}) });
 // Arc-like behavior: track which tabs have been active in each collapsed folder.
 // These tabs stay visible until user manually opens/closes the folder.
 // WeakMap<HTMLElement (folder), Set<number (tabId)>>
 const collapsedFolderShownTabs = new WeakMap();
 const bookmarkOrderBaselines = new Map();
+const favoritesContext = () => ({ spaces, activeSpaceId, pendingActiveSpaceId, windowId: currentWindow?.id });
+const bookmarkSelection = createBookmarkSelection({ document, getContext: favoritesContext, onGesture: () => todaySelection.clear() });
+const todaySelection = createTodayTabSelection({ document, getContext: favoritesContext, onGesture: () => bookmarkSelection.clear() });
+const saveTodaySelection = createTodayFolderAction({ document, selection: todaySelection, showStatus: showFavoritesStatus,
+    sendRequest: message => chrome.runtime.sendMessage(message),
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
+});
+const moveTodaySelection = createTodaySpaceMoveAction({ selection: todaySelection, getContext: favoritesContext,
+    sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
+});
+const savedMoveCapture = {
+    getContext: favoritesContext, selection: bookmarkSelection, document,
+    readBookmarks: ids => chrome.bookmarks.get(ids),
+    readTree: id => chrome.bookmarks.getSubTree(id),
+    readInverted: () => Utils.getInvertTabOrder()
+};
+const moveSavedSelection = createSavedSpaceMoveAction({ selection: bookmarkSelection, getContext: favoritesContext,
+    readInverted: () => Utils.getInvertTabOrder(),
+    sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
+});
+const todaySplit = createTodaySplitUI({ document, selection: todaySelection, getContext: favoritesContext,
+    sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); },
+    clearDropFeedback: () => { sidebarDropFeedback.clear(); hideAllDropIndicators(); },
+    onConsumeDrag: () => {
+        favoritesDragSource.clear(); isDraggingTab = false; dragSourceFolderElement = null;
+        document.querySelectorAll('.dragging').forEach(row => row.classList.remove('dragging'));
+    }
+});
+const favoritesDragSource = createFavoritesDragSource({ document, getContext: favoritesContext, selection: bookmarkSelection });
+const addBookmarkFavorite = createSavedBookmarkFavoriteDrop({ getContext: favoritesContext });
+let favoritesPreview = false;
+let pendingFavoritesDrops = 0;
+const nativeFavoriteConversions = new Set();
+const favoritesStatus = createFavoritesStatus({ document,
+    returnFocus: () => document.querySelector('#pinnedFavicons .pinned-favicon') || newTabBtn });
+function showFavoritesStatus(message, preview = false, dismissible = true) {
+    favoritesPreview = preview;
+    favoritesStatus.show(message, { preview, dismissible });
+}
+function clearFavoritesPreview() {
+    favoritesPreview = false;
+    favoritesStatus.clearPreview();
+}
 
 function disposeEditorsInElement(element) {
     if (!element) return;
@@ -96,227 +193,63 @@ function scheduleBookmarkRefresh() {
     refreshCoordinator.invalidateBookmarks();
 }
 
-// Helper function to update bookmark for a tab
-async function updateBookmarkForTab(tab, bookmarkTitle) {
-    Logger.log("updating bookmark", tab, bookmarkTitle);
-    const binding = await Utils.getPinnedTabState(tab.id);
-    if (!binding?.bookmarkId) return;
-    const space = ownerOf(spaces, tab.id);
-    const bookmark = space && await getSpaceBookmarkById(space, binding.bookmarkId);
-    if (!bookmark) throw new Error('The favorite binding is no longer valid for this space.');
-    await chrome.bookmarks.update(bookmark.id, { title: bookmarkTitle });
+const tabMenuActions = createTabMenuActions({ document,
+    getContext: () => ({ windowId: currentWindow?.id, spaceId: activeSpaceId }),
+    sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
+});
+
+function actionsForTabRow(tabElement, { selectionCount = 1, muted = false, validate = () => true } = {}) {
+    const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
+    if (!space || !tabElement.isConnected) throw new Error('This row changed. Reopen its menu.');
+    const target = { windowId: currentWindow.id, spaceId: space.id, bookmarkFolderId: space.bookmarkFolderId };
+    if (tabElement.dataset.tabId) target.tabId = Number(tabElement.dataset.tabId);
+    if (tabElement.dataset.bookmarkId) {
+        target.bookmarkId = tabElement.dataset.bookmarkId;
+        target.parentId = tabElement.parentElement?.closest('.folder')?.dataset.bookmarkId || space.bookmarkFolderId;
+    }
+    return tabMenuActions(target, { selectionCount, muted, validate: () => tabElement.isConnected
+        && Number(tabElement.dataset.tabId) === target.tabId
+        && tabElement.closest('.space')?.dataset.spaceId === target.spaceId
+        && (tabElement.dataset.bookmarkId || undefined) === target.bookmarkId && validate() });
 }
 
-
-async function replaceBookmarkUrlWithCurrentUrl(tab, tabElement) {
-    if (!tab?.id) return;
-
-    // Always prefer the live tab URL (the `tab` object captured by the UI can be stale).
-    let liveTab = null;
-    try {
-        liveTab = await chrome.tabs.get(tab.id);
-    } catch (e) {
-        // We'll fall back to dataset/tab url below.
-    }
-
-    const newUrl = liveTab?.url || tabElement?.dataset?.url || tab?.url || null;
-    if (!newUrl) {
-        console.warn('[Arcify] Replace bookmark URL failed: missing current tab URL', { tabId: tab.id });
-        return;
-    }
-    const newTitle = liveTab?.title || tab?.title || null;
-
-    const stored = await Utils.getPinnedTabState(tab.id);
-    const bookmarkId = tabElement?.dataset?.bookmarkId || stored?.bookmarkId;
-    const pinnedUrl = tabElement?.dataset?.pinnedUrl || stored?.pinnedUrl;
-
-    const resolvedBookmarkId = bookmarkId;
-
-    if (!resolvedBookmarkId) {
-        console.warn('[Arcify] Cannot replace bookmark URL: missing bookmarkId and unable to resolve.', {
-            tabId: tab.id,
-            pinnedUrl,
-            dataset: tabElement?.dataset
-        });
-        return;
-    }
-
-    try {
-        const space = ownerOf(spaces, tab.id);
-        const bookmark = space && await getSpaceBookmarkById(space, resolvedBookmarkId);
-        if (!bookmark) throw new Error('The favorite binding is no longer valid for this space.');
-        const updatePayload = { url: newUrl };
-        // Keep bookmark title in sync with the new pinned page for clarity.
-        if (newTitle) updatePayload.title = newTitle;
-        await chrome.bookmarks.update(bookmark.id, updatePayload);
-    } catch (e) {
-        console.error('[Arcify] chrome.bookmarks.update failed', { bookmarkId: resolvedBookmarkId, newUrl, error: e });
-        return;
-    }
-
-    await Utils.setPinnedTabState(tab.id, { bookmarkId: resolvedBookmarkId, pinnedUrl: newUrl });
-    if (newTitle) {
-        // Update override baseline (and pinned display) to the new URL/title.
-        await Utils.setTabNameOverride(tab.id, newUrl, newTitle);
-    }
-
-    if (tabElement) {
-        tabElement.dataset.pinnedUrl = newUrl;
-        tabElement.dataset.url = newUrl;
-        // Tab is now pinned to current URL; "back to pinned" should no longer be available.
-        const favicon = tabElement.querySelector('.tab-favicon') || tabElement.querySelector('img');
-        if (favicon) {
-            favicon.classList.remove('pinned-back');
-            favicon.title = '';
-            favicon.removeAttribute('aria-label');
-        }
-        const slash = tabElement.querySelector('.tab-url-changed-slash');
-        if (slash) slash.classList.remove('visible');
-
-        // Ensure the displayed title + domain subtitle reflect the new pinned URL immediately.
-        const titleDisplay = tabElement.querySelector('.tab-title-display');
-        if (titleDisplay && newTitle) titleDisplay.textContent = newTitle;
-        const domainDisplay = tabElement.querySelector('.tab-domain-display');
-        if (domainDisplay) domainDisplay.style.display = 'none';
-    }
-}
-
-// Function to apply color overrides from settings
-async function applyColorOverrides() {
-    try {
-        const settings = await Utils.getSettings();
-        Logger.log('Applying color overrides, settings:', settings);
-
-        const root = document.documentElement;
-
-        // Clear any existing overrides first
-        const colorNames = ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan'];
-        colorNames.forEach(colorName => {
-            root.style.removeProperty(`--user-chrome-${colorName}-color`);
-        });
-
-        // Apply new overrides if they exist
-        if (settings.colorOverrides && Object.keys(settings.colorOverrides).length > 0) {
-            Logger.log('Found color overrides:', settings.colorOverrides);
-            Object.keys(settings.colorOverrides).forEach(colorName => {
-                const colorValue = settings.colorOverrides[colorName];
-                if (colorValue) {
-                    root.style.setProperty(`--user-chrome-${colorName}-color`, colorValue);
-                    Logger.log(`Applied color override: --user-chrome-${colorName}-color = ${colorValue}`);
-                }
-            });
-        } else {
-            Logger.log('No color overrides found in settings');
-        }
-
-        // Re-apply colors to all existing spaces
-        reapplySpaceColors();
-    } catch (error) {
-        Logger.error('Error applying color overrides:', error);
-    }
-}
-
-// Function to re-apply colors to the active space
 function reapplySpaceColors() {
-    const sidebarContainer = document.getElementById('sidebar-container');
-    if (!sidebarContainer || !activeSpaceId || spaces.length === 0) return;
-
-    // Find the active space
-    const activeSpace = spaces.find(space => space.id === activeSpaceId);
-    if (!activeSpace) return;
-
-    const root = document.documentElement;
-    const colorVar = `--chrome-${activeSpace.color}-color`;
-    const colorDarkVar = `--chrome-${activeSpace.color}-color-dark`;
-
-    // Get computed values
-    const computedStyle = getComputedStyle(root);
-    let colorValue = computedStyle.getPropertyValue(colorVar).trim();
-    let colorDarkValue = computedStyle.getPropertyValue(colorDarkVar).trim();
-
-    // Fallback if variables aren't set yet
-    if (!colorValue) {
-        colorValue = `var(--chrome-${activeSpace.color}-color, rgba(255, 255, 255, 0.1))`;
-    }
-    if (!colorDarkValue) {
-        colorDarkValue = `var(--chrome-${activeSpace.color}-color-dark, rgba(255, 255, 255, 0.1))`;
-    }
-
-    sidebarContainer.style.setProperty('--space-bg-color', colorValue);
-    sidebarContainer.style.setProperty('--space-bg-color-dark', colorDarkValue);
+    applySpaceTheme(document, spaces.find(space => space.id === activeSpaceId));
 }
+
+const savedFavoritesUI = createSavedFavoritesUI({
+    document, container: document.getElementById('pinnedFavicons'), getWindowId: () => currentWindow?.id,
+    onStatus: showFavoritesStatus,
+    onDragStart: element => { isDraggingTab = true; favoritesDragSource.start(element); void newTabWindowDrop.start(); },
+    onDragEnd: () => { isDraggingTab = false; favoritesDragSource.clear(); refreshCoordinator.schedule(); }
+});
+
+const favoritesDropFeedback = createFavoritesDropFeedback({
+    document, container: document.getElementById('pinnedFavicons'),
+    resolve: point => resolveFavoritesDrop({ ...point, container: document.getElementById('pinnedFavicons'),
+        source: favoritesDragSource.inspect().source, favorites: savedFavoritesUI.getSnapshot().favorites }),
+    isActive: () => Boolean(favoritesDragSource.inspect().source),
+    onClear: () => { if (favoritesPreview) clearFavoritesPreview(); },
+    onCancel: () => {
+        favoritesDragSource.clear();
+        bookmarkSelection.clearDragImage();
+        if (!isDraggingTab) return;
+        isDraggingTab = false;
+        document.querySelectorAll('.dragging').forEach(node => node.classList.remove('dragging'));
+        dragSourceFolderElement = null;
+        sidebarDropFeedback.clear();
+        refreshCoordinator.schedule();
+    }
+});
 
 // Function to update pinned favicons
 async function updatePinnedFavicons() {
     const pinnedFavicons = document.getElementById('pinnedFavicons');
-    const pinnedTabs = await chrome.tabs.query({ pinned: true, windowId: currentWindow.id });
-
-    // Remove favicon elements for tabs that are no longer pinned
-    Array.from(pinnedFavicons.children).forEach(element => {
-        // Only remove elements that are pinned favicons (have the pinned-favicon class)
-        if (element.classList.contains('pinned-favicon')) {
-            const tabId = element.dataset.tabId;
-            if (!pinnedTabs.some(tab => tab.id.toString() === tabId)) {
-                element.remove();
-            }
-        }
-    });
-
-    pinnedTabs.forEach(tab => {
-        // Check if favicon element already exists for this tab
-        const existingElement = pinnedFavicons.querySelector(`[data-tab-id="${tab.id}"]`);
-        if (!existingElement) {
-            const faviconElement = document.createElement('div');
-            faviconElement.className = 'pinned-favicon';
-            faviconElement.title = tab.title;
-            faviconElement.dataset.tabId = tab.id;
-            faviconElement.draggable = true; // Make pinned favicon draggable
-
-            const img = document.createElement('img');
-            img.src = Utils.getFaviconUrl(tab.url, "96");
-            img.onerror = () => {
-                img.src = tab.favIconUrl;
-                img.onerror = () => { img.src = 'assets/default_icon.png'; }; // Fallback favicon
-            };
-            img.alt = tab.title;
-
-            faviconElement.appendChild(img);
-            faviconElement.addEventListener('mousedown', (event) => {
-                if (event.button === MOUSE_BUTTON.LEFT) {
-                    clearAllActiveStates();
-                    // Add active class to clicked tab
-                    faviconElement.classList.add('active');
-                    chrome.tabs.update(tab.id, { active: true });
-                }
-            });
-
-            // Add drag event listeners for pinned favicon
-            faviconElement.addEventListener('dragstart', () => {
-                faviconElement.classList.add('dragging');
-            });
-
-            faviconElement.addEventListener('dragend', () => {
-                faviconElement.classList.remove('dragging');
-            });
-
-            pinnedFavicons.appendChild(faviconElement);
-        }
-    });
-
-    pinnedTabs.sort((a, b) => a.index - b.index).forEach(tab => {
-        const element = pinnedFavicons.querySelector(`[data-tab-id="${tab.id}"]`);
-        if (element) pinnedFavicons.appendChild(element);
-    });
-
-    // Show/hide placeholder based on whether there are pinned tabs
-    const placeholderContainer = pinnedFavicons.querySelector('.pinned-placeholder-container');
-    if (placeholderContainer) {
-        if (pinnedTabs.length === 0) {
-            placeholderContainer.style.display = 'block';
-        } else {
-            placeholderContainer.style.display = 'none';
-        }
-    }
+    await savedFavoritesUI.refresh();
+    favoritesDropFeedback.refresh();
 
     // Add drag and drop event listeners ONCE. updatePinnedFavicons() is called from many
     // handlers; re-adding these container listeners every call leaked duplicate handlers
@@ -324,135 +257,105 @@ async function updatePinnedFavicons() {
     if (!pinnedFavicons.dataset.dragListenersBound) {
         pinnedFavicons.dataset.dragListenersBound = 'true';
     pinnedFavicons.addEventListener('dragover', e => {
-        e.preventDefault();
-        e.currentTarget.classList.add('drag-over');
-
-        // Show drop indicator for horizontal favicons
-        const draggingElement = document.querySelector('.dragging');
-        if (draggingElement) {
-            const afterElement = getDragAfterElementFavicon(pinnedFavicons, e.clientX);
-            if (afterElement) {
-                // Check if this is a placeholder (empty container)
-                if (afterElement.classList.contains('pinned-placeholder-container')) {
-                    // Show visual feedback on the placeholder itself
-                    afterElement.classList.add('drag-over');
-                    hideAllDropIndicators(); // Don't show traditional indicators for placeholders
-                } else {
-                    // Show traditional drop indicators for actual favicons
-                    const position = getDropPosition(afterElement, e.clientX, e.clientY, true);
-                    showDropIndicator(afterElement, position, true);
-                    // Remove any placeholder drag-over state
-                    const placeholder = pinnedFavicons.querySelector('.pinned-placeholder-container');
-                    if (placeholder) placeholder.classList.remove('drag-over');
-                }
-            } else {
-                hideAllDropIndicators();
-                // Remove any placeholder drag-over state
-                const placeholder = pinnedFavicons.querySelector('.pinned-placeholder-container');
-                if (placeholder) placeholder.classList.remove('drag-over');
-            }
+        const { source, hint, error } = favoritesDragSource.inspect();
+        hideAllDropIndicators();
+        sidebarDropFeedback.clear();
+        if (!source) {
+            favoritesDropFeedback.clear();
+            showFavoritesStatus(error || '', true);
+            if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+            return;
         }
-    });
-
-    pinnedFavicons.addEventListener('dragleave', e => {
         e.preventDefault();
-        e.currentTarget.classList.remove('drag-over');
-        // Hide indicators when leaving the pinned favicons area
-        if (!pinnedFavicons.contains(e.relatedTarget)) {
-            hideAllDropIndicators();
-            // Remove any placeholder drag-over state
-            const placeholder = pinnedFavicons.querySelector('.pinned-placeholder-container');
-            if (placeholder) placeholder.classList.remove('drag-over');
-        }
+        const destination = favoritesDropFeedback.update(e);
+        showFavoritesStatus(hint || '', true);
+        if (e.dataTransfer) e.dataTransfer.dropEffect = !destination ? 'none'
+            : source.kind === 'bookmarks' || (source.kind === 'bookmark' && !source.tabId) ? 'copy' : 'move';
     });
 
     pinnedFavicons.addEventListener('drop', async e => {
+        todaySplit.clearDrag();
         e.preventDefault();
-        e.currentTarget.classList.remove('drag-over');
-        hideAllDropIndicators(); // Clean up indicators on drop
-        // Remove any placeholder drag-over state
-        const placeholder = pinnedFavicons.querySelector('.pinned-placeholder-container');
-        if (placeholder) placeholder.classList.remove('drag-over');
-        const draggingElement = document.querySelector('.dragging');
-        if (draggingElement && draggingElement.dataset.tabId) {
-            const tabId = parseInt(draggingElement.dataset.tabId);
-
-            // If dragging a pinned favicon to reorder, handle positioning
-            if (draggingElement.classList.contains('pinned-favicon')) {
-                const afterElement = getDragAfterElementFavicon(pinnedFavicons, e.clientX);
-                if (afterElement) {
-                    // Check if this is a placeholder (empty container)
-                    if (afterElement.classList.contains('pinned-placeholder-container')) {
-                        // Empty container - append directly and hide placeholder
-                        pinnedFavicons.appendChild(draggingElement);
-                        afterElement.style.display = 'none';
-                    } else {
-                        // Normal positioning logic for actual favicons
-                        const position = getDropPosition(afterElement, e.clientX, e.clientY, true);
-
-                        // Position element based on indicator logic
-                        if (position === 'left') {
-                            pinnedFavicons.insertBefore(draggingElement, afterElement);
-                        } else { // 'right'
-                            const nextSibling = afterElement.nextElementSibling;
-                            if (nextSibling) {
-                                pinnedFavicons.insertBefore(draggingElement, nextSibling);
-                            } else {
-                                pinnedFavicons.appendChild(draggingElement);
-                            }
-                        }
-                    }
-                } else {
-                    // Fallback: append to end
-                    pinnedFavicons.appendChild(draggingElement);
+        hideAllDropIndicators();
+        const destination = favoritesDropFeedback.drop(e);
+        const { source, error } = favoritesDragSource.take();
+        if (!source) { showFavoritesStatus(error); return; }
+        if (!destination) return;
+        // Consume this selection now. A late operation result must never clear
+        // a newer selection the user made while the writer was working.
+        if (source.kind === 'bookmarks') bookmarkSelection.clear();
+        bookmarkSelection.clearDragImage();
+        const draggingElement = source.element;
+        const tabId = source.tabId;
+        const operation = String(Number(pinnedFavicons.dataset.dropOperation || 0) + 1);
+        pinnedFavicons.dataset.dropOperation = operation;
+        pinnedFavicons.dataset.dropState = 'pending';
+        const finishDrop = (message, state) => {
+            if (pinnedFavicons.dataset.dropOperation !== operation) return;
+            showFavoritesStatus(message);
+            pinnedFavicons.dataset.dropState = state;
+        };
+        pendingMutationCount++;
+        pendingFavoritesDrops++;
+        pinnedFavicons.setAttribute('aria-busy', 'true');
+        showFavoritesStatus(source.kind === 'bookmarks' ? `Adding ${source.bookmarks.length} bookmarks to Favorites…` : 'Adding Favorite…', false, false);
+        try {
+            const { beforeId } = destination;
+            if (tabId) assertNotNativeSplit(await chrome.tabs.get(tabId));
+            let result;
+            if (source.kind === 'bookmark' || source.kind === 'bookmarks') {
+                result = await addBookmarkFavorite(source, beforeId);
+            } else if (source.kind === 'saved') {
+                result = await savedFavoritesUI.request('reorder', { favoriteId: source.favoriteId, beforeId });
+            } else if (source.kind === 'native') {
+                // Native-only pins retain their own native order. Reordering
+                // never adopts them or overwrites the shared saved order.
+                const live = await chrome.tabs.get(tabId);
+                if (live.windowId !== source.windowId || currentWindow?.id !== source.windowId || !live.pinned) throw new Error('This browser pin changed. Drag it again.');
+                const nativeNodes = [...pinnedFavicons.querySelectorAll('.native-favorite')].filter(node => node !== draggingElement);
+                const index = destination.beforeTabId === null ? nativeNodes.length
+                    : nativeNodes.findIndex(node => node.dataset.tabId === destination.beforeTabId);
+                if (index < 0 || !pinnedFavicons.contains(draggingElement)) throw new Error('The destination browser pin changed. Drag it again.');
+                nativeNodes.splice(index, 0, draggingElement);
+                const nativeTabs = (await chrome.tabs.query({ pinned: true, windowId: source.windowId })).filter(tab => !isStartupLauncherTab(tab));
+                const unmanagedIds = new Set(nativeNodes.map(node => Number(node.dataset.tabId)));
+                const slots = nativeTabs.filter(tab => unmanagedIds.has(tab.id)).map(tab => tab.index).sort((a, b) => a - b);
+                for (let i = 0; i < nativeNodes.length; i++) {
+                    const tab = await chrome.tabs.get(Number(nativeNodes[i].dataset.tabId));
+                    if (tab.windowId !== source.windowId || currentWindow?.id !== source.windowId || !tab.pinned) throw new Error('This browser pin changed. Drag it again.');
+                    await chrome.tabs.move(tab.id, { index: slots[i] });
                 }
-                const ids = [...pinnedFavicons.querySelectorAll('.pinned-favicon[data-tab-id]')]
-                    .map(el => Number(el.dataset.tabId));
-                for (let index = 0; index < ids.length; index++) {
-                    const live = await chrome.tabs.get(ids[index]);
-                    if (live.pinned && live.windowId === currentWindow.id) await chrome.tabs.move(live.id, { index });
-                }
-                await updatePinnedFavicons();
             } else {
-                // Dragging a regular tab to make it pinned
-                const afterElement = getDragAfterElementFavicon(pinnedFavicons, e.clientX);
-                let position = null;
-                let targetIndex = 0; // Default to index 0 for empty containers
-
-                if (afterElement) {
-                    if (afterElement.classList.contains('pinned-placeholder-container')) {
-                        // Empty container - use index 0 and hide placeholder after pinning
-                        targetIndex = 0;
-                    } else {
-                        // Normal positioning logic for actual favicons
-                        position = getDropPosition(afterElement, e.clientX, e.clientY, true);
-                        targetIndex = calculatePinnedTabIndex(afterElement, position, pinnedFavicons);
-                    }
-                }
-
-                // Step 1: Pin the tab (this adds it to the end by default)
-                await chrome.tabs.update(tabId, { pinned: true });
-
-                // Step 2: Move it to the correct position if needed
-                if (targetIndex !== undefined && targetIndex >= 0) {
-                    try {
-                        await chrome.tabs.move(tabId, { index: targetIndex });
-                    } catch (error) {
-                        Logger.warn('Error moving pinned tab to target index:', error);
-                    }
-                }
-
-                // Step 3: Update the favicon display
-                updatePinnedFavicons();
-
-                // Hide placeholder if this was an empty container
-                if (afterElement && afterElement.classList.contains('pinned-placeholder-container')) {
-                    afterElement.style.display = 'none';
-                }
-
-                // Remove the tab from its original container
-                draggingElement.remove();
+                result = await savedFavoritesUI.request('addTab', { tabId, beforeId });
             }
+            await updatePinnedFavicons();
+            if (result?.batch) finishDrop(describeBookmarkBatchOutcome(result.batch), result.warning || result.batch.entries.some(entry => entry.status === 'skipped') ? 'warning' : 'success');
+            else if (result?.warning) finishDrop(result.warning, 'warning');
+            else finishDrop(source.kind === 'native' ? 'Browser pins reordered.' : source.kind === 'saved' ? 'Saved Favorites reordered.' : 'Added to Favorites. Your source bookmarks stay in their folders.', 'success');
+            if (pinnedFavicons.dataset.dropState === 'pending') finishDrop('Favorites updated.', 'success');
+        } catch (error) {
+            Logger.warn('Could not add Favorite:', error);
+            // A partial batch remains a failure; display its exact outcomes and
+            // refresh once without resubmitting any completed/uncertain entry.
+            const outcome = describeBookmarkBatchOutcome(error.batch);
+            const failure = outcome
+                ? `${outcome}${error.batch.entries.some(entry => entry.status === 'failed') ? '' : ` ${error.message} Check Favorites before trying again. Nothing was retried automatically.`}`
+                : source.kind === 'bookmarks'
+                    ? `Could not confirm the batch result. ${error.message} Some Favorites may have been added. Check Favorites before trying again. Nothing was retried automatically.`
+                    : `Could not add Favorite. ${error.message}`;
+            if (source.kind === 'bookmarks' || error.batch) {
+                try { await updatePinnedFavicons(); }
+                catch (refreshError) { Logger.warn('Could not refresh partial Favorites result:', refreshError); }
+            }
+            // Publish once after recovery refresh. Re-announcing the same
+            // result later could resurrect a message the user dismissed.
+            finishDrop(failure, 'error');
+        } finally {
+            bookmarkSelection.clearDragImage();
+            pendingMutationCount--;
+            pendingFavoritesDrops--;
+            pinnedFavicons.setAttribute('aria-busy', String(pendingFavoritesDrops > 0));
+            refreshCoordinator.invalidateBookmarks();
         }
     });
     } // end bind-once guard for pinnedFavicons drag listeners
@@ -531,16 +434,30 @@ async function activatePinnedTabByURL(bookmarkUrl, targetSpaceId, spaceName, boo
 // Initialize the sidebar when the DOM is loaded
 document.addEventListener('DOMContentLoaded', async () => {
     Logger.log('DOM loaded, initializing sidebar...');
-    await applyColorOverrides();
+    const palette = initializeSpaceColorOverrides({ document, onError: error => Logger.error('Could not load color palette:', error) });
+    await initializeSidebarAppearance({ document, onChange: () => { favoritesDropFeedback.refresh(); spaceSwitcherController.refresh(); },
+        onError: error => Logger.error('Could not load sidebar appearance:', error) }).ready;
+    await palette.ready;
+    maxDragFolderDepth = (await chrome.storage.sync.get({ syncTabGroups: false })).syncTabGroups ? 1 : 2;
 
     // Listen for storage changes to re-apply colors when they're updated
     chrome.storage.onChanged.addListener((changes, areaName) => {
-        if (areaName === 'sync' && changes.colorOverrides) {
-            Logger.log('Color overrides changed, re-applying...');
-            applyColorOverrides();
+        if ((areaName === 'local' && (changes.persistentFavorites || changes[FAVORITE_ICON_CACHE_KEY])) || (areaName === 'session' && changes.favoriteSession)) {
+            if (currentWindow) updatePinnedFavicons();
+        }
+        // Alias/binding updates also arrive during inactive-tab cleanup. Repaint
+        // their rows without the reveal intent reserved for Space navigation.
+        if (areaName === 'local' && (changes.tabNameOverridesById || changes.pinnedTabStatesById)) refreshCoordinator.invalidateBookmarks();
+        if (areaName === 'local' && Object.keys(changes).some(key => key.startsWith('folderCollapsed:'))) {
+            folderStateGeneration++;
+            refreshCoordinator.invalidateBookmarks();
+        }
+        if (areaName === 'sync' && changes.syncTabGroups) {
+            maxDragFolderDepth = changes.syncTabGroups.newValue ? 1 : 2;
+            sidebarDropFeedback.refresh();
         }
 
-        // Re-render active space when tab order inversion setting changes
+        // Re-render saved pins/folders when their display reversal changes
         if (areaName === 'sync' && changes.invertTabOrder) {
             Logger.log('invertTabOrder changed, refreshing active space UI...');
             if (refreshActiveSpaceUITimeout) clearTimeout(refreshActiveSpaceUITimeout);
@@ -557,6 +474,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
 
     await initSidebar();
+    archiveIntentConsumer = createArchiveIntentConsumer({ document, getState: () => ({ ready: sidebarReady && !pendingActiveSpaceId,
+        revision: archiveDisplayRevision, windowId: currentWindow?.id, spaceId: activeSpaceId, bookmarkFolderId: spaces.find(space => space.id === activeSpaceId)?.bookmarkFolderId }),
+        showPopup: showArchivedTabsPopup, onError: showFavoritesStatus });
+    archiveIntentConsumer.start();
     await updatePinnedFavicons(); // Initial load before taking the tour baseline
     initSidebarTour().catch(error => Logger.error("Tour initialization failed:", error));
 
@@ -564,9 +485,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.tabs.onCreated.addListener(handleTabCreated);
     chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
         handleTabUpdate(tabId, changeInfo, tab);
-        if (tab.pinned) updatePinnedFavicons(); // Update favicons when a tab is pinned/unpinned
+        if (tab.pinned || changeInfo.pinned !== undefined) updatePinnedFavicons(); // Update favicons when a tab is pinned/unpinned
+        if (changeInfo.splitViewId !== undefined || changeInfo.groupId !== undefined || changeInfo.url !== undefined) refreshCoordinator.invalidateActiveView();
     });
     chrome.tabs.onRemoved.addListener(handleTabRemove);
+    chrome.tabs.onRemoved.addListener((_tabId, info) => { if (info.windowId === currentWindow?.id) updatePinnedFavicons(); });
     const refreshWindowTabs = async (_tabId, info) => {
         if (info.newWindowId === currentWindow?.id || info.oldWindowId === currentWindow?.id) {
             await updatePinnedFavicons();
@@ -576,11 +499,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.tabs.onAttached.addListener(refreshWindowTabs);
     chrome.tabs.onDetached.addListener(refreshWindowTabs);
     chrome.tabs.onMoved.addListener((_tabId, info) => {
-        if (info.windowId === currentWindow?.id) updatePinnedFavicons();
+        if (info.windowId === currentWindow?.id) { updatePinnedFavicons(); refreshCoordinator.invalidateActiveView(); }
     });
     chrome.tabs.onActivated.addListener(handleTabActivated);
     // Setup Quick Pin listener
-    setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabToTemp, activeSpaceId, setActiveSpace, activatePinnedTabByURL);
+    setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabToTemp, activeSpaceId, setActiveSpace, activatePinnedTabByURL, showFavoritesStatus);
 
     // Tab navigation listener
     // Add event listener for placeholder close button
@@ -661,6 +584,30 @@ const spaceSaveQueue = new SpacePatchQueue(
 let pendingSpaceSaves = Promise.resolve();
 let pendingSaveCount = 0;
 let sidebarReady = false;
+createSidebarNewTabRow({ button: newTabBtn, status: document.getElementById('spotlightStatus'),
+    getContext: () => {
+        const displayedSpace = newTabBtn.closest('.space');
+        const ready = sidebarReady && displayedSpace?.classList.contains('active') &&
+            displayedSpace.style.display !== 'none' && displayedSpace.dataset.spaceId === activeSpaceId;
+        return { windowId: ready ? currentWindow?.id : null, spaceId: activeSpaceId };
+    },
+    sendRequest: message => chrome.runtime.sendMessage(message)
+});
+const newTabWindowDrop = createNewTabWindowDrop({ button: newTabBtn,
+    getContext: () => ({ windowId: sidebarReady ? currentWindow?.id : null, spaceId: activeSpaceId,
+        bookmarkFolderId: spaces.find(space => space.id === activeSpaceId)?.bookmarkFolderId }),
+    inspectSource: () => favoritesDragSource.inspect(),
+    validateSelection: source => !todaySelection.isBatch() && (!source.selectionSnapshot || bookmarkSelection.validate(source.selectionSnapshot)),
+    getTab: id => chrome.tabs.get(id), sendRequest: message => chrome.runtime.sendMessage(message),
+    settle: () => pendingSpaceSaves, showStatus: showFavoritesStatus,
+    begin: () => { pendingMutationCount++; }, end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    refresh: async () => { await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); },
+    clearFeedback: () => { sidebarDropFeedback.clear(); favoritesDropFeedback.clear(); if (favoritesPreview) clearFavoritesPreview(); hideAllDropIndicators();
+        document.querySelectorAll('.today-split-drop-active').forEach(node => node.classList.remove('today-split-drop-active')); },
+    consumeDrag: () => { favoritesDragSource.clear(); todaySplit.clearDrag(); bookmarkSelection.clearDragImage();
+        isDraggingTab = false; dragSourceFolderElement = null;
+        document.querySelectorAll('.dragging').forEach(node => node.classList.remove('dragging')); }
+});
 let editorSessions;
 const refreshCoordinator = new RefreshCoordinator({
     readSpaces: async () => {
@@ -668,11 +615,17 @@ const refreshCoordinator = new RefreshCoordinator({
         return spaceRequest('get');
     },
     adoptSpaces: next => adoptStoredSpaces(next, { render: false }),
-    render: async () => {
-        await activateSpaceInDOM(activeSpaceId, spaces, updateSpaceSwitcher);
-        return refreshActiveSpaceUI();
+    render: async ({ isCurrent, activeViewChanged }) => {
+        const spaceId = activeSpaceId;
+        const canCommit = () => isCurrent() && activeSpaceId === spaceId;
+        if (await refreshActiveSpaceUI({ canCommit }) === false || !canCommit()) return false;
+        activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher);
+        syncCollapsedFoldersInActiveSpace();
+        if (activeViewChanged && ownerOf(spaces, activeChromeTabId)?.id === spaceId) activeTabReveal.request(activeChromeTabId);
+        else activeTabReveal.flush();
+        return true;
     },
-    isBusy: () => !sidebarReady || isDraggingTab || isOpeningBookmark || pendingSaveCount > 0 || pendingMutationCount > 0 || editorSessions?.isActive(),
+    isBusy: () => !sidebarReady || isDraggingTab || isDraggingSpace || isOpeningBookmark || pendingSaveCount > 0 || pendingMutationCount > 0 || editorSessions?.isActive(),
     onError: error => Logger.warn('Could not refresh external changes:', error)
 });
 editorSessions = new EditSessionRegistry(() => refreshCoordinator.schedule());
@@ -686,42 +639,74 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
         render = false;
         refreshCoordinator.invalidateSpaces();
     }
-    const projection = list => JSON.stringify(list.map(({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
-        ({ id, name, color, bookmarkFolderId, spaceBookmarks, temporaryTabs })));
-    const needsRender = projection(spaces) !== projection(next);
+    const restoreNewTabFocus = document.activeElement === newTabBtn && document.hasFocus?.() !== false;
+    const newTabSpaceId = newTabBtn.closest('.space')?.dataset.spaceId;
+    const projection = list => JSON.stringify(list.map(({ id, name, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs }) =>
+        ({ id, name, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs })));
+    let needsRender = projection(spaces) !== projection(next);
     const old = spaces;
-    const oldMetadata = new Map(old.map(s => [s.id, { name: s.name, color: s.color }]));
+    const oldMetadata = new Map(old.map(s => [s.id, { name: s.name, icon: s.icon }]));
     spaces = next.map(space => {
         const existing = old.find(s => s.id === space.id);
         return existing ? Object.assign(existing, structuredClone(space)) : structuredClone(space);
     });
     spaceSaveQueue.reset(next);
+    reapplySpaceColors();
     for (const space of old) {
         if (!spaces.some(s => s.id === space.id)) {
             const element = getSpaceElement(space.id);
+            if (space.id === activeSpaceId) invalidateArchiveDisplay();
             disposeEditorsInElement(element);
             element?.remove();
         }
     }
+    const restoreViewport = needsRender ? captureSidebarViewport(getSpaceElement(activeSpaceId)?.querySelector('.space-content')) : () => {};
     for (const space of spaces) {
         // Remove old projections immediately when another panel moves or closes a tab.
         // Newly added rows are rendered when the destination space is shown.
         const owned = new Set([...space.spaceBookmarks, ...space.temporaryTabs]);
         getSpaceElement(space.id)?.querySelectorAll('.tab[data-tab-id]').forEach(element => {
             if (!owned.has(Number(element.dataset.tabId))) {
+                // The background can publish a close before onRemoved finishes.
+                // Keep this saved row until the guaranteed active-view repaint
+                // can replace it by bookmark identity, retaining its focused
+                // control instead of briefly moving focus to another bookmark.
+                if (needsRender && space.id === activeSpaceId && element.dataset.bookmarkId) return;
                 disposeEditorsInElement(element);
                 element.remove();
             }
         });
+        const currentElement = getSpaceElement(space.id);
+        const currentColor = currentElement?.querySelector('#spaceColorSelect');
+        if (currentColor) currentColor.value = space.color;
+        currentElement?.querySelectorAll('.color-swatch').forEach(swatch => {
+            swatch.classList.toggle('selected', !space.customTint && swatch.dataset.color === space.color);
+        });
         const previous = oldMetadata.get(space.id);
-        if (!previous || previous.name !== space.name || previous.color !== space.color) {
+        if (!previous || previous.name !== space.name || previous.icon !== space.icon) {
             const element = getSpaceElement(space.id);
+            if (space.id === activeSpaceId) invalidateArchiveDisplay();
             disposeEditorsInElement(element);
             element?.remove();
             createSpaceElement(space);
         }
     }
-    if (!spaces.some(s => s.id === activeSpaceId)) activeSpaceId = spaces[0]?.id;
+    restoreViewport();
+    if (pendingActiveSpaceId && spaces.some(space => space.id === pendingActiveSpaceId)) {
+        needsRender ||= activeSpaceId !== pendingActiveSpaceId;
+        invalidateArchiveDisplay();
+        activeSpaceId = pendingActiveSpaceId;
+        pendingActiveSpaceId = null;
+    }
+    if (!spaces.some(s => s.id === activeSpaceId)) { invalidateArchiveDisplay(); activeSpaceId = spaces[0]?.id; }
+    // A metadata replacement may remove the button's parent. Reattach only to
+    // that same visible Space here; a different active view commits after its
+    // async render so a newly opened editor can still defer the switch.
+    const previousNewTabSpace = getSpaceElement(newTabSpaceId);
+    if (previousNewTabSpace?.style.display !== 'none') {
+        placeNewTabRow(newTabBtn, previousNewTabSpace, { restoreFocus: restoreNewTabFocus });
+    }
+    bookmarkSelection.reconcile();
     if (needsRender && render) {
         await activateSpaceInDOM(activeSpaceId, spaces, updateSpaceSwitcher);
         await refreshActiveSpaceUI();
@@ -738,23 +723,38 @@ async function initSidebar() {
     spaceSaveQueue.reset(spaces);
     const allTabs = await chrome.tabs.query({});
     await Utils.prunePinnedTabStates(allTabs.map(t => t.id));
-    // Restore bookmark bindings using only this space's owned tabs.
-    for (const space of spaces) {
-        try {
-            const folder = await getSpaceBookmarkFolder(space);
-            const bound = await BookmarkUtils.matchTabsWithBookmarks(folder, space.id,
-                Utils.setTabNameOverride.bind(Utils), Utils.setPinnedTabState.bind(Utils), null, Utils.getPinnedUrlKey.bind(Utils), currentWindow.id);
-            const previousPins = space.spaceBookmarks;
-            const windowTabIds = new Set(allTabs.filter(t => t.windowId === currentWindow.id).map(t => t.id));
-            space.spaceBookmarks = [...new Set([...previousPins.filter(id => !windowTabIds.has(id)), ...bound])];
-            space.temporaryTabs = [...new Set([...space.temporaryTabs, ...previousPins])].filter(id => !space.spaceBookmarks.includes(id));
-            for (const id of previousPins) if (!space.spaceBookmarks.includes(id)) await Utils.removePinnedTabState(id);
-        } catch (error) {
-            Logger.warn('Space bookmark association needs recovery:', space.id, error);
+    const windowTabIds = new Set(allTabs.filter(t => t.windowId === currentWindow.id).map(t => t.id));
+    let membershipChanged = false, reconciliationBefore;
+    await withSavedMoveLock(async () => {
+        await assertSavedMoveSettled();
+        // A different panel may have moved saved items after our queued get.
+        // Re-read canonical membership while holding the shared bookmark barrier.
+        const current = await chrome.storage.local.get('spaces');
+        spaces = current.spaces;
+        spaceSaveQueue.reset(spaces);
+        reconciliationBefore = structuredClone(spaces);
+        // Restore bookmark bindings using only this space's owned tabs.
+        for (const space of spaces) {
+            try {
+                const previousMembership = JSON.stringify([space.spaceBookmarks, space.temporaryTabs]);
+                const folder = await getSpaceBookmarkFolder(space);
+                const bound = await BookmarkUtils.matchTabsWithBookmarks(folder, space.id,
+                    Utils.setTabNameOverride.bind(Utils), Utils.setPinnedTabState.bind(Utils), null, Utils.getPinnedUrlKey.bind(Utils), currentWindow.id);
+                const previousPins = space.spaceBookmarks;
+                space.spaceBookmarks = reconcileWindowPinOrder(previousPins, bound, windowTabIds);
+                space.temporaryTabs = [...new Set([...space.temporaryTabs, ...previousPins])].filter(id => !space.spaceBookmarks.includes(id));
+                membershipChanged ||= previousMembership !== JSON.stringify([space.spaceBookmarks, space.temporaryTabs]);
+                for (const id of previousPins) if (!space.spaceBookmarks.includes(id)) await Utils.removePinnedTabState(id, { preserveNativePinned: true });
+            } catch (error) {
+                Logger.warn('Space bookmark association needs recovery:', space.id, error);
+            }
+            createSpaceElement(space);
         }
-        createSpaceElement(space);
+    });
+    if (membershipChanged) {
+        spaces = await spaceRequest('reconcilePins', { before: reconciliationBefore, after: spaces });
+        spaceSaveQueue.reset(spaces);
     }
-    await saveSpaces();
     const activeTab = allTabs.find(t => t.active && t.windowId === currentWindow.id);
     activeChromeTabId = activeTab?.id;
     const { activeSpaces = {} } = await chrome.storage.session.get('activeSpaces');
@@ -762,8 +762,26 @@ async function initSidebar() {
     previousSpaceId = activeSpaceId;
     setupDOMElements(createNewSpace, () => spaces);
     sidebarReady = true;
+    newTabBtn.disabled = false;
     refreshCoordinator.schedule();
     chrome.storage.onChanged.addListener((changes, area) => {
+        if (area === 'session' && changes.activeSpaces && sidebarReady) {
+            const nextId = changes.activeSpaces.newValue?.[currentWindow.id];
+            if (nextId && (nextId !== activeSpaceId || pendingActiveSpaceId)) {
+                tabContextMenuRequest++; closeTabContextMenu();
+                bookmarkSelection.clear();
+                if (spaces.some(space => space.id === nextId)) {
+                    invalidateArchiveDisplay();
+                    activeSpaceId = nextId;
+                    pendingActiveSpaceId = null;
+                } else {
+                    invalidateArchiveDisplay();
+                    pendingActiveSpaceId = nextId;
+                }
+                refreshCoordinator.invalidateActiveView();
+            }
+            return;
+        }
         if (area !== 'local' || !changes.spaces || !sidebarReady) return;
         scheduleStoredSpacesRefresh();
     });
@@ -804,55 +822,31 @@ async function offerTabGroupImport() {
 
 async function getOwnedTabs(spaceId) {
     const space = spaces.find(s => s.id === spaceId);
-    return selectWindowSpaceTabs(space, await chrome.tabs.query({ windowId: currentWindow.id }), currentWindow.id);
+    const live = await savedFavoritesUI.request('get');
+    const globalIds = new Set(live.favorites.filter(item => item.tabId !== null).map(item => item.tabId));
+    return selectWindowSpaceTabs(space, await chrome.tabs.query({ windowId: currentWindow.id }), currentWindow.id, globalIds);
 }
 
 function createSpaceElement(space) {
     Logger.log('Creating space element for:', space.id);
     const spaceElement = spaceTemplate.content.cloneNode(true);
-    const sidebarContainer = document.getElementById('sidebar-container');
     const spaceContainer = spaceElement.querySelector('.space');
     spaceContainer.dataset.spaceId = space.id;
     spaceContainer.style.display = space.id === activeSpaceId ? 'flex' : 'none';
     spaceContainer.dataset.spaceUuid = space.id;
+    const spaceIcon = spaceContainer.querySelector('.space-icon');
+    spaceIcon.textContent = getSpaceIcon(space.icon)?.glyph || '';
+    spaceIcon.hidden = !getSpaceIcon(space.icon);
+    spaceContainer.querySelector('.space-name').setAttribute('aria-keyshortcuts', 'Shift+F10');
 
-    // Set space background color from extension settings
-    // Get the computed value from :root to ensure overrides are applied
-    const root = document.documentElement;
-    const colorVar = `--chrome-${space.color}-color`;
-    const colorDarkVar = `--chrome-${space.color}-color-dark`;
-
-    // Get computed values - this will resolve the CSS variable chain
-    const computedStyle = getComputedStyle(root);
-    let colorValue = computedStyle.getPropertyValue(colorVar).trim();
-    let colorDarkValue = computedStyle.getPropertyValue(colorDarkVar).trim();
-
-    // Fallback if variables aren't set yet
-    if (!colorValue) {
-        colorValue = `var(--chrome-${space.color}-color, rgba(255, 255, 255, 0.1))`;
-    }
-    if (!colorDarkValue) {
-        colorDarkValue = `var(--chrome-${space.color}-color-dark, rgba(255, 255, 255, 0.1))`;
-    }
-
-    sidebarContainer.style.setProperty('--space-bg-color', colorValue);
-    sidebarContainer.style.setProperty('--space-bg-color-dark', colorDarkValue);
+    if (space.id === activeSpaceId) applySpaceTheme(document, space);
 
     // Set up color select
     const colorSelect = spaceElement.getElementById('spaceColorSelect');
     colorSelect.value = space.color;
     colorSelect.addEventListener('change', async () => {
-        const newColor = colorSelect.value;
-        space.color = newColor;
-
-
-
-        // Update space background color
-        sidebarContainer.style.setProperty('--space-bg-color', `var(--chrome-${newColor}-color, rgba(255, 255, 255, 0.1))`);
-        sidebarContainer.style.setProperty('--space-bg-color-dark', `var(--chrome-${space.color}-color-dark, rgba(255, 255, 255, 0.1))`);
-
-        saveSpaces();
-        await updateSpaceSwitcher();
+        try { await mutateSpaceSetting('metadata', { spaceId: space.id, changes: { color: colorSelect.value, customTint: null } }); }
+        catch (error) { colorSelect.value = space.color; alert(error.message); }
     });
 
     // Handle color swatch clicks
@@ -888,12 +882,7 @@ function createSpaceElement(space) {
         const session = spaceEditSession || editorSessions.begin('space', space.id);
         try {
             await editorSessions.complete(session, async () => {
-                const oldFolder = await getSpaceBookmarkFolder(space);
-                await chrome.bookmarks.update(oldFolder.id, { title: nameInput.value });
-                await LocalStorage.updateSpaceRegistryEntry(oldFolder.id, { name: nameInput.value });
-                space.name = nameInput.value;
-                await saveSpaces();
-                await updateSpaceSwitcher();
+                await mutateSpaceSetting('metadata', { spaceId: space.id, changes: { name: nameInput.value } });
             });
         } catch (error) {
             nameInput.value = space.name;
@@ -943,6 +932,7 @@ function createSpaceElement(space) {
 
         // Update chevron state
         updateChevronState(spaceContainer, pinnedSection);
+        bookmarkSelection.reconcile();
     });
 
     // Set up containers
@@ -996,8 +986,8 @@ function createSpaceElement(space) {
     });
 
     deleteSpaceBtn.addEventListener('click', () => {
-        if (confirm('Delete this space and close all its tabs?')) {
-            deleteSpace(space.id);
+        if (confirm(spaceDeleteMessage(space))) {
+            deleteSpace(space.id).catch(error => alert(error.message));
         }
     });
 
@@ -1013,23 +1003,19 @@ function createSpaceElement(space) {
 
     const popup = spaceElement.querySelector('.archived-tabs-popup');
     const archiveButton = spaceElement.querySelector('.sidebar-button');
-    const spaceContent = spaceElement.querySelector('.space-content');
 
     archiveButton.addEventListener('click', (e) => {
         e.stopPropagation(); // Prevent closing immediately if clicking outside logic exists
-        spaceContent.classList.toggle('hidden');
-        const isVisible = popup.classList.contains('visible');
-        if (isVisible) {
-            popup.classList.toggle('visible');
-        } else {
-            showArchivedTabsPopup(space.id); // Populate and show
-            popup.classList.toggle('visible');
-        }
-        archiveButton.setAttribute('aria-expanded', String(popup.classList.contains('visible')));
+        const opening = !popup.classList.contains('visible');
+        if (opening) showArchivedTabsPopup(space.id);
+        setArchivePopupOpen(spaceContainer, opening);
     });
 
     // Add to DOM
     spacesList.appendChild(spaceElement);
+    if (space.id === activeSpaceId && (!newTabBtn.closest('.space') || newTabBtn.closest('.space').dataset.spaceId === space.id)) {
+        placeNewTabRow(newTabBtn, spaceContainer);
+    }
 
     // Set up settings button to open extension options
     const settingsButton = spaceElement.querySelector('#space-settings');
@@ -1042,247 +1028,119 @@ function createSpaceElement(space) {
     }
 }
 
-async function updateSpaceSwitcher() {
-    Logger.log('Updating space switcher...');
-    spaceSwitcher.innerHTML = '';
+// Metadata and root-folder changes use the same queue as delete/reorder. A
+// background update can refresh any window without activating the edited Space.
+async function mutateSpaceSetting(action, payload) {
+    pendingMutationCount++;
+    let saved;
+    try {
+        await pendingSpaceSaves;
+        saved = await spaceRequest(action, payload);
+    } finally {
+        pendingMutationCount--;
+        refreshCoordinator.invalidateSpaces();
+        if (action === 'newFolder') refreshCoordinator.invalidateBookmarks();
+    }
+    try {
+        await adoptStoredSpaces(saved);
+        // Paint before dialog dismissal restores header focus, which defers refresh.
+        if (action === 'newFolder' && payload.spaceId === activeSpaceId) await refreshActiveSpaceUI();
+        updateSpaceSwitcher();
+    } catch (error) {
+        if (action !== 'newFolder') throw error;
+        // Creation already committed; a rendering error must not offer Create again.
+        Logger.warn('Folder created; sidebar refresh deferred:', error);
+        document.getElementById('spaceOrderStatus').textContent = 'Folder created. Reopen the Space if it is not visible yet.';
+    }
+}
 
-    // --- Drag and Drop State ---
-    let draggedButton = null;
+const spaceContextMenu = createSpaceContextMenu({
+    document, roots: [spacesList, spaceSwitcher],
+    getSpace: id => spaces.find(space => space.id === id),
+    update: (spaceId, changes) => mutateSpaceSetting('metadata', { spaceId, changes }),
+    newFolder: (spaceId, title) => mutateSpaceSetting('newFolder', { spaceId, title }),
+    remove: deleteSpace,
+    // A newer Space gesture owns the menu, including over a pending Tab lookup.
+    onOpen: () => { tabContextMenuRequest++; closeTabContextMenu(); tabMenuActions.cancelEdit(); },
+    isBusy: () => isDraggingSpace,
+    report: message => { document.getElementById('spaceOrderStatus').textContent = message; }
+});
 
-    // --- Add listeners to the container ---
-    spaceSwitcher.addEventListener('dragover', (e) => {
-        e.preventDefault(); // Necessary to allow dropping
-        const currentlyDragged = document.querySelector('.dragging-switcher');
-        if (!currentlyDragged) return; // Don't do anything if not dragging a switcher button
+const spaceSwitcherController = createSpaceSwitcher({
+    container: spaceSwitcher,
+    getSpaces: () => spaces,
+    getActiveSpaceId: () => activeSpaceId,
+    activate: setActiveSpace,
+    move: reorderSpace,
+    onDragState: dragging => {
+        isDraggingSpace = dragging;
+        if (!dragging) refreshCoordinator.schedule();
+    },
+    report: message => { document.getElementById('spaceOrderStatus').textContent = message; }
+});
 
-        const afterElement = getDragAfterElementSwitcher(spaceSwitcher, e.clientX);
+function updateSpaceSwitcher() {
+    spaceSwitcherController.render();
+}
 
-        // Remove placeholder classes from all buttons first
-        const buttons = spaceSwitcher.querySelectorAll('button');
-        buttons.forEach(button => {
-            button.classList.remove('drag-over-placeholder-before', 'drag-over-placeholder-after');
-        });
+// Reorder through the sole writer using stable IDs, without sending an old
+// panel's entire order or mutating bookmark folders. Refresh adopts the result.
+async function reorderSpace(operation) {
+    pendingMutationCount++;
+    try {
+        await pendingSpaceSaves;
+        const saved = await spaceRequest('reorder', operation);
+        spaces = projectSpaceOrder(spaces, saved);
+        updateSpaceSwitcher();
+    } finally {
+        pendingMutationCount--;
+        refreshCoordinator.invalidateSpaces();
+    }
+}
 
-        // Add placeholder class to the appropriate element
-        if (afterElement) {
-            // Add margin *before* the element we'd insert before
-            afterElement.classList.add('drag-over-placeholder-before');
-        } else {
-            // If afterElement is null, we are dropping at the end.
-            // Add margin *after* the last non-dragging element.
-            const lastElement = spaceSwitcher.querySelector('button:not(.dragging-switcher):last-of-type');
-            if (lastElement) {
-                lastElement.classList.add('drag-over-placeholder-after');
+function setupTabDragHandlers(tabElement, handle = tabElement) {
+    handle.draggable = true;
+    if (tabElement.matches('.folder')) {
+        // A modified folder click does not turn a range gesture into an open,
+        // close or rename operation. Range selection never expands folders.
+        for (const type of ['click', 'dblclick']) handle.addEventListener(type, event => {
+            if ((event.shiftKey || event.ctrlKey || event.metaKey) && !event.target.closest('input, button')) {
+                event.preventDefault(); event.stopImmediatePropagation();
             }
-        }
-
-        // --- Remove this block ---
-        // We no longer move the element during dragover, rely on CSS placeholders
-        /*
-        if (currentlyDragged) {
-            if (afterElement == null) {
-                spaceSwitcher.appendChild(currentlyDragged);
-            } else {
-                spaceSwitcher.insertBefore(currentlyDragged, afterElement);
-            }
-        }
-        */
-        // --- End of removed block ---
-    });
-
-    spaceSwitcher.addEventListener('dragleave', (e) => {
-        // Simple cleanup: remove placeholders if the mouse leaves the container area
-        // More robust check might involve relatedTarget, but this is often sufficient
-        if (e.target === spaceSwitcher) {
-            const buttons = spaceSwitcher.querySelectorAll('button');
-            buttons.forEach(button => {
-                button.classList.remove('drag-over-placeholder-before', 'drag-over-placeholder-after');
-            });
-        }
-    });
-
-    spaceSwitcher.addEventListener('drop', async (e) => {
-        e.preventDefault();
-
-        // Ensure placeholders are removed after drop
-        const buttons = spaceSwitcher.querySelectorAll('button');
-        buttons.forEach(button => {
-            button.classList.remove('drag-over-placeholder-before', 'drag-over-placeholder-after');
-        });
-
-        if (draggedButton) {
-            const targetElement = e.target.closest('button'); // Find the button dropped onto or near
-            const draggedSpaceId = draggedButton.dataset.spaceId;
-            let targetSpaceId = targetElement ? targetElement.dataset.spaceId : null;
-
-            // Find original index
-            const originalIndex = spaces.findIndex(s => s.id === draggedSpaceId);
-            if (originalIndex === -1) return; // Should not happen
-
-            const draggedSpace = spaces[originalIndex];
-
-            // Remove from original position
-            spaces.splice(originalIndex, 1);
-
-            // Find new index
-            let newIndex;
-            if (targetSpaceId) {
-                const targetIndex = spaces.findIndex(s => s.id === targetSpaceId);
-                // Determine if dropping before or after the target based on drop position relative to target center
-                const targetRect = targetElement.getBoundingClientRect();
-                const dropX = e.clientX; // *** Use clientX ***
-                if (dropX < targetRect.left + targetRect.width / 2) { // *** Use left and width ***
-                    newIndex = targetIndex; // Insert before target
-                } else {
-                    newIndex = targetIndex + 1; // Insert after target
-                }
-
-            } else {
-                // If dropped not on a specific button (e.g., empty area), append to end
-                newIndex = spaces.length;
-            }
-
-            // Insert at new position
-            // Ensure newIndex is within bounds (can happen if calculation is slightly off at edges)
-            // newIndex = Math.max(0, Math.min(newIndex, spaces.length));
-            Logger.log("droppedat", newIndex);
-
-            if (newIndex < 0) {
-                newIndex = 0;
-            } else if (newIndex > spaces.length) {
-                newIndex = spaces.length;
-            }
-            Logger.log("set", newIndex);
-
-            spaces.splice(newIndex, 0, draggedSpace);
-
-            // Save and re-render
-            saveSpaces();
-            await updateSpaceSwitcher(); // Re-render to reflect new order and clean up listeners
-        }
-        draggedButton = null; // Reset dragged item
-    });
-
-
-    spaces.forEach(space => {
-        const button = document.createElement('button');
-        button.textContent = space.name;
-        button.setAttribute('aria-label', `Switch to space ${space.name}`);
-        button.dataset.spaceId = space.id; // Store space ID
-        button.classList.toggle('active', space.id === activeSpaceId);
-        button.draggable = true; // Make the button draggable
-
-        button.addEventListener('click', async () => {
-            if (button.classList.contains('dragging-switcher')) return;
-
-            Logger.log("clicked for active", space);
-            await setActiveSpace(space.id);
-        });
-
-        // --- Drag Event Listeners for Buttons ---
-        button.addEventListener('dragstart', (e) => {
-            draggedButton = button; // Store the button being dragged
-            // Use a specific class to avoid conflicts with tab dragging
-            setTimeout(() => button.classList.add('dragging-switcher'), 0);
-            e.dataTransfer.effectAllowed = 'move';
-            // Optional: Set drag data if needed elsewhere, though not strictly necessary for reordering within the same list
-            // e.dataTransfer.setData('text/plain', space.id);
-        });
-
-        button.addEventListener('dragend', () => {
-            // Clean up placeholders and dragging class on drag end (cancel/drop outside)
-            const buttons = spaceSwitcher.querySelectorAll('button');
-            buttons.forEach(btn => {
-                btn.classList.remove('drag-over-placeholder-before', 'drag-over-placeholder-after');
-            });
-            if (draggedButton) { // Check if draggedButton is still set
-                draggedButton.classList.remove('dragging-switcher');
-            }
-            draggedButton = null; // Ensure reset here too
-        });
-
-        spaceSwitcher.appendChild(button);
-    });
-
-    // Inactive space from bookmarks
-    const arcifyFolder = await LocalStorage.getOrCreateArcifyFolder();
-    const spaceFolders = await chrome.bookmarks.getChildren(arcifyFolder.id);
-    spaceFolders.forEach(spaceFolder => {
-        if (spaces.find(space => space.name == spaceFolder.title)) {
+        }, true);
+    }
+    handle.addEventListener('dragstart', event => {
+        if (event.target.closest('input, button')) { event.preventDefault(); return; }
+        if (!tabElement.dataset.bookmarkId && todaySelection.isBatch() && todaySelection.isSelected(tabElement)) {
+            event.preventDefault();
+            showFavoritesStatus('Right-click the Today selection to create Split View or save a pinned folder. Batch dragging is not supported.');
             return;
-        } else {
-            const button = document.createElement('button');
-            button.textContent = spaceFolder.title;
-            button.setAttribute('aria-label', `Create space from ${spaceFolder.title}`);
-            button.addEventListener('click', async () => {
-                const newTab = await ChromeHelper.createNewTab();
-                await createSpaceFromInactive(spaceFolder.title, newTab);
-            });
-            spaceSwitcher.appendChild(button);
         }
-    });
-
-    // const spaceFolder = spaceFolders.find(f => f.title === space.name);
-
-}
-
-// Wrapper functions that use the unified getDragAfterElement from domManager.js
-function getDragAfterElementSwitcher(container, x) {
-    return getDragAfterElement(container, x, {
-        axis: 'x',
-        selector: 'button:not(.dragging-switcher)'
-    });
-}
-
-function getDragAfterElementTabs(container, y) {
-    return getDragAfterElement(container, y, {
-        axis: 'y',
-        selector: ':scope > .tab:not(.dragging), :scope > .folder:not(.dragging)',
-        placeholderSelector: ':scope > .tab-placeholder'
-    });
-}
-
-function getDragAfterElementFavicon(container, x) {
-    return getDragAfterElement(container, x, {
-        axis: 'x',
-        selector: '.pinned-favicon:not(.dragging)',
-        placeholderSelector: '.pinned-placeholder-container'
-    });
-}
-
-function calculatePinnedTabIndex(afterElement, position, pinnedFavicons) {
-    if (!afterElement) {
-        // If no target element, append to the end
-        return pinnedFavicons.querySelectorAll('.pinned-favicon').length;
-    }
-
-    const pinnedElements = Array.from(pinnedFavicons.querySelectorAll('.pinned-favicon'));
-    const afterIndex = pinnedElements.indexOf(afterElement);
-
-    if (afterIndex === -1) {
-        // Fallback: append to end if element not found
-        return pinnedElements.length;
-    }
-
-    if (position === 'left') {
-        return afterIndex; // Insert before the target element
-    } else { // position === 'right'
-        return afterIndex + 1; // Insert after the target element  
-    }
-}
-
-// Helper function to set up drag event listeners for tab elements
-function setupTabDragHandlers(tabElement) {
-    tabElement.addEventListener('dragstart', event => {
+        if (!tabElement.dataset.bookmarkId) todaySelection.clear();
+        todaySplit.startDrag(tabElement);
+        event.stopPropagation();
+        sidebarDropFeedback.clear();
         isDraggingTab = true;
-        event.dataTransfer.setData('text/plain', tabElement.dataset.tabId || tabElement.dataset.url || '');
+        event.dataTransfer.setData('text/plain', tabElement.dataset.bookmarkId || tabElement.dataset.tabId || tabElement.dataset.url || '');
         event.dataTransfer.effectAllowed = 'move';
         tabElement.classList.add('dragging');
+        const started = favoritesDragSource.start(tabElement);
+        if (started?.error) {
+            event.preventDefault(); tabElement.classList.remove('dragging'); isDraggingTab = false;
+            todaySplit.clearDrag(); showFavoritesStatus(started.error); return;
+        }
+        if (favoritesDragSource.isBatch()) {
+            event.dataTransfer.effectAllowed = 'copy';
+            bookmarkSelection.dragImage(event, started.source.bookmarks.length);
+        } else if (tabElement.dataset.bookmarkId && !tabElement.dataset.tabId) event.dataTransfer.effectAllowed = 'copyMove';
+        void newTabWindowDrop.start();
         // Track the source folder (if any) so we can resync collapsed-folder projections after drop.
-        dragSourceFolderElement = tabElement.closest('.folder');
+        dragSourceFolderElement = tabElement.parentElement.closest('.folder');
     });
 
-    tabElement.addEventListener('dragend', () => {
+    handle.addEventListener('dragend', () => {
+        bookmarkSelection.clearDragImage();
+        sidebarDropFeedback.clear();
         isDraggingTab = false;
         tabElement.classList.remove('dragging');
         dragSourceFolderElement = null;
@@ -1294,15 +1152,67 @@ function setupTabDragHandlers(tabElement) {
 let folderOpenTimer = null;
 let currentHoveredFolder = null;
 let dragSourceFolderElement = null;
+let maxDragFolderDepth = 1;
+const sidebarDropFeedback = createSidebarDropFeedback({
+    document,
+    resolve: point => favoritesDragSource.isBatch() ? null : resolveSidebarDrop({ ...point, dragging: document.querySelector('.dragging'), maxFolderDepth: maxDragFolderDepth }),
+    onTarget: destination => {
+        const folder = destination?.placement === 'inside' ? destination.folder : null;
+        if (folder?.classList.contains('collapsed')) {
+            if (currentHoveredFolder !== folder) startFolderOpenTimer(folder);
+        } else clearFolderOpenTimer();
+    },
+    onClear: clearFolderOpenTimer
+});
+
+// Batch semantics exist only for Favorites. Stop unsupported destinations at
+// capture as well as in final handlers; never let a legacy handler move just
+// the one physical .dragging row, even if the frozen selection became stale.
+function blockBookmarkBatchDrop(event) {
+    if (!favoritesDragSource.isBatch() || document.getElementById('pinnedFavicons').contains(event.target)) return false;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+    sidebarDropFeedback.clear();
+    showFavoritesStatus('Multiple bookmarks can only be dropped into Favorites. No bookmarks were moved.');
+    return true;
+}
+document.addEventListener('dragover', blockBookmarkBatchDrop, true);
+document.addEventListener('drop', blockBookmarkBatchDrop, true);
+
+document.addEventListener('dragend', () => {
+    favoritesDragSource.clear();
+    if (favoritesPreview) clearFavoritesPreview();
+    isDraggingTab = false;
+    document.querySelectorAll('.dragging').forEach(element => element.classList.remove('dragging'));
+    hideAllDropIndicators();
+    dragSourceFolderElement = null;
+    refreshCoordinator.schedule();
+});
+document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && isDraggingTab) {
+        favoritesDragSource.clear();
+        if (favoritesPreview) clearFavoritesPreview();
+        isDraggingTab = false;
+        document.querySelectorAll('.dragging').forEach(element => element.classList.remove('dragging'));
+        dragSourceFolderElement = null;
+        hideAllDropIndicators();
+        refreshCoordinator.schedule();
+    }
+});
 
 function setFolderCollapsed(folderElement, collapsed, persist = true) {
+    folderElement.setAttribute('role', 'treeitem'); folderElement.setAttribute('aria-expanded', String(!collapsed));
+    folderElement.querySelector(':scope > .folder-content').setAttribute('role', 'group');
+    folderElement.querySelector(':scope > .folder-collapsed-tabs')?.setAttribute('role', 'group');
     folderElement.classList.toggle('collapsed', collapsed);
     folderElement.querySelector(':scope > .folder-content').classList.toggle('collapsed', collapsed);
     const folderToggle = folderElement.querySelector('.folder-toggle');
     folderToggle.classList.toggle('collapsed', collapsed);
     folderToggle.setAttribute('aria-expanded', String(!collapsed));
     syncCollapsedFolderTabs(folderElement);
+    bookmarkSelection.reconcile();
     if (persist) {
+        folderStateGeneration++;
         saveFolderCollapsed(folderElement.dataset.bookmarkId, collapsed)
             .catch(error => Logger.error('Could not save folder state', error));
     }
@@ -1324,7 +1234,8 @@ function startFolderOpenTimer(folderElement) {
         }
         folderOpenTimer = null;
         currentHoveredFolder = null;
-    }, 250); // 750ms delay like macOS Finder
+        sidebarDropFeedback.refresh();
+    }, 250); // Brief hover delay before opening a collapsed folder.
 }
 
 // Helper function to clear the folder auto-open timer
@@ -1340,27 +1251,36 @@ async function setActiveSpace(spaceId, updateTab = true) {
     const space = spaces.find(s => s.id === spaceId);
     if (!space) return;
     if (activeSpaceId && activeSpaceId !== spaceId) {
+        tabContextMenuRequest++; closeTabContextMenu();
+        bookmarkSelection.clear();
         previousSpaceId = activeSpaceId;
         const activeEditor = document.activeElement?.closest?.(`[data-space-id="${activeSpaceId}"]`);
-        if (activeEditor) document.activeElement.blur();
+        if (activeEditor && document.activeElement !== newTabBtn) document.activeElement.blur();
         editorSessions.dispose('folder-pending', activeSpaceId);
     }
+    if (activeSpaceId !== spaceId || pendingActiveSpaceId) invalidateArchiveDisplay();
+    pendingActiveSpaceId = null;
     activeSpaceId = spaceId;
     await pendingSpaceSaves;
     await spaceRequest('activate', { windowId: currentWindow.id, spaceId });
+    if (activeSpaceId !== spaceId) return;
     await activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher);
     await refreshActiveSpaceUI();
+    if (activeSpaceId !== spaceId) return;
     if (updateTab) {
         const tabs = (await getOwnedTabs(spaceId)).filter(t => t.windowId === currentWindow.id);
+        if (activeSpaceId !== spaceId) return;
         const tab = tabs.find(t => t.id === space.lastTab) || tabs[tabs.length - 1];
         if (tab) {
             await chrome.tabs.update(tab.id, { active: true });
             activateTabInDOM(tab.id);
+            activeTabReveal.request(tab.id);
         }
-    }
+    } else if (ownerOf(spaces, activeChromeTabId)?.id === spaceId) activeTabReveal.request(activeChromeTabId);
 }
 
 async function createSpaceFromInactive(spaceName, tabToMove) {
+    if (tabToMove?.id) assertNotNativeSplit(await chrome.tabs.get(tabToMove.id));
     Logger.log(`Creating inactive space "${spaceName}" with tab:`, tabToMove);
     isCreatingSpace = true;
     try {
@@ -1388,6 +1308,8 @@ async function createSpaceFromInactive(spaceName, tabToMove) {
             uuid: registryEntry?.spaceUuid ?? Utils.generateUUID(),
             name: spaceName,
             color: spaceColor,
+            ...(getSpaceIcon(registryEntry.icon) ? { icon: registryEntry.icon } : {}),
+            ...(normalizeCustomTint(registryEntry.customTint) ? { customTint: normalizeCustomTint(registryEntry.customTint) } : {}),
             spaceBookmarks: spaceBookmarks,
             temporaryTabs: [tabToMove.id],
             lastTab: tabToMove.id,
@@ -1430,65 +1352,64 @@ function saveSpaces() {
     return run;
 }
 
+function partialPinnedBookmarkError(error, bindingCompleted = false, confirmed = true) {
+    return new Error(`${confirmed ? 'The bookmark was saved' : 'A bookmark change may have been applied'}, but the live-tab update could not be completed. ${error.message} ` +
+        `Check Pinned${bindingCompleted ? ' and its live-tab binding' : ''} before trying again. Nothing was retried.`);
+}
+
 async function moveTabToPinned(space, tab) {
+    const guard = async () => assertNotNativeSplit(await chrome.tabs.get(tab.id));
+    await guard();
     space = spaces.find(s => s.id === space.id);
     if (!space) return;
     const spaceFolder = await getSpaceBookmarkFolder(space);
+    await guard();
     const created = await chrome.bookmarks.create({
         parentId: spaceFolder.id, title: tab.title, url: tab.url
     });
-    const bookmarkIdToStore = created.id;
+    let bindingCompleted = false;
+    try {
+        await guard();
+        // Revalidate inside the shared binding lock, after its storage read.
+        await Utils.setPinnedTabState(tab.id, { pinnedUrl: tab.url, bookmarkId: created.id }, { beforeWrite: guard });
+        bindingCompleted = true;
 
-    // Track the original pinned URL for Arc-like "Back to Pinned URL" behavior.
-    await Utils.setPinnedTabState(tab.id, { pinnedUrl: tab.url, bookmarkId: bookmarkIdToStore });
+        space.temporaryTabs = space.temporaryTabs.filter(id => id !== tab.id);
+        if (!space.spaceBookmarks.includes(tab.id)) space.spaceBookmarks.push(tab.id);
 
-    space.temporaryTabs = space.temporaryTabs.filter(id => id !== tab.id);
-    if (!space.spaceBookmarks.includes(tab.id)) {
-        space.spaceBookmarks.push(tab.id);
-    }
-
-    // Update chevron state after moving tab to pinned
-    const spaceElement = document.querySelector(`[data-space-id="${space.id}"]`);
-    if (spaceElement) {
-        const pinnedContainer = spaceElement.querySelector('[data-tab-type="pinned"]');
-        updateChevronState(spaceElement, pinnedContainer);
-    }
-
-    // Update placeholders after moving tab to pinned
-    updatePinnedSectionPlaceholders();
-
-    // Persist extension ordering after membership changes.
-    await persistSpaceTabOrder(space.id, { source: 'arcify', movedTabId: tab.id });
-    await refreshActiveSpaceUI();
+        const spaceElement = document.querySelector(`[data-space-id="${space.id}"]`);
+        if (spaceElement) updateChevronState(spaceElement, spaceElement.querySelector('[data-tab-type="pinned"]'));
+        updatePinnedSectionPlaceholders();
+        await persistSpaceTabOrder(space.id, { source: 'arcify', movedTabId: tab.id });
+        await refreshActiveSpaceUI();
+    } catch (error) { throw partialPinnedBookmarkError(error, bindingCompleted); }
 }
 
 async function moveTabToTemp(space, tab, { temporaryDisplayOrder = null, inverted = false, refresh = true } = {}) {
+    const guard = async () => assertNotNativeSplit(await chrome.tabs.get(tab.id));
+    await guard();
     space = spaces.find(s => s.id === space.id);
     if (!space) return;
-    await removeSpacePin(space, tab);
+    let removed = false;
+    try {
+        const result = await removeSpacePin(space, tab, { beforeWrite: guard });
+        removed = result.removed;
+        // Guarded removal validates after its storage write and restores only
+        // its own removed binding on failure, before any membership changes.
+        await Utils.removePinnedTabState(tab.id, { beforeWrite: guard, expectedBookmarkId: result.bookmarkId });
 
-    // Move tab from bookmarks to temporary tabs in space data
-    space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== tab.id);
-    if (!space.temporaryTabs.includes(tab.id)) {
-        space.temporaryTabs.push(tab.id);
+        space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== tab.id);
+        if (!space.temporaryTabs.includes(tab.id)) space.temporaryTabs.push(tab.id);
+        if (temporaryDisplayOrder) space.temporaryTabs = mergeCapturedTemporaryOrder(space.temporaryTabs, temporaryDisplayOrder, inverted);
+
+        const spaceElement = document.querySelector(`[data-space-id="${space.id}"]`);
+        if (spaceElement) updateChevronState(spaceElement, spaceElement.querySelector('[data-tab-type="pinned"]'));
+        await persistSpaceTabOrder(space.id, { source: 'arcify', movedTabId: tab.id });
+        if (refresh) await refreshActiveSpaceUI();
+    } catch (error) {
+        if (!removed || error.bookmarkRemoved) throw error;
+        throw new Error(`The saved pin was removed, but its live-tab update could not be completed. ${error.message} Nothing was retried or recreated.`);
     }
-    if (temporaryDisplayOrder) {
-        space.temporaryTabs = mergeCapturedTemporaryOrder(space.temporaryTabs, temporaryDisplayOrder, inverted);
-    }
-
-    // No longer a space-pinned tab; clear pinned state mapping.
-    await Utils.removePinnedTabState(tab.id);
-
-    // Update chevron state after moving tab from pinned
-    const spaceElement = document.querySelector(`[data-space-id="${space.id}"]`);
-    if (spaceElement) {
-        const pinnedContainer = spaceElement.querySelector('[data-tab-type="pinned"]');
-        updateChevronState(spaceElement, pinnedContainer);
-    }
-
-    // Persist extension ordering after membership changes.
-    await persistSpaceTabOrder(space.id, { source: 'arcify', movedTabId: tab.id });
-    if (refresh) await refreshActiveSpaceUI();
 }
 
 // Helper function to manage folder placeholder state
@@ -1648,9 +1569,17 @@ function updatePinnedSectionPlaceholders() {
 // Convert favorite tab (pinned-favicon) to proper tab element
 async function convertFavoriteToTab(draggingElement, targetIsPinned) {
     const tabId = parseInt(draggingElement.dataset.tabId);
+    assertNotNativeSplit(await chrome.tabs.get(tabId));
+    nativeFavoriteConversions.add(tabId);
+    try {
+    // Release exact global ownership explicitly; ordinary Favorites need no pin event.
+    if (draggingElement.dataset.favoriteId) await savedFavoritesUI.request('releaseTab', { favoriteId: draggingElement.dataset.favoriteId, tabId });
+    else await chrome.tabs.update(tabId, { pinned: false });
 
-    // Unpin from Chrome favorites
-    await chrome.tabs.update(tabId, { pinned: false });
+    // Reverse drops keep the existing copy semantics. Do not repurpose or
+    // relocate the native Favorite's original saved bookmark.
+    await Utils.removePinnedTabState(tabId);
+    await releaseCompletedFavoriteReceipt(tabId, currentWindow.id);
 
     // Get fresh tab data and create proper UI element
     const tab = await chrome.tabs.get(tabId);
@@ -1663,6 +1592,7 @@ async function convertFavoriteToTab(draggingElement, targetIsPinned) {
     updatePinnedFavicons();
 
     return { tab, newTabElement };
+    } finally { nativeFavoriteConversions.delete(tabId); }
 }
 
 // Handle bookmark operations during drop events
@@ -1671,6 +1601,32 @@ async function handleBookmarkOperations(event, draggingElement, container, targe
     if (!draggingElement || !container || !event) {
         Logger.warn('Missing required elements for bookmark operations');
         return;
+    }
+
+    if (draggingElement.dataset.tabId) assertNotNativeSplit(await chrome.tabs.get(Number(draggingElement.dataset.tabId)));
+
+    if (draggingElement.classList.contains('folder')) {
+        if (container.dataset.tabType !== 'pinned' || !draggingElement.dataset.bookmarkId) {
+            throw new Error('Folders can only be moved within Favorites.');
+        }
+        const spaceElement = container.closest('.space');
+        const space = spaces.find(space => space.id === spaceElement.dataset.spaceId);
+        const root = await getSpaceBookmarkFolder(space);
+        const source = dropIntent.bookmarkSourceContent;
+        const target = dropIntent.bookmarkTargetContent;
+        const parentId = bookmarkParentIdForContent(target, root.id);
+        if (source !== target && !await canCreateFolder(root.id, parentId)) {
+            throw new Error('Nested folders require tab group sync to be off and support two folder levels.');
+        }
+        const result = await saveBookmarkOperation(makeBookmarkDropOperation({
+            sourceContent: source, targetContent: target, draggingElement, rootId: root.id, inverted: dropIntent.inverted
+        }));
+        for (const [id, order] of Object.entries(result.orders || {})) bookmarkOrderBaselines.set(String(id), order.map(String));
+        space.spaceBookmarks = mergeVisibleOrder(space.spaceBookmarks ?? [],
+            canonicalOrderFromDisplay(getFlattenedPinnedSectionTabIds(spaceElement), dropIntent.inverted));
+        await persistSpaceTabOrder(space.id);
+        updatePinnedSectionPlaceholders();
+        return { orderHandled: true };
     }
 
     // Handle tab being moved to pinned section or folder (both open tabs and bookmark-only tabs)
@@ -1686,6 +1642,7 @@ async function handleBookmarkOperations(event, draggingElement, container, targe
         // Determine if this is a bookmark-only tab or a regular tab
         const isBookmarkOnly = !draggingElement.dataset.tabId && draggingElement.dataset.url;
         Logger.log("Processing drag drop - isBookmarkOnly:", isBookmarkOnly);
+        let bookmarkWriteCompleted = false, bindingCompleted = false;
 
         try {
             let tab;
@@ -1745,12 +1702,19 @@ async function handleBookmarkOperations(event, draggingElement, container, targe
                 inverted: dropIntent.inverted,
                 tab
             });
-            const result = await saveBookmarkOperation(operation);
+            const guard = async () => { if (tabId) assertNotNativeSplit(await chrome.tabs.get(tabId)); };
+            await guard();
+            const result = await saveBookmarkOperation(operation, tabId ? { guardTab: { tabId, windowId: tab.windowId } } : {});
+            bookmarkWriteCompleted = true;
             bookmarkId = result.createdId || bookmarkId;
             for (const [id, order] of Object.entries(result.orders || {})) bookmarkOrderBaselines.set(String(id), order.map(String));
+            await guard();
+            if (tabId) {
+                await Utils.setPinnedTabState(tabId, { bookmarkId, pinnedUrl }, { beforeWrite: guard });
+                bindingCompleted = true;
+            }
             draggingElement.dataset.bookmarkId = bookmarkId;
             draggingElement.dataset.pinnedUrl = pinnedUrl;
-            if (tabId) await Utils.setPinnedTabState(tabId, { bookmarkId, pinnedUrl });
             // Move tab from temporary to pinned in space data (only for regular tabs with real IDs)
             if (!isBookmarkOnly && tabId) {
                 space.temporaryTabs = space.temporaryTabs.filter(id => id !== tabId);
@@ -1772,14 +1736,15 @@ async function handleBookmarkOperations(event, draggingElement, container, targe
         } catch (error) {
             Logger.error('Error handling pinned tab drop:', error);
             updatePinnedSectionPlaceholders();
-            throw error;
+            throw bookmarkWriteCompleted || error.createdId || error.moved
+                ? partialPinnedBookmarkError(error, bindingCompleted, bookmarkWriteCompleted || Boolean(error.createdId)) : error;
         }
     } else if (container.dataset.tabType === 'temporary' && draggingElement.dataset.tabId) {
         // Handle favorite tab conversion
         if (draggingElement.classList.contains('pinned-favicon')) {
             const { tab } = await convertFavoriteToTab(draggingElement, false);
             const space = spaces.find(s => s.id === activeSpaceId);
-            if (space) await moveTabToSpace(tab.id, space.id, false);
+            if (space) await moveTabToSpace(tab.id, space.id, false, dropIntent);
             return; // Exit early, conversion complete
         }
 
@@ -1812,8 +1777,9 @@ async function handleBookmarkOperations(event, draggingElement, container, targe
     } else if (draggingElement && draggingElement.classList.contains('pinned-favicon') && draggingElement.dataset.tabId) {
         const tabId = parseInt(draggingElement.dataset.tabId);
         try {
-            // 1. Unpin the tab from Chrome favorites
-            await chrome.tabs.update(tabId, { pinned: false });
+            // Release the Favorite before assigning the page to a Space.
+            if (draggingElement.dataset.favoriteId) await savedFavoritesUI.request('releaseTab', { favoriteId: draggingElement.dataset.favoriteId, tabId });
+            else await chrome.tabs.update(tabId, { pinned: false });
 
             // Update all folder placeholders after conversion
             updatePinnedSectionPlaceholders();
@@ -1913,7 +1879,8 @@ function getTempSectionTabIds(spaceElement) {
     const tempContainer = getTempContainer(spaceElement);
     if (!tempContainer) return [];
     return uniqPreserveOrder(
-        Array.from(tempContainer.querySelectorAll('.tab[data-tab-id]')).map(el => parseInt(el.dataset.tabId))
+        // A Favorite dropped here has not yet been converted into a full row.
+        Array.from(tempContainer.querySelectorAll('.tab[data-tab-id], .pinned-favicon[data-tab-id]')).map(el => parseInt(el.dataset.tabId))
     );
 }
 
@@ -1939,14 +1906,15 @@ async function handleArcifyOrderChangeAfterDropByTabId(tabId, container) {
     if (!space) return;
 
     const tabType = container.dataset.tabType;
-    const invertTabOrder = await Utils.getInvertTabOrder();
     if (tabType === 'temporary') {
+        const todayOrderInverted = await Utils.getTodayOrderInverted();
         // DOM order is display order (top->bottom). Canonical storage is extension order (left->right).
         const tempIdsDisplayOrder = getTempSectionTabIds(spaceElement);
-        const tempIdsChromeOrder = invertTabOrder ? [...tempIdsDisplayOrder].reverse() : tempIdsDisplayOrder;
+        const tempIdsChromeOrder = canonicalOrderFromDisplay(tempIdsDisplayOrder, todayOrderInverted);
         // Preserve any non-rendered temp ids (should be rare), append to end.
         space.temporaryTabs = mergeVisibleOrder(space.temporaryTabs ?? [], tempIdsChromeOrder);
     } else if (tabType === 'pinned') {
+        const invertTabOrder = await Utils.getInvertTabOrder();
         // DOM order is display order. Canonical storage is extension order.
         const pinnedIdsDisplayOrder = getFlattenedPinnedSectionTabIds(spaceElement);
         const pinnedIdsChromeOrder = invertTabOrder ? [...pinnedIdsDisplayOrder].reverse() : pinnedIdsDisplayOrder;
@@ -1960,131 +1928,57 @@ async function handleArcifyOrderChangeAfterDropByTabId(tabId, container) {
 
 async function setupDragAndDrop(pinnedContainer, tempContainer) {
     Logger.log('Setting up drag and drop handlers...');
+    pinnedContainer.setAttribute('role', 'tree'); pinnedContainer.setAttribute('aria-label', 'Saved bookmarks');
+    pinnedContainer.setAttribute('aria-multiselectable', 'true');
     [pinnedContainer, tempContainer].forEach(container => {
         container.addEventListener('dragover', e => {
-            e.preventDefault();
-            const draggingElement = document.querySelector('.dragging');
-            if (draggingElement) {
-                const targetFolder = e.target.closest('.folder')?.querySelector(':scope > .folder-content');
-                const targetContainer = targetFolder || container;
-
-                // Check for collapsed folder auto-open functionality
-                const folderElement = e.target.closest('.folder');
-                if (folderElement && folderElement.classList.contains('collapsed')) {
-                    // Start timer to auto-open collapsed folder if hovering over it
-                    if (currentHoveredFolder !== folderElement) {
-                        startFolderOpenTimer(folderElement);
-                    }
-                } else {
-                    // Clear timer if not hovering over a collapsed folder
-                    clearFolderOpenTimer();
-                }
-
-                // Get the element we're dragging over to show drop indicator
-                const afterElement = getDragAfterElementTabs(targetContainer, e.clientY);
-                if (afterElement && targetContainer.contains(afterElement)) {
-                    // Check if this is a placeholder (empty container)
-                    if (afterElement.classList.contains('tab-placeholder')) {
-                        // Show visual feedback on the placeholder itself
-                        afterElement.classList.add('drag-over');
-                        hideAllDropIndicators(); // Don't show traditional indicators for placeholders
-                    } else {
-                        // Show traditional drop indicators for actual tabs/folders
-                        const position = getDropPosition(afterElement, e.clientX, e.clientY, false);
-                        showDropIndicator(afterElement, position, false);
-                        // Remove any placeholder drag-over state in this container
-                        const placeholder = targetContainer.querySelector('.tab-placeholder');
-                        if (placeholder) placeholder.classList.remove('drag-over');
-                    }
-                } else {
-                    // If no specific element, hide indicators
-                    hideAllDropIndicators();
-                    // Remove any placeholder drag-over state in this container
-                    const placeholder = targetContainer.querySelector('.tab-placeholder');
-                    if (placeholder) placeholder.classList.remove('drag-over');
-                }
-
-                // Note: Actual bookmark operations moved to drop event for proper architecture
-            }
+            if (blockBookmarkBatchDrop(e)) return;
+            const destination = sidebarDropFeedback.update(e, container);
+            hideAllDropIndicators();
+            if (destination) e.preventDefault();
+            if (e.dataTransfer) e.dataTransfer.dropEffect = destination ? 'move' : 'none';
         });
-
-        // Add dragleave handler to hide indicators when leaving container
         container.addEventListener('dragleave', e => {
-            // Only hide indicators if we're actually leaving the container (not moving to a child)
-            if (!container.contains(e.relatedTarget)) {
-                hideAllDropIndicators();
-                // Remove any placeholder drag-over state in this container
-                const placeholder = container.querySelector('.tab-placeholder');
-                if (placeholder) placeholder.classList.remove('drag-over');
-                // Clear folder auto-open timer when leaving the container
-                clearFolderOpenTimer();
-            }
+            if (!container.contains(e.relatedTarget)) sidebarDropFeedback.clear();
         });
 
         // Add drop handler to position elements and hide indicators
         container.addEventListener('drop', async e => {
+            if (blockBookmarkBatchDrop(e)) return;
+            todaySplit.clearDrag();
             e.preventDefault();
+            const destination = sidebarDropFeedback.drop(e, container);
             hideAllDropIndicators();
-            // Remove any placeholder drag-over state in this container
-            const placeholder = container.querySelector('.tab-placeholder');
-            if (placeholder) placeholder.classList.remove('drag-over');
-            // Clear folder auto-open timer on drop
-            clearFolderOpenTimer();
-
             const draggingElement = document.querySelector('.dragging');
-            if (draggingElement) {
+            if (draggingElement?.dataset.favoriteId && !draggingElement.dataset.tabId) {
+                showFavoritesStatus('Open this Favorite before moving its tab to a Space.');
+                return;
+            }
+            if (draggingElement && destination) {
                 pendingMutationCount++;
                 try {
                 const spaceElement = container.closest('.space');
-                if (container.dataset.tabType === 'pinned' && spaceElement?.dataset.bookmarkTreeUnavailable === 'true') {
-                    throw new Error('Favorites are unavailable until this space bookmark folder is restored.');
-                }
                 const originalContent = draggingElement.parentElement;
-                const sourceContent = dragSourceFolderElement?.querySelector(':scope > .folder-content');
+                const sourceFolderElement = dragSourceFolderElement;
+                const sourceContent = sourceFolderElement?.querySelector(':scope > .folder-content');
                 const anchorKey = draggingElement.dataset.bookmarkId || draggingElement.dataset.tabId;
                 const sourceAnchor = sourceContent && projectedTabAnchors.get(sourceContent)?.get(anchorKey);
+                // Capture source intent before the await: native dragend may clear
+                // transient drag state, but no DOM or bookmark mutation precedes this guard.
+                if (draggingElement.dataset.tabId) assertNotNativeSplit(await chrome.tabs.get(Number(draggingElement.dataset.tabId)));
                 if (sourceAnchor) {
                     sourceAnchor.remove();
                     projectedTabAnchors.get(sourceContent).delete(anchorKey);
                 }
                 const droppedTabId = draggingElement.dataset.tabId ? parseInt(draggingElement.dataset.tabId) : null;
-                // If dropping on a folder header / collapsed folder area, treat it as dropping into that folder.
-                const targetFolderElement = e.target.closest('.folder');
+                const targetFolderElement = destination.folder;
                 const targetFolder = targetFolderElement?.querySelector(':scope > .folder-content');
                 if (targetFolderElement) openFolder(targetFolderElement);
+                const targetContainer = destination.container;
+                insertAtSidebarDrop(destination, draggingElement);
 
-                const targetContainer = targetFolder || container;
-
-                // Calculate drop position using same logic as indicators
-                const afterElement = getDragAfterElementTabs(targetContainer, e.clientY);
-                if (afterElement && targetContainer.contains(afterElement)) {
-                    // Check if this is a placeholder (empty container)
-                    if (afterElement.classList.contains('tab-placeholder')) {
-                        // Empty container - append directly and hide placeholder
-                        targetContainer.appendChild(draggingElement);
-                        afterElement.classList.add('hidden');
-                    } else {
-                        // Normal positioning logic for actual tabs/folders
-                        const position = getDropPosition(afterElement, e.clientX, e.clientY, false);
-
-                        // Position element based on indicator logic
-                        if (position === 'above') {
-                            targetContainer.insertBefore(draggingElement, afterElement);
-                        } else { // 'below'
-                            const nextSibling = afterElement.nextElementSibling;
-                            if (nextSibling) {
-                                targetContainer.insertBefore(draggingElement, nextSibling);
-                            } else {
-                                targetContainer.appendChild(draggingElement);
-                            }
-                        }
-                    }
-                } else {
-                    // Fallback: append to end if no specific target
-                    targetContainer.appendChild(draggingElement);
-                }
-
-                const dropInverted = await Utils.getInvertTabOrder();
+                const dropInverted = container.dataset.tabType === 'temporary'
+                    ? await Utils.getTodayOrderInverted() : await Utils.getInvertTabOrder();
                 const dropIntent = container.dataset.tabType === 'temporary'
                     ? { temporaryDisplayOrder: getTempSectionTabIds(spaceElement), inverted: dropInverted }
                     : {
@@ -2097,10 +1991,10 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
                 const operationResult = await handleBookmarkOperations(e, draggingElement, container, targetFolder, dropIntent);
 
                 // Resync collapsed-folder projections/icons after move (source + destination)
-                if (dragSourceFolderElement) {
-                    syncCollapsedFolderTabs(dragSourceFolderElement);
+                if (sourceFolderElement) {
+                    syncCollapsedFolderTabs(sourceFolderElement);
                 }
-                if (targetFolderElement && targetFolderElement !== dragSourceFolderElement) {
+                if (targetFolderElement && targetFolderElement !== sourceFolderElement) {
                     syncCollapsedFolderTabs(targetFolderElement);
                 }
 
@@ -2125,68 +2019,25 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
 
 // Function to set up drag and drop for placeholder containers to make entire placeholder area droppable
 function setupPlaceholderDragAndDrop(placeholderContainer, pinnedContainer) {
-    Logger.log('Setting up placeholder drag and drop handlers...');
-
-    placeholderContainer.addEventListener('dragover', e => {
-        e.preventDefault();
-        const draggingElement = document.querySelector('.dragging');
-        if (draggingElement) {
-            // Check if pinned container is empty (no tabs or folders, only placeholder)
-            const hasContent = pinnedContainer.querySelectorAll('.tab:not(.tab-placeholder), .folder').length > 0;
-
-            if (!hasContent) {
-                // Container is empty - show visual feedback on placeholder
-                const placeholder = placeholderContainer.querySelector('.tab-placeholder');
-                if (placeholder) {
-                    placeholder.classList.add('drag-over');
-                }
-                hideAllDropIndicators();
-            }
-        }
+    const isEmpty = () => !pinnedContainer.querySelector('.tab, .folder');
+    placeholderContainer.addEventListener('dragover', event => {
+        if (blockBookmarkBatchDrop(event)) return;
+        if (!isEmpty()) return;
+        const destination = sidebarDropFeedback.update({ target: pinnedContainer, clientX: event.clientX, clientY: event.clientY }, pinnedContainer);
+        if (destination) event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = destination ? 'move' : 'none';
     });
-
-    placeholderContainer.addEventListener('dragleave', e => {
-        // Only hide if leaving the placeholder container entirely
-        if (!placeholderContainer.contains(e.relatedTarget)) {
-            const placeholder = placeholderContainer.querySelector('.tab-placeholder');
-            if (placeholder) {
-                placeholder.classList.remove('drag-over');
-            }
-        }
+    placeholderContainer.addEventListener('dragleave', event => {
+        if (!placeholderContainer.contains(event.relatedTarget)) sidebarDropFeedback.clear();
     });
-
-    placeholderContainer.addEventListener('drop', async e => {
-        e.preventDefault();
-        const placeholder = placeholderContainer.querySelector('.tab-placeholder');
-        if (placeholder) {
-            placeholder.classList.remove('drag-over');
-        }
-        hideAllDropIndicators();
-
-        const draggingElement = document.querySelector('.dragging');
-        if (draggingElement) {
-            // Check if pinned container is empty
-            const hasContent = pinnedContainer.querySelectorAll('.tab:not(.tab-placeholder), .folder').length > 0;
-
-            if (!hasContent) {
-                // Forward the drop to the pinned container by simulating the drop event
-                Logger.log('Forwarding placeholder drop to pinned container');
-
-                // Create a synthetic drop event for the pinned container
-                const syntheticEvent = new DragEvent('drop', {
-                    bubbles: true,
-                    cancelable: true,
-                    dataTransfer: e.dataTransfer,
-                    clientX: e.clientX,
-                    clientY: e.clientY,
-                    screenX: e.screenX,
-                    screenY: e.screenY
-                });
-
-                // Dispatch the event on the pinned container
-                pinnedContainer.dispatchEvent(syntheticEvent);
-            }
-        }
+    placeholderContainer.addEventListener('drop', event => {
+        if (blockBookmarkBatchDrop(event)) return;
+        if (!isEmpty()) return;
+        event.preventDefault();
+        pinnedContainer.dispatchEvent(new DragEvent('drop', {
+            bubbles: true, cancelable: true, dataTransfer: event.dataTransfer,
+            clientX: event.clientX, clientY: event.clientY
+        }));
     });
 }
 
@@ -2236,6 +2087,7 @@ async function createNewFolder(spaceElement, parentFolderElement = null) {
     }
     let createdFolderId = createdFolder.id;
     folderElement.dataset.bookmarkId = createdFolderId;
+    setupTabDragHandlers(folderElement, folderHeader);
     await saveFolderCollapsed(createdFolderId, false);
     if (folderEditSession.disposed || activeSpaceId !== space.id || !spaceElement.isConnected) {
         refreshCoordinator.schedule();
@@ -2310,21 +2162,23 @@ async function createNewFolder(spaceElement, parentFolderElement = null) {
 }
 
 const spaceRenderTasks = new Map();
-async function loadTabs(space, pinnedContainer, tempContainer) {
+async function loadTabs(space, pinnedContainer, tempContainer, canCommit = () => !editorSessions.isActive()) {
     const previous = spaceRenderTasks.get(space.id) || Promise.resolve();
     const run = previous.catch(error => Logger.warn('Previous space render failed', error)).then(async () => {
-        if (!pinnedContainer.isConnected) return;
-        return renderSpaceTabs(space, pinnedContainer, tempContainer);
+        if (!pinnedContainer.isConnected || !tempContainer.isConnected || !canCommit()) return false;
+        return renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit);
     });
     spaceRenderTasks.set(space.id, run);
     try { return await run; }
     finally { if (spaceRenderTasks.get(space.id) === run) spaceRenderTasks.delete(space.id); }
 }
 
-async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
+async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit) {
+    const folderGeneration = folderStateGeneration;
     Logger.log('Loading tabs for space:', space.id);
     Logger.log('Space bookmarks in space:', space.spaceBookmarks);
     const representedPinnedTabIds = new Set();
+    const todayOrderInverted = await Utils.getTodayOrderInverted();
     const invertTabOrder = await Utils.getInvertTabOrder();
     const tabs = (await getOwnedTabs(space.id)).filter(t => !t.pinned);
     const pinnedStatesById = await Utils.getPinnedTabStates();
@@ -2351,6 +2205,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
                         const folderElement = newFolder.querySelector('.folder');
                         folderElement.dataset.bookmarkId = item.id;
                         const folderHeader = folderElement.querySelector('.folder-header');
+                        setupTabDragHandlers(folderElement, folderHeader);
                         const folderIcon = folderElement.querySelector('.folder-icon');
                         const folderTitle = folderElement.querySelector('.folder-title');
                         const folderNameInput = folderElement.querySelector('.folder-name');
@@ -2445,6 +2300,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
                                 Logger.log('Creating UI element for active bookmark:', existingTab);
                                 representedPinnedTabIds.add(existingTab.id);
                                 existingTab.pinnedUrl = item.url;
+                                existingTab.bookmarkTitle = item.title;
                                 existingTab.bookmarkId = item.id;
                                 const tabElement = await createTabElement(existingTab, true);
                                 Logger.log('Appending tab element to container:', tabElement);
@@ -2454,6 +2310,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
                                 const bookmarkTab = {
                                     id: null,
                                     title: item.title,
+                                    bookmarkTitle: item.title,
                                     url: item.url,
                                     favIconUrl: null,
                                     spaceName: space.name,
@@ -2494,11 +2351,16 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
     }
 
     const tempFragment = document.createDocumentFragment();
-    let tabsToLoad = [...new Set([
-        ...space.temporaryTabs,
-        ...space.spaceBookmarks.filter(id => !representedPinnedTabIds.has(id))
-    ])];
-    if (invertTabOrder) tabsToLoad.reverse();
+    const temporaryIds = new Set(space.temporaryTabs);
+    const todayTabsToLoad = [...temporaryIds];
+    const savedPinsToLoad = [...new Set(space.spaceBookmarks.filter(id =>
+        !representedPinnedTabIds.has(id) && !temporaryIds.has(id)))];
+    if (todayOrderInverted) todayTabsToLoad.reverse();
+    if (invertTabOrder) savedPinsToLoad.reverse();
+    // Preserve the existing fallback group boundary, but saved pins retain
+    // their own display order even when the bookmark tree is unavailable.
+    const tabsToLoad = todayOrderInverted
+        ? [...savedPinsToLoad, ...todayTabsToLoad] : [...todayTabsToLoad, ...savedPinsToLoad];
     for (const tabId of tabsToLoad) {
         const tab = tabs.find(t => t.id === tabId);
         if (!tab || representedPinnedTabIds.has(tabId)) continue;
@@ -2526,7 +2388,15 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
         refreshCoordinator.invalidateSpaces();
         return false;
     }
+    if (folderGeneration !== folderStateGeneration) {
+        // Keep the live toggle and retry only the repaint. Folder state is not
+        // navigation and must never request an active-tab reveal.
+        refreshCoordinator.invalidateBookmarks();
+        return false;
+    }
+    if (!pinnedContainer.isConnected || !tempContainer.isConnected || !canCommit()) return false;
 
+    const restoreViewport = captureSidebarViewport(pinnedContainer.closest('.space-content'));
     pinnedContainer.querySelectorAll('.tab, .folder, .bookmark-association-error').forEach(el => {
         disposeEditorsInElement(el);
         el.remove();
@@ -2537,16 +2407,24 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer) {
     });
     pinnedContainer.appendChild(pinnedFragment);
     tempContainer.appendChild(tempFragment);
+    tempContainer.dataset.todayOrderInverted = String(todayOrderInverted);
+    pinnedContainer.dataset.savedOrderInverted = String(invertTabOrder);
     const spaceElement = pinnedContainer.closest('.space');
     if (spaceElement) spaceElement.dataset.bookmarkTreeUnavailable = treeAvailable ? 'false' : 'true';
+    bookmarkSelection.reconcile();
+    restoreViewport();
+    activeTabReveal.flush();
     return true;
 }
 
 // Debounced UI refresh when settings change (e.g., invertTabOrder)
 let refreshActiveSpaceUITimeout = null;
 
-async function refreshActiveSpaceUI({ force = false } = {}) {
-    if (!force && (editorSessions.isActive() || pendingMutationCount > 0)) {
+async function refreshActiveSpaceUI({ force = false, canCommit = () => true } = {}) {
+    const spaceId = activeSpaceId;
+    const isCurrent = () => activeSpaceId === spaceId && canCommit() &&
+        (force || (!editorSessions.isActive() && !isDraggingTab && !isDraggingSpace && pendingMutationCount === 0));
+    if (!isCurrent()) {
         refreshCoordinator.invalidateSpaces();
         return false;
     }
@@ -2562,11 +2440,12 @@ async function refreshActiveSpaceUI({ force = false } = {}) {
         const tempContainer = spaceElement.querySelector('[data-tab-type="temporary"]');
         if (!pinnedContainer || !tempContainer) return true;
 
-        if (await loadTabs(space, pinnedContainer, tempContainer) === false) return false;
+        if (await loadTabs(space, pinnedContainer, tempContainer, isCurrent) === false || !isCurrent()) return false;
         updatePinnedSectionPlaceholders();
 
         // Restore active highlight if possible
         const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!isCurrent()) return false;
         if (activeTabs?.length) {
             activateTabInDOM(activeTabs[0].id);
         }
@@ -2601,10 +2480,12 @@ async function closeTab(tabElement, tab, isPinned = false, isBookmarkOnly = fals
         const space = spaces.find(s => s.id === tabElement.closest('.space')?.dataset.spaceId);
         if (!space) return;
         await removeSpacePin(space, { bookmarkId: tabElement.dataset.bookmarkId });
+        const restoreViewport = captureSidebarViewport(tabElement.closest('.space-content'));
         tabElement.remove();
 
         // Update folder placeholders after removing bookmark
         updatePinnedSectionPlaceholders();
+        restoreViewport();
         return;
     }
 
@@ -2664,6 +2545,13 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
         if (bookmarkIdForTab) tabElement.dataset.bookmarkId = bookmarkIdForTab;
     }
 
+    if (typeof tab.bookmarkTitle === 'string') tabElement.dataset.bookmarkTitle = tab.bookmarkTitle;
+
+    // Capture modifier gestures before favicon navigation and row activation.
+    if (isPinned && tabElement.dataset.bookmarkId) bookmarkSelection.register(tabElement);
+    else if (!isPinned && !isBookmarkOnly) todaySelection.register(tabElement);
+    if (!isBookmarkOnly) todaySplit.register(tabElement, tab, { today: !isPinned });
+
     // Set up favicon
     favicon.src = Utils.getFaviconUrl(tab.url);
     favicon.classList.add('tab-favicon');
@@ -2717,11 +2605,12 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     }
 
     // Set up action button
+    const rowAction = getTabRowAction({ isPinned, isBookmarkOnly });
     actionButton.classList.remove('tab-close');
-    actionButton.classList.add(isBookmarkOnly ? 'tab-remove' : 'tab-close');
-    actionButton.textContent = isBookmarkOnly ? '−' : '×';
-    actionButton.title = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
-    actionButton.setAttribute('aria-label', actionButton.title);
+    actionButton.classList.add(rowAction.className);
+    actionButton.textContent = rowAction.glyph;
+    actionButton.title = rowAction.label;
+    actionButton.setAttribute('aria-label', rowAction.label);
     actionButton.addEventListener('click', async (e) => {
         e.stopPropagation();
         const activeSpace = spaces.find(s => s.id === activeSpaceId);
@@ -2754,7 +2643,10 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
         const pinnedUrl = (isPinned ? (tabElement.dataset.pinnedUrl || pinnedUrlForTab) : null);
         const isNavigatedAway = Boolean(isPinned && pinnedUrl && tab.url && Utils.getPinnedUrlKey(tab.url) !== Utils.getPinnedUrlKey(pinnedUrl));
 
-        if (override && !isNavigatedAway) {
+        if (isPinned && !isNavigatedAway && typeof tab.bookmarkTitle === 'string') {
+            displayTitle = tab.bookmarkTitle;
+            titleInput.value = tab.bookmarkTitle;
+        } else if (override && !isNavigatedAway) {
             displayTitle = override.name;
             titleInput.value = override.name; // Set input value to override name
         }
@@ -2787,71 +2679,15 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
         titleInput.style.display = 'none';
     };
 
-    // --- Event Listeners for Editing (Only for actual tabs) ---
-    if (!isBookmarkOnly) {
-        let tabEditSession = null;
-        tabDetails.addEventListener('dblclick', (e) => {
-            // Prevent dblclick on favicon or close button from triggering rename
-            if (e.target === favicon || e.target === actionButton) return;
-
-            titleDisplay.style.display = 'none';
-            domainDisplay.style.display = 'none'; // Hide domain while editing
-            titleInput.style.display = 'inline-block'; // Or 'block'
-            if (!tabEditSession) tabEditSession = editorSessions.begin('tab', tab.id);
-            titleInput.select(); // Select text for easy replacement
-            titleInput.focus(); // Focus the input
-        });
-
-        const saveOrCancelEdit = async (save) => {
-            const session = tabEditSession;
-            if (!session) return;
-            const newName = titleInput.value.trim();
-            try {
-                await editorSessions.complete(session, async () => {
-                    if (save) {
-                    // Fetch the latest tab info in case the title changed naturally
-                    const currentTabInfo = await chrome.tabs.get(tab.id);
-                    const originalTitle = currentTabInfo.title;
-                    const activeSpace = spaces.find(s => s.id === activeSpaceId);
-
-                    if (newName && newName !== originalTitle) {
-                        await Utils.setTabNameOverride(tab.id, tab.url, newName);
-                        if (isPinned) {
-                            await updateBookmarkForTab(tab, newName);
-                        }
-                    } else {
-                        // If name is empty or same as original, remove override
-                        await Utils.removeTabNameOverride(tab.id);
-                        if (isPinned) {
-                            await updateBookmarkForTab(tab, originalTitle);
-                        }
-                    }
-                    }
-                    const potentiallyUpdatedTab = await chrome.tabs.get(tab.id);
-                    tab.title = potentiallyUpdatedTab.title;
-                    tab.url = potentiallyUpdatedTab.url;
-                    await updateDisplay();
-                });
-            } catch (error) {
-                Logger.error("Error getting tab info or saving override:", error);
-                alert(error.message);
-            } finally {
-                if (tabEditSession === session) tabEditSession = null;
-            }
-        };
-
-        titleInput.addEventListener('blur', () => saveOrCancelEdit(true));
-        titleInput.addEventListener('keydown', async (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault(); // Prevent potential form submission if wrapped
-                await saveOrCancelEdit(true);
-                titleInput.blur(); // Explicitly blur to hide input
-            } else if (e.key === 'Escape') {
-                await saveOrCancelEdit(false); // Cancel reverts input visually via updateDisplay
-                titleInput.blur(); // Explicitly blur to hide input
-            }
-        });
-    }
+    // Live double-click uses the same editor as Rename in the menu. Closed
+    // pins use the menu: double-click would first activate/open their row.
+    tabDetails.addEventListener('dblclick', event => {
+        if (isBookmarkOnly || event.target === favicon || event.target === actionButton || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        event.preventDefault(); event.stopPropagation();
+        bookmarkSelection.clear(); todaySelection.clear();
+        try { void actionsForTabRow(tabElement).rename(); }
+        catch (error) { showFavoritesStatus(error.message); }
+    });
 
     // --- Initial Display ---
     await updateDisplay(); // Call initially to set the correct title/domain
@@ -2909,65 +2745,17 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
                         return;
                     }
 
-                    // Check if tab is in archive and restore it
-                    const archivedTabs = await Utils.getArchivedTabs();
-                    const archivedTab = !isPinned && archivedTabs.find(t => t.url === tabUrl);
-
+                    // A stale ordinary row may resolve only by its complete
+                    // unchanged archive tuple. URL-only guesses can select a twin.
+                    const archiveView = !isPinned ? await Utils.getArchiveView(currentWindow.id) : null;
+                    const candidates = archiveView?.entries.filter(({ entry }) => entry.url === tabUrl) || [];
                     let targetSpaceId = activeSpaceId;
                     let bookmarkTitle = tab.title || tabElement.querySelector('.tab-title-display')?.textContent || 'Bookmark';
-
-                    if (archivedTab) {
-                        Logger.log('Found archived tab, restoring from archive:', archivedTab);
-                        targetSpaceId = archivedTab.spaceId || activeSpaceId;
-                        bookmarkTitle = archivedTab.name || bookmarkTitle;
-
-                        // Restore the archived tab
-                        const restoredTab = await Utils.restoreArchivedTab(archivedTab);
-
-                        if (restoredTab) {
-                            // Pin the restored tab if it was originally pinned
-                            if (isPinned) {
-                                await chrome.tabs.update(restoredTab.id, { pinned: true });
-                            }
-
-                            // Tab is already active from restore, but ensure it's activated
-                            chrome.tabs.update(restoredTab.id, { active: true });
-                            activateTabInDOM(restoredTab.id);
-
-                            // Update space data
-                            const space = spaces.find(s => s.id === targetSpaceId);
-                            if (space) {
-                                space.lastTab = restoredTab.id;
-                                // If this was a pinned tab, ensure it's in spaceBookmarks
-                                if (isPinned) {
-                                    // Remove any stale tabId references (in case old tabId was still in array)
-                                    if (tab.id) {
-                                        space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== tab.id);
-                                    }
-                                    // Add the new restored tabId
-                                    if (!space.spaceBookmarks.includes(restoredTab.id)) {
-                                        space.spaceBookmarks.push(restoredTab.id);
-                                    }
-                                }
-                                saveSpaces();
-                            }
-
-                            // Ensure restored tab lands in correct Chrome position for this space.
-                            await persistSpaceTabOrder(targetSpaceId, { source: 'arcify', movedTabId: restoredTab.id });
-
-                            // Replace the element with the active tab element
-                            if (isPinned) {
-                                const pinnedUrl = tabElement.dataset.pinnedUrl || tabUrl;
-                                const bookmarkId = tabElement.dataset.bookmarkId || null;
-                                restoredTab.pinnedUrl = pinnedUrl;
-                                restoredTab.bookmarkId = bookmarkId;
-                                await Utils.setPinnedTabState(restoredTab.id, { pinnedUrl: pinnedUrl, bookmarkId: bookmarkId });
-                            }
-                            const updatedTabElement = await createTabElement(restoredTab, isPinned, false);
-                            tabElement.replaceWith(updatedTabElement);
-                            isOpeningBookmark = false;
-                            return;
-                        }
+                    if (candidates.length) {
+                        // An ordinary row has no archivedAt identity. Ask the user
+                        // to choose the exact archive entry rather than infer one.
+                        showFavoritesStatus('This tab is archived. Open the archive and choose its entry to reopen it.');
+                        return;
                     }
 
                     // Tab not found and not in archive, open as new bookmark
@@ -3037,25 +2825,106 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false) {
     setupTabDragHandlers(tabElement);
 
     // --- Context Menu ---
-    tabElement.addEventListener('contextmenu', async (e) => {
+    const openTabContextMenu = async (e, keyboard = false) => {
+        const menuRequest = ++tabContextMenuRequest;
+        tabMenuActions.cancelEdit();
+        spaceContextMenu.close(false);
+        closeTabContextMenu();
         e.preventDefault();
-        const arcifyFolder = await LocalStorage.getOrCreateArcifyFolder();
-        const allBookmarkSpaceFolders = await chrome.bookmarks.getChildren(arcifyFolder.id);
-        showTabContextMenu(
-            e.pageX,
-            e.pageY,
-            tab,
-            isPinned,
-            isBookmarkOnly,
-            tabElement,
-            closeTab,
-            spaces,
-            moveTabToSpace,
-            setActiveSpace,
-            allBookmarkSpaceFolders,
-            createSpaceFromInactive,
-            replaceBookmarkUrlWithCurrentUrl
-        );
+        e.stopPropagation();
+        const menuSession = createContextMenuSession(document, { onEscape: () => {
+            if (keyboard && tabElement.isConnected) tabElement.focus();
+        } });
+        let attached = false;
+        try {
+            const todaySnapshot = !isPinned && !isBookmarkOnly ? todaySelection.freeze(tabElement) : null;
+            if (!isPinned && !isBookmarkOnly && !todaySnapshot) {
+                showFavoritesStatus('The Today row changed. Reopen its menu. Nothing was moved.'); return;
+            }
+            // Freeze the selected Today batch before asynchronous menu preparation.
+            // Incidental refresh must not replace its exact rows while tabs.get waits.
+            if (todaySnapshot && !todaySnapshot.error) {
+                const interaction = editorSessions.begin('tab', tab.id);
+                menuSession.onClose(() => { void editorSessions.complete(interaction); });
+            }
+            const pinSnapshot = isPinned && tabElement.dataset.bookmarkId ? bookmarkSelection.freeze(tabElement) : null;
+            const splitActions = todaySnapshot ? todaySplit.actionsFor(tabElement, todaySnapshot) : null;
+            const moveActions = todaySnapshot && !todaySnapshot.error &&
+                !todaySnapshot.entries.some(entry => todaySplit.isSplitRow(entry.element)) ? moveTodaySelection(todaySnapshot) : null;
+            if (isPinned || isBookmarkOnly) todaySelection.clear();
+            if (pinSnapshot?.error) { showFavoritesStatus(pinSnapshot.error); return; }
+            if (todaySnapshot?.error) { showFavoritesStatus(todaySnapshot.error); return; }
+            if (todaySnapshot && !todaySelection.validate(todaySnapshot)) return;
+            let savedMove = null;
+            if (pinSnapshot) {
+                try {
+                    const savedSnapshot = await captureSavedSelectionMove(pinSnapshot, { ...savedMoveCapture,
+                        active: () => menuSession.active && menuRequest === tabContextMenuRequest && !pendingActiveSpaceId });
+                    if (!savedSnapshot) return;
+                    savedMove = moveSavedSelection(savedSnapshot);
+                } catch (error) { if (menuSession.active) showFavoritesStatus(error.message); return; }
+            }
+            let actions;
+            try {
+                let muted = false;
+                if (!isBookmarkOnly) muted = Boolean((await chrome.tabs.get(tab.id)).mutedInfo?.muted);
+                actions = actionsForTabRow(tabElement, { selectionCount: pinSnapshot?.entries.length || todaySnapshot?.entries.length || 1, muted, validate: () => (!todaySnapshot || todaySelection.validate(todaySnapshot)) && (!pinSnapshot || bookmarkSelection.validate(pinSnapshot)) });
+            } catch (error) { if (menuSession.active) showFavoritesStatus(error.message); return; }
+            if (!menuSession.active || menuRequest !== tabContextMenuRequest || pendingActiveSpaceId) return;
+            if (todaySnapshot && !todaySelection.validate(todaySnapshot)) {
+                showFavoritesStatus('The Today selection changed. Select the tabs again. Nothing was moved.'); return;
+            }
+            if (pinSnapshot && !bookmarkSelection.validate(pinSnapshot)) return;
+            showTabContextMenu(
+                keyboard ? tabElement.getBoundingClientRect().left : e.pageX,
+                keyboard ? tabElement.getBoundingClientRect().bottom : e.pageY,
+                tab,
+                isPinned,
+                isBookmarkOnly,
+                tabElement,
+                closeTab,
+                spaces,
+                moveTabToSpace,
+                setActiveSpace,
+                [],
+                createSpaceFromInactive,
+                actions.useCurrentUrl,
+                async () => {
+                    try {
+                        assertNotNativeSplit(await chrome.tabs.get(tab.id));
+                        if (tabElement.dataset.bookmarkId) {
+                            const space = spaces.find(item => item.id === tabElement.closest('.space')?.dataset.spaceId);
+                            await addBookmarkFavorite({ windowId: currentWindow.id, spaceId: space?.id,
+                                bookmarkFolderId: space?.bookmarkFolderId, bookmarkId: tabElement.dataset.bookmarkId,
+                                parentId: tabElement.parentElement?.closest('.folder')?.dataset.bookmarkId || space?.bookmarkFolderId,
+                                tabId: tab.id });
+                        } else await savedFavoritesUI.request('addTab', { tabId: tab.id });
+                        showFavoritesStatus('Favorite saved across Spaces and windows.');
+                        await updatePinnedFavicons();
+                    } catch (error) { showFavoritesStatus(error.message); }
+                },
+                todaySnapshot ? { count: todaySnapshot.entries.length, save: () => saveTodaySelection(todaySnapshot), move: moveActions,
+                    ...(!moveActions ? { moveHint: 'End Split View before moving these selected tabs to another Space. Nothing was moved.' } : {}) } : null,
+                { ...actions, report: showFavoritesStatus },
+                { ...splitActions, keyboard,
+                    ...(!todaySnapshot && (splitActions?.create || splitActions?.end || savedMove?.destinations.length) ? { beginInteraction: () => {
+                        const session = editorSessions.begin(pinSnapshot ? 'bookmark' : 'tab', pinSnapshot ? tabElement.dataset.bookmarkId : tab.id);
+                        return () => { void editorSessions.complete(session); };
+                    } } : {})
+                },
+                menuSession,
+                savedMove
+            );
+            attached = true;
+        } finally { if (!attached) menuSession.close(); }
+    };
+    tabElement.addEventListener('contextmenu', openTabContextMenu);
+    if ((!isPinned && !isBookmarkOnly) || tabElement.dataset.bookmarkId) tabElement.addEventListener('keydown', event => {
+        if (event.target !== tabElement || event.repeat || event.isComposing) return;
+        if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) {
+            event.preventDefault(); event.stopImmediatePropagation();
+            void openTabContextMenu(event, true);
+        }
     });
 
     return tabElement;
@@ -3108,6 +2977,8 @@ async function createNewSpace() {
             uuid: registryEntry?.spaceUuid ?? Utils.generateUUID(),
             name: spaceName,
             color: spaceColor,
+            ...(getSpaceIcon(registryEntry.icon) ? { icon: registryEntry.icon } : {}),
+            ...(normalizeCustomTint(registryEntry.customTint) ? { customTint: normalizeCustomTint(registryEntry.customTint) } : {}),
             spaceBookmarks: [],
             temporaryTabs: []
         };
@@ -3159,25 +3030,8 @@ async function getSpaceFavoriteUrlKeys(space) {
 }
 
 async function cleanTemporaryTabs(spaceId) {
-    Logger.log('Cleaning temporary tabs for space:', spaceId);
-    const space = spaces.find(s => s.id === spaceId);
-    if (!space) return;
-
-    // Only close live tabs owned by this space, protecting favorite bindings.
-    const ownedTabs = await getOwnedTabs(spaceId);
-    const protectedIds = new Set(space.spaceBookmarks);
-    const favoriteUrlKeys = await getSpaceFavoriteUrlKeys(space);
-    const bindings = await Utils.getPinnedTabStates();
-    const closable = ownedTabs.filter(t =>
-        !isProtectedFavorite(t, protectedIds, bindings, favoriteUrlKeys)
-    );
-
-    await Promise.all(closable.map(t => chrome.tabs.remove(t.id)));
-
-    // Keep only surviving favorites.
-    const closedIds = new Set(closable.map(t => t.id));
-    space.temporaryTabs = space.temporaryTabs.filter(id => !closedIds.has(id));
-    saveSpaces();
+    await pendingSpaceSaves;
+    await adoptStoredSpaces(await spaceRequest('clean', { spaceId, windowId: currentWindow.id }));
 }
 
 async function handleTabCreated(tab) {
@@ -3189,6 +3043,9 @@ async function handleTabCreated(tab) {
 
 
 function handleTabUpdate(tabId, changeInfo, tab) {
+    // Reverse drag conversion owns its membership and DOM placement. Its own
+    // native-unpin event must not concurrently move the row to temporary tabs.
+    if (changeInfo.pinned === false && nativeFavoriteConversions.has(tabId)) return;
     if (isOpeningBookmark) {
         return;
     }
@@ -3200,7 +3057,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
         const tabElement = document.querySelector(`[data-tab-id="${tabId}"]`);
         if (tabElement) {
             // Update Favicon if URL changed
-            if (changeInfo.url || changeInfo.favIconUrl) {
+            if (!tabElement.classList.contains('saved-favorite') && (changeInfo.url || changeInfo.favIconUrl)) {
                 const img = tabElement.querySelector('img');
                 if (img) {
                     img.src = tab.favIconUrl;
@@ -3220,21 +3077,23 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                 if (changeInfo.pinned) {
                     // Chrome-native-pinning a favorite must NOT delete its bookmark — the
                     // bookmark is the only durable record of the favorite. We only detach the
-                    // runtime binding (remove the tab-id from the space arrays + pinned state)
-                    // so the favorite persists as an unrealized bookmark and re-binds on unpin.
+                    // tab from space membership. Keep its exact bookmark binding
+                    // so another drop of the saved row reuses this native tab.
 
                     // Remove tab from all spaces data when it becomes pinned
                     spaces.forEach(space => {
                         space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== tabId);
                         space.temporaryTabs = space.temporaryTabs.filter(id => id !== tabId);
                     });
-                    await Utils.removePinnedTabState(tabId);
                     saveSpaces();
                     editorSessions.dispose('tab', tabId);
                     disposeEditorsInElement(tabElement);
                     tabElement.remove(); // Remove from space
                 } else {
-                    moveTabToSpace(tabId, activeSpaceId, false /* pinned */);
+                    // Native unpin/close membership belongs to SpaceStore. Chrome
+                    // can emit pinned:false while removing a tab, so an optimistic
+                    // move here can resurrect it and look up an already-closed id.
+                    refreshCoordinator.invalidateSpaces();
                 }
                 // Update pinned favicons for both pinning and unpinning
                 updatePinnedFavicons();
@@ -3252,7 +3111,9 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                     const isNavigatedAway = Boolean(pinnedUrl && tab.url && Utils.getPinnedUrlKey(tab.url) !== Utils.getPinnedUrlKey(pinnedUrl));
 
                     // Only force override title when we're still on the pinned URL.
-                    if (override && !isNavigatedAway) {
+                    if (tabElement.dataset.bookmarkId && !isNavigatedAway && tabElement.dataset.bookmarkTitle !== undefined) {
+                        displayTitle = tabElement.dataset.bookmarkTitle;
+                    } else if (override && !isNavigatedAway) {
                         displayTitle = override.name;
                     }
                     titleDisplay.textContent = displayTitle;
@@ -3274,7 +3135,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                         domainDisplay.style.display = 'none';
                     }
                     // Update input value only if not focused (might overwrite user typing)
-                    titleInput.value = (override && !isNavigatedAway) ? override.name : tab.title;
+                    titleInput.value = displayTitle;
                 }
             }
             let faviconElement = tabElement.querySelector('.tab-favicon');
@@ -3282,7 +3143,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                 // fallback to img element
                 faviconElement = tabElement.querySelector('img');
             }
-            if (changeInfo.url && faviconElement) {
+            if (changeInfo.url && faviconElement && !tabElement.classList.contains('saved-favorite')) {
                 faviconElement.src = Utils.getFaviconUrl(changeInfo.url);
                 // Do NOT auto-overwrite the pinned bookmark URL on navigation.
                 // Instead, make favicon look actionable and show the Arc-like label only on favicon hover.
@@ -3304,10 +3165,8 @@ function handleTabUpdate(tabId, changeInfo, tab) {
             if (changeInfo.active !== undefined && changeInfo.active) {
                 activateTabInDOM(tabId);
             }
-            if (changeInfo.status == 'complete' || changeInfo.status == 'loading') {
-                // Scroll to the newly created tab
-                scrollToTab(tabId, 100);
-            }
+            // Loading/title/highlight updates are incidental. Only activation
+            // and explicit Space navigation request an active-tab reveal.
         }
     });
 }
@@ -3339,16 +3198,20 @@ async function handleTabRemove(tabId) {
     const isPinned = owningSpace ? owningSpace.spaceBookmarks.includes(tabId) : false;
     Logger.log("isPinned", isPinned);
 
+    let replacement = null;
     if (isPinned && tabElement.dataset.bookmarkId) {
         try {
             const [bookmark] = await chrome.bookmarks.get(tabElement.dataset.bookmarkId);
             if (bookmark?.url) {
-                const row = await createTabElement({ id: null, title: bookmark.title,
+                replacement = await createTabElement({ id: null, title: bookmark.title,
                     url: bookmark.url, pinnedUrl: bookmark.url, bookmarkId: bookmark.id }, true, true);
-                tabElement.replaceWith(row);
-            } else tabElement.remove();
-        } catch { tabElement.remove(); }
-    } else tabElement.remove();
+            }
+        } catch { /* A deleted bookmark has no closed-row replacement. */ }
+    }
+    const restoreViewport = captureSidebarViewport(tabElement.closest('.space-content'));
+    if (replacement) tabElement.replaceWith(replacement);
+    else tabElement.remove();
+    restoreViewport();
 
     // Remove tab from spaces
     spaces.forEach(space => {
@@ -3364,22 +3227,56 @@ async function handleTabRemove(tabId) {
 
 // Prevent overlapping membership changes for the same tab.
 const processingTabMoves = new Set();
+const activationSequenceByWindow = new Map();
+let latestActivationWindowId = null;
+let activationEventSequence = 0;
+let latestAcceptedActivationSequence = 0;
 
 function handleTabActivated(activeInfo) {
+    const eventSequence = ++activationEventSequence;
+    // Sequence each window independently: a foreign-window activation must not
+    // cancel this panel's still-current pending activation.
+    const activationSequence = (activationSequenceByWindow.get(activeInfo.windowId) || 0) + 1;
+    activationSequenceByWindow.set(activeInfo.windowId, activationSequence);
     if (isCreatingSpace) {
         Logger.log('Skipping tab creation handler - space is being created');
         return;
     }
+    const completeSelectionActivation = bookmarkSelection.captureActivation();
+    const completeTodayActivation = todaySelection.captureActivation();
     chrome.windows.getCurrent({ populate: false }, async (currentWindow) => {
-        if (activeInfo.windowId !== currentWindow.id) {
-            Logger.log('New tab is in a different window, ignoring...');
+        if (activeInfo.windowId !== currentWindow.id
+            || activationSequence !== activationSequenceByWindow.get(activeInfo.windowId)
+            || eventSequence < latestAcceptedActivationSequence) {
+            Logger.log('Activation is stale or belongs to another window, ignoring...');
             return;
         }
 
+        // Only a verified panel-window event advances this counter. An ignored
+        // foreign event cannot cancel local work, but an old-window callback
+        // cannot overwrite an already accepted newer local activation.
+        latestAcceptedActivationSequence = eventSequence;
         Logger.log('Tab activated:', activeInfo);
+        completeSelectionActivation();
+        completeTodayActivation();
+        const activeTabChanged = activeChromeTabId !== activeInfo.tabId;
         activeChromeTabId = activeInfo.tabId;
-        // Find which space contains this tab
-        const spaceWithTab = spaces.find(space =>
+        latestActivationWindowId = activeInfo.windowId;
+        let authoritativeSpaces, latestWindow, activeTabs;
+        try {
+            authoritativeSpaces = await spaceRequest('get');
+            [latestWindow, activeTabs] = await Promise.all([
+                chrome.windows.getCurrent({ populate: false }),
+                chrome.tabs.query({ windowId: activeInfo.windowId, active: true })
+            ]);
+        } catch (error) { Logger.warn('Activation refresh deferred:', error); return; }
+        // The authoritative read can complete after another activation or after
+        // this panel moves. Guard every ensuing Space, DOM and reveal effect.
+        if (activationSequence !== activationSequenceByWindow.get(activeInfo.windowId)
+            || eventSequence !== latestAcceptedActivationSequence
+            || latestActivationWindowId !== activeInfo.windowId || activeChromeTabId !== activeInfo.tabId
+            || latestWindow.id !== activeInfo.windowId || activeTabs[0]?.id !== activeInfo.tabId) return;
+        const spaceWithTab = authoritativeSpaces.find(space =>
             space.spaceBookmarks.includes(activeInfo.tabId) ||
             space.temporaryTabs.includes(activeInfo.tabId)
         );
@@ -3391,12 +3288,17 @@ function handleTabActivated(activeInfo) {
             Logger.log("lasttab space", spaces);
         }
 
-        if (spaceWithTab && spaceWithTab.id !== activeSpaceId) {
+        // Until a pending session target is adopted, this tab's cached owner may
+        // still be its previous space. The authoritative session intent wins.
+        if (!pendingActiveSpaceId && spaceWithTab && spaceWithTab.id !== activeSpaceId) {
             // Switch to the space containing the tab
+            tabContextMenuRequest++; closeTabContextMenu();
+            invalidateArchiveDisplay();
             activeSpaceId = spaceWithTab.id;
-            await activateSpaceInDOM(spaceWithTab.id, spaces, updateSpaceSwitcher);
-            await refreshActiveSpaceUI();
-            activateTabInDOM(activeInfo.tabId);
+            // Session and tab events can arrive in either order. Queue a view
+            // change independently of the metadata projection, and let the same
+            // busy/generation guards protect both event paths.
+            refreshCoordinator.invalidateActiveView();
         } else {
             // Activate only the tab in the current space
             activateTabInDOM(activeInfo.tabId);
@@ -3422,8 +3324,8 @@ function handleTabActivated(activeInfo) {
         // Update collapsed-folder projections to follow Arc behavior (active-only) unless user enabled "show all open".
         syncCollapsedFoldersInActiveSpace();
 
-        // Scroll to the activated tab's location
-        scrollToTab(activeInfo.tabId, 0);
+        // Duplicate activation/highlight notifications are not navigation.
+        if (activeTabChanged) activeTabReveal.request(activeInfo.tabId);
     });
 }
 
@@ -3433,16 +3335,9 @@ async function deleteSpace(spaceId) {
     if (space) {
         editorSessions.dispose('folder-pending', spaceId);
         editorSessions.dispose('space', spaceId);
-        const folderToDelete = await getSpaceBookmarkFolder(space);
-        await chrome.bookmarks.removeTree(folderToDelete.id);
-        await LocalStorage.removeSpaceRegistryEntry(folderToDelete.id);
-        // Close live tabs owned by the deleted space.
-        const ownedTabs = (await chrome.tabs.query({})).filter(t => ownerOf(spaces, t.id)?.id === spaceId);
-
-        // Remove space from array
-        spaces = spaces.filter(s => s.id !== spaceId);
-        await saveSpaces();
-        if (ownedTabs.length) await chrome.tabs.remove(ownedTabs.map(t => t.id));
+        await pendingSpaceSaves;
+        // Final ownership validation and close happen in the sole worker queue.
+        await adoptStoredSpaces(await spaceRequest('delete', { spaceId }));
 
         // Remove space element from DOM
         const spaceElement = document.querySelector(`[data-space-id="${spaceId}"]`);
@@ -3466,46 +3361,8 @@ async function deleteSpace(spaceId) {
 // -- Helper Functions
 ////////////////////////////////////////////////////////////////
 
-/**
- * Scrolls to make a tab visible in the sidebar
- * @param {number} tabId - The ID of the tab to scroll to
- * @param {number} timeout - Timeout in milliseconds to wait before scrolling
- */
-function scrollToTab(tabId, timeout = 0) {
-    setTimeout(() => {
-        const tabElement = document.querySelector(`[data-tab-id="${tabId}"]`);
-        if (tabElement) {
-            const spaceElement = tabElement.closest('[data-space-id]');
-            if (spaceElement) {
-                const spaceContent = spaceElement.querySelector('.space-content');
-                if (spaceContent) {
-                    const tabRect = tabElement.getBoundingClientRect();
-                    const spaceContentRect = spaceContent.getBoundingClientRect();
-
-                    // Check if the tab is visible in the space content
-                    const isTabVisible = tabRect.top >= spaceContentRect.top && tabRect.bottom <= spaceContentRect.bottom;
-
-                    if (!isTabVisible) {
-                        Logger.log('[ScrollDebug] Scrolling to show tab');
-                        // Scroll to make the tab visible
-                        const scrollTop = spaceContent.scrollTop + (tabRect.top - spaceContentRect.top);
-                        spaceContent.scrollTop = scrollTop;
-                    } else {
-                        Logger.log('[ScrollDebug] Tab is already visible, no scroll needed');
-                    }
-                } else {
-                    Logger.log('[ScrollDebug] Space content not found, no scroll needed');
-                }
-            } else {
-                Logger.log('[ScrollDebug] Space not found, no scroll needed');
-            }
-        } else {
-            Logger.log('[ScrollDebug] Tab not found, no scroll needed');
-        }
-    }, timeout);
-}
-
-async function moveTabToSpace(tabId, spaceId, pinned = false, openerTabId = null) {
+async function moveTabToSpace(tabId, spaceId, pinned = false, { temporaryDisplayOrder = null, inverted = false } = {}) {
+    assertNotNativeSplit(await chrome.tabs.get(tabId));
     if (!spaces.some(s => s.id === spaceId)) return;
     processingTabMoves.add(tabId);
     try {
@@ -3535,9 +3392,8 @@ async function moveTabToSpace(tabId, spaceId, pinned = false, openerTabId = null
     if (pinned) {
         space.spaceBookmarks.push(tabId);
     } else {
-        const openerIndex = space.temporaryTabs.indexOf(openerTabId);
-        if (openerIndex >= 0) space.temporaryTabs.splice(openerIndex + 1, 0, tabId);
-        else space.temporaryTabs.push(tabId);
+        space.temporaryTabs.push(tabId);
+        if (temporaryDisplayOrder) space.temporaryTabs = mergeCapturedTemporaryOrder(space.temporaryTabs, temporaryDisplayOrder, inverted);
     }
 
     // 4. Update the UI (remove tab element from old section, create it in new section)
@@ -3554,60 +3410,16 @@ async function moveTabToSpace(tabId, spaceId, pinned = false, openerTabId = null
         const chromeTab = await chrome.tabs.get(tabId);
         if (chromeTab.windowId !== currentWindow.id) { await saveSpaces(); return; }
         const tabElement = await createTabElement(chromeTab, pinned);
-        if (container.children.length > 1) {
-            if (openerTabId) {
-                let tabs = container.querySelectorAll(`.tab`);
-                const openerTabIndex = Array.from(tabs).findIndex(tab => tab.dataset.tabId == openerTabId);
-                if (openerTabIndex + 1 < tabs.length) {
-                    const tabToInsertBefore = tabs[openerTabIndex + 1];
-                    container.insertBefore(tabElement, tabToInsertBefore);
-                } else {
-                    container.appendChild(tabElement);
-                }
-            } else {
-                if (pinned) {
-                    // Add to the bottom after all existing elements
-                    container.appendChild(tabElement);
-                } else {
-                    // Render temporary tabs in extension order
-                    const ownedTabs = await getOwnedTabs(spaceId);
-                    const currentTabIndex = ownedTabs.findIndex(t => t.id === tabId);
-
-                    if (currentTabIndex !== -1 && ownedTabs.length > 1) {
-                        // First, add the new tab element to the container so it can be found in the filter
-                        container.appendChild(tabElement);
-
-                        // Filter to only include tabs in the temporary container (including the new one)
-                        const tabsInContainer = ownedTabs.filter(t => {
-                            return container.querySelector(`[data-tab-id="${t.id}"]`);
-                        });
-
-                        // Apply invert order if enabled
-                        const invertTabOrder = await Utils.getInvertTabOrder();
-                        if (invertTabOrder) {
-                            tabsInContainer.reverse();
-                        }
-
-                        // Re-append all tabs in correct order (including the new one)
-                        tabsInContainer.forEach(t => {
-                            const el = container.querySelector(`[data-tab-id="${t.id}"]`);
-                            if (el) {
-                                container.appendChild(el);
-                            }
-                        });
-                    } else {
-                        // Fallback: use simple insert logic
-                        const invertTabOrder = await Utils.getInvertTabOrder();
-                        if (invertTabOrder) {
-                            container.insertBefore(tabElement, container.firstChild);
-                        } else {
-                            container.appendChild(tabElement);
-                        }
-                    }
-                }
+        container.appendChild(tabElement);
+        if (!pinned) {
+            // This is an existing Favorite moved by a drop, not a new tab. Keep
+            // its captured drop slot and the frozen Today representation.
+            const todayOrderInverted = await Utils.getTodayOrderInverted();
+            const display = todayOrderInverted ? [...space.temporaryTabs].reverse() : space.temporaryTabs;
+            for (const id of display) {
+                const element = container.querySelector(`[data-tab-id="${id}"]`);
+                if (element) container.appendChild(element);
             }
-        } else {
-            container.appendChild(tabElement);
         }
     }
 
@@ -3630,55 +3442,43 @@ async function movToPrevTabInSpace(tabId, sourceSpace) {
 }
 // Reusable function to set up folder context menu
 function setupFolderContextMenu(folderElement, space, item = null) {
-    folderElement.addEventListener('contextmenu', async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const contextMenu = document.createElement('div');
-        contextMenu.classList.add('context-menu');
-        contextMenu.style.position = 'fixed';
-        contextMenu.style.left = `${e.clientX}px`;
-        contextMenu.style.top = `${e.clientY}px`;
-
-        const spaceElement = folderElement.closest('.space');
-        const spaceFolder = await getSpaceBookmarkFolder(space);
-        const folderId = folderElement.dataset.bookmarkId;
-        if (folderId && await canCreateFolder(spaceFolder.id, folderId)) {
-            const newFolderOption = document.createElement('div');
-            newFolderOption.classList.add('context-menu-item');
-            newFolderOption.textContent = 'New Folder';
-            newFolderOption.addEventListener('click', async () => {
-                contextMenu.remove();
-                await createNewFolder(spaceElement, folderElement);
-            });
-            contextMenu.appendChild(newFolderOption);
-        }
-
-        const deleteOption = document.createElement('div');
-        deleteOption.classList.add('context-menu-item');
-        deleteOption.textContent = 'Delete Folder';
-        deleteOption.addEventListener('click', async () => {
-            if (confirm('Are you sure you want to delete this folder and all its contents?')) {
-                if (folderId) await chrome.bookmarks.removeTree(folderId);
-                editorSessions.dispose('folder', folderId);
-                const parentFolder = folderElement.parentElement.closest('.folder');
-                disposeEditorsInElement(folderElement);
-                folderElement.remove();
-                if (parentFolder) updateFolderPlaceholder(parentFolder);
-                updatePinnedSectionPlaceholders();
-            }
-            contextMenu.remove();
+    const header = folderElement.querySelector(':scope > .folder-header');
+    if (header) header.tabIndex = 0;
+    const open = async (event, keyboard = false) => {
+        event.preventDefault(); event.stopPropagation();
+        tabMenuActions.cancelEdit(); spaceContextMenu.close(false); closeTabContextMenu();
+        bookmarkSelection.clear(); todaySelection.clear();
+        const spaceElement = folderElement.closest('.space'), folderId = folderElement.dataset.bookmarkId;
+        await openSavedFolderContextMenu({ document, element: folderElement, event, keyboard,
+            prepareMove: active => captureSavedFolderMove(folderElement, { ...savedMoveCapture,
+                active: () => active() && !pendingActiveSpaceId }),
+            createMoveAction: moveSavedSelection,
+            canCreate: async () => {
+                const spaceFolder = await getSpaceBookmarkFolder(space);
+                return folderId && await canCreateFolder(spaceFolder.id, folderId);
+            },
+            createFolder: () => createNewFolder(spaceElement, folderElement),
+            deleteFolder: async () => {
+                if (confirm('Are you sure you want to delete this folder and all its contents?')) {
+                    if (folderId) await chrome.bookmarks.removeTree(folderId);
+                    editorSessions.dispose('folder', folderId);
+                    const parentFolder = folderElement.parentElement.closest('.folder');
+                    disposeEditorsInElement(folderElement);
+                    folderElement.remove();
+                    if (parentFolder) updateFolderPlaceholder(parentFolder);
+                    updatePinnedSectionPlaceholders();
+                }
+            },
+            beginInteraction: () => {
+                const session = editorSessions.begin('folder', folderId);
+                return () => { void editorSessions.complete(session); };
+            },
+            showStatus: showFavoritesStatus
         });
-
-        contextMenu.appendChild(deleteOption);
-        document.body.appendChild(contextMenu);
-
-        // Close context menu when clicking outside
-        const closeContextMenu = (e) => {
-            if (!contextMenu.contains(e.target)) {
-                contextMenu.remove();
-                document.removeEventListener('click', closeContextMenu);
-            }
-        };
-        document.addEventListener('click', closeContextMenu);
+    };
+    folderElement.addEventListener('contextmenu', event => void open(event));
+    header?.addEventListener('keydown', event => {
+        if (event.target !== header || event.repeat || event.isComposing) return;
+        if (event.key === 'ContextMenu' || event.key === 'F10' && event.shiftKey) void open(event, true);
     });
 }

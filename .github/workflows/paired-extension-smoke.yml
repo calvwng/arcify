@@ -1,0 +1,985 @@
+name: Paired extension smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      acceptance_scope:
+        description: 'Run the legacy suite or only isolated Little Arc acceptance'
+        required: false
+        default: legacy
+        type: choice
+        options:
+          - legacy
+          - little-arc
+      expected_arcify_head:
+        description: 'Full reviewed Arcify commit SHA; required only for Little Arc'
+        required: false
+        type: string
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/paired-extension-smoke.yml'
+      - 'scripts/paired-chrome-smoke.mjs'
+      - 'scripts/paired-chrome-move-window.mjs'
+      - 'new-tab-window-drop.js'
+      - 'tests/unit/new-tab-window-drop.test.js'
+      - 'scripts/paired-chrome-new-tab-drop.mjs'
+      - 'tests/unit/paired-chrome-new-tab-drop.test.js'
+      - 'move-tab-new-window.js'
+      - 'tests/unit/paired-chrome-move-window.test.js'
+      - 'tests/unit/move-tab-new-window.test.js'
+      - 'scripts/paired-chrome-overlay-recovery.mjs'
+      - 'scripts/paired-chrome-spotlight-actions.mjs'
+      - 'scripts/paired-chrome-spotlight-navigation.mjs'
+      - 'scripts/paired-chrome-spotlight-tabs.mjs'
+      - 'scripts/paired-chrome-action-surface.mjs'
+      - 'scripts/paired-chrome-helper-origin.mjs'
+      - 'scripts/paired-chrome-spotlight-archive.mjs'
+      - 'scripts/paired-chrome-spotlight-split.mjs'
+      - 'spotlight-split-actions.js'
+      - 'tests/unit/spotlight-split-actions.test.js'
+      - 'tests/unit/paired-chrome-spotlight-split.test.js'
+      - 'tests/unit/paired-chrome-split-wiring.test.js'
+      - 'scripts/lib/spotlight-pair-split-*.mjs'
+      - 'docs/spotlight-split-actions.md'
+      - 'tests/unit/paired-chrome-spotlight-archive.test.js'
+      - 'tests/unit/paired-chrome-archive-wiring.test.js'
+      - 'docs/archive-actions-paired-ci.md'
+      - 'spotlight-archive-actions.js'
+      - 'archive-store.js'
+      - 'archive-client.js'
+      - 'archive-intent-ui.js'
+      - 'archive-display-session.js'
+      - 'tests/unit/helpers/archive-display-fixture.js'
+      - 'tests/unit/archive-intent-ui.test.js'
+      - 'tests/unit/archive-popup.test.js'
+      - 'docs/archive-operations.md'
+      - 'tests/unit/spotlight-archive*.test.js'
+      - 'tests/unit/archive-store*.test.js'
+      - 'scripts/check-spotlight-pair.mjs'
+      - 'scripts/lib/spotlight-pair-extended-*.mjs'
+      - 'scripts/lib/spotlight-pair-archive-*.mjs'
+      - 'scripts/test-spotlight-pair-contract.mjs'
+      - 'tests/unit/paired-chrome-spotlight-navigation.test.js'
+      - 'tests/unit/paired-chrome-spotlight-tabs.test.js'
+      - 'tests/unit/paired-chrome-action-surface.test.js'
+      - 'tests/unit/paired-chrome-helper-origin.test.js'
+      - 'tests/unit/paired-chrome-helper-origin-wiring.test.js'
+      - 'tests/unit/paired-chrome-extended-wiring.test.js'
+      - 'docs/spotlight-navigation-paired-ci.md'
+      - 'docs/spotlight-tab-commands-hosted.md'
+      - 'docs/extended-actions-paired-ci.md'
+      - 'spotlight-space-navigation.js'
+      - 'spotlight-tab-actions.js'
+      - 'spotlight-action-guards.js'
+      - 'tests/unit/spotlight-space-navigation*.test.js'
+      - 'tests/unit/spotlight-tab-actions*.test.js'
+      - 'tests/unit/paired-chrome-overlay-recovery.test.js'
+      - 'tests/unit/paired-chrome-spotlight-actions.test.js'
+      - 'tests/unit/paired-chrome-spotlight-wiring.test.js'
+      - 'docs/OVERLAY-RECOVERY-HOSTED.md'
+      - 'docs/spotlight-actions-paired-ci.md'
+      - 'spotlight-space-actions.js'
+      - 'tests/unit/spotlight-space-actions.test.js'
+      - 'tests/unit/spotlight-bridge.test.js'
+      - 'scripts/paired-chrome-run-plan.mjs'
+      - 'tests/unit/paired-chrome-move-drag-wiring.test.js'
+      - 'docs/move-drag-paired-ci.md'
+      - 'docs/appearance-actions-paired-ci.md'
+      - 'docs/recovery-actions-paired-ci.md'
+      - 'scripts/paired-chrome-native-split*'
+      - 'tests/unit/paired-chrome-native-split*'
+      - 'tests/unit/paired_chrome_native_split_capture_test.py'
+      - 'tests/NATIVE_SPLIT_CI.md'
+      - 'native-split-safety.js'
+      - 'tests/unit/native-split-safety.test.js'
+      - 'scripts/paired-chrome-reload-fixtures.mjs'
+      - 'scripts/paired-chrome-control-window.mjs'
+      - 'tests/unit/paired-chrome-control-window.test.js'
+      - 'tests/unit/paired-chrome-run-plan.test.js'
+      - 'scripts/paired-chrome-sandbox.mjs'
+      - 'scripts/paired-chrome-ui.mjs'
+      - 'scripts/paired-chrome-space-click.mjs'
+      - 'scripts/paired-chrome-menu-focus.mjs'
+      - 'scripts/paired-chrome-sidebar.mjs'
+      - 'scripts/paired-chrome-sidebar-appearance.mjs'
+      - 'scripts/paired-chrome-space-theme.mjs'
+      - 'scripts/paired-chrome-spotlight-appearance.mjs'
+      - 'tests/unit/paired-chrome-space-theme.test.js'
+      - 'tests/unit/paired-chrome-spotlight-appearance.test.js'
+      - 'tests/unit/paired-chrome-theme-wiring.test.js'
+      - 'tests/unit/paired-chrome-theme-readiness.test.js'
+      - 'tests/unit/sidebar-theme.test.js'
+      - 'tests/unit/appearance-bootstrap.test.js'
+      - 'assets/appearance-bootstrap.js'
+      - 'docs/space-themes.md'
+      - 'docs/theme-paired-ci.md'
+      - 'scripts/paired-chrome-management-scroll.mjs'
+      - 'scripts/paired-chrome-today-selection.mjs'
+      - 'scripts/paired-chrome-today-move.mjs'
+      - 'scripts/paired-chrome-saved-move.mjs'
+      - 'tests/unit/paired-chrome-saved-move.test.js'
+      - 'docs/saved-move-paired-ci.md'
+      - 'saved-move-*.js'
+      - 'saved-space-move-*.js'
+      - 'tests/unit/saved-move-*.test.js'
+      - 'tests/unit/saved-space-move-*.test.js'
+      - 'scripts/paired-chrome-today-order.mjs'
+      - 'tests/unit/paired-chrome-today-order.test.js'
+      - 'today-order*.js'
+      - 'tests/unit/today-order*.test.js'
+      - 'tests/unit/paired-chrome-today-move.test.js'
+      - 'scripts/paired-chrome-today-folder-diagnostics.mjs'
+      - 'scripts/paired-chrome-space-context.mjs'
+      - 'scripts/paired-chrome-space-icon-input.mjs'
+      - 'tests/unit/paired-chrome-space-icon-input.test.js'
+      - 'docs/space-icon-input-validation.md'
+      - 'scripts/paired-chrome-tab-menu.mjs'
+      - 'scripts/paired-chrome-native-close.*'
+      - 'scripts/paired-chrome-newtab.mjs'
+      - 'scripts/paired-chrome-newtab-row.mjs'
+      - 'tests/unit/paired-chrome-newtab-row.test.js'
+      - 'tests/unit/sidebar-new-tab*.test.js'
+      - 'scripts/paired-chrome-favorites.mjs'
+      - 'scripts/paired-chrome-space-marker.mjs'
+      - 'scripts/paired-chrome-keyboard.mjs'
+      - 'scripts/paired-chrome-worker.mjs'
+      - 'scripts/paired-chrome-cold-setup.mjs'
+      - 'scripts/paired-chrome-extensions.mjs'
+      - 'scripts/paired-chrome-runtime/**'
+      - 'tests/unit/paired-chrome-sandbox.test.js'
+      - 'tests/unit/paired-chrome-ui.test.js'
+      - 'tests/unit/paired-chrome-space-click.test.js'
+      - 'tests/unit/paired-chrome-menu-focus.test.js'
+      - 'tests/unit/paired-chrome-sidebar.test.js'
+      - 'tests/unit/paired-chrome-sidebar-appearance.test.js'
+      - 'tests/unit/paired-chrome-management-scroll.test.js'
+      - 'tests/unit/paired-chrome-today-selection.test.js'
+      - 'tests/unit/paired-chrome-today-folder-diagnostics.test.js'
+      - 'tests/unit/paired-chrome-space-context.test.js'
+      - 'tests/unit/paired-chrome-tab-menu.test.js'
+      - 'tests/unit/paired-chrome-menu-wiring.test.js'
+      - 'tests/unit/paired-chrome-native-close.test.js'
+      - 'tests/unit/paired_chrome_native_close_test.py'
+      - 'tests/unit/paired-chrome-ordinary-favorites.test.js'
+      - 'tests/unit/paired-chrome-newtab.test.js'
+      - 'tests/unit/paired-chrome-favorites.test.js'
+      - 'tests/unit/paired-chrome-space-marker.test.js'
+      - 'tests/unit/paired-chrome-keyboard.test.js'
+      - 'tests/unit/paired-chrome-worker.test.js'
+      - 'tests/unit/paired-chrome-cold-setup.test.js'
+      - 'tests/unit/paired-chrome-extensions.test.js'
+      - 'spotlight-bridge*.js'
+      - 'spotlight-invalidation.js'
+      - 'bookmark-events.js'
+      - 'tests/unit/spotlight-invalidation.test.js'
+      - 'tests/unit/spotlight-bridge-protocol.test.js'
+      - 'tests/unit/bookmark-events.test.js'
+      - 'tests/unit/sidebar-drop*.test.js'
+      - 'sidebar-command.js'
+      - 'bookmark-selection.js'
+      - 'tests/unit/bookmark-selection*.test.js'
+      - 'scripts/paired-chrome-bookmark-selection.mjs'
+      - 'tests/unit/paired-chrome-bookmark-selection.test.js'
+      - 'favorites-status.js'
+      - 'tests/unit/favorites-status.test.js'
+      - 'favorites-drop.js'
+      - 'favorites-drop-feedback.js'
+      - 'favorites-drop-target.js'
+      - 'favorite-icons.js'
+      - 'favorite-store.js'
+      - 'favorite-continuity.js'
+      - 'favorite-witness-protocol.js'
+      - 'today-*.js'
+      - 'tests/unit/today-*.test.js'
+      - 'tests/unit/ordinary-favorites.test.js'
+      - 'saved-favorites-ui.js'
+      - 'tests/unit/favorite*.test.js'
+      - 'tests/unit/saved-favorites*.test.js'
+      - 'scripts/paired-chrome-*favorites*.mjs'
+      - 'scripts/paired-chrome-favorite-search.mjs'
+      - 'scripts/paired-chrome-favorite-icons.mjs'
+      - 'tests/unit/paired-chrome-favorite-icons.test.js'
+      - 'tests/unit/paired-chrome-favorites-marker.test.js'
+      - 'scripts/paired-chrome-browser-restart.mjs'
+      - 'tests/unit/paired-chrome-browser-restart.test.js'
+      - 'tests/unit/paired-chrome-favorites-restart.test.js'
+      - 'tests/unit/paired-chrome-favorite-search.test.js'
+      - 'utils.js'
+      - 'tests/unit/favorites-drop*.test.js'
+      - 'startup-*.js'
+      - 'tab-group-sync.js'
+      - 'tests/unit/tab-group-order.test.js'
+      - 'space-store.js'
+      - 'space-continuity.js'
+      - 'space-context-menu.js'
+      - 'context-menu-session.js'
+      - 'tests/unit/context-menu-session.test.js'
+      - 'space-icons.js'
+      - 'space-colors.js'
+      - 'localstorage.js'
+      - 'tests/unit/space-context*.test.js'
+      - 'tab-menu-*.js'
+      - 'tab-title-projection.js'
+      - 'tests/unit/tab-menu-*.test.js'
+      - 'tests/unit/tab-title-projection.test.js'
+      - 'domManager.js'
+      - 'space-order.js'
+      - 'space-switcher.js'
+      - 'tests/unit/space-switcher.test.js'
+      - 'tests/unit/space-store.test.js'
+      - 'space-bookmarks.js'
+      - 'background.js'
+      - 'refresh-coordinator.js'
+      - 'tests/unit/refresh-coordinator.test.js'
+      - 'tests/unit/sidebar-management-scroll.test.js'
+      - 'tests/unit/sidebar-viewport.test.js'
+      - 'sidebar*'
+      - 'styles.css'
+      - 'tab-row-action.js'
+      - 'options*'
+      - 'manifest.json'
+      - 'package*.json'
+      - 'vite.config.js'
+
+permissions:
+  contents: read
+
+jobs:
+  paired-chrome:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise the real pair with installed Chrome's namespace sandbox
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Independent runner/job: neither failure cancels or suppresses the other.
+  # Both are mandatory workflow outcomes; this does not replace paired-chrome.
+  favorite-lifecycle:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: favorite-lifecycle
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise Favorite native close, reload and restart in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-favorite-lifecycle
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-favorite-lifecycle/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-favorite-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-favorite-lifecycle/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Independent mandatory acceptance job; full49/lifecycle5/native-split4 remain required.
+  # All eight selected cases use a fresh profile, with no browser update or case retry.
+  appearance-actions:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: appearance-actions
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise appearance, themes, recovery and initial actions in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-appearance-actions
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-appearance-actions/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-appearance-actions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-appearance-actions/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Mandatory positive-capability job on its own runner. Missing APIs fail; never skip.
+  native-split:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: native-split
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Require supported Chrome using the explicit official HTTPS package route
+        working-directory: arcify
+        # Only this positive-capability job may update the existing stable package.
+        # Use verified TLS to the exact Google URL; no redirects or source/key imports.
+        # Keep host policy, normal apt/browser sandboxing,
+        # channel: chrome, and every later package/process/sandbox assertion.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-native-split
+          node scripts/paired-chrome-native-split-vendor-update.mjs 2>&1 | tee test-results/paired-chrome-native-split/chrome-update.log
+      - name: Exercise native Split View with real drag, keyboard and exact native pair evidence
+        working-directory: arcify
+        # channel: chrome uses the installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never manually install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-native-split
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-native-split/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-native-split-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-native-split/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Supplemental mandatory outcome on its own fresh runner/profile; no dependency.
+  recovery-actions:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: recovery-actions
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise overlay recovery and initial actions in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-recovery-actions
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-recovery-actions/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-recovery-actions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-recovery-actions/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Supplemental mandatory outcome on its own fresh runner/profile; no dependency.
+  extended-actions:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: extended-actions
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise Spotlight navigation and tab commands in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-extended-actions
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-extended-actions/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-extended-actions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-extended-actions/
+          if-no-files-found: warn
+          retention-days: 14
+
+  archive-actions:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: archive-actions
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise Spotlight Archive native opening and exact entry reopening in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-archive-actions
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-archive-actions/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-archive-actions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-archive-actions/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Supplemental mandatory outcome on its own fresh runner/profile; no dependency.
+  archive-reopen:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: archive-reopen
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise Spotlight Archive exact entry reopening in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-archive-reopen
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-archive-reopen/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-archive-reopen-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-archive-reopen/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Supplemental fresh-profile case 38: full coverage and all prior jobs remain mandatory.
+  move-drag:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: move-drag
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact Arcify head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c13511fd36d56358156c10336b8961b7ef95d5bc
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact paired revisions
+        run: |
+          git -C arcify rev-parse HEAD
+          git -C arcify-spotlight rev-parse HEAD
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Exercise tab menus, native Move and sticky New Tab drag in an independent fresh profile
+        working-directory: arcify
+        # channel: chrome uses the image's installed stable browser and its existing
+        # AppArmor allowance. The fixture requires actual Namespace/PID/network/
+        # seccomp sandbox evidence before installing either extension.
+        # Never install/repair/chmod/chown a privileged helper or change policy.
+        # Do not add sandbox/web-security disabling flags or modify runner policy.
+        # A browser launch denial must remain a failed run with its original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-move-drag
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-move-drag/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-move-drag-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-move-drag/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Isolated acceptance: explicit dispatch or only same-repository PR 75. Legacy jobs above are unchanged.
+  little-arc:
+    runs-on: ubuntu-24.04
+    if: (github.event_name == 'workflow_dispatch' && inputs.acceptance_scope == 'little-arc') || (github.event_name == 'pull_request' && github.repository == 'calvwng/arcify' && github.event.number == 75 && github.event.pull_request.number == 75 && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'integration/arcify-bridge-v1' && github.event.pull_request.base.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main')
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: little-arc
+      ARCIFY_TEST_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || inputs.expected_arcify_head }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+      ARCIFY_SPOTLIGHT_HEAD: 3b0b178f2c11b3add351c430a1e7734f54f25c8f
+    steps:
+      - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out exact Little Arc Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: 3b0b178f2c11b3add351c430a1e7734f54f25c8f
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Record and verify exact source provenance before installation
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/arcify/test-results/paired-chrome-little-arc"
+          mkdir -p "$evidence"
+          {
+            printf 'workflow-ref=%s\nworkflow-sha=%s\nrun-id=%s\nrun-attempt=%s\n' "$GITHUB_WORKFLOW_REF" "$GITHUB_WORKFLOW_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'event-name=%s\nevent-ref=%s\nevent-sha=%s\n' "$GITHUB_EVENT_NAME" "$GITHUB_REF" "$GITHUB_SHA"
+            printf 'expected-arcify=%s\nactual-arcify=%s\n' "$ARCIFY_TEST_HEAD" "$(git -C arcify rev-parse HEAD)"
+            printf 'expected-spotlight=%s\nactual-spotlight=%s\n' "$ARCIFY_SPOTLIGHT_HEAD" "$(git -C arcify-spotlight rev-parse HEAD)"
+          } | tee "$evidence/source-provenance.txt"
+          [[ "$ARCIFY_TEST_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C arcify rev-parse HEAD)" = "$ARCIFY_TEST_HEAD"
+          test "$(git -C arcify-spotlight rev-parse HEAD)" = "$ARCIFY_SPOTLIGHT_HEAD"
+          for repo in arcify arcify-spotlight; do
+            test -z "$(git -C "$repo" status --porcelain)"
+            git -C "$repo" ls-tree -r --full-tree HEAD > "$evidence/$repo-source-tree.txt"
+            (cd "$repo" && git ls-files -z | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/$repo-source-sha256.txt"
+          done
+          node --input-type=module <<'NODE' | tee "$evidence/event-provenance.json"
+          import { execFileSync } from 'node:child_process';
+          import { readLittleArcAcceptanceContext } from './arcify/scripts/paired-chrome-little-arc-context.mjs';
+          const head = execFileSync('git', ['-C', 'arcify', 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          console.log(JSON.stringify(readLittleArcAcceptanceContext(process.env, head), null, 2));
+          NODE
+          node arcify/scripts/paired-chrome-little-arc-provenance.mjs record arcify-spotlight "$evidence"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact pair and retain production hashes
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/arcify/test-results/paired-chrome-little-arc"
+          npm run build --prefix arcify 2>&1 | tee "$evidence/arcify-build.log"
+          npm run build --prefix arcify-spotlight 2>&1 | tee "$evidence/arcify-spotlight-build.log"
+          for repo in arcify arcify-spotlight; do
+            git -C "$repo" status --porcelain=v1 -z --untracked-files=all > "$evidence/$repo-post-build-git-status.z"
+            git -C "$repo" status --porcelain=v1 --untracked-files=all > "$evidence/$repo-post-build-git-status.txt"
+          done
+          for repo in arcify arcify-spotlight; do
+            if [ "$repo" = arcify ]; then
+              test -z "$(git -C "$repo" status --porcelain)"
+              (cd "$repo" && sha256sum --check "$evidence/$repo-source-sha256.txt") > "$evidence/$repo-source-verification.txt"
+            else
+              node arcify/scripts/paired-chrome-little-arc-provenance.mjs verify "$repo" "$evidence" > "$evidence/$repo-source-verification.txt"
+            fi
+            test -f "$repo/dist/manifest.json"
+            (cd "$repo" && find dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/$repo-build-sha256.txt"
+          done
+      - name: Exercise only Little Arc with installed Chrome's namespace sandbox
+        working-directory: arcify
+        # Keep the ordinary non-root runner, installed Chrome, isolated locked driver,
+        # fresh disposable profile and real Namespace/PID/network/seccomp evidence.
+        # Never update the browser, repair helpers, change policy or weaken security.
+        # A browser launch denial remains a failed run with the original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-little-arc
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-little-arc/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-little-arc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-little-arc/
+          if-no-files-found: warn
+          retention-days: 14

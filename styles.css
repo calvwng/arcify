@@ -106,6 +106,36 @@ h3 {
     min-width: 150px;
 }
 
+/* Tab actions and their explanations share one readable, viewport-bounded surface. */
+#tab-context-menu {
+    box-sizing: border-box;
+    width: 280px;
+    min-width: 0;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+    padding: 6px;
+}
+
+#tab-context-menu .context-menu-item {
+    box-sizing: border-box;
+    min-height: 36px;
+    padding: 9px 12px;
+    border-radius: 5px;
+    font-size: 13px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+#tab-context-menu .context-menu-hint {
+    padding: 8px 12px;
+    margin: 4px 0;
+    font-size: 12px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+    color: var(--theme-panel-muted, var(--text-secondary, #666));
+}
+
 .context-menu-item {
     padding: 8px 12px;
     cursor: pointer;
@@ -117,6 +147,27 @@ h3 {
 
 .context-menu-item:hover {
     background-color: var(--tab-hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.context-menu.today-move-picker {
+    width: 260px;
+    min-width: 0;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    overflow-y: auto;
+}
+
+.today-move-picker .context-menu-item, .today-move-hint {
+    overflow-wrap: anywhere;
+}
+
+.today-move-hint { padding: 8px 12px; font-size: 12px; line-height: 1.4; }
+
+.today-move-picker [role="menuitem"]:focus-visible,
+[data-action="moveTodayTabsToSpace"]:focus-visible,
+[data-action="moveSavedItemsToSpace"]:focus-visible {
+    outline: 2px solid var(--accent-color, #4d8dff);
+    outline-offset: -2px;
 }
 
 .context-menu-separator {
@@ -367,35 +418,35 @@ h3 {
 }
 
 .color-swatch[data-color="grey"] {
-    background-color: #9CA3AF;
+    background-color: var(--chrome-grey-color);
 }
 
 .color-swatch[data-color="blue"] {
-    background-color: #60A5FA;
+    background-color: var(--chrome-blue-color);
 }
 
 .color-swatch[data-color="red"] {
-    background-color: #F87171;
+    background-color: var(--chrome-red-color);
 }
 
 .color-swatch[data-color="yellow"] {
-    background-color: #FBBF24;
+    background-color: var(--chrome-yellow-color);
 }
 
 .color-swatch[data-color="green"] {
-    background-color: #34D399;
+    background-color: var(--chrome-green-color);
 }
 
 .color-swatch[data-color="pink"] {
-    background-color: #F472B6;
+    background-color: var(--chrome-pink-color);
 }
 
 .color-swatch[data-color="purple"] {
-    background-color: #A78BFA;
+    background-color: var(--chrome-purple-color);
 }
 
 .color-swatch[data-color="cyan"] {
-    background-color: #22D3EE;
+    background-color: var(--chrome-cyan-color);
 }
 
 .folder {
@@ -663,17 +714,22 @@ h3 {
     background-color: rgba(255, 255, 255, 0.2);
     border: none;
     color: #333;
-    padding: 12px;
-    border-radius: 12px;
+    padding: var(--tab-padding, 8px);
+    border-radius: 8px;
     cursor: pointer;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 8px;
-    font-size: 16px;
+    font-size: var(--tab-font-size, 14px);
     width: 100%;
     transition: background-color 0.3s ease;
 }
+
+.new-tab-btn[hidden] { display: none; }
+.new-tab-btn[aria-busy="true"] { cursor: progress; opacity: 0.7; }
+.new-tab-btn:focus-visible { outline: 2px solid var(--accent-color, #4d8dff); outline-offset: -2px; }
+#spotlightStatus:not(:empty) { padding: 4px 8px; font-size: 12px; }
 
 .new-tab-btn:hover {
     background-color: rgba(255, 255, 255, 0.3);
@@ -716,14 +772,6 @@ h3 {
     transform: translateX(-50%) translateY(-4px);
 }
 
-/* Dark mode toast styling */
-@media (prefers-color-scheme: dark) {
-    .url-copy-toast {
-        background-color: rgb(255, 255, 255);
-        color: #333;
-        box-shadow: 0 4px 12px rgba(255, 255, 255, 0.1);
-    }
-}
 
 .space-switcher {
     display: flex;
@@ -798,6 +846,68 @@ h3 {
 .tab.active {
     background-color: #ECEFF1;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+/* Selection and active-page state are independent. An inset outline remains
+   visible on both active and inactive rows, without changing their layout. */
+.tab.bookmark-selected, .tab.today-selected {
+    background: color-mix(in srgb, var(--space-bg-color, #6c8cff) 35%, transparent);
+    box-shadow: inset 0 0 0 2px currentColor;
+}
+.tab.bookmark-selected .tab-title-display, .tab.today-selected .tab-title-display { font-weight: 600; }
+.tab[role="treeitem"]:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.bookmark-selection-status {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 8px;
+    right: 8px;
+    z-index: 1000;
+    pointer-events: none;
+    padding: 6px 10px;
+    border: 1px solid currentColor;
+    border-radius: 8px;
+    color: CanvasText;
+    background: Canvas;
+    font-size: 12px;
+    line-height: 1.4;
+}
+.bookmark-selection-status[hidden] { display: none; }
+.today-folder-dialog {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: grid;
+    align-items: start;
+    padding: 60px 12px 12px;
+    background: rgb(0 0 0 / 35%);
+}
+.today-folder-dialog form {
+    min-width: 0;
+    padding: 16px;
+    border: 1px solid currentColor;
+    border-radius: 12px;
+    color: CanvasText;
+    background: Canvas;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+}
+.today-folder-dialog h2 { margin: 0 0 12px; font-size: 18px; }
+.today-folder-dialog p { margin: 0 0 16px; line-height: 1.4; }
+.today-folder-dialog label { display: block; margin-bottom: 6px; }
+.today-folder-dialog input { width: 100%; box-sizing: border-box; padding: 8px; }
+.today-folder-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.today-folder-buttons button { padding: 6px 10px; }
+.bookmark-drag-preview {
+    position: fixed;
+    left: 0;
+    top: 0;
+    z-index: 2147483647;
+    padding: 10px 14px;
+    border: 2px solid currentColor;
+    border-radius: 10px;
+    color: CanvasText;
+    background: Canvas;
+    font: 600 14px system-ui, sans-serif;
+    pointer-events: none;
 }
 
 .tab-favicon {
@@ -1732,6 +1842,38 @@ h3 {
     border-color: #eee;
 }
 
+.favorites-drop-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 0 12px 8px;
+}
+.favorites-drop-notice[hidden], .favorites-drop-dismiss[hidden] { display: none; }
+.favorites-drop-status {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+}
+.favorites-drop-dismiss {
+    flex: 0 0 24px;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+}
+.favorites-drop-dismiss:hover { background: var(--hover-bg, rgba(127, 127, 127, 0.15)); }
+.favorites-drop-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
 .pinned-placeholder-container {
     padding: 8px 16px;
     text-align: center;
@@ -1798,219 +1940,6 @@ h3 {
     line-height: 1.4;
 }
 
-/* Dark mode support */
-@media (prefers-color-scheme: dark) {
-    :root {
-        /* In dark mode, use darker variants of user colors or fallback to dark defaults */
-        --chrome-grey-color: var(--user-chrome-grey-color, #546E7A);
-        --chrome-blue-color: var(--user-chrome-blue-color, #235d8b);
-        --chrome-red-color: var(--user-chrome-red-color, #963d3d);
-        --chrome-yellow-color: var(--user-chrome-yellow-color, #a38e54);
-        --chrome-green-color: var(--user-chrome-green-color, #4f8057);
-        --chrome-pink-color: var(--user-chrome-pink-color, #b06c92);
-        --chrome-purple-color: var(--user-chrome-purple-color, #8d75a1);
-        --chrome-cyan-color: var(--user-chrome-cyan-color, #5e9299);
-
-        /* Dark variants - auto-generated, darker in dark mode */
-        --chrome-grey-color-dark: color-mix(in srgb, var(--chrome-grey-color) 70%, black);
-        --chrome-blue-color-dark: color-mix(in srgb, var(--chrome-blue-color) 60%, black);
-        --chrome-red-color-dark: color-mix(in srgb, var(--chrome-red-color) 60%, black);
-        --chrome-yellow-color-dark: color-mix(in srgb, var(--chrome-yellow-color) 65%, black);
-        --chrome-green-color-dark: color-mix(in srgb, var(--chrome-green-color) 55%, black);
-        --chrome-pink-color-dark: color-mix(in srgb, var(--chrome-pink-color) 60%, black);
-        --chrome-purple-color-dark: color-mix(in srgb, var(--chrome-purple-color) 65%, black);
-        --chrome-cyan-color-dark: color-mix(in srgb, var(--chrome-cyan-color) 65%, black);
-    }
-
-    /* Dark mode text colors */
-    body {
-        color: #ECEFF1;
-    }
-
-    h3 {
-        color: #ECEFF1;
-    }
-
-    .space-name {
-        color: #ECEFF1;
-    }
-
-    .space-toggle-chevron {
-        color: #ECEFF1;
-    }
-
-    .space-toggle-chevron:hover {
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .space-options {
-        color: #ECEFF1;
-    }
-
-    .space-options-dropdown button:hover {
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .folder-name {
-        color: #ECEFF1;
-    }
-
-    .folder-toggle {
-        color: rgba(255, 255, 255, 0.8);
-    }
-
-    .tab-placeholder {
-        color: rgba(255, 255, 255, 0.5);
-        border: 2px dotted rgba(255, 255, 255, 0.2);
-    }
-
-    .clean-tabs-btn {
-        color: #E0E0E0;
-    }
-
-    .clean-tabs-btn:hover {
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .divider-line {
-        background-color: rgba(255, 255, 255, 0.2);
-    }
-
-    .add-space-btn {
-        color: rgba(255, 255, 255, 0.7);
-    }
-
-    .add-space-btn:hover {
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .new-tab-btn {
-        color: #ECEFF1;
-    }
-
-    .space-switcher button {
-        color: #ECEFF1;
-    }
-
-    .space-switcher button.active {
-        color: #000000;
-    }
-
-    .tab-title-display,
-    .tab-title-input {
-        /* color: #fafafa; */
-        color: #ECEFF1;
-    }
-
-    .tab.active .tab-title-display,
-    .tab.active .tab-title-input {
-        color: #000000;
-    }
-
-    .tab-domain-display {
-        color: rgba(255, 255, 255, 0.8);
-    }
-
-    #newSpaceName {
-        background-color: rgba(255, 255, 255, 0.1);
-        color: #ECEFF1;
-    }
-
-    #newSpaceName:focus {
-        background-color: rgba(255, 255, 255, 0.2);
-    }
-
-    #newSpaceName::placeholder {
-        color: rgba(255, 255, 255, 0.5);
-    }
-
-    #createSpaceBtn {
-        background-color: rgba(255, 255, 255, 0.2);
-        color: #ECEFF1;
-    }
-
-    #createSpaceBtn:hover:not(:disabled) {
-        background-color: rgba(255, 255, 255, 0.3);
-    }
-
-    .sidebar-button {
-        color: rgba(255, 255, 255, 0.8);
-    }
-
-    .sidebar-button:hover {
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .archived-tabs-list .archived-tab-item {
-        color: #ECEFF1;
-    }
-
-    .archived-tabs-list .archived-tab-item:hover {
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .no-archived-tabs-message {
-        color: rgba(255, 255, 255, 0.6);
-    }
-
-    .archiving-toggle-label {
-        color: #ECEFF1;
-    }
-
-    .archiving-time-input {
-        background: rgba(255, 255, 255, 0.1);
-        color: #ECEFF1;
-        border-color: rgba(255, 255, 255, 0.2);
-    }
-
-    .archiving-time-input:disabled {
-        background: rgba(255, 255, 255, 0.05);
-        color: rgba(255, 255, 255, 0.4);
-        border-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .pinned-tab-placeholder {
-        color: rgba(255, 255, 255, 0.5);
-        border: 2px dashed rgba(255, 255, 255, 0.2);
-        background: rgba(255, 255, 255, 0.05);
-    }
-
-    .placeholder-close-btn {
-        color: rgba(255, 255, 255, 0.5);
-    }
-
-    .placeholder-close-btn:hover {
-        color: #ECEFF1;
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    /* Context menu dark mode */
-    .context-menu {
-        background-color: #2a2a2a;
-        border: 1px solid #444;
-    }
-
-    .context-menu-item {
-        background-color: #2a2a2a;
-        color: #ECEFF1;
-    }
-
-    .context-menu-item:hover {
-        background-color: rgba(255, 255, 255, 0.1);
-    }
-
-    .context-menu-separator {
-        background-color: #444;
-    }
-
-    .context-menu-item.with-submenu::after {
-        color: rgba(255, 255, 255, 0.6);
-    }
-
-    .color-swatch.selected {
-        border-color: rgba(255, 255, 255, 0.5);
-    }
-}
 
 .space-header-spacer {
     flex: 1;
@@ -2039,3 +1968,517 @@ select:focus-visible,
 }
 .tab-group-import p { margin: 0 0 8px; }
 .tab-group-import button { margin-right: 8px; padding: 6px 10px; cursor: pointer; }
+
+/* Arc-like destination feedback. Kept outside folder overflow clipping. */
+.sidebar-drop-anchor {
+    position: fixed;
+    height: 2px;
+    border-radius: 2px;
+    background: var(--sidebar-drop-color, #2563eb);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5);
+    transform: translateY(-1px);
+    z-index: 10000;
+    pointer-events: none;
+}
+.sidebar-drop-anchor::before {
+    content: '';
+    position: absolute;
+    left: -2px;
+    top: -2px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: inherit;
+}
+.sidebar-drop-anchor[hidden] { display: none; }
+.folder-header.sidebar-drop-inside {
+    box-shadow: inset 0 0 0 2px var(--sidebar-drop-color, #2563eb);
+    background: color-mix(in srgb, var(--sidebar-drop-color, #2563eb) 14%, transparent);
+    border-radius: 8px;
+}
+.folder-header[draggable='true'] { cursor: grab; }
+.folder.dragging { opacity: 0.5; }
+.sidebar-drop-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    pointer-events: none;
+}
+
+@media (forced-colors: active) {
+    .sidebar-drop-anchor { background: Highlight; box-shadow: none; forced-color-adjust: none; }
+    .folder-header.sidebar-drop-inside { outline: 2px solid Highlight; outline-offset: -2px; }
+}
+
+/* Body-level insertion line: not clipped by chip corners or the switcher mask,
+   never a flex item, and never intercepts the drop it previews. */
+.space-drop-anchor {
+    position: fixed;
+    z-index: 10000;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--sidebar-drop-color, #2563eb);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.95);
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+.space-drop-anchor::before,
+.space-drop-anchor::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: inherit;
+    box-shadow: inherit;
+    transform: translate(-50%, -50%);
+}
+.space-drop-anchor::before { top: 0; }
+.space-drop-anchor::after { top: 100%; }
+.space-drop-anchor[hidden] { display: none; }
+#spaceSwitcher button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+.space-order-status:not(:empty) {
+    position: absolute;
+    bottom: 44px;
+    left: 8px;
+    right: 8px;
+    padding: 4px 8px;
+    border-radius: 8px;
+    background: var(--space-bg-color, #f0f0f0);
+    color: inherit;
+    font-size: 12px;
+    pointer-events: none;
+}
+
+@media (forced-colors: active) {
+    .space-drop-anchor {
+        background: Highlight;
+        box-shadow: 0 0 0 1px Canvas;
+        forced-color-adjust: none;
+    }
+}
+
+/* Saved Favorite state belongs to the record; Chrome pins may come and go. */
+.pinned-favicon { position: relative; flex-direction: column; gap: 3px; }
+.favorite-state { font-size: 9px; line-height: 11px; opacity: .75; }
+.favorite-closed { background-color: rgba(255, 255, 255, .1); border: 1px dashed rgba(80, 80, 80, .45); box-sizing: border-box; }
+.native-favorite { border: 1px dotted rgba(80, 80, 80, .35); box-sizing: border-box; }
+.pinned-favicon:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
+/* Opt-in fixed tracks keep incomplete rows the same size as full rows. Never
+   use auto-fit/minmax(..., 1fr): that stretches a short last row or sparse grid. */
+:root[data-favorites-layout="compact"] .pinned-favicons {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, var(--favorite-tile-size, 44px));
+    gap: 8px;
+    justify-content: start;
+}
+:root[data-favorites-layout="compact"] .pinned-favicon {
+    width: var(--favorite-tile-size, 44px);
+    height: var(--favorite-tile-size, 44px);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    gap: 0;
+    transition: background-color .2s, box-shadow .2s;
+}
+:root[data-favorites-layout="compact"] .pinned-favicon img {
+    width: var(--favorite-icon-size, 16px);
+    height: var(--favorite-icon-size, 16px);
+}
+:root[data-favorites-layout="compact"] .favorite-state { display: none; }
+:root[data-favorites-layout="compact"] .pinned-placeholder-container { grid-column: 1 / -1; }
+
+/* Keep names shrinkable at narrow sidebar widths, without replacing the input
+   or shrinking the controls. Custom sizing is independent of Favorites. */
+:root[data-space-header-custom="true"] .space-name-container { min-width: 0; }
+:root[data-space-header-custom="true"] .space-name { min-width: 0; width: 100%; }
+:root[data-space-header-custom="true"] .space-header > :is(.sidebar-button, .space-options-container) { flex-shrink: 0; }
+:root[data-space-header-custom="true"] .space-header {
+    min-height: var(--space-header-control-size);
+    flex-shrink: 0;
+}
+:root[data-space-header-custom="true"] .space-name {
+    font-size: var(--space-header-font-size);
+    line-height: 1.25;
+    min-height: var(--space-header-control-size);
+}
+:root[data-space-header-custom="true"] .space-header :is(.sidebar-button, .space-options) {
+    width: var(--space-header-control-size);
+    height: var(--space-header-control-size);
+    padding: 0;
+}
+:root[data-space-header-custom="true"] .space-header .svg-icon {
+    width: var(--space-header-icon-size);
+    height: var(--space-header-icon-size);
+    margin: 0;
+}
+:root[data-space-header-compact="true"] .space-name { font-weight: 500; }
+/* Hover-only chevrons must also become visible and usable from the keyboard. */
+:root[data-space-header-custom="true"] .space-name-container:focus-within .space-toggle-chevron {
+    opacity: .7 !important;
+    pointer-events: auto;
+    width: 24px;
+    min-width: 24px;
+    min-height: 24px;
+    margin-right: 8px;
+    padding: 4px;
+}
+:root[data-space-header-custom="true"] .space-name-container:hover .space-toggle-chevron { min-width: 24px; min-height: 24px; }
+:root[data-space-header-custom="true"] .space-name:focus-visible { outline: 2px solid var(--chrome-blue-color, #8bb3f3); outline-offset: -2px; }
+
+.appearance-range-control { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.appearance-range-control input { min-width: 0; width: 100%; min-height: 28px; }
+.appearance-range-control output { min-width: 44px; font-variant-numeric: tabular-nums; }
+.appearance-reset {
+    padding: 8px 12px;
+    border: 1px solid var(--options-border-color, #8886);
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+.appearance-reset:disabled { opacity: .5; cursor: default; }
+#sidebarAppearanceStatus { margin-top: 8px; }
+.context-menu button.context-menu-item { display: block; width: 100%; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.context-menu button.context-menu-item:hover, .context-menu button.context-menu-item:focus-visible { background: #eee; }
+
+/* Saved/native Favorites share the same overlay language as Spaces. This line
+   never participates in flex wrapping or gets clipped by rounded icon tiles. */
+.favorites-drop-anchor {
+    position: fixed;
+    z-index: 10000;
+    width: 3px;
+    border-radius: 2px;
+    background: var(--sidebar-drop-color, #2563eb);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, .95);
+    transform: translateX(-50%);
+    pointer-events: none;
+}
+.favorites-drop-anchor::before,
+.favorites-drop-anchor::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: inherit;
+    box-shadow: inherit;
+    transform: translate(-50%, -50%);
+}
+.favorites-drop-anchor::before { top: 0; }
+.favorites-drop-anchor::after { top: 100%; }
+.favorites-drop-anchor[hidden] { display: none; }
+@media (forced-colors: active) {
+    .favorites-drop-anchor {
+        background: Highlight;
+        box-shadow: 0 0 0 1px Canvas;
+        forced-color-adjust: none;
+    }
+}
+
+/* Space basics: bounded, keyboard-accessible menus and editors. */
+.space-icon { display: inline-block; flex: 0 0 auto; margin-right: 5px; }
+.space-icon[hidden] { display: none; }
+.space-switcher .space-icon-fallback { display: none; }
+:root[data-hide-space-names="true"] .space-switcher-name { display: none; }
+:root[data-hide-space-names="true"] .space-switcher button { width: 32px; padding: 0; }
+:root[data-hide-space-names="true"] .space-switcher .space-icon { margin-right: 0; }
+:root[data-hide-space-names="true"] .space-switcher .space-icon-fallback { display: inline-block; }
+.space-switcher button:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
+.space-context-menu, .space-editor {
+    box-sizing: border-box;
+    color: #f4f4f5;
+    background: #27272a;
+    border: 1px solid #71717a;
+    border-radius: 10px;
+    box-shadow: 0 8px 30px #0006;
+    padding: 8px;
+    font-size: 13px;
+}
+.space-context-menu { position: fixed; z-index: 10020; width: 210px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; }
+.space-context-menu button, .space-editor button {
+    color: inherit; background: transparent; border: 1px solid transparent; border-radius: 6px;
+    padding: 8px; cursor: pointer; font: inherit; text-align: left;
+}
+.space-context-menu button { display: block; width: 100%; }
+.space-context-menu button:hover, .space-editor button:hover { background: #3f3f46; }
+.space-context-menu button:focus-visible, .space-editor :is(button, input):focus-visible { outline: 2px solid #93c5fd; outline-offset: -2px; }
+.space-editor-backdrop { position: fixed; inset: 0; z-index: 10021; background: #0007; display: flex; align-items: center; justify-content: center; padding: 12px; }
+.space-editor { width: 320px; max-width: 100%; max-height: calc(100vh - 24px); overflow: auto; padding: 14px; }
+.space-editor h2 { font-size: 15px; margin: 0 0 12px; overflow-wrap: anywhere; }
+.space-editor label { display: block; }
+.space-editor input { display: block; box-sizing: border-box; width: 100%; margin: 8px 0; padding: 8px; color: inherit; background: #18181b; border: 1px solid #71717a; border-radius: 5px; }
+.space-editor button:disabled { opacity: .6; cursor: wait; }
+.space-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.space-choice-grid button { border-color: var(--choice-color, #52525b); overflow-wrap: anywhere; }
+.space-choice-grid button[aria-pressed="true"] { background: #3f3f46; outline: 2px solid #93c5fd; outline-offset: -2px; }
+.space-emoji-form { margin-bottom: 12px; }
+.space-emoji-hint { margin: 0 0 8px; font-size: 12px; line-height: 1.4; color: #d4d4d8; }
+.space-editor-status { margin: 6px 0; color: #fca5a5; overflow-wrap: anywhere; }
+
+/* Split View has its own labeled target; ordinary row edges still reorder. */
+.today-split-target {
+    display: none;
+    flex: 0 0 auto;
+    align-self: center;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    padding: 3px 6px;
+    font-size: 10px;
+    line-height: 16px;
+    cursor: default;
+    opacity: 0;
+    pointer-events: none;
+}
+.today-split-dragging .tab:not(.dragging) > .today-split-target[data-split-eligible="true"] {
+    display: inline-flex;
+    opacity: 1;
+    pointer-events: auto;
+}
+.today-split-target:focus-visible,
+.today-split-target.today-split-drop-active {
+    outline: 2px solid var(--accent-color, #4a87ff);
+    outline-offset: 2px;
+    background: rgba(74, 135, 255, 0.18);
+}
+.today-split-badge {
+    display: inline-block;
+    align-self: flex-start;
+    font-size: 10px;
+    line-height: 14px;
+    opacity: 0.75;
+}
+.today-split-menu-hint {
+    padding: 8px 12px;
+    max-width: 265px;
+    white-space: normal;
+    cursor: default;
+    opacity: 0.65;
+    font-size: 12px;
+}
+
+#todaySplitDeferralStatus {
+    position: static;
+    margin: 4px 8px 8px;
+}
+
+/* Profile appearance is resolved by one matchMedia listener. Explicit Light or
+   Dark overrides the OS, and per-Space tints derive readable colors in both. */
+:root[data-theme] body { color: var(--sidebar-text-color); background: var(--space-bg-color); }
+:root[data-theme] :is(h3, .space-name, .space-toggle-chevron, .space-options,
+    .space-options-dropdown button, .folder-name, .folder-toggle, .folder-title,
+    .clean-tabs-btn, .add-space-btn, .new-tab-btn, .sidebar-button,
+    .archived-tab-item, .archiving-toggle-label, .placeholder-close-btn,
+    .tab-title-display, .tab-title-input, .tab-close, .tab-remove, .tab-restore, .tab-close-btn,
+    .tab-mute-btn, .tab-audio, .space-switcher button) { color: var(--sidebar-text-color); }
+:root[data-theme] :is(.tab-domain-display, .tab-placeholder, .pinned-tab-placeholder,
+    .no-archived-tabs-message, .favorite-state, .today-split-badge, .tab-url-changed-slash) { color: var(--text-secondary); opacity: 1; }
+:root[data-theme] :is(.folder-icon, .sidebar-button svg) { fill: currentColor; }
+:root[data-theme] .folder-icon { color: var(--sidebar-text-color); opacity: 1; }
+:root[data-theme] :is(.sidebar-container, .tab, .folder, .space-switcher button,
+    .pinned-favicon, .new-tab-btn) { transition-property: transform, box-shadow; }
+:root[data-theme] :is(.new-tab-btn, .pinned-favicon, .space-switcher button, .add-space-toggle,
+    #createSpaceBtn, #newSpaceName, .new-tab-input, .archiving-time-input) {
+    color: var(--sidebar-text-color); background: var(--sidebar-secondary-bg);
+}
+:root[data-theme] :is(.space-name:focus, .folder-name:focus, #newSpaceName:focus,
+    .tab-title-input:focus) { background: var(--sidebar-secondary-bg); color: var(--sidebar-text-color); }
+:root[data-theme] :is(#newSpaceName, .tab-title-input, .archiving-time-input)::placeholder { color: var(--text-secondary); opacity: 1; }
+:root[data-theme] :is(.new-tab-btn:hover, .pinned-favicon:hover, .space-switcher button:hover,
+    .space-toggle-chevron:hover, .space-options:hover, .space-options-dropdown button:hover,
+    .clean-tabs-btn:hover, .add-space-btn:hover, .sidebar-button:hover,
+    .archived-tab-item:hover, .placeholder-close-btn:hover, .add-space-toggle:hover,
+    #createSpaceBtn:hover:not(:disabled), .tab-favicon.pinned-back:hover) { background: var(--tab-hover-bg); }
+:root[data-theme] :is(.tab.active, .tab.bookmark-selected, .tab.today-selected,
+    .pinned-favicon.active, .space-switcher button.active) {
+    background: var(--theme-selected-bg); color: var(--theme-selected-text);
+}
+:root[data-theme] :is(.tab.active, .tab.bookmark-selected, .tab.today-selected) :is(.tab-title-display, .tab-title-input,
+    .tab-domain-display, .today-split-badge, .tab-url-changed-slash, .tab-close, .tab-remove, .tab-restore, .tab-close-btn, .tab-mute-btn, .tab-audio) { color: inherit; }
+:root[data-theme] .pinned-favicon.active .favorite-state { color: inherit; }
+:root[data-theme] :is(.tab.bookmark-selected, .tab.today-selected) { box-shadow: inset 0 0 0 2px currentColor; }
+:root[data-theme] :is(.today-split-target:focus-visible, .today-split-target.today-split-drop-active) { background: var(--theme-selected-bg); color: var(--theme-selected-text); }
+:root[data-theme] .divider-line { background: var(--sidebar-border-color); }
+:root[data-theme] :is(.tab-placeholder, .pinned-tab-placeholder, .favorite-closed, .archiving-time-input) { border-color: var(--sidebar-border-color); }
+:root[data-theme] .pinned-tab-placeholder { background: var(--sidebar-secondary-bg); }
+:root[data-theme] .tab-placeholder.drag-over { color: var(--sidebar-text-color); border-color: var(--sidebar-drop-color); background: var(--tab-hover-bg); }
+:root[data-theme] :is(.tab-title-input:focus, .space-name:focus-visible) { outline-color: var(--accent-color); }
+:root[data-theme] ::selection { background: var(--sidebar-text-color); color: var(--space-bg-color); }
+
+/* Body-level menus/dialogs must not inherit a Space's foreground on an unrelated
+   surface. These neutral tokens also cover dialogs opened for inactive Spaces. */
+:root[data-theme] :is(.context-menu, .context-menu-item, .space-context-menu, .space-editor,
+    .space-options-dropdown, .color-picker-grid, .today-folder-dialog form,
+    .archived-tabs-popup, .bookmark-selection-status, .bookmark-drag-preview) {
+    background: var(--theme-panel-bg); color: var(--theme-panel-text); border-color: var(--sidebar-border-color);
+}
+:root[data-theme] :is(.context-menu-item, .context-menu button.context-menu-item,
+    .space-context-menu button, .space-editor button, .space-options-dropdown button) { color: var(--theme-panel-text); }
+:root[data-theme] :is(.context-menu-item:hover, .context-menu button.context-menu-item:hover,
+    .context-menu button.context-menu-item:focus-visible, .space-context-menu button:hover,
+    .space-editor button:hover, .space-options-dropdown button:hover,
+    .space-choice-grid button[aria-pressed="true"]) { background: var(--theme-panel-hover); }
+:root[data-theme] :is(.space-context-menu button:focus-visible, .space-editor button:focus-visible,
+    .space-editor input:focus-visible, .space-choice-grid button[aria-pressed="true"]) {
+    outline: 2px solid var(--theme-panel-text); outline-offset: -2px;
+}
+:root[data-theme] :is(.space-editor input, .today-folder-dialog input, .today-folder-dialog button) {
+    background: var(--theme-input-bg); color: var(--theme-panel-text); border-color: var(--theme-panel-muted);
+}
+:root[data-theme] :is(.space-emoji-hint, .space-tint-hint, .today-split-menu-hint, .context-menu-item.with-submenu::after) { color: var(--theme-panel-muted); opacity: 1; }
+:root[data-theme] .space-editor-status { color: var(--theme-danger); }
+:root[data-theme] .space-choice-grid button { border-width: 3px; }
+:root[data-theme] .color-swatch.selected { outline: 2px solid var(--theme-panel-text); outline-offset: 2px; }
+:root[data-theme] :is(.drop-indicator, .drop-indicator-vertical) { background-color: var(--sidebar-drop-color); }
+.space-tint-form { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 0 12px; margin-bottom: 12px; }
+.space-tint-form label:first-child { flex: 0 0 72px; }
+.space-tint-form label:nth-child(2) { flex: 1; min-width: 100px; }
+.space-tint-form input[type="color"] { height: 38px; width: 100%; padding: 3px; cursor: pointer; }
+.space-tint-hint { flex: 0 0 100%; margin: 0 0 8px; font-size: 12px; line-height: 1.4; }
+.space-editor input[aria-invalid="true"] { outline: 2px solid var(--theme-danger); }
+
+/* Options follow the same profile setting, with neutral page surfaces. */
+:root[data-theme] .options-page {
+    --options-bg-color: var(--theme-input-bg);
+    --options-text-color: var(--theme-panel-text);
+    --options-muted-color: var(--theme-panel-muted);
+    --options-border-color: var(--theme-panel-muted);
+    --options-primary-color: var(--theme-danger);
+    background: var(--options-bg-color); color: var(--options-text-color); color-scheme: inherit;
+}
+:root[data-theme] .options-container { background: var(--theme-panel-bg); }
+:root[data-theme] :is(.options-input, .color-picker, .color-reset-btn) { background: var(--theme-input-bg); color: var(--theme-panel-text); }
+:root[data-theme] .color-reset-btn:hover { background: var(--theme-panel-hover); }
+:root[data-theme] .options-page ::selection { background: var(--theme-panel-text); color: var(--theme-panel-bg); }
+@media (forced-colors: active) {
+    :root[data-theme] :is(.tab.bookmark-selected, .tab.today-selected, .space-choice-grid button[aria-pressed="true"]) { outline: 2px solid Highlight; }
+}
+
+/* One shared header line box, regardless of emoji grapheme or header size. The
+   name stays an editable input; long unfocused names yield before the controls. */
+.space-header { flex-shrink: 0; min-height: var(--space-header-control-size, 28px); }
+.space-name-container { min-width: 0; flex: 1 1 0; align-items: center; }
+.space-header > :is(.sidebar-button, .space-options-container) { flex-shrink: 0; }
+.space-header .space-icon {
+    display: inline-flex; align-items: center; justify-content: center; align-self: center;
+    flex: 0 0 auto; min-width: 1.25em; height: var(--space-header-control-size, 28px);
+    font-size: var(--space-header-font-size, 16px); line-height: 1; padding: 0;
+}
+.space-header .space-icon[hidden] { display: none; }
+.space-header .space-name {
+    flex: 1 1 0; min-width: 0; width: 100%; box-sizing: border-box;
+    height: var(--space-header-control-size, 28px); min-height: var(--space-header-control-size, 28px);
+    font-size: var(--space-header-font-size, 16px); line-height: 1.25; padding: 0; opacity: 1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.space-header .space-name:focus { text-overflow: clip; }
+.space-header .space-name:focus-visible { outline: 2px solid var(--sidebar-text-color, currentColor); outline-offset: -2px; }
+
+/* Neutral Settings tokens are available before any module or storage read.
+   The early packaged script selects the validated cached mode, or System. */
+:root {
+    --theme-panel-bg: #ffffff; --theme-panel-text: #16191f; --theme-panel-muted: #505664;
+    --theme-panel-hover: #edf0f5; --theme-input-bg: #f7f8fb; --theme-danger: #a71929;
+}
+:root[data-theme="dark"] {
+    --theme-panel-bg: #24262d; --theme-panel-text: #f6f7fb; --theme-panel-muted: #c7cbd5;
+    --theme-panel-hover: #383c46; --theme-input-bg: #191b21; --theme-danger: #ffb4b4;
+}
+/* No explicit override can match this fallback, even before hydration. */
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+        --theme-panel-bg: #24262d; --theme-panel-text: #f6f7fb; --theme-panel-muted: #c7cbd5;
+        --theme-panel-hover: #383c46; --theme-input-bg: #191b21; --theme-danger: #ffb4b4;
+    }
+}
+.options-page {
+    --options-bg-color: var(--theme-input-bg); --options-text-color: var(--theme-panel-text);
+    --options-muted-color: var(--theme-panel-muted); --options-border-color: var(--theme-panel-muted);
+    --options-primary-color: var(--theme-danger); color-scheme: inherit;
+}
+.options-container, .options-page :is(dialog, [role="dialog"]) { background: var(--theme-panel-bg); color: var(--theme-panel-text); }
+.options-page :is(input:not([type="checkbox"]):not([type="range"]), select, textarea, button) {
+    background: var(--theme-input-bg); color: var(--theme-panel-text); border-color: var(--theme-panel-muted);
+    font: inherit; accent-color: var(--theme-panel-text); caret-color: var(--theme-panel-text);
+}
+.options-page :is(input, textarea)::placeholder { color: var(--theme-panel-muted); opacity: 1; }
+.options-page :is(button, input, select, textarea):disabled {
+    opacity: 1; color: var(--theme-panel-muted); background-color: var(--theme-panel-hover);
+    border-color: var(--theme-panel-muted); cursor: not-allowed;
+}
+.options-page :is(input[type="range"], input[type="checkbox"]) { accent-color: var(--theme-panel-text); }
+.options-page :is(button, input, select, textarea, a, summary):focus-visible {
+    outline: 2px solid var(--theme-panel-text); outline-offset: 3px;
+}
+.options-page :is(button:not(:disabled)):hover { background: var(--theme-panel-hover); }
+.options-page :is(a, a:visited) { color: var(--theme-panel-text); text-decoration: underline; text-underline-offset: 2px; }
+.options-page .settings-section { margin-top: 2rem; border-top: 1px solid var(--options-border-color); padding-top: 1rem; overflow-wrap: anywhere; }
+.options-page .settings-section :is(input, button) { max-width: 100%; min-height: 44px; border: 1px solid var(--theme-panel-muted); border-radius: 6px; padding: 8px 10px; margin: 4px 0; }
+.options-page .settings-section input { display: block; width: 100%; min-width: 0; }
+.options-page .settings-section :is(label, p, ol) { display: block; margin: .5rem 0; }
+.options-page .settings-section ol { padding-left: 1.25rem; }
+.options-page :is([role="status"], [role="alert"]) { color: var(--theme-panel-text); }
+.options-page :is([role="alert"], #bridgeStatus[data-state="error"], #bridgeStatus[data-state="unavailable"]) { color: var(--theme-danger); }
+.options-page .save-toast { background: var(--theme-panel-hover); color: var(--theme-panel-text); border: 1px solid var(--theme-panel-muted); }
+.options-page .toast-message { white-space: normal; overflow-wrap: anywhere; }
+.options-page .toggle-label { background: var(--theme-panel-muted); border: 1px solid var(--theme-panel-text); }
+.options-page .toggle-label::before { background: var(--theme-panel-bg); }
+.options-page .ios-toggle:checked + .toggle-label { background: var(--theme-panel-text); }
+.options-page .ios-toggle:disabled + .toggle-label { opacity: 1; border-style: dashed; cursor: not-allowed; }
+.options-page .ios-toggle:focus-visible + .toggle-label { outline-color: var(--theme-panel-text); }
+.options-page dialog::backdrop { background: #0008; }
+@media (forced-colors: active) {
+    .options-page :is(input, select, textarea, button, dialog, [role="dialog"], .save-toast) { forced-color-adjust: auto; }
+    .options-page .toggle-label { background: Canvas; border-color: ButtonText; }
+    .options-page .toggle-label::before { background: ButtonText; }
+    .options-page .ios-toggle:checked + .toggle-label { background: Highlight; }
+}
+
+
+/* The native header/Favorites stay outside this scrollport. The New Tab row
+   keeps its flow slot below Today, then sticks to the scrollport's top edge. */
+.spaces-list, .space, .space-content { min-height: 0; }
+.space-header { flex-shrink: 0; }
+.temporary-tabs { position: relative; flex-shrink: 0; }
+#newTabBtn {
+    position: sticky; top: 0; z-index: 3;
+    background: var(--space-bg-color, #f0f0f0); color: var(--sidebar-text-color, #333);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--sidebar-border-color, #888) 35%, transparent);
+    opacity: 1; line-height: 24px; overflow: hidden;
+}
+#newTabBtn:hover { background: var(--tab-hover-bg, #e4e4e4); }
+#newTabBtn .new-tab-symbol { flex: 0 0 20px; width: 20px; height: 24px; display: flex; align-items: center; }
+#newTabBtn .new-tab-symbol svg { width: 20px; height: 20px; flex-shrink: 0; }
+#newTabBtn .new-tab-label { font-size: inherit; line-height: 24px; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#newTabBtn .new-tab-window-icon { display: none; }
+#newTabBtn[data-window-drag="eligible"] .new-tab-plus-icon { display: none; }
+#newTabBtn[data-window-drag="eligible"] .new-tab-window-icon { display: block; }
+#newTabBtn.new-tab-window-hover { background: var(--theme-selected-bg, #d6d6d6); color: var(--theme-selected-text, #222); }
+#newTabBtn[aria-busy="true"] { opacity: 1; }
+
+/* Shared native Split outline; numbered text also distinguishes multiple groups.
+   Separate/partial members get individual dashed outlines, never a false bridge. */
+.tab[data-split-outline]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 2px dashed currentColor;
+    border-radius: 10px;
+    pointer-events: none;
+}
+.tab[data-split-outline="first"] { margin-bottom: 0; border-radius: 10px 10px 0 0; }
+.tab[data-split-outline="last"] { border-radius: 0 0 10px 10px; }
+.tab[data-split-outline="first"]::after { border-style: solid; border-bottom: 0; border-radius: 10px 10px 0 0; }
+.tab[data-split-outline="last"]::after { border-style: solid; border-top: 0; border-radius: 0 0 10px 10px; }
+.tab[data-split-outline] .today-split-badge { opacity: 1; font-weight: 600; white-space: normal; }

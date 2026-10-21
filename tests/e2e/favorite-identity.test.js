@@ -1,4 +1,6 @@
 import { launchBrowserWithExtension, openSidebar } from './helpers/extension-helper.js';
+import { focusSidebarForInteraction } from './helpers/sidebar-focus.js';
+import { waitForSidebarFixtureRow } from './helpers/sidebar-fixture-evidence.js';
 
 // No internet dependency: all tab navigation uses a local fixture server.
 let url;
@@ -7,6 +9,7 @@ let server;
 let browser, page, fixture;
 const row = id => `.space.active .tab[data-tab-id="${id}"]`;
 async function toggle(id) {
+    await focusSidebarForInteraction(page);
     await page.waitForFunction(id => {
         const el = document.querySelector(`.space.active .tab[data-tab-id="${id}"]`);
         if (!el) return false;
@@ -16,7 +19,7 @@ async function toggle(id) {
     await page.waitForSelector('.context-menu-item');
     await page.evaluate(() => {
         const item = [...document.querySelectorAll('.context-menu-item')]
-            .find(el => /^(Pin Tab|Unpin Tab)$/.test(el.textContent));
+            .find(el => /^(Pin Tab|Remove Pin)$/.test(el.textContent));
         if (!item) throw new Error('Pin action missing');
         item.click();
     });
@@ -41,7 +44,10 @@ beforeAll(async () => {
         const { spaces } = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'get' });
         const space = spaces[0];
         const a = await chrome.tabs.create({ url, active: false });
-        await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: a.id, spaceId: space.id });
+        const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: a.id, spaceId: space.id });
+        if (!assignment?.success || !assignment.spaces?.find(item => item.id === space.id)?.temporaryTabs?.includes(a.id)) {
+            throw new Error(`Fixture assignment failed for tab ${a.id} in Space ${space.id}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+        }
         return { a: a.id, spaceId: space.id, folderId: space.bookmarkFolderId };
     }, url);
     await page.reload();
@@ -55,11 +61,14 @@ test('same-URL tabs remain distinct through pin, navigation, reload, close, reop
     const first = (await state()).bindings[fixture.a].bookmarkId;
     const b = await page.evaluate(async ({ url, spaceId }) => {
         const tab = await chrome.tabs.create({ url: 'about:blank', active: false });
-        await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+        const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+        if (!assignment?.success || !assignment.spaces?.find(item => item.id === spaceId)?.temporaryTabs?.includes(tab.id)) {
+            throw new Error(`Fixture assignment failed for tab ${tab.id} in Space ${spaceId}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+        }
         await chrome.tabs.update(tab.id, { url });
         return tab.id;
     }, { url, spaceId: fixture.spaceId });
-    await page.waitForSelector(row(b));
+    await waitForSidebarFixtureRow(page, row(b), { stage: 'same-URL twin creation', tabIds: [b], spaceId: fixture.spaceId });
     await page.waitForFunction(id => document.querySelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`), { polling: 100 }, b);
     expect((await state()).bindings[b]?.bookmarkId).toBeUndefined();
 
@@ -75,9 +84,13 @@ test('same-URL tabs remain distinct through pin, navigation, reload, close, reop
         expect(await page.$eval(row(b), el => el.dataset.bookmarkId)).toBe(second);
     }
 
-    // Closing B preserves B's bookmark and never redirects its row to A.
+    // The live pin's minus closes only B; its saved bookmark remains available.
+    expect(await page.$eval(`${row(b)} .tab-close`, el => ({ glyph: el.textContent, label: el.getAttribute('aria-label'), title: el.title })))
+        .toEqual({ glyph: '−', label: 'Close Tab (keep pin)', title: 'Close Tab (keep pin)' });
     await page.$eval(`${row(b)} .tab-close`, el => el.click());
     await page.waitForSelector(`.space.active .bookmark-only[data-bookmark-id="${second}"]`);
+    expect(await page.$eval(`.space.active .bookmark-only[data-bookmark-id="${second}"] .tab-remove`, el => ({ glyph: el.textContent, label: el.getAttribute('aria-label'), title: el.title })))
+        .toEqual({ glyph: '×', label: 'Remove Pin (delete bookmark)', title: 'Remove Pin (delete bookmark)' });
     await page.$eval(`.space.active .bookmark-only[data-bookmark-id="${second}"]`, el => el.click());
     await page.waitForFunction(({ second, a }) => {
         const el = document.querySelector(`.space.active .tab[data-bookmark-id="${second}"][data-tab-id]`);
@@ -96,14 +109,17 @@ test('favorite demotion keeps the captured middle temporary position after refre
         const created = [];
         for (const suffix of ['demote-favorite', 'demote-left', 'demote-right']) {
             const tab = await chrome.tabs.create({ url: `${url}${suffix}`, active: false });
-            await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+            const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+            if (!assignment?.success || !assignment.spaces?.find(item => item.id === spaceId)?.temporaryTabs?.includes(tab.id)) {
+                throw new Error(`Fixture assignment failed for tab ${tab.id} in Space ${spaceId}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+            }
             created.push(tab.id);
         }
         return created;
     }, { url, spaceId: fixture.spaceId });
     const [favorite, left, right] = ids;
-    await page.waitForSelector(row(favorite));
-    await page.waitForSelector(row(right));
+    await waitForSidebarFixtureRow(page, row(favorite), { stage: 'demotion fixture creation', tabIds: ids, spaceId: fixture.spaceId });
+    await waitForSidebarFixtureRow(page, row(right), { stage: 'demotion fixture creation', tabIds: ids, spaceId: fixture.spaceId });
     await toggle(favorite);
     await page.waitForFunction(id => document.querySelector(`.space.active [data-tab-type="pinned"] .tab[data-tab-id="${id}"]`),
         { polling: 100 }, favorite);
@@ -125,10 +141,10 @@ test('favorite demotion keeps the captured middle temporary position after refre
         return positions.every(index => index >= 0) && positions[0] < positions[1] && positions[1] < positions[2];
     }, { polling: 100 }, desired);
     await page.waitForFunction(async ({ desired, favorite, spaceId }) => {
-        const { spaces, pinnedTabStatesById = {} } = await chrome.storage.local.get(['spaces', 'pinnedTabStatesById']);
+        const { spaces, pinnedTabStatesById = {}, todayOrderRepresentation } = await chrome.storage.local.get(['spaces', 'pinnedTabStatesById', 'todayOrderRepresentation']);
         const space = spaces.find(item => item.id === spaceId);
-        const { invertTabOrder = true } = await chrome.storage.sync.get({ invertTabOrder: true });
-        const display = invertTabOrder ? [...space.temporaryTabs].reverse() : space.temporaryTabs;
+        if (todayOrderRepresentation?.version !== 1) return false;
+        const display = todayOrderRepresentation.inverted ? [...space.temporaryTabs].reverse() : space.temporaryTabs;
         const positions = desired.map(id => display.indexOf(id));
         return !pinnedTabStatesById[favorite] && positions.every(index => index >= 0) &&
             positions[0] < positions[1] && positions[1] < positions[2];
@@ -162,7 +178,10 @@ test('closed URL twins render once each and a temporary reorder preserves every 
     }
     const temp = await page.evaluate(async ({ url, spaceId }) => {
         const tab = await chrome.tabs.create({ url, active: false });
-        await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+        const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+        if (!assignment?.success || !assignment.spaces?.find(item => item.id === spaceId)?.temporaryTabs?.includes(tab.id)) {
+            throw new Error(`Fixture assignment failed for tab ${tab.id} in Space ${spaceId}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+        }
         return tab.id;
     }, { url, spaceId: fixture.spaceId });
     await page.waitForFunction(id => {
@@ -202,7 +221,10 @@ test('moving the associated folder out of Arcify keeps live tabs visible and rec
         const ids = [];
         for (const suffix of ['folder-recovery', 'folder-recovery-favorite']) {
             const tab = await chrome.tabs.create({ url: `${url}${suffix}`, active: false });
-            await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+            const assignment = await chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId: tab.id, spaceId });
+            if (!assignment?.success || !assignment.spaces?.find(item => item.id === spaceId)?.temporaryTabs?.includes(tab.id)) {
+                throw new Error(`Fixture assignment failed for tab ${tab.id} in Space ${spaceId}: ${assignment?.error || 'reply did not confirm temporary membership'}`);
+            }
             ids.push(tab.id);
         }
         return ids;
@@ -252,21 +274,41 @@ test('service-worker ordering matches real Chrome move semantics and rejects par
     expect(ordered.partial.success).toBe(false);
 });
 
-test('reordering native pinned favicons updates Chrome and survives reload', async () => {
+test('reordering native pinned favicons updates Chrome and survives reload (synthetic drag lifecycle)', async () => {
     const another = await page.evaluate(async url => (await chrome.tabs.create({ url, pinned: true, active: false })).id, url);
-    await page.waitForSelector(`#pinnedFavicons [data-tab-id="${another}"]`);
-    await page.$eval(`#pinnedFavicons [data-tab-id="${fixture.a}"]`, el => {
-        el.classList.add('dragging');
-        el.parentElement.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, clientX: 100000 }));
-        el.classList.remove('dragging');
-    });
-    await page.waitForFunction(async id => {
-        const tabs = await chrome.tabs.query({ pinned: true, currentWindow: true });
-        return tabs.sort((a, b) => a.index - b.index).at(-1)?.id === id;
-    }, { polling: 100 }, fixture.a);
+    await page.waitForSelector(`#pinnedFavicons .native-favorite[data-tab-id="${another}"]`);
+    const original = await page.evaluate(async () => (await chrome.tabs.query({ pinned: true, currentWindow: true }))
+        .sort((a, b) => a.index - b.index).map(tab => tab.id));
+    const expected = [...original.filter(id => id !== fixture.a), fixture.a];
+    const preview = await page.$eval(`#pinnedFavicons .native-favorite[data-tab-id="${fixture.a}"]`, (el, targetId) => {
+        // Synthetic lifecycle coverage, not native mouse/drag evidence. Use the
+        // target's real right half and row center: the old X=100000/Y=0 sentinel
+        // lies above a wrapping grid and therefore means its start, not append.
+        const target = el.parentElement.querySelector(`.native-favorite[data-tab-id="${targetId}"]`);
+        target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        const rect = target.getBoundingClientRect();
+        if (!(rect.width > 0 && rect.height > 0)) throw new Error('Native reorder target has no layout.');
+        const dataTransfer = new DataTransfer();
+        const endpoint = { bubbles: true, cancelable: true, dataTransfer,
+            clientX: rect.right - Math.min(4, rect.width / 4), clientY: rect.top + rect.height / 2 };
+        el.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer }));
+        target.dispatchEvent(new DragEvent('dragover', endpoint));
+        const marker = document.querySelector('.favorites-drop-anchor');
+        const preview = { hidden: marker.hidden, list: marker.dataset.list,
+            placement: marker.dataset.placement, anchorId: marker.dataset.anchorId };
+        target.dispatchEvent(new DragEvent('drop', endpoint));
+        el.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer }));
+        return preview;
+    }, another);
+    expect(preview).toEqual({ hidden: false, list: 'native', placement: 'after', anchorId: String(another) });
+    await page.waitForFunction(async expected => {
+        const actual = (await chrome.tabs.query({ pinned: true, currentWindow: true }))
+            .sort((a, b) => a.index - b.index).map(tab => tab.id);
+        return actual.length === expected.length && actual.every((id, index) => id === expected[index]);
+    }, { polling: 100 }, expected);
     await page.reload();
-    await page.waitForSelector(`#pinnedFavicons [data-tab-id="${another}"]`);
-    expect(await page.$$eval('#pinnedFavicons .pinned-favicon', els => Number(els.at(-1).dataset.tabId))).toBe(fixture.a);
+    await page.waitForSelector(`#pinnedFavicons .native-favorite[data-tab-id="${another}"]`);
+    expect(await page.$$eval('#pinnedFavicons .native-favorite', els => els.map(el => Number(el.dataset.tabId)))).toEqual(expected);
 });
 
 test('new folders have a bookmark identity before naming and remain usable after Escape', async () => {

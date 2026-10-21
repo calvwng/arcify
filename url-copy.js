@@ -102,3 +102,20 @@ export async function copyCurrentTabUrlWithFallback({ chromeApi = globalThis.chr
         return false;
     }
 }
+
+// Exact caller-supplied text only: no active-tab lookup, page injection, sidebar
+// fallback, or retry after an uncertain clipboard send.
+export async function copyExactTextOffscreen(text, { chromeApi = globalThis.chrome, beforeWrite = async () => {} } = {}) {
+    if (typeof text !== 'string' || !text || text.length > 16384) throw new Error('Invalid clipboard text.');
+    if (!chromeApi.offscreen?.createDocument || !chromeApi.runtime?.getContexts) throw new Error('The offscreen clipboard is unavailable.');
+    const documentUrl = chromeApi.runtime.getURL('offscreen.html');
+    const contexts = await chromeApi.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'], documentUrls: [documentUrl] });
+    if (!contexts.length) {
+        await beforeWrite();
+        await chromeApi.offscreen.createDocument({ url: 'offscreen.html', reasons: ['CLIPBOARD'], justification: 'Copy the exact tab link requested in Spotlight.' });
+    }
+    await beforeWrite();
+    const response = await chromeApi.runtime.sendMessage({ target: 'offscreen', type: 'copyToClipboard', text });
+    if (response?.success !== true || response.text !== text) throw new Error('The clipboard did not affirm the exact requested text.');
+    return { copied: true, text };
+}

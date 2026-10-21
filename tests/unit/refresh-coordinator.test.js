@@ -149,3 +149,98 @@ test('persistent failures use bounded backoff and explicit retry retains dirty w
     await scheduled.shift()();
     assert.equal(coordinator.handledBookmarkGeneration, 1);
 });
+
+test('active-view invalidation renders unchanged spaces and acknowledges only successful work', async () => {
+    let fail = true;
+    let renders = 0;
+    const scheduled = [];
+    const coordinator = new RefreshCoordinator({
+        readSpaces: async () => [], adoptSpaces: async () => ({ needsRender: false, completed: true }),
+        render: async ({ isCurrent }) => {
+            assert.equal(isCurrent(), true);
+            renders++;
+            if (fail) throw new Error('render failed');
+        }, schedule: callback => { scheduled.push(callback); return callback; }, cancel
+    });
+    coordinator.invalidateActiveView();
+    await scheduled.shift()();
+    assert.equal(coordinator.handledActiveViewGeneration, 0);
+    fail = false;
+    await scheduled.shift()();
+    assert.equal(renders, 2);
+    assert.equal(coordinator.handledActiveViewGeneration, 1);
+    assert.equal(coordinator.hasWork(), false);
+});
+
+test('new view work arriving during render invalidates its commit guard and cannot be acknowledged', async () => {
+    let release;
+    let guard;
+    let renders = 0;
+    const scheduled = [];
+    const coordinator = new RefreshCoordinator({
+        readSpaces: async () => [], adoptSpaces: async () => false,
+        render: async ({ isCurrent }) => {
+            renders++;
+            if (renders === 1) {
+                guard = isCurrent;
+                await new Promise(resolve => { release = resolve; });
+            }
+            return isCurrent();
+        }, schedule: callback => { scheduled.push(callback); return callback; }, cancel
+    });
+    coordinator.invalidateActiveView();
+    const first = scheduled.shift()();
+    await flush();
+    assert.equal(guard(), true);
+    coordinator.invalidateActiveView();
+    assert.equal(guard(), false);
+    await scheduled.shift()(); // An event's wake can fire before the old drain ends.
+    release();
+    await first;
+    assert.equal(coordinator.handledActiveViewGeneration, 0);
+    assert.equal(scheduled.length, 1);
+    await scheduled.shift()();
+    assert.equal(renders, 2);
+    assert.equal(coordinator.handledActiveViewGeneration, 2);
+});
+
+test('adopted metadata retains render work after a superseding read even when the next projection is equal', async () => {
+    let first = true;
+    let renders = 0;
+    const scheduled = [];
+    const coordinator = new RefreshCoordinator({
+        readSpaces: async () => [],
+        adoptSpaces: async () => {
+            if (!first) return false;
+            first = false;
+            coordinator.invalidateSpaces();
+            return true;
+        },
+        render: async () => { renders++; },
+        schedule: callback => { scheduled.push(callback); return callback; },
+        cancel: callback => { const index = scheduled.indexOf(callback); if (index >= 0) scheduled.splice(index, 1); }
+    });
+    coordinator.invalidateSpaces();
+    await scheduled.shift()();
+    assert.equal(renders, 0);
+    assert.equal(coordinator.spacesDirty, true);
+    assert.equal(coordinator.renderDirty, true);
+    await scheduled.shift()();
+    assert.equal(renders, 1);
+    assert.equal(coordinator.hasWork(), false);
+    assert.equal(coordinator.handledSpacesGeneration, 2);
+});
+
+test('render distinguishes explicit active-view navigation from incidental bookmark and membership changes', async () => {
+    const reasons = [];
+    const coordinator = new RefreshCoordinator({
+        readSpaces: async () => [], adoptSpaces: async () => true,
+        render: async ({ activeViewChanged }) => reasons.push(activeViewChanged),
+        schedule: immediate, cancel
+    });
+    coordinator.invalidateBookmarks(); await flush();
+    coordinator.invalidateSpaces(); await flush();
+    coordinator.invalidateActiveView(); coordinator.invalidateBookmarks(); await flush();
+    coordinator.invalidateBookmarks(); await flush();
+    assert.deepEqual(reasons, [false, false, true, false]);
+});

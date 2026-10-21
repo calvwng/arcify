@@ -1,3 +1,7 @@
+import { normalizeColorOverrides, DEFAULT_SPACE_COLORS } from './space-colors.js';
+import { setSpaceColorOverrides } from './sidebar-theme.js';
+import './spotlight-bridge-options.js';
+import './sidebar-appearance-options.js';
 /**
  * Options - Extension settings and preferences UI
  * 
@@ -17,16 +21,7 @@ import { LocalStorage } from './localstorage.js';
 import { Logger } from './logger.js';
 
 // Default color values (must be 6-digit hex for color picker compatibility)
-const DEFAULT_COLORS = {
-  grey: '#cccccc',
-  blue: '#8bb3f3',
-  red: '#ff9e97',
-  yellow: '#ffe29f',
-  green: '#8bda99',
-  pink: '#fbaad7',
-  purple: '#d6a6ff',
-  cyan: '#a5e2ea'
-};
+const DEFAULT_COLORS = DEFAULT_SPACE_COLORS;
 
 const COLOR_NAMES = Object.keys(DEFAULT_COLORS);
 
@@ -69,15 +64,7 @@ function updateAutoArchiveIdleMinutesVisibility(forceEnabled) {
 
 // Function to apply color overrides to CSS variables
 function applyColorOverrides(colorOverrides) {
-  const root = document.documentElement;
-  COLOR_NAMES.forEach(colorName => {
-    const colorValue = colorOverrides?.[colorName];
-    if (colorValue) {
-      root.style.setProperty(`--user-chrome-${colorName}-color`, colorValue);
-    } else {
-      root.style.removeProperty(`--user-chrome-${colorName}-color`);
-    }
-  });
+  setSpaceColorOverrides(document, colorOverrides);
 }
 
 // Function to save options to chrome.storage
@@ -97,16 +84,21 @@ async function saveOptions() {
 
   const settings = {
     defaultSpaceName: defaultSpaceNameSelect?.value || 'Home',
+    startupLauncherEnabled: getCheckboxValue(document.getElementById('startupLauncherEnabled'), false),
     autoArchiveEnabled: getCheckboxValue(document.getElementById('autoArchiveEnabled'), false),
     autoArchiveIdleMinutes: parseInt(autoArchiveIdleMinutesInput?.value, 10) || 360,
+    ordinaryFavoriteTabs: getCheckboxValue(document.getElementById('ordinaryFavoriteTabs'), false),
     syncTabGroups: getCheckboxValue(document.getElementById('syncTabGroups'), false),
     invertTabOrder: getCheckboxValue(document.getElementById('invertTabOrder'), true),
+    todayNewTabsAtTop: getCheckboxValue(document.getElementById('todayNewTabsAtTop'), true),
     showAllOpenTabsInCollapsedFolders: getCheckboxValue(document.getElementById('showAllOpenTabsInCollapsedFolders'), false),
     colorOverrides: Object.keys(colorOverrides).length > 0 ? colorOverrides : null,
     debugLoggingEnabled: getCheckboxValue(document.getElementById('debugLoggingEnabled'), false)
   };
 
   try {
+    // Freeze the existing Today display before changing the legacy bookmark flag.
+    await Utils.getTodayOrderInverted();
     await chrome.storage.sync.set(settings);
     Logger.log('Settings saved:', settings);
 
@@ -137,14 +129,18 @@ function showToast(message = 'Settings saved') {
 
 // Function to restore options from chrome.storage
 async function restoreOptions() {
+  await Utils.getTodayOrderInverted();
   const settings = await Utils.getSettings();
 
   await populateSpacesDropdown(settings.defaultSpaceName);
 
   // Restore checkbox values
+  setCheckboxValue(document.getElementById('startupLauncherEnabled'), settings.startupLauncherEnabled, false);
   setCheckboxValue(document.getElementById('autoArchiveEnabled'), settings.autoArchiveEnabled, false);
+  setCheckboxValue(document.getElementById('ordinaryFavoriteTabs'), settings.ordinaryFavoriteTabs, false);
   setCheckboxValue(document.getElementById('syncTabGroups'), settings.syncTabGroups, false);
   setCheckboxValue(document.getElementById('invertTabOrder'), settings.invertTabOrder, true);
+  setCheckboxValue(document.getElementById('todayNewTabsAtTop'), settings.todayNewTabsAtTop, true);
   setCheckboxValue(document.getElementById('showAllOpenTabsInCollapsedFolders'), settings.showAllOpenTabsInCollapsedFolders, false);
   setCheckboxValue(document.getElementById('debugLoggingEnabled'), settings.debugLoggingEnabled, false);
 
@@ -156,7 +152,7 @@ async function restoreOptions() {
   updateAutoArchiveIdleMinutesVisibility(settings.autoArchiveEnabled);
 
   // Restore color overrides
-  const colorOverrides = settings.colorOverrides || {};
+  const colorOverrides = normalizeColorOverrides(settings.colorOverrides);
   COLOR_NAMES.forEach(colorName => {
     const colorPicker = document.getElementById(getColorPickerId(colorName));
     if (colorPicker) {
@@ -247,7 +243,7 @@ function setupAutoSave() {
   addListenerIfExists('defaultSpaceName', 'change', saveOptions);
 
   // Auto-save for checkboxes (most just save immediately)
-  const checkboxIds = ['syncTabGroups', 'invertTabOrder', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
+  const checkboxIds = ['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
   checkboxIds.forEach(id => addListenerIfExists(id, 'change', saveOptions));
 
   // Auto-archive checkbox needs special handling to update visibility
@@ -265,8 +261,13 @@ function setupAutoSave() {
   });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  restoreOptions();
+document.addEventListener('DOMContentLoaded', async () => {
   setupAdvancedOptions();
-  setupAutoSave();
+  try {
+    await restoreOptions();
+    setupAutoSave();
+  } catch (error) {
+    Logger.error('Could not load settings:', error);
+    showToast('Settings could not load. Reload this page before making changes.');
+  }
 });

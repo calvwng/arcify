@@ -1,4 +1,10 @@
+import { applySpaceTheme } from './sidebar-theme.js';
+import { placeNewTabRow } from './sidebar-new-tab.js';
+import { appendTodayMovePicker } from './today-space-move-ui.js';
+import { appendSavedMovePicker } from './saved-space-move-ui.js';
+import { createContextMenuSession } from './context-menu-session.js';
 import { firstUnusedColor } from './space-colors.js';
+import { assertNotNativeSplit } from './native-split-safety.js';
 /**
  * DOMManager - Sidebar DOM manipulation and UI component management
  * 
@@ -90,9 +96,6 @@ export function setupDOMElements(createNewSpace, getSpaces = () => []) {
     });
 
     document.getElementById('createSpaceBtn').addEventListener('click', createNewSpace);
-    newTabBtn.addEventListener('click', () => {
-        chrome.tabs.create({});
-    });
 
     const createSpaceColorSwatch = document.getElementById('createSpaceColorSwatch');
     createSpaceColorSwatch.addEventListener('click', (e) => {
@@ -165,7 +168,7 @@ export function activateTabInDOM(tabId) {
     }
 }
 
-export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher) {
+export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher, { restoreFocus = document.activeElement === newTabBtn && document.hasFocus?.() !== false } = {}) {
     // Show/hide space containers
     document.querySelectorAll('.space').forEach(s => {
         const isActive = s.dataset.spaceId === String(spaceId);
@@ -173,20 +176,28 @@ export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher) {
         s.style.display = isActive ? 'flex' : 'none';
     });
 
+    placeNewTabRow(newTabBtn, getSpaceElement(spaceId), { restoreFocus });
+
     // Get space color and update sidebar container background
     const space = spaces.find(s => s.id === spaceId);
     if (space) {
-        // Update background color
-        const sidebarContainer = document.getElementById('sidebar-container');
-        sidebarContainer.style.setProperty('--space-bg-color', `var(--chrome-${space.color}-color, rgba(255, 255, 255, 0.1))`);
-        sidebarContainer.style.setProperty('--space-bg-color-dark', `var(--chrome-${space.color}-color-dark, rgba(255, 255, 255, 0.1))`);
+        applySpaceTheme(document, space);
     }
 
     // Update space switcher
     updateSpaceSwitcher();
 }
 
-export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null) {
+let activeTabContextMenuCleanup = null;
+
+export function closeTabContextMenu() { activeTabContextMenuCleanup?.(); }
+
+export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabElement, closeTab, spaces, moveTabToSpace, setActiveSpace, allBookmarkSpaceFolders, createSpaceFromInactive, onReplaceBookmarkUrlWithCurrent = null, onAddToFavorites = null, todaySelection = null, tabActions = null, splitActions = null, menuSession = null, savedMove = null) {
+    activeTabContextMenuCleanup?.();
+    const session = menuSession || createContextMenuSession(document, { onEscape: () => {
+        if (splitActions?.keyboard && tabElement.isConnected) tabElement.focus();
+    } });
+    if (!session.active) return;
     // Remove any existing context menus
     const existingMenu = document.getElementById('tab-context-menu');
     if (existingMenu) {
@@ -196,29 +207,95 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     const contextMenu = document.createElement('div');
     contextMenu.id = 'tab-context-menu';
     contextMenu.className = 'context-menu'; // Reuse general context menu styling
+    contextMenu.setAttribute('role', 'menu');
     contextMenu.style.position = 'fixed';
     contextMenu.style.left = `${x}px`;
     contextMenu.style.top = `${y}px`;
 
+    const multiple = Math.max(todaySelection?.count || 1, tabActions?.selectionCount || 1) > 1;
+    const addAction = (label, callback, action) => {
+        if (typeof callback !== 'function') return;
+        const item = document.createElement('div'); item.className = 'context-menu-item';
+        item.textContent = label; item.dataset.action = action; item.setAttribute('role', 'menuitem'); item.tabIndex = 0;
+        item.addEventListener('click', () => {
+            if (!session.active || !contextMenu.contains(item)) return;
+            // Transfer focus before removing the menu; refresh then restores the
+            // same live row identity without overriding later user focus.
+            if (['createSplitView', 'endSplitView'].includes(action) && contextMenu.contains(document.activeElement) && tabElement.isConnected) tabElement.focus({ preventScroll: true });
+            closeMenu(); void callback();
+        }, { once: true });
+        item.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click(); } });
+        contextMenu.append(item);
+    };
+    if (splitActions) {
+        addAction('Create Split View', splitActions.create, 'createSplitView');
+        addAction('End Split View', splitActions.end, 'endSplitView');
+        if (splitActions.hint) {
+            const hint = document.createElement('div'); hint.className = 'context-menu-hint today-split-menu-hint';
+            hint.dataset.action = 'splitViewHint'; hint.setAttribute('aria-disabled', 'true'); hint.textContent = splitActions.hint;
+            contextMenu.append(hint);
+        }
+    }
+    if (multiple && !todaySelection) {
+        const hint = document.createElement('div'); hint.className = 'context-menu-item'; hint.setAttribute('aria-disabled', 'true');
+        hint.textContent = 'Select one pin to edit it. Move selected pins to another Space, or drag them to Favorites.'; contextMenu.append(hint);
+    }
+    if (!multiple && tabActions) {
+        addAction('Copy Link', tabActions.copyLink, 'copyLink');
+        addAction('Rename…', tabActions.rename, 'rename');
+        addAction('Edit Pinned URL…', tabActions.editUrl, 'editUrl');
+        addAction(tabActions.muted ? 'Unmute Tab' : 'Mute Tab', tabActions.mute, 'mute');
+        addAction('Duplicate Tab', tabActions.duplicate, 'duplicate');
+        addAction('Move to New Window', tabActions.moveToNewWindow, 'moveToNewWindow');
+    }
+    if (multiple) {
+        const hint = document.createElement('div'); hint.className = 'context-menu-hint';
+        hint.textContent = 'Select one live tab to move to a new window.'; contextMenu.append(hint);
+    }
     // --- Menu Items ---
+    if (todaySelection) {
+        const save = document.createElement('div');
+        save.className = 'context-menu-item'; save.id = 'saveTodayTabsInNewFolder';
+        save.textContent = `Save ${todaySelection.count} tab${todaySelection.count === 1 ? '' : 's'} in new pinned folder…`;
+        save.setAttribute('role', 'menuitem'); save.tabIndex = 0;
+        const activate = () => { if (!session.active || !contextMenu.contains(save)) return; closeMenu(); void todaySelection.save(); };
+        save.addEventListener('click', activate, { once: true });
+        save.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); save.click(); }
+        });
+        contextMenu.append(save);
+        if (todaySelection.moveHint) {
+            const hint = document.createElement('div'); hint.className = 'context-menu-hint';
+            hint.dataset.action = 'todayMoveHint'; hint.setAttribute('aria-disabled', 'true'); hint.textContent = todaySelection.moveHint;
+            contextMenu.append(hint);
+        }
+        appendTodayMovePicker({ document, menu: contextMenu, actions: todaySelection.move, close: closeMenu,
+            active: () => session.active, reposition: () => Utils.adjustMenuPosition(contextMenu, x, y) });
+    }
 
     // Only show these options for actual tabs that are part of a space
-    if (!isBookmarkOnly) {
+    if (!isBookmarkOnly && !multiple) {
         const addToFavoritesOption = document.createElement('div');
         addToFavoritesOption.className = 'context-menu-item';
         addToFavoritesOption.textContent = 'Add to Favorites';
         addToFavoritesOption.addEventListener('click', async () => {
-            await chrome.tabs.update(tab.id, { pinned: true });
-            contextMenu.remove();
+            if (!session.active || !contextMenu.contains(addToFavoritesOption)) return;
+            if (typeof onAddToFavorites === 'function') await onAddToFavorites();
+            closeMenu();
         });
         contextMenu.appendChild(addToFavoritesOption);
 
         const pinInSpaceOption = document.createElement('div');
         pinInSpaceOption.className = 'context-menu-item';
-        pinInSpaceOption.textContent = isPinned ? 'Unpin Tab' : 'Pin Tab';
-        pinInSpaceOption.addEventListener('click', () => {
-            chrome.runtime.sendMessage({ command: 'toggleSpacePin', tabId: tab.id });
-            contextMenu.remove();
+        pinInSpaceOption.textContent = isPinned ? 'Remove Pin' : 'Pin Tab';
+        pinInSpaceOption.addEventListener('click', async () => {
+            if (!session.active || !contextMenu.contains(pinInSpaceOption)) return;
+            closeMenu();
+            try {
+                assertNotNativeSplit(await chrome.tabs.get(tab.id));
+                if (isPinned && tabActions?.removePin) await tabActions.removePin();
+                else await chrome.runtime.sendMessage({ command: 'toggleSpacePin', tabId: tab.id });
+            } catch (error) { (tabActions?.report || Logger.warn)(error.message); }
         });
         contextMenu.appendChild(pinInSpaceOption);
 
@@ -226,149 +303,84 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         if (isPinned && typeof onReplaceBookmarkUrlWithCurrent === 'function') {
             const replaceBookmarkUrlOption = document.createElement('div');
             replaceBookmarkUrlOption.className = 'context-menu-item';
-            replaceBookmarkUrlOption.textContent = 'Replace Bookmark URL with Current URL';
+            replaceBookmarkUrlOption.textContent = 'Use Current URL for Pin';
             replaceBookmarkUrlOption.addEventListener('click', async () => {
+                if (!session.active || !contextMenu.contains(replaceBookmarkUrlOption)) return;
                 try {
                     await onReplaceBookmarkUrlWithCurrent(tab, tabElement);
                 } catch (e) {
                     Logger.warn('[ContextMenu] Failed to replace bookmark URL with current URL:', e);
                 } finally {
-                    contextMenu.remove();
+                    closeMenu();
                 }
             });
             contextMenu.appendChild(replaceBookmarkUrlOption);
         }
 
-        // Add a separator
-        const separator = document.createElement('div');
-        separator.className = 'context-menu-separator';
-        contextMenu.appendChild(separator);
-
-        // 2. Move to Space
-        const moveToSpaceItem = document.createElement('div');
-        moveToSpaceItem.className = 'context-menu-item with-submenu';
-        moveToSpaceItem.textContent = 'Move to Space';
-
-        const submenu = document.createElement('div');
-        submenu.className = 'context-menu submenu';
-
-        // Add active spaces
-        const currentSpace = spaces.find(s => s.temporaryTabs.includes(tab.id) || s.spaceBookmarks.includes(tab.id));
-        const otherActiveSpaces = spaces.filter(s => s.id !== currentSpace?.id);
-        otherActiveSpaces.forEach(space => {
-            const submenuItem = document.createElement('div');
-            submenuItem.className = 'context-menu-item';
-            submenuItem.textContent = space.name;
-            submenuItem.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                contextMenu.remove(); // Close menu immediately for better UX
-
-                await moveTabToSpace(tab.id, space.id, false);
-                // Set the space as active, but prevent it from auto-activating a different tab
-                await setActiveSpace(space.id, false);
-                // Explicitly activate the tab that was just moved
-                await Utils.focusTab(tab.id);
-            });
-            submenu.appendChild(submenuItem);
-        });
-
-        // Add inactive spaces
-        const activeSpaceNames = new Set(spaces.map(s => s.name));
-        const inactiveSpaceFolders = allBookmarkSpaceFolders.filter(f => !f.url && !activeSpaceNames.has(f.title));
-
-        if (otherActiveSpaces.length > 0 && inactiveSpaceFolders.length > 0) {
-            const separator = document.createElement('div');
-            separator.className = 'context-menu-separator';
-            submenu.appendChild(separator);
-        }
-
-        inactiveSpaceFolders.forEach(folder => {
-            const submenuItem = document.createElement('div');
-            submenuItem.className = 'context-menu-item';
-            submenuItem.textContent = folder.title;
-            submenuItem.addEventListener('click', (e) => {
-                e.stopPropagation();
-                createSpaceFromInactive(folder.title, tab);
-                contextMenu.remove();
-            });
-            submenu.appendChild(submenuItem);
-        });
-
-        // Only add the "Move to" menu if there's somewhere to move to
-        if (submenu.hasChildNodes()) {
-            moveToSpaceItem.appendChild(submenu);
-            contextMenu.appendChild(moveToSpaceItem);
-
-            // Adjust submenu position when it becomes visible
-            moveToSpaceItem.addEventListener('mouseenter', () => {
-                // Wait for next frame to ensure submenu is rendered
-                requestAnimationFrame(() => {
-                    const submenuRect = submenu.getBoundingClientRect();
-                    const parentRect = moveToSpaceItem.getBoundingClientRect();
-                    const viewportWidth = window.innerWidth;
-                    const viewportHeight = window.innerHeight;
-
-                    // Reset any previous adjustments
-                    submenu.style.left = '';
-                    submenu.style.right = '';
-                    submenu.style.top = '';
-                    submenu.style.bottom = '';
-
-                    // Check if submenu overflows right edge
-                    if (parentRect.right + submenuRect.width > viewportWidth) {
-                        // Position to the left of parent instead
-                        submenu.style.left = 'auto';
-                        submenu.style.right = '100%';
-                    }
-
-                    // Check if submenu overflows bottom edge
-                    if (parentRect.top + submenuRect.height > viewportHeight) {
-                        // Align to bottom instead of top
-                        submenu.style.top = 'auto';
-                        submenu.style.bottom = '0';
-                    }
-                });
-            });
-        }
     }
 
+    // Closed and live saved pins share the exact-bookmark batch writer. Never
+    // fall back to the old URL-based live-tab move or create an inactive Space.
+    if (isPinned || isBookmarkOnly) appendSavedMovePicker({ document, menu: contextMenu, actions: savedMove, close: closeMenu,
+        active: () => session.active, reposition: () => Utils.adjustMenuPosition(contextMenu, x, y) });
+
+    // Capture the rendered owner before async menu work; later native moves
+    // must not silently change which Space the archive action targets.
+    const archiveOwner = (spaces || []).find(space => String(space.id) === tabElement.closest('.space')?.dataset.spaceId);
+    const archiveSource = archiveOwner ? { id: archiveOwner.id, bookmarkFolderId: archiveOwner.bookmarkFolderId } : null;
     // Archive Tab (Only for active tabs)
-    if (!isBookmarkOnly) {
+    if (!isBookmarkOnly && !multiple) {
         const archiveOption = document.createElement('div');
         archiveOption.className = 'context-menu-item';
         archiveOption.textContent = 'Archive Tab';
         archiveOption.addEventListener('click', async () => {
-            await Utils.archiveTab(tab.id); // Use the utility function
-            contextMenu.remove();
+            if (!session.active || !contextMenu.contains(archiveOption)) return;
+            try { await Utils.archiveTab(tab.id, tab, archiveSource); closeMenu(); }
+            catch (error) { (tabActions?.report || Logger.warn)(error.message); }
         });
         contextMenu.appendChild(archiveOption);
     }
 
     // Close Tab / Remove Bookmark
-    const closeOption = document.createElement('div');
-    closeOption.className = 'context-menu-item';
-    closeOption.textContent = isBookmarkOnly ? 'Remove Bookmark' : 'Close Tab';
-    closeOption.addEventListener('click', () => {
-        closeTab(tabElement, tab, isPinned, isBookmarkOnly);
-        contextMenu.remove();
-    });
-    contextMenu.appendChild(closeOption);
+    if (!multiple) {
+        const closeOption = document.createElement('div');
+        closeOption.className = 'context-menu-item';
+        closeOption.textContent = isBookmarkOnly ? 'Remove Pin' : isPinned ? 'Close Tab (Keep Pin)' : 'Close Tab';
+        closeOption.addEventListener('click', () => {
+            if (!session.active || !contextMenu.contains(closeOption)) return;
+            if (isBookmarkOnly && tabActions?.removePin) void tabActions.removePin();
+            else closeTab(tabElement, tab, isPinned, isBookmarkOnly);
+            closeMenu();
+        });
+        contextMenu.appendChild(closeOption);
+    }
 
     // --- Add to DOM and setup closing ---
-    document.body.appendChild(contextMenu);
+    session.attach(contextMenu);
 
     // Adjust position to keep within viewport
     Utils.adjustMenuPosition(contextMenu, x, y);
+    // Move menus freeze exact row identities. Hold incidental re-renders
+    // until this interaction finishes; the writer still checks live native state.
+    const finishInteraction = splitActions?.beginInteraction?.();
+    session.onClose(() => {
+        if (activeTabContextMenuCleanup === closeMenu) activeTabContextMenuCleanup = null;
+        finishInteraction?.();
+    });
+    if (splitActions?.keyboard) contextMenu.querySelector('[role="menuitem"]')?.focus();
+    contextMenu.addEventListener('keydown', event => {
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+        const items = [...contextMenu.querySelectorAll('[role="menuitem"]')];
+        if (!items.length) return;
+        event.preventDefault();
+        const index = items.indexOf(document.activeElement);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 :
+            (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+        items[next].focus();
+    });
 
-    // Close context menu when clicking outside
-    const closeContextMenu = (e) => {
-        if (!contextMenu.contains(e.target)) {
-            contextMenu.remove();
-            document.removeEventListener('click', closeContextMenu, { capture: true }); // Use capture phase
-        }
-    };
-    // Use capture phase to catch clicks before they bubble up
-    document.addEventListener('click', closeContextMenu, { capture: true });
+    function closeMenu() { session.close(); }
+    activeTabContextMenuCleanup = closeMenu;
 }
 
 export async function showArchivedTabsPopup(activeSpaceId) {
@@ -444,16 +456,19 @@ export async function showArchivedTabsPopup(activeSpaceId) {
 
     // Manual archives remain restorable even when automatic cleanup is off.
     message.style.display = 'block';
-    const allArchived = await Utils.getArchivedTabs();
+    const currentWindow = await chrome.windows.getCurrent();
+    let archiveView = await Utils.getArchiveView(currentWindow.id);
+    const allArchived = archiveView.entries;
     if (allArchived.length === 0) {
         message.textContent = 'No archived tabs.';
         list.style.display = 'none';
     } else {
         message.textContent = '';
         list.style.display = 'block';
-        allArchived.forEach(archivedTab => {
+        allArchived.forEach(({ entry: archivedTab, bookmarkFolderId }) => {
             const item = document.createElement('div');
             item.className = 'tab archived-item';
+            item.dataset.archiveEntryId = archivedTab.entryId;
             item.title = `${archivedTab.name}\n${archivedTab.url}\nArchived: ${new Date(archivedTab.archivedAt).toLocaleString()}`;
 
             const favicon = document.createElement('img');
@@ -473,15 +488,28 @@ export async function showArchivedTabsPopup(activeSpaceId) {
             restoreButton.className = 'tab-restore';
             restoreButton.setAttribute('aria-label', 'Restore archived tab');
             restoreButton.style.marginLeft = 'auto';
-            item.addEventListener('click', (e) => {
+            let restoring = false;
+            const requestId = crypto.randomUUID();
+            item.dataset.archiveEntryId = archivedTab.entryId;
+            item.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                Utils.restoreArchivedTab(archivedTab);
-                item.remove();
-                if (list.children.length === 0) {
-                    message.textContent = 'No archived tabs.';
+                if (restoring || !item.isConnected || !list.contains(item)) return;
+                restoring = true; restoreButton.disabled = true;
+                try {
+                    const result = await Utils.restoreArchivedTab(archivedTab, { windowId: currentWindow.id,
+                        context: archiveView.context, bookmarkFolderId, requestId });
+                    if (!result?.consumed) throw new Error('Reopening could not be confirmed. The entry is retained.');
+                    if (!list.contains(item)) return;
+                    item.remove();
+                    try { archiveView = await Utils.getArchiveView(currentWindow.id); } catch { /* A later click fails safely until refreshed. */ }
+                    message.textContent = result.warning || (list.children.length === 0 ? 'No archived tabs.' : '');
                     message.style.display = 'block';
-                    list.style.display = 'none';
-                }
+                    if (list.children.length === 0) list.style.display = 'none';
+                } catch (error) {
+                    if (!list.contains(item)) return;
+                    message.textContent = error.message;
+                    message.style.display = 'block';
+                } finally { restoring = false; restoreButton.disabled = false; }
             });
 
             item.appendChild(favicon);
@@ -512,7 +540,7 @@ export function showUrlCopyToast() {
     }, 2000);
 }
 
-export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabToTemp, currentActiveSpaceId, setActiveSpaceFunc, activatePinnedTabByURL) {
+export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabToTemp, currentActiveSpaceId, setActiveSpaceFunc, activatePinnedTabByURL, report = message => Logger.warn(message)) {
     chrome.runtime.onMessage.addListener(function (request, sender, sendResponse) {
         if (request.command === "quickPinToggle" || request.command === "toggleSpacePin") {
             Logger.log(`[QuickPin] Received command: ${request.command}`, { request });
@@ -553,12 +581,12 @@ export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabTo
                 if (request.command === "quickPinToggle") {
                     Logger.log("[QuickPin] Handling quickPinToggle for active tab.");
                     chrome.tabs.query({ active: true, lastFocusedWindow: true }, function (tabs) {
-                        getTabAndToggle(tabs[0]);
+                        void getTabAndToggle(tabs[0]).catch(error => report(error.message));
                     });
                 } else if (request.command === "toggleSpacePin" && request.tabId) {
                     Logger.log(`[QuickPin] Handling toggleSpacePin for tabId: ${request.tabId}`);
                     chrome.tabs.get(request.tabId, function (tab) {
-                        getTabAndToggle(tab);
+                        void getTabAndToggle(tab).catch(error => report(error.message));
                     });
                 }
             });
