@@ -10,6 +10,7 @@ function fixture() {
         { id: 'pin', title: 'Saved title', url: 'https://same.test/', parentId: 'nested', index: 1 }, { id: 'twin', title: 'Other pin', url: 'https://same.test/', parentId: 'nested', index: 2 }];
     const local = { todayOrderRepresentation: { version: 1, inverted: false }, pinnedTabStatesById: { 2: { bookmarkId: 'pin', pinnedUrl: 'https://same.test/' }, 9: { bookmarkId: 'pin', pinnedUrl: 'https://same.test/' } }, tabNameOverridesById: { 1: { name: 'Alias' }, 2: { name: 'Old saved name' }, 3: { name: 'Twin alias' }, 9: { name: 'Old saved name' } } };
     const effects = [], hooks = {}, globalTabs = new Set(), listeners = [];
+    const event = () => { const listeners = new Set(); return { addListener: fn => listeners.add(fn), removeListener: fn => listeners.delete(fn), emit: (...args) => [...listeners].forEach(fn => fn(...args)), size: () => listeners.size }; };
     globalThis.chrome = {
         runtime: { id: 'test', getURL: path => `chrome-extension://test/${path}`, onMessage: { addListener(fn) { listeners.push(fn); } } },
         storage: { sync: { async get(defaults) { return { ...defaults }; } }, local: { async get(key) { await hooks.storageGet?.(key); return { [key]: structuredClone(local[key]) }; }, async set(values) { await hooks.storageSet?.(values); Object.assign(local, structuredClone(values)); effects.push(['storage', structuredClone(values)]); await hooks.storageAfterSet?.(values); } } },
@@ -18,10 +19,11 @@ function fixture() {
             async query(query = {}) { await hooks.tabQuery?.(query); return structuredClone(tabs.filter(tab => query.windowId === undefined || tab.windowId === query.windowId)); },
             async update(id, values) { effects.push(['update-tab', id, values]); const tab = tabs.find(tab => tab.id === id); if ('muted' in values) tab.mutedInfo.muted = values.muted; return structuredClone(tab); },
             async duplicate(id) { const next = { ...structuredClone(tabs.find(tab => tab.id === id)), id: 100 }; tabs.push(next); effects.push(['duplicate', id]); await hooks.duplicate?.(next); return next; } },
-        bookmarks: { async get(id) { return structuredClone(nodes.filter(node => node.id === id)); }, async search({ title }) { return structuredClone(nodes.filter(node => node.title === title)); },
+        bookmarks: { ...Object.fromEntries(['onMoved', 'onRemoved', 'onChanged'].map(name => [name, event()])),
+            async get(id) { await hooks.bookmarkGet?.(id); return structuredClone(nodes.filter(node => node.id === id)); }, async search({ title }) { return structuredClone(nodes.filter(node => node.title === title)); },
             async getChildren(id) { await hooks.children?.(id); return structuredClone(nodes.filter(node => node.parentId === id)); },
             async update(id, values) { await hooks.updateBookmark?.(id, values); Object.assign(nodes.find(node => node.id === id), values); effects.push(['update-bookmark', id, values]); return structuredClone(nodes.find(node => node.id === id)); },
-            async remove(id) { nodes.splice(nodes.findIndex(node => node.id === id), 1); effects.push(['remove-bookmark', id]); await hooks.removed?.(id); } }
+            async remove(id) { const [node] = nodes.splice(nodes.findIndex(node => node.id === id), 1); effects.push(['remove-bookmark', id]); chrome.bookmarks.onRemoved.emit(id, { parentId: node.parentId, node }); await hooks.removed?.(id); } }
     };
     Utils._pinnedStateChain = Promise.resolve(); Utils._tabNameChain = Promise.resolve();
     const store = new SpaceStore(); store.initialized = true; store.spaces = [{ id: 's', bookmarkFolderId: 'root', temporaryTabs: [1, 3], spaceBookmarks: [2, 9] }, { id: 'other', bookmarkFolderId: 'other-root', temporaryTabs: [], spaceBookmarks: [] }];
@@ -100,6 +102,60 @@ test('remove pin deletes only saved membership, detaches exact cross-window bind
     assert.deepEqual(f.tabs, before); assert.equal(f.nodes.some(node => node.id === 'pin'), false); assert(f.nodes.some(node => node.id === 'twin'));
     assert.deepEqual(f.store.spaces[0].spaceBookmarks, []); assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 3, 2, 9]);
     assert.deepEqual(f.local.pinnedTabStatesById, {}); assert.deepEqual(Object.keys(f.local.tabNameOverridesById), ['1', '3']);
+});
+
+for (const target of ['pin', 'root']) for (const boundary of ['storage', 'query']) test(`remove pin revalidates ${target} moved outside Arcify during ${boundary} reads`, async () => {
+    const f = fixture(); let moved = false;
+    const move = () => {
+        if (moved || !chrome.bookmarks.onMoved.size()) return;
+        moved = true; f.nodes.find(node => node.id === target).parentId = 'bar';
+        // The fresh read must reject this even before its native event arrives.
+    };
+    if (boundary === 'storage') f.hooks.storageGet = key => { if (key === 'pinnedTabStatesById') move(); };
+    else f.hooks.tabQuery = move;
+    await assert.rejects(f.run(f.closed, 'removePin'), /saved pin or its folder changed|no longer inside/);
+    assert.equal(moved, true); assert.deepEqual(f.effects, []);
+    assert(f.nodes.some(node => node.id === 'pin'));
+    for (const name of ['onMoved', 'onRemoved', 'onChanged']) assert.equal(chrome.bookmarks[name].size(), 0);
+});
+
+for (const target of ['pin', 'nested', 'root']) for (const boundary of ['tree-read', 'final-query']) test(`remove pin fences ${target} move during ${boundary}`, async () => {
+    const f = fixture(); let moved = false, queries = 0;
+    const move = () => {
+        if (moved || !chrome.bookmarks.onMoved.size()) return;
+        moved = true;
+        const node = f.nodes.find(node => node.id === target), oldParentId = node.parentId;
+        node.parentId = 'bar';
+        chrome.bookmarks.onMoved.emit(target, { oldParentId, parentId: 'bar' });
+        // Returning to the original tree must not revive a superseded read.
+        node.parentId = oldParentId;
+        chrome.bookmarks.onMoved.emit(target, { oldParentId: 'bar', parentId: oldParentId });
+    };
+    if (boundary === 'tree-read') f.hooks.children = parent => { if (parent === 'nested') move(); };
+    else f.hooks.tabQuery = () => { if (chrome.bookmarks.onMoved.size() && ++queries === 2) move(); };
+    await assert.rejects(f.run(f.closed, 'removePin'), /bookmark context changed/);
+    assert.equal(moved, true); assert.deepEqual(f.effects, []);
+    assert(f.nodes.some(node => node.id === 'pin'));
+    for (const name of ['onMoved', 'onRemoved', 'onChanged']) assert.equal(chrome.bookmarks[name].size(), 0);
+});
+
+test('remove pin requires native bookmark observation and cleans it after successful deletion', async () => {
+    const missing = fixture(); delete chrome.bookmarks.onMoved;
+    await assert.rejects(missing.run(missing.closed, 'removePin'), /observation is unavailable/);
+    assert.deepEqual(missing.effects, []);
+    const f = fixture(); await f.run(f.closed, 'removePin');
+    assert.equal(f.effects.filter(([kind]) => kind === 'remove-bookmark').length, 1);
+    for (const name of ['onMoved', 'onRemoved', 'onChanged']) assert.equal(chrome.bookmarks[name].size(), 0);
+});
+
+test('remove pin rechecks linked native Split after final bookmark traversal', async () => {
+    const f = fixture();
+    f.hooks.children = parent => {
+        if (parent === 'nested' && chrome.bookmarks.onMoved.size()) f.tabs.find(tab => tab.id === 9).splitViewId = 77;
+    };
+    await assert.rejects(f.run(f.closed, 'removePin'), /End Split View/);
+    assert.deepEqual(f.effects, []);
+    for (const name of ['onMoved', 'onRemoved', 'onChanged']) assert.equal(chrome.bookmarks[name].size(), 0);
 });
 
 for (const url of ['javascript:alert(1)', 'data:text/html,x', 'https://bad.test/a b', 'https://x.test/\nattack', '', 'not a url', 'chrome-extension://other/options.html']) test(`URL input rejects unsafe or malformed ${JSON.stringify(url)}`, () => assert.throws(() => normalizeTabMenuUrl(url)));

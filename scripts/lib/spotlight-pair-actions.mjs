@@ -7,6 +7,7 @@ import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY, PAIRING_GENERATION_KEY, SPACE_AC
 export async function assertInitialSpaceActionRoundTrips({ ArcifyBridgeClient, ArcifySpaceActionsClient, validateActionResult }) {
     const ARCIFY = 'a'.repeat(32), SPOTLIGHT = 'b'.repeat(32), WINDOW = 7;
     const copy = value => structuredClone(value);
+    const event = () => { const listeners = new Set(); return { addListener: fn => listeners.add(fn), removeListener: fn => listeners.delete(fn), emit: (...args) => [...listeners].forEach(fn => fn(...args)) }; };
     const local = { [PEER_KEY]: SPOTLIGHT, [PAIRING_GENERATION_KEY]: 'arcify-generation', spaceModelVersion: 2,
         spaces: [{ id: 'work', spaceUuid: 'work', name: 'Work', color: 'blue', bookmarkFolderId: 'work-folder', temporaryTabs: [1, 3, 11], spaceBookmarks: [2] }],
         pinnedTabStatesById: { 2: { bookmarkId: 'existing-pin', pinnedUrl: 'https://same.test/' } } };
@@ -53,11 +54,12 @@ export async function assertInitialSpaceActionRoundTrips({ ArcifyBridgeClient, A
             async remove() { assert.fail('Actions must not close tabs'); }
         },
         bookmarks: {
+            ...Object.fromEntries(['onMoved', 'onRemoved', 'onChanged', 'onCreated'].map(name => [name, event()])),
             async search(query) { return copy(bookmarks.filter(node => node.title === query.title)); },
             async get(id) { return copy(bookmarks.filter(node => node.id === id)); },
             async getChildren(id) { return copy(bookmarks.filter(node => node.parentId === id)); },
-            async create(options) { const node = { id: `created-${effects.length}`, ...copy(options) }; bookmarks.push(node); effects.push(['createBookmark', copy(node)]); return copy(node); },
-            async remove(id) { const index = bookmarks.findIndex(node => node.id === id); assert(index >= 0); bookmarks.splice(index, 1); effects.push(['removeBookmark', id]); }
+            async create(options) { const node = { id: `created-${effects.length}`, ...copy(options) }; bookmarks.push(node); effects.push(['createBookmark', copy(node)]); chrome.bookmarks.onCreated.emit(node.id, copy(node)); return copy(node); },
+            async remove(id) { const index = bookmarks.findIndex(node => node.id === id); assert(index >= 0); const [node] = bookmarks.splice(index, 1); effects.push(['removeBookmark', id]); chrome.bookmarks.onRemoved.emit(id, { parentId: node.parentId, index, node: copy(node) }); }
         }
     };
     try {

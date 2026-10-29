@@ -8,6 +8,7 @@ import { Utils } from '../../utils.js';
 const launcherUrl = 'chrome-extension://arcify/startup-launcher.html';
 const spotlightUrl = `chrome-extension://${'a'.repeat(32)}/newtab.html`;
 const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); },
+    removeListener(fn) { this.listeners = this.listeners.filter(listener => listener !== fn); },
     async emit(...args) { await Promise.all(this.listeners.map(fn => fn(...args))); } });
 const area = data => ({
     async get(keys) {
@@ -27,7 +28,7 @@ function fixture({ enabled, session = {}, windows, tabs, controllerOptions = {} 
         storage: { sync: area(sync), session: area(session), onChanged: event() },
         windows: { onCreated: event(), onFocusChanged: event(), getAll: async () => structuredClone(state.windows) },
         alarms: { onAlarm: event(), create: async (name, alarm) => state.alarms.set(name, alarm), clear: async name => state.alarms.delete(name) },
-        tabs: { onCreated: event(), onUpdated: event(), onActivated: event(),
+        tabs: { onCreated: event(), onUpdated: event(), onActivated: event(), onDetached: event(), onReplaced: event(), onRemoved: event(),
             query: async query => structuredClone(state.tabs.filter(tab => query.windowId === undefined || query.windowId === tab.windowId)),
             get: async id => { const tab = state.tabs.find(tab => tab.id === id); if (!tab) throw Error('No tab'); return structuredClone(tab); },
             create: async options => {
@@ -226,6 +227,63 @@ test('late restore never closes a launcher tab the user has navigated away from'
     await app.controller.flush();
     assert.deepEqual(app.state.removed, []);
 });
+
+test('late restore preserves a launcher moved to another window even without an observed event', async () => {
+    const app = fixture({ enabled: true });
+    await app.controller.start(); await app.controller.flush();
+    const created = app.state.tabs.find(tab => tab.url === launcherUrl);
+    assert.equal(app.state.session[STARTUP_LAUNCHER_SESSION].createdWindowId, 1);
+    created.windowId = 2;
+    app.state.windows.push({ id: 2, type: 'normal' });
+    app.state.tabs.push({ id: 70, windowId: 2, url: 'https://other.test/' }, { id: 55, windowId: 1, url: launcherUrl });
+    await app.controller.flush();
+    assert.deepEqual(app.state.removed, []);
+});
+
+test('moving a launcher away and back retires cleanup across worker restart', async () => {
+    const app = fixture({ enabled: true });
+    await app.controller.start(); await app.controller.flush();
+    const created = app.state.tabs.find(tab => tab.url === launcherUrl);
+    await app.browser.tabs.onDetached.emit(created.id, { oldWindowId: 1 });
+    await app.controller.flush();
+    assert.deepEqual(app.state.session[STARTUP_LAUNCHER_SESSION], { pending: false });
+    app.state.tabs.push({ id: 55, windowId: 1, url: launcherUrl });
+    const resumed = app.makeController(); await resumed.ready; await resumed.flush();
+    assert.deepEqual(app.state.removed, []);
+});
+
+test('legacy launcher session records cannot authorize duplicate cleanup', async () => {
+    const app = fixture({ enabled: true, session: { [STARTUP_LAUNCHER_SESSION]: { pending: false, createdTabId: 101 } },
+        tabs: [{ id: 101, windowId: 1, url: launcherUrl }, { id: 55, windowId: 1, url: launcherUrl }] });
+    await app.controller.ready; await app.controller.flush();
+    assert.deepEqual(app.state.removed, []);
+});
+
+for (const boundary of ['get', 'query', 'final-get']) for (const change of ['move-back', 'replacement', 'navigation', 'sibling-removal']) {
+    test(`cleanup fences ${change} during ${boundary}`, async () => {
+        const app = fixture({ enabled: true });
+        await app.controller.start(); await app.controller.flush();
+        const created = app.state.tabs.find(tab => tab.url === launcherUrl);
+        app.state.tabs.push({ id: 55, windowId: 1, url: launcherUrl });
+        const method = boundary === 'final-get' ? 'get' : boundary;
+        const original = app.browser.tabs[method]; let triggered = false, reads = 0;
+        app.browser.tabs[method] = async arg => {
+            const result = await original(arg);
+            if (method === 'get' && arg === created.id) reads++;
+            if (!triggered && (method === 'get' ? arg === created.id && (boundary !== 'final-get' || reads === 2) : arg.windowId === 1)) {
+                triggered = true;
+                if (change === 'move-back') await app.browser.tabs.onDetached.emit(created.id, { oldWindowId: 1 });
+                if (change === 'replacement') await app.browser.tabs.onReplaced.emit(999, created.id);
+                if (change === 'navigation') await app.browser.tabs.onUpdated.emit(created.id, { url: 'https://away.test/' }, created);
+                if (change === 'sibling-removal') await app.browser.tabs.onRemoved.emit(10, { windowId: 1 });
+            }
+            return result;
+        };
+        await app.controller.flush();
+        assert.equal(triggered, true);
+        assert.deepEqual(app.state.removed, []);
+    });
+}
 
 test('late restore does not close a launcher with an outbound user navigation still pending', async () => {
     const app = fixture({ enabled: true });

@@ -741,10 +741,12 @@ export class SpaceStore {
         }
         const legacyBindings = temporaryOnly ? await Utils.getPinnedTabStates() : {};
         const protectedIds = new Set(temporaryOnly ? space.spaceBookmarks : []), closed = [];
+        const isProtected = tab => isProtectedFavorite(tab, protectedIds, legacyBindings, protectedUrls)
+            || Boolean(tab.pendingUrl && protectedUrls.has(Utils.getPinnedUrlKey(tab.pendingUrl)));
         for (const tab of await this.queryTabs({})) {
             if (windowId !== undefined && tab.windowId !== windowId || tab.pinned || tab.incognito || isStartupLauncherTab(tab)
                 || this.isGlobalTab(tab) || this.isTransientTab(tab) || ownerOf(this.spaces, tab.id)?.id !== spaceId
-                || temporaryOnly && isProtectedFavorite(tab, protectedIds, legacyBindings, protectedUrls)) continue;
+                || temporaryOnly && isProtected(tab)) continue;
             // Revalidate the exact tab immediately before removal while holding
             // the same queue as Favorite adoption, release, cleanup and archive.
             let current;
@@ -752,7 +754,10 @@ export class SpaceStore {
             try { current = this.observeTab(await chrome.tabs.get(tab.id)); } catch { continue; }
             await this.transientWindows?.flushObservedUnlocked();
             if (current.windowId !== tab.windowId || current.pinned || current.incognito || this.isGlobalTab(current) || this.isTransientTab(current)
-                || ownerOf(this.spaces, current.id)?.id !== spaceId) continue;
+                || ownerOf(this.spaces, current.id)?.id !== spaceId
+                // Earlier removals may have awaited a navigation. Preserve a
+                // saved destination in either the committed or pending URL.
+                || temporaryOnly && isProtected(current)) continue;
             // Keep the native read last. Bookmark events fence the folder across
             // that read without introducing another asynchronous stale-tab gap.
             assertBeforeRemove?.();

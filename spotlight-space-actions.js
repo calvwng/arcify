@@ -235,7 +235,7 @@ export async function runSpaceAction(store, request, { beforeMutation = async ()
         title: request.context.tab.title, url: request.context.tab.url }, { beforeWrite: guard });
     if (request.command === 'removeCurrentPin') {
         const result = await removeSavedSpacePin(store, { getSpace: () => selectedSpace(store, request.windowId, request.context),
-            bookmarkId: request.context.tab.bookmark.id }, { beforeWrite: guard, stopOnPartial: true });
+            bookmarkId: request.context.tab.bookmark.id, parentId: request.context.tab.bookmark.parentId }, { beforeWrite: guard, stopOnPartial: true });
         return { ...result, tabId: request.context.tab.id };
     }
     throw bridgeError('INVALID_REQUEST', 'Unsupported Space action.');

@@ -136,7 +136,7 @@ export async function runTabMenuActionCore(store, request, { beforeWrite = null,
     }
     if (action === 'removePin') {
         await resolve();
-        await removeSavedSpacePin(store, { getSpace, bookmarkId }, { beforeWrite: guard });
+        await removeSavedSpacePin(store, { getSpace, bookmarkId, parentId: request.parentId }, { beforeWrite: guard });
         return {};
     }
     // Recheck immediately before Chrome's non-transactional bookmark write.

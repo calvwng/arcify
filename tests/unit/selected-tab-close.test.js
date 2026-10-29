@@ -32,6 +32,29 @@ for(const reason of ['removed','replaced','moved','url','owner','duplicate','glo
  assert.equal((await f.run()).success,false);assert.deepEqual(f.removed,[]);
 });
 test('fresh ownership and window reads stop after first removal',async()=>{const f=fixture();f.hooks.remove=id=>{if(id===1)f.tabs.get(2).windowId=11};const r=await f.run();assert.deepEqual(r.completed,[1]);assert.equal(r.uncertain,false);assert.deepEqual(f.removed,[1])});
+
+for (const tabId of [1, 2]) for (const boundary of ['preflight', 'before-remove']) test(`pending navigation rejects ${tabId === 1 ? 'Today' : 'saved'} close at ${boundary}`, async () => {
+ const f=fixture();let reads=0;
+ const navigate=()=>Object.assign(f.tabs.get(tabId),{pendingUrl:'https://different.test/',status:'loading'});
+ if(boundary==='preflight')navigate();
+ else f.hooks.get=id=>{if(id===tabId && ++reads===2)navigate()};
+ const result=await f.run();
+ assert.equal(result.success,false);assert.equal(result.uncertain,false);
+ const completed=boundary==='before-remove' && tabId===2 ? [1] : [];
+ assert.deepEqual(result.completed,completed);assert.deepEqual(f.removed,completed);assert(f.tabs.has(tabId));
+});
+
+test('navigation beginning during first removal preserves the second tab and confirmed progress', async () => {
+ const f=fixture();f.hooks.remove=id=>{if(id===1)Object.assign(f.tabs.get(2),{pendingUrl:'https://different.test/',status:'loading'})};
+ const result=await f.run();
+ assert.equal(result.success,false);assert.equal(result.uncertain,false);
+ assert.deepEqual(result.completed,[1]);assert.deepEqual(f.removed,[1]);assert(f.tabs.has(2));
+});
+
+test('same selected pending destination remains eligible', async () => {
+ const f=fixture();for(const tab of f.tabs.values())tab.pendingUrl=tab.url;
+ assert.equal((await f.run()).success,true);assert.deepEqual(f.removed,[1,2]);
+});
 test('remove rejection is uncertain and never retried',async()=>{const f=fixture();f.hooks.remove=id=>{if(id===2)throw Error('API failure')};const r=await f.run();assert.deepEqual(r.completed,[1]);assert.equal(r.uncertain,true);assert.deepEqual(f.removed,[1,2])});
 test('ownership change during last tab read aborts',async()=>{const f=fixture();f.hooks.get=id=>{if(id===1)f.store.active[10]='other'};assert.equal((await f.run()).success,false);assert.deepEqual(f.removed,[])});
 test('duplicate IDs are rejected',async()=>{const f=fixture();f.request.entries.push(f.request.entries[0]);assert.equal((await f.run()).success,false);assert.deepEqual(f.removed,[])});

@@ -43,7 +43,8 @@ export async function closeSelectedTabs(store, request) {
             owner(entry);
             assertNotTransient(store, { windowId: request.windowId, tab });
             if (tab.id !== entry.tabId || tab.windowId !== request.windowId || tab.incognito || tab.pinned ||
-                isStartupLauncherTab(tab) || (tab.url || tab.pendingUrl || '') !== entry.url) throw stale();
+                isStartupLauncherTab(tab) || (tab.url || tab.pendingUrl || '') !== entry.url ||
+                tab.pendingUrl && tab.pendingUrl !== entry.url) throw stale();
             // Avoid browser-owned split side effects on an unselected peer.
             if (request.entries.length > 1 && hasNativeSplit(tab)) throw new Error('End Split View before closing selected tabs.');
         }

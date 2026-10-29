@@ -27,6 +27,7 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
     const observedNavigations = new Map();
     const initialTabUrls = new Map();
     const changedBeforeCapture = new Set();
+    const cleanupRevoked = new Set();
     const enqueue = task => {
         const result = chain.then(task);
         chain = result.catch(reportError);
@@ -140,16 +141,35 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
             // A restored launcher can arrive after our create. Remove only the
             // redundant tab we created, never a restored or manually opened tab.
             if (launchers.some(tab => tab.id !== state.createdTabId)) {
-                let created;
-                try { created = await browser.tabs.get(state.createdTabId); } catch { /* Already closed. */ }
-                if (created) {
-                    const siblings = await browser.tabs.query({ windowId: created.windowId });
-                    created = siblings.find(tab => tab.id === state.createdTabId);
-                    const stillLauncher = isStartupLauncherTab(created, browser)
-                        && (!created.pendingUrl || isStartupLauncherUrl(created.pendingUrl, browser));
-                    // Do not close a browser window or an outbound navigation just
-                    // to remove a redundant helper. A moved tab is also left alone.
-                    if (stillLauncher && siblings.some(tab => tab.id !== created.id)) await browser.tabs.remove(created.id);
+                // Old session records lack original-window authority. Keep them,
+                // and never reacquire cleanup permission after a native move.
+                if (Number.isSafeInteger(state.createdWindowId) && state.createdWindowId > 0
+                    && !cleanupRevoked.has(state.createdTabId)) {
+                    let changed = false;
+                    const removers = [];
+                    const listen = (event, callback) => {
+                        if (!event?.addListener) return;
+                        event.addListener(callback); removers.push(() => event.removeListener(callback));
+                    };
+                    listen(browser.tabs.onUpdated, (id, update) => {
+                        if (id === state.createdTabId && (['url', 'pendingUrl', 'pinned', 'splitViewId'].some(key => Object.hasOwn(update, key))
+                            || update.status === 'loading')) changed = true;
+                    });
+                    listen(browser.tabs.onRemoved, (id, info) => { if (id === state.createdTabId || info?.windowId === state.createdWindowId) changed = true; });
+                    listen(browser.tabs.onDetached, (id, info) => { if (id === state.createdTabId || info?.oldWindowId === state.createdWindowId) changed = true; });
+                    const eligible = tab => tab?.id === state.createdTabId && tab.windowId === state.createdWindowId
+                        && !tab.incognito && !tab.pinned && (tab.splitViewId === undefined || tab.splitViewId === -1)
+                        && isStartupLauncherTab(tab, browser) && (!tab.pendingUrl || isStartupLauncherUrl(tab.pendingUrl, browser));
+                    try {
+                        const created = await browser.tabs.get(state.createdTabId);
+                        if (eligible(created)) {
+                            const siblings = await browser.tabs.query({ windowId: state.createdWindowId });
+                            const latest = await browser.tabs.get(state.createdTabId);
+                            if (!changed && !cleanupRevoked.has(state.createdTabId) && eligible(latest)
+                                && siblings.some(tab => tab.id !== latest.id)) await browser.tabs.remove(latest.id);
+                        }
+                    } catch { /* Missing or changing native state retires cleanup without replay. */ }
+                    finally { removers.forEach(remove => remove()); }
                 }
                 await writeState({ pending: false });
             }
@@ -207,7 +227,8 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
             }
             return;
         }
-        await writeState({ pending: false, createdTabId: tab.id });
+        await writeState(cleanupRevoked.has(tab.id) ? { pending: false }
+            : { pending: false, createdTabId: tab.id, createdWindowId: target.id });
         await reconcile(); // Catch a restore that raced the create call.
     }
 
@@ -245,6 +266,17 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
             || (state?.createdTabId && isStartupLauncherTab(tab, browser))) await schedule(state);
     });
     browser.runtime.onStartup.addListener(start);
+    const revokeCleanup = id => {
+        cleanupRevoked.add(id);
+        // Mark synchronously to fence in-flight reads; persist retirement on the
+        // same queue so it also survives a later worker restart.
+        void enqueue(async () => {
+            const state = await readState();
+            if (state?.createdTabId === id) await writeState({ pending: false });
+        });
+    };
+    browser.tabs.onDetached?.addListener(revokeCleanup);
+    browser.tabs.onReplaced?.addListener((added, removed) => { revokeCleanup(added); revokeCleanup(removed); });
     browser.windows.onCreated.addListener(() => onTab());
     browser.windows.onFocusChanged.addListener(windowId => {
         if (!mayForeground()) return;
