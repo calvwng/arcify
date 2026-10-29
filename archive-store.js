@@ -206,6 +206,10 @@ export class ArchiveStore {
                 assertNotTransient(this.store, { windowId: request.windowId, tab });
                 if (!tab || tab.windowId !== request.windowId || tab.pinned || tab.incognito
                     || this.store.isGlobalTab(tab) || isStartupLauncherTab(tab) || binding?.bookmarkId) stale();
+                // A durable claim proves the native ID, not continued URL ownership.
+                // Resumed claims have no fresh-create observer, so always enforce
+                // the exact settled destination at every mutation boundary.
+                if (tab.url !== entry.url || tab.pendingUrl || tab.status !== 'complete') stale();
                 assertNotNativeSplit(tab);
                 const owners = locations(this.store, tabId);
                 if (owners.length && (owners.length !== 1 || owners[0].space.id !== space.id || owners[0].section !== 'temporaryTabs')
@@ -339,7 +343,8 @@ export class ArchiveStore {
                     await this.rootUnlocked(space);
                     const live = await chrome.tabs.get(tab.id);
                     assertNotTransient(this.store, { windowId: request.windowId, tab: live });
-                    if (!live || live.windowId !== request.windowId || live.incognito || live.pinned || this.store.isGlobalTab(live)) stale();
+                    if (!live || live.windowId !== request.windowId || live.incognito || live.pinned || this.store.isGlobalTab(live)
+                        || live.url !== entry.url || live.pendingUrl || live.status !== 'complete') stale();
                     assertNotNativeSplit(live);
                     settlement?.verify(live);
                 }, tab.id);
@@ -362,7 +367,8 @@ export class ArchiveStore {
                     await this.contextUnlocked(request.windowId, focusRequest.context);
                     const live = await chrome.tabs.get(tab.id);
                     assertNotTransient(this.store, { windowId: request.windowId, tab: live });
-                    if (!live || live.windowId !== request.windowId || live.incognito || live.pinned || this.store.isGlobalTab(live)) stale();
+                    if (!live || live.windowId !== request.windowId || live.incognito || live.pinned || this.store.isGlobalTab(live)
+                        || live.url !== entry.url || live.pendingUrl || live.status !== 'complete') stale();
                     assertNotNativeSplit(live);
                 }, tab.id);
                 await chrome.tabs.update(tab.id, { active: true });
@@ -376,7 +382,8 @@ export class ArchiveStore {
                     await this.contextUnlocked(request.windowId, activatedRequest.context);
                     const live = await chrome.tabs.get(tab.id);
                     assertNotTransient(this.store, { windowId: request.windowId, tab: live });
-                    if (!live || live.windowId !== request.windowId || !live.active || live.incognito || live.pinned || this.store.isGlobalTab(live)) stale();
+                    if (!live || live.windowId !== request.windowId || !live.active || live.incognito || live.pinned || this.store.isGlobalTab(live)
+                        || live.url !== entry.url || live.pendingUrl || live.status !== 'complete') stale();
                     assertNotNativeSplit(live);
                 }, tab.id);
                 await chrome.windows.update(request.windowId, { focused: true });

@@ -46,6 +46,8 @@ const getTab = id => {
     if (!tab) throw new Error(`No tab with id ${id}`);
     return tab;
 };
+const helperPayload = () => ({ url: 'https://new.test/', supportedFeatures: ['helperSourceV1'],
+    helperSource: { tabId: 1, url: `chrome-extension://${PEER}/newtab.html`, token: '00000000-0000-0000-0000-000000000001' } });
 function reorder(windowId, ids, index) {
     const ordered = tabs.filter(tab => tab.windowId === windowId).sort((a, b) => a.index - b.index);
     const moving = ids.map(getTab);
@@ -1159,4 +1161,59 @@ test('shared Today external command retains pairing and exact folder/window iden
  const original=chrome.windows.update;chrome.windows.update=async(id,update)=>{const result=await original(id,update);Object.assign(windows.find(w=>w.id===id),update);return {...result,...update};};
  const response=await bridge(request('openSharedToday',base,'open-shared'),SENDER);assert.equal(response.ok,true,JSON.stringify(response));assert.equal(response.tabId,11);assert.equal(store.active[1],'a');assert.equal(store.active[2],'a');assert.equal(getTab(11).windowId,2);assert.equal(writes('tab.create').length,0);assert.equal(writes('tab.move').length,0);assert.equal(writes('tab.update').length,1);
  const replay=await bridge(request('openSharedToday',base,'open-shared'),SENDER);assert.equal(writes('tab.update').length,1);assert.equal(replay.ok,true);
+});
+
+test('helper capability is negotiated and ordinary helper opening retains selected Space semantics', async () => {
+    const store = await makeStore(), handle = createSpotlightBridge(store), payload = helperPayload();
+    getTab(1).url = payload.helperSource.url;
+    chrome.runtime.sendMessage = (peer, message, reply) => {
+        assert.equal(peer, PEER); assert.equal(message.type, 'arcify-helper-source');
+        assert.equal(message.tabId, 1); assert.equal(message.windowId, 1); reply({ live: true });
+    };
+    const hello = await handle(request('hello', { supportedFeatures: ['helperSourceV1'] }), SENDER);
+    assert(hello.capabilities.includes('helperSourceV1'));
+    const response = await handle(request('openTab', payload), SENDER);
+    assert.equal(response.ok, true, JSON.stringify(response)); assert.equal(writes('tab.create').length, 1);
+    assert.equal(ownerOf(store.spaces, response.tabId).id, 'a');
+});
+
+for (const kind of ['move', 'move-back', 'same-url-navigation']) test(`helper ${kind} in provider queue rejects before tab creation`, async () => {
+    const store = await makeStore(), payload = helperPayload(); getTab(1).url = payload.helperSource.url;
+    chrome.runtime.sendMessage = (peer, message, reply) => reply({ live: true });
+    journalHook = async () => {
+        if (kind === 'same-url-navigation') chrome.tabs.onUpdated.emit(1, { status: 'loading' });
+        else { getTab(1).windowId = 2; chrome.tabs.onDetached.emit(1, { oldWindowId: 1 }); if (kind === 'move-back') getTab(1).windowId = 1; }
+    };
+    const response = await createSpotlightBridge(store)(request('openTab', payload), SENDER);
+    assertError(response, 'STALE_HELPER_SOURCE'); assert.equal(writes('tab.create').length, 0);
+});
+
+test('helper event fence rejects ABA during provider native read after successful peer attestation', async () => {
+    const store = await makeStore(), payload = helperPayload(); getTab(1).url = payload.helperSource.url;
+    let attested = false; const get = chrome.tabs.get;
+    chrome.runtime.sendMessage = (peer, message, reply) => { attested = true; reply({ live: true }); };
+    chrome.tabs.get = async id => {
+        const value = await get(id);
+        if (attested && id === 1) { chrome.tabs.onDetached.emit(1, { oldWindowId: 1 }); attested = false; }
+        return value;
+    };
+    assertError(await createSpotlightBridge(store)(request('openTab', payload), SENDER), 'STALE_HELPER_SOURCE');
+    assert.equal(writes('tab.create').length, 0);
+});
+
+test('provider rechecks pairing after helper attestation before mutation', async () => {
+    const store = await makeStore(), payload = helperPayload(); getTab(1).url = payload.helperSource.url;
+    chrome.runtime.sendMessage = (peer, message, reply) => { delete local[PEER_KEY]; reply({ live: true }); };
+    assertError(await createSpotlightBridge(store)(request('openTab', payload), SENDER), 'UNAUTHORIZED');
+    assert.equal(writes('tab.create').length, 0);
+});
+
+test('helper source rejects absent negotiation, foreign helper URL and refused grant', async () => {
+    const store = await makeStore(), handle = createSpotlightBridge(store), payload = helperPayload(); getTab(1).url = payload.helperSource.url;
+    const { supportedFeatures, ...unnegotiated } = payload;
+    assertError(await handle(request('openTab', unnegotiated, 'unnegotiated'), SENDER), 'INVALID_REQUEST');
+    assertError(await handle(request('openTab', { ...payload, helperSource: { ...payload.helperSource, url: `chrome-extension://${SELF}/newtab.html` } }, 'foreign'), SENDER), 'STALE_HELPER_SOURCE');
+    chrome.runtime.sendMessage = (peer, message, reply) => reply({ live: false });
+    assertError(await handle(request('openTab', payload, 'refused'), SENDER), 'STALE_HELPER_SOURCE');
+    assert.equal(writes('tab.create').length, 0);
 });

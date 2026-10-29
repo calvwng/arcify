@@ -146,6 +146,7 @@ export function saveTodayTabsInNewFolder(store, request) {
                 const space = getSpace();
                 const originalTemporary = [...space.temporaryTabs];
                 let membershipChanged = false;
+                let removedRank;
                 try {
                     await validateTab(entry);
                     await Utils.setPinnedTabState(entry.tabId, { bookmarkId, pinnedUrl: entry.url }, { onlyIfUnboundOrMatching: true });
@@ -153,6 +154,7 @@ export function saveTodayTabsInNewFolder(store, request) {
                     space.temporaryTabs = space.temporaryTabs.filter(id => id !== entry.tabId);
                     space.spaceBookmarks.push(entry.tabId); membershipChanged = true;
                     bound.set(entry.tabId, bookmarkId);
+                    removedRank = store.restoredRanks?.get(entry.tabId);
                     store.restoredRanks?.delete(entry.tabId);
                     await validateTab(entry);
                     await store.persist();
@@ -166,6 +168,11 @@ export function saveTodayTabsInNewFolder(store, request) {
                         space.temporaryTabs = [...originalTemporary.filter(id => id === entry.tabId || space.temporaryTabs.includes(id)),
                             ...space.temporaryTabs.filter(id => !originalTemporary.includes(id))];
                         bound.delete(entry.tabId);
+                        // Restore only the rank this attempt removed. A newer
+                        // rank written during persistence belongs to newer state.
+                        if (removedRank !== undefined && !store.restoredRanks?.has(entry.tabId)) {
+                            store.restoredRanks?.set(entry.tabId, removedRank);
+                        }
                     }
                     try { await releaseBinding(entry, bookmarkId); if (membershipChanged) await store.persist(); }
                     catch { result.cleanupUncertain = true; }

@@ -69,9 +69,9 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = '56cf43b1f773eab0e7d82d0645b9a48927e05616';
+const PINNED_SPOTLIGHT = '75aa85e1a1ff3dcdb222374c801fa98d1818c4a0';
 // Every scope qualifies the same reconciled companion; retain scope-specific provenance checks.
-const PINNED_LITTLE_ARC_SPOTLIGHT = '56cf43b1f773eab0e7d82d0645b9a48927e05616';
+const PINNED_LITTLE_ARC_SPOTLIGHT = '75aa85e1a1ff3dcdb222374c801fa98d1818c4a0';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',

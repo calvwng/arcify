@@ -6,6 +6,8 @@ export const PEER_KEY = 'arcifyBridgePeerId';
 export const PAIRING_GENERATION_KEY = 'arcifyBridgePairingGeneration';
 export const GLOBAL_FAVORITES_FEATURE = 'globalFavoritesV1';
 export const ROUTED_OPEN_FEATURE = 'sourceRoutedOpenV1';
+export const HELPER_SOURCE_FEATURE = 'helperSourceV1';
+const helperCommands = ['openTab', 'activateTab', 'activateSpace', 'openBookmark', 'openFavorite', 'openSharedToday'];
 export const SPACE_ACTIONS_FEATURE = 'spaceActionsV1';
 export const ARCHIVE_ACTIONS_FEATURE = 'archiveActionsV1';
 export const SPLIT_ACTIONS_FEATURE = 'splitActionsV1';
@@ -15,7 +17,7 @@ export const TAB_ACTION_COMMANDS = ['renameCurrentTab', 'editCurrentPinUrl', 'du
 export const SPACE_ACTION_COMMANDS = ['openSettings', 'createSpaceFolder', 'pinCurrentTab', 'removeCurrentPin'];
 export const SPACE_NAVIGATION_FEATURE = 'spaceNavigationV1';
 export const SPACE_NAVIGATION_COMMANDS = ['switchSpace', 'moveCurrentTodayTab'];
-const supportedFeatures = ['sharedTodayV1', GLOBAL_FAVORITES_FEATURE, ROUTED_OPEN_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, ARCHIVE_ACTIONS_FEATURE, SPLIT_ACTIONS_FEATURE];
+const supportedFeatures = ['sharedTodayV1', GLOBAL_FAVORITES_FEATURE, ROUTED_OPEN_FEATURE, HELPER_SOURCE_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, ARCHIVE_ACTIONS_FEATURE, SPLIT_ACTIONS_FEATURE];
 export const isExtensionId = value => typeof value === 'string' && /^[a-p]{32}$/.test(value);
 export const isWindowId = value => Number.isSafeInteger(value) && value > 0;
 const isId = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
@@ -149,13 +151,20 @@ export function validateRequest(message, commands) {
     if (typeof message.requestId !== 'string' || !/^[\w.:-]{1,80}$/.test(message.requestId)
         || !isWindowId(message.windowId) || !commands.includes(message.command))
         throw bridgeError('INVALID_REQUEST', 'Invalid request ID, window, or command.');
-    const fields = ['type', 'version', 'requestId', 'windowId', 'command', 'supportedFeatures', ...commandFields[message.command]];
+    const fields = ['type', 'version', 'requestId', 'windowId', 'command', 'supportedFeatures', ...(helperCommands.includes(message.command) ? ['helperSource'] : []), ...commandFields[message.command]];
     if (Object.keys(message).some(key => !fields.includes(key))) throw bridgeError('INVALID_REQUEST', 'Unexpected request field.');
     if (message.supportedFeatures !== undefined && (!Array.isArray(message.supportedFeatures)
         || message.supportedFeatures.length < 1 || message.supportedFeatures.length > supportedFeatures.length
         || new Set(message.supportedFeatures).size !== message.supportedFeatures.length
         || message.supportedFeatures.some(feature => !supportedFeatures.includes(feature))))
         throw bridgeError('INVALID_REQUEST', 'Invalid supported feature marker.');
+    if (message.helperSource !== undefined && (!message.supportedFeatures?.includes(HELPER_SOURCE_FEATURE)
+        || !message.helperSource || Array.isArray(message.helperSource)
+        || Object.keys(message.helperSource).length !== 3 || !['tabId', 'url', 'token'].every(key => Object.hasOwn(message.helperSource, key))
+        || !isTabId(message.helperSource.tabId) || typeof message.helperSource.url !== 'string'
+        || !/^chrome-extension:\/\/[a-p]{32}\/newtab\.html(?:[?#].*)?$/.test(message.helperSource.url)
+        || typeof message.helperSource.token !== 'string' || !/^[0-9a-f-]{36}$/.test(message.helperSource.token)))
+        throw bridgeError('INVALID_REQUEST', 'Invalid exact helper source.');
     if (message.command === 'openRoutedTab' && (!message.supportedFeatures?.includes(ROUTED_OPEN_FEATURE)
         || !isTransientUrl(message.url) || !exactKeys(message.source, ['tabId','url','token'])
         || !isTabId(message.source.tabId) || !isTransientUrl(message.source.url)

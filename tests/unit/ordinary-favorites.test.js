@@ -9,7 +9,7 @@ import { isProtectedFavorite } from '../../favorite-safety.js';
 // Real shared worker queue, both stores and group projector. Only browser APIs
 // are mocked. These tests do not claim native keyboard or browser acceptance.
 const clone = value => structuredClone(value);
-const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, emit(...args) { for (const fn of this.listeners) fn(...clone(args)); } });
+const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, removeListener(fn) { this.listeners = this.listeners.filter(listener => listener !== fn); }, emit(...args) { for (const fn of this.listeners) fn(...clone(args)); } });
 const saved = id => ({ id, title: id, url: 'https://same.test/', sourceBookmarkId: null });
 const space = (id, tabs = []) => ({ id, name: id, color: 'blue', bookmarkFolderId: id, spaceBookmarks: [], temporaryTabs: tabs });
 let local, session, sync, tabs, effects, hooks, nodes, groups, nextId;
@@ -54,10 +54,10 @@ beforeEach(() => {
             async move(ids, options) { effects.push(['move', clone(ids), options]); }
         },
         tabGroups: { onRemoved: event(), onUpdated: event(), async query() { return clone(groups); }, async update(id, update) { Object.assign(groups.find(g => g.id === id), update); effects.push(['groupUpdate', id, update]); }, async move() {} },
-        bookmarks: { async search(query) { return clone(nodes.filter(node => node.title === query.title)); }, async get(id) { return clone(nodes.filter(node => node.id === id)); },
+        bookmarks: { onMoved: event(), onRemoved: event(), onChanged: event(), async search(query) { return clone(nodes.filter(node => node.title === query.title)); }, async get(id) { return clone(nodes.filter(node => node.id === id)); },
             async getChildren(id) { return clone(nodes.filter(node => node.parentId === id)); },
             async getSubTree(id) { const build = id => { const node = nodes.find(node => node.id === id); return node && { ...node, children: nodes.filter(child => child.parentId === id).map(child => build(child.id)) }; }; return [build(id)]; },
-            async removeTree(id) { const remove = id => { for (const child of nodes.filter(node => node.parentId === id)) remove(child.id); nodes = nodes.filter(node => node.id !== id); }; remove(id); },
+            async removeTree(id) { const remove = id => { for (const child of nodes.filter(node => node.parentId === id)) remove(child.id); nodes = nodes.filter(node => node.id !== id); }; remove(id); chrome.bookmarks.onRemoved.emit(id); },
             async create(input) { const node = { id: `node-${nodes.length}`, ...input }; nodes.push(node); return clone(node); }
         }
     };

@@ -7,6 +7,27 @@ import { archiveRequest } from '../../archive-client.js';
 
 const clone = value => structuredClone(value);
 const original = (extra = {}) => ({ url: 'https://archive.test/page', name: 'Archived page', spaceId: 'original', archivedAt: 12, ...extra });
+
+for (const phase of ['created', 'assigned']) for (const worker of ['same', 'restarted']) for (const change of ['completed-navigation', 'pending-navigation', 'loading']) {
+    test(`${phase} claim in ${worker} worker rejects ${change} before explicit retry can consume`, async () => {
+        const f = fixture(), request = await f.prepare();
+        if (phase === 'created') f.hooks.persist = () => { throw new Error('Assignment interrupted'); };
+        else f.hooks.afterSet = values => { if (values[ARCHIVE_CLAIMS_KEY]?.entries[request.expected.entryId]?.phase === 'assigned') throw new Error('Consume interrupted'); };
+        await assert.rejects(f.archive.reopen(request), { code: 'REOPEN_PARTIAL' });
+        assert.equal(f.local[ARCHIVE_CLAIMS_KEY].entries[request.expected.entryId].phase, phase);
+        f.hooks.persist = null; f.hooks.afterSet = null;
+        const tab = f.tabs.find(tab => tab.id === 100);
+        if (change === 'completed-navigation') tab.url = 'https://unrelated.test/';
+        if (change === 'pending-navigation') tab.pendingUrl = 'https://unrelated.test/';
+        if (change === 'loading') tab.status = 'loading';
+        const before = clone(f.tabs), effects = f.effects.length;
+        const archive = worker === 'same' ? f.archive : new ArchiveStore(f.store);
+        await assert.rejects(archive.reopen({ ...request, requestId: 'retry' }), { code: 'REOPEN_PARTIAL' });
+        assert.equal(f.local.archivedTabs.length, 1); assert.equal(f.creates().length, 1);
+        assert.deepEqual(f.tabs, before);
+        assert.equal(f.effects.slice(effects).some(([kind]) => ['focus-tab', 'focus-window', 'remove', 'create'].includes(kind)), false);
+    });
+}
 function fixture(entries = [original()]) {
     let nextTabId = 100;
     const local = { [ARCHIVE_KEY]: clone(entries), pinnedTabStatesById: {}, todayOrderRepresentation: { version: 1, inverted: false } }, session = {}, hooks = {}, effects = [], listeners = [];
@@ -50,6 +71,20 @@ function fixture(entries = [original()]) {
     const creates = () => effects.filter(([kind]) => kind === 'create');
     return { local, session, hooks, effects, nodes, tabs, store, archive, prepare, creates, listeners };
 }
+
+for (const boundary of ['consume', 'display-persist']) test(`resumed claim navigation during ${boundary} never focuses unrelated destination`, async () => {
+    const f = fixture(), request = await f.prepare();
+    f.hooks.persist = () => { throw new Error('Assignment interrupted'); };
+    await assert.rejects(f.archive.reopen(request), { code: 'REOPEN_PARTIAL' });
+    f.hooks.persist = null;
+    const navigate = () => { f.tabs.find(tab => tab.id === 100).url = 'https://unrelated.test/'; };
+    if (boundary === 'consume') f.hooks.afterSet = values => { if (values[ARCHIVE_CLAIMS_KEY]?.entries[request.expected.entryId]?.phase === 'consumed') navigate(); };
+    else f.hooks.afterPersist = () => { if (f.local.archivedTabs.length === 0) navigate(); };
+    const result = await new ArchiveStore(f.store).reopen({ ...request, requestId: 'retry' });
+    assert.equal(result.status, 'partial'); assert.equal(result.consumed, true);
+    assert.equal(f.effects.some(([kind]) => kind === 'focus-tab' || kind === 'focus-window'), false);
+    assert.equal(f.creates().length, 1);
+});
 
 test('additive migration preserves every legacy field, row, same-URL identity, order and timestamp; old readers work', async () => {
     const entries = [original({ archivedAt: 50, extra: { nested: [1, 2] } }), original(), original({ spaceId: 'source', archivedAt: 7 })];

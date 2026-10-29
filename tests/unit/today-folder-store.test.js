@@ -69,6 +69,34 @@ test('inverted rendering still shows the saved folder children in captured visib
     assert.deepEqual(displayed.map(node => Number(node.title.slice(4))), [3, 2, 1]);
 });
 
+test('failed Today save restores rank so a later restored tab retains A B C order', async () => {
+    const f = fixture(), store = f.store;
+    f.request.entries = [f.request.entries[0]];
+    store.spaces[0].temporaryTabs = [1, 3];
+    store.restoredRanks = new Map([[1, 0], [3, 2]]);
+    let fail = true;
+    f.hooks.persist = () => { if (fail) { fail = false; throw new Error('Persist failed'); } };
+    await assert.rejects(f.save(), /Persist failed/);
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 3]);
+    assert.equal(store.restoredRanks.get(1), 0);
+    const late = { id: 2, windowId: 10, url: 'https://late.test/', pinned: false };
+    store.restoreQueue = [{ tabId: 22, spaceId: 's', section: 'temporaryTabs', order: 1, url: late.url }];
+    store.savedWindows = []; store.restoreWindowKeys = new Map(); store.windowKeys = new Map();
+    store.liveTabs = new Map([[1, f.tabs[0]], [3, f.tabs[2]], [2, late]]);
+    store.provisional = new Set(); store.recoveryCandidates = new Set(); store.restoredMetadata = [];
+    store.track(late);
+    assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2, 3]);
+});
+
+test('failed Today save compensation preserves a newer restoration rank', async () => {
+    const f = fixture(); f.request.entries = [f.request.entries[0]];
+    f.store.restoredRanks.set(1, 0);
+    let fail = true;
+    f.hooks.persist = () => { if (fail) { fail = false; f.store.restoredRanks.set(1, 7); throw new Error('Persist failed'); } };
+    await assert.rejects(f.save(), /Persist failed/);
+    assert.equal(f.store.restoredRanks.get(1), 7);
+});
+
 for (const mutation of ['closed', 'url', 'pending-url', 'window', 'native-pin', 'global-favorite', 'other-space', 'already-pinned', 'binding', 'active-space', 'root-moved', 'root-deleted', 'root-replaced', 'invert', 'private-tab', 'private-window', 'non-normal-window']) {
     test(`whole-batch preflight rejects ${mutation} without creating even an empty folder`, async () => {
         const f = fixture(), target = f.tabs[1];

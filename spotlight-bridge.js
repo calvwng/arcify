@@ -1,3 +1,4 @@
+import { captureHelperSource } from './spotlight-helper-source.js';
 import { captureRoutedOpenSource, runRoutedOpen, ROUTED_OPEN_FEATURE } from './spotlight-routed-open.js';
 import { readSharedToday, openSharedToday } from './shared-today.js';
 import { nativeSplitAvailable } from './today-split-action.js';
@@ -16,7 +17,7 @@ import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
 import { readSpaceNavigationContext, runSpaceNavigation } from './spotlight-space-navigation.js';
 import { readTabActionContext, runTabAction } from './spotlight-tab-actions.js';
 import { readSpaceActionContext, runSpaceAction } from './spotlight-space-actions.js';
-import { SPLIT_ACTIONS_FEATURE, SPLIT_ACTION_COMMANDS, ARCHIVE_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
+import { SPLIT_ACTIONS_FEATURE, SPLIT_ACTION_COMMANDS, ARCHIVE_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, HELPER_SOURCE_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
 const COMMANDS = ['openRoutedTab', 'openSharedToday', 'splitActionContext', ...SPLIT_ACTION_COMMANDS, 'archiveContext', 'reopenArchivedTab', 'hello', 'snapshot', 'activateSpace', 'activateTab', 'openTransient', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
 const JOURNAL_KEY = 'spotlightBridgeRequests';
@@ -195,7 +196,7 @@ export async function runBridgeAction(store, request, snapshot, { beforeMutation
 
 export function createSpotlightBridge(store, archiveActions = new SpotlightArchiveActions(store)) {
     let chain = Promise.resolve();
-    const handle = async (request, sender, routedGuard) => {
+    const handle = async (request, sender, routedGuard, helperGuard) => {
         const initialPairing = await chrome.storage.local.get([PEER_KEY, PAIRING_GENERATION_KEY]);
         const peerId = initialPairing[PEER_KEY], generation = initialPairing[PAIRING_GENERATION_KEY];
         const checkPairing = async () => {
@@ -285,7 +286,7 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
             const snapshot = contextualAction ? null : await readBridgeSnapshot(store, request.windowId, request.supportedFeatures?.includes('sharedTodayV1'));
             // Capability checks may await storage too. Pairing must be the last
             // persisted authority read before the caller's mutation boundary.
-            const beforeMutation = async () => { await requireFeatures(); await checkPairing(); };
+            const beforeMutation = async () => { await requireFeatures(); await helperGuard?.check(peerId); await checkPairing(); helperGuard?.assert(); };
             await beforeMutation();
             return routedAction ? runRoutedOpen(store, request, routedGuard, { beforeMutation, peerId }) : splitAction ? runSplitAction(store, request, { beforeMutation }) : archiveAction ? archiveActions.reopenUnlocked(request, { peerId, pairingGeneration: generation ?? null, beforeMutation }) : navigation ? runSpaceNavigation(store, request, { beforeMutation }) : tabAction ? runTabAction(store, request, { beforeMutation }) : spaceAction ? runSpaceAction(store, request, { beforeMutation })
                 : runBridgeAction(store, request, snapshot, { beforeMutation });
@@ -313,14 +314,18 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
         return response;
     };
     return (request, sender) => {
-        let routedGuard;
+        let routedGuard, helperGuard;
         try {
+            if (request?.helperSource !== undefined) {
+                validateRequest(request, COMMANDS);
+                helperGuard = captureHelperSource(request);
+            }
             if (request?.command === 'openRoutedTab') {
                 validateRequest(request, COMMANDS);
                 routedGuard = captureRoutedOpenSource(store, request);
             }
         } catch (error) { return Promise.resolve(responseFor(request, 'arcify', {ok:false,error:{code:error.code || 'FAILED',message:error.message}})); }
-        const pending = chain.then(() => handle(request, sender, routedGuard)).finally(() => routedGuard?.dispose());
+        const pending = chain.then(() => handle(request, sender, routedGuard, helperGuard)).finally(() => { routedGuard?.dispose(); helperGuard?.dispose(); });
         chain = pending.catch(() => {});
         return pending.catch(error => responseFor(request, 'arcify', { ok: false,
             error: { code: error.code || 'FAILED', message: error.message || 'Arcify request failed.' } }));
@@ -369,6 +374,7 @@ function commandCapabilities(request, browser, store) {
         ...(typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : []),
         ...(store.transientWindows ? ['transientWindowsV1', ...(request.supportedFeatures?.includes(ROUTED_OPEN_FEATURE) ? [ROUTED_OPEN_FEATURE] : [])] : []),
         ...(request.supportedFeatures?.includes('sharedTodayV1') ? ['sharedTodayV1'] : []),
+        ...(request.supportedFeatures?.includes(HELPER_SOURCE_FEATURE) ? [HELPER_SOURCE_FEATURE] : []),
         ...(nativeSplitAvailable(browser) && request.supportedFeatures?.includes(SPLIT_ACTIONS_FEATURE) ? [SPLIT_ACTIONS_FEATURE] : []),
         ...(store.archiveStore && request.supportedFeatures?.includes(ARCHIVE_ACTIONS_FEATURE) ? [ARCHIVE_ACTIONS_FEATURE] : []),
         ...(request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE) ? [SPACE_ACTIONS_FEATURE] : []),

@@ -3142,8 +3142,19 @@ function handleTabUpdate(tabId, changeInfo, tab) {
     if (isOpeningBookmark) {
         return;
     }
+    // Native event payloads are snapshots. New events or committed renders can
+    // supersede this callback while its window/metadata reads are pending.
+    const displayIsCurrent = displayChanges.capture();
+    const committedDisplay = committedDisplayIsCurrent;
+    const canUpdate = (row = null) => {
+        if (displayIsCurrent() && committedDisplay === committedDisplayIsCurrent &&
+            (!row || (row.isConnected && document.querySelector(`[data-tab-id="${tabId}"]`) === row))) return true;
+        // Title/loading-only updates may have no other render scheduled.
+        refreshCoordinator.invalidateActiveView();
+        return false;
+    };
     chrome.windows.getCurrent({ populate: false }, async (currentWindow) => {
-        if (tab.windowId !== currentWindow.id) return;
+        if (tab.windowId !== currentWindow.id || !canUpdate()) return;
         Logger.log('Tab updated:', tabId, changeInfo, spaces);
 
         // Update tab element if it exists
@@ -3194,6 +3205,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                 // Don't update if the input field is currently focused
                 if (document.activeElement !== titleInput) {
                     const overrides = await Utils.getTabNameOverrides();
+                    if (!canUpdate(tabElement)) return;
                     Logger.log('changeInfo', changeInfo);
                     Logger.log('overrides', overrides);
                     Logger.log('tab.url', tab.url); // Log the tab URL her
@@ -3201,6 +3213,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                     Logger.log('override', override); // Log the override object here
                     let displayDomain = null;
                     const pinnedUrl = tabElement.dataset.pinnedUrl || (await Utils.getPinnedTabState(tabId))?.pinnedUrl || null;
+                    if (!canUpdate(tabElement) || document.activeElement === titleInput) return;
                     const isNavigatedAway = Boolean(pinnedUrl && tab.url && Utils.getPinnedUrlKey(tab.url) !== Utils.getPinnedUrlKey(pinnedUrl));
 
                     // Only force override title when we're still on the pinned URL.
@@ -3243,6 +3256,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
                 tabElement.dataset.url = tab.url;
                 if (tabElement.closest('[data-tab-type="pinned"]')) {
                     const pinnedUrl = tabElement.dataset.pinnedUrl || (await Utils.getPinnedTabState(tabId))?.pinnedUrl;
+                    if (!canUpdate(tabElement)) return;
                     const shouldEnableBack = Boolean(pinnedUrl && tab.url && Utils.getPinnedUrlKey(tab.url) !== Utils.getPinnedUrlKey(pinnedUrl));
                     faviconElement.classList.toggle('pinned-back', shouldEnableBack);
                     faviconElement.title = shouldEnableBack ? 'Back to Pinned URL' : '';

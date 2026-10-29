@@ -7,13 +7,21 @@ import { pathToFileURL } from 'node:url';
 import * as arcify from '../spotlight-bridge-protocol.js';
 import { assertArchiveActionsContract } from './lib/spotlight-pair-archive-contract.mjs';
 import { assertExtendedActionsContract } from './lib/spotlight-pair-extended-contract.mjs';
-import { assertCommonV1Contract, assertInitialSpaceActionsContract } from './lib/spotlight-pair-contract.mjs';
+import { assertCommonV1Contract, assertInitialSpaceActionsContract, assertHelperSourceContract } from './lib/spotlight-pair-contract.mjs';
 
 if (process.argv.length !== 3) throw new Error('Usage: node scripts/test-spotlight-pair-contract.mjs <spotlight-checkout>');
 const peerModule = path => import(pathToFileURL(resolve(process.argv[2], path)).href);
 const spotlight = await peerModule('shared/arcify-bridge-protocol.js');
 const actions = await peerModule('shared/arcify-space-actions-protocol.js');
 const tabActions = await peerModule('shared/arcify-tab-actions-protocol.js');
+
+test('helper source wire contract passes the actual pair and detects drift on either side', () => {
+    assertHelperSourceContract(arcify, spotlight);
+    for (const replacement of [{ HELPER_SOURCE_FEATURE: 'other' }, { validateRequest: message => message }]) {
+        assert.throws(() => assertHelperSourceContract({ ...arcify, ...replacement }, spotlight));
+        assert.throws(() => assertHelperSourceContract(arcify, { ...spotlight, ...replacement }));
+    }
+});
 
 test('actual pair passes despite intentionally different optional-action module layouts', async () => {
     const sentinel = { contractTest: true }, previous = globalThis.chrome;

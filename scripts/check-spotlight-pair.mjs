@@ -11,7 +11,7 @@ import { FavoriteStore } from '../favorite-store.js';
 import { createSpotlightBridge, getBridgeSnapshot } from '../spotlight-bridge.js';
 import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY } from '../spotlight-bridge-protocol.js';
 import * as arcifyProtocol from '../spotlight-bridge-protocol.js';
-import { assertCommonV1Contract, assertInitialSpaceActionsContract } from './lib/spotlight-pair-contract.mjs';
+import { assertCommonV1Contract, assertInitialSpaceActionsContract, assertHelperSourceContract } from './lib/spotlight-pair-contract.mjs';
 import { assertInitialSpaceActionRoundTrips } from './lib/spotlight-pair-actions.mjs';
 import { assertExtendedActionsContract } from './lib/spotlight-pair-extended-contract.mjs';
 import { assertSplitActionsContract } from './lib/spotlight-pair-split-contract.mjs';
@@ -28,6 +28,7 @@ const peerModule = path => import(pathToFileURL(resolve(spotlightRoot, path)).hr
 const spotlightProtocol = await peerModule('shared/arcify-bridge-protocol.js');
 const spotlightActions = await peerModule('shared/arcify-space-actions-protocol.js');
 await assertCommonV1Contract(arcifyProtocol, spotlightProtocol);
+assertHelperSourceContract(arcifyProtocol, spotlightProtocol);
 assertInitialSpaceActionsContract(arcifyProtocol, spotlightActions);
 const spotlightTabActions = await peerModule('shared/arcify-tab-actions-protocol.js');
 assertExtendedActionsContract(arcifyProtocol, spotlightActions, spotlightTabActions);

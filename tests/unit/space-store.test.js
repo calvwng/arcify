@@ -18,7 +18,7 @@ beforeEach(() => {
     local = { spaceModelVersion: 2, spaces: [space('a', [1]), space('b', [2])] };
     session = { spaceSession: true }; sync = {}; mutations = []; groups = [];
     tabs = [{ id: 1, windowId: 1, url: 'https://one.test/', groupId: -1 }, { id: 2, windowId: 1, url: 'https://two.test/', groupId: -1 }];
-    const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, emit(...args) { this.listeners.forEach(fn => fn(...args)); } });
+    const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, removeListener(fn) { this.listeners = this.listeners.filter(listener => listener !== fn); }, emit(...args) { this.listeners.forEach(fn => fn(...args)); } });
     globalThis.chrome = {
         runtime: { getURL: path => `chrome-extension://arcify/${path}` },
         storage: { local: area(local), session: area(session), sync: area(sync), onChanged: event() },
@@ -26,7 +26,7 @@ beforeEach(() => {
             group: async args => { mutations.push(['group', args]); const id = args.groupId ?? 100 + groups.length; if (!groups.some(g => g.id === id)) groups.push({ id, windowId: 1 }); tabs.filter(t => args.tabIds.includes(t.id)).forEach(t => t.groupId = id); return id; },
             move: async (...args) => mutations.push(['move', ...args]) },
         tabGroups: { move: async (...args) => mutations.push(['groupMove', ...args]), onRemoved: event(), onUpdated: event(), query: async () => groups, update: async (id, attrs) => { mutations.push(['update', id, attrs]); Object.assign(groups.find(g => g.id === id), attrs); } },
-        bookmarks: { search: async () => [{ id: 'root' }], getChildren: async () => [], create: async ({ title }) => ({ id: title, title }) }
+        bookmarks: { onMoved: event(), onRemoved: event(), onChanged: event(), search: async () => [{ id: 'root' }], getChildren: async () => [], create: async ({ title }) => ({ id: title, title }) }
     };
 });
 test('independent default ignores group identity and order and retains empty spaces', async () => {
@@ -617,12 +617,50 @@ test('Space deletion removes only its backing subtree and closes owned tabs in e
     chrome.tabs.get = async id => structuredClone(tabs.find(tab => tab.id === id));
     chrome.tabs.remove = async id => { removed.push(id); tabs = tabs.filter(tab => tab.id !== id); };
     chrome.bookmarks.removeTree = async id => trees.push(id);
+    chrome.bookmarks.get = async id => [{ id, parentId: 'root' }];
     const store = new SpaceStore();
     store.favoriteStore = { async initialize() {}, async reconcile() {}, noteSpaceExclusion() {}, ownsTab: tab => (typeof tab === 'number' ? tab : tab?.id) === 4 };
     await store.dispatch({ action: 'delete', spaceId: 'b' });
     assert.deepEqual(removed.sort(), [2, 3]); assert.deepEqual(trees, ['b']);
     assert.deepEqual(tabs.map(tab => tab.id), [1, 4]);
     assert.deepEqual(local.persistentFavorites, [{ id: 'favorite', url: 'https://favorite.test/' }]);
+});
+
+for (const boundary of ['initial', 'tab-read', 'native-read', 'after-close']) for (const change of ['moved', 'missing']) {
+    test(`Space deletion rejects ${change} backing folder at ${boundary}`, async () => {
+        const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+        const removed = [], trees = [];
+        let reads = 0, invalid = boundary === 'initial';
+        chrome.bookmarks.get = async id => {
+            if (boundary === 'tab-read' && ++reads === 2) invalid = true;
+            return invalid ? change === 'missing' ? [] : [{ id, parentId: 'outside' }] : [{ id, parentId: 'root' }];
+        };
+        chrome.tabs.get = async id => { if (boundary === 'native-read') { invalid = true; chrome.bookmarks.onMoved.emit('b'); } return structuredClone(tabs.find(tab => tab.id === id)); };
+        chrome.tabs.remove = async id => { removed.push(id); invalid = true; };
+        chrome.bookmarks.removeTree = async id => trees.push(id);
+        await assert.rejects(store.dispatch({ action: 'delete', spaceId: 'b' }), /unavailable|no longer inside|context changed/);
+        assert.deepEqual(trees, []);
+        assert.deepEqual(removed, boundary === 'after-close' ? [2] : []);
+        assert(store.spaces.some(space => space.id === 'b'));
+    });
+}
+
+for (const change of ['pinned', 'moved']) test(`Space deletion reads native ${change} state after final bookmark validation`, async () => {
+    const store = new SpaceStore(); await store.dispatch({ action: 'get' });
+    const removed = []; let reads = 0;
+    chrome.bookmarks.get = async id => {
+        if (++reads === 2) {
+            if (change === 'pinned') tabs[1].pinned = true;
+            else tabs[1].windowId = 2;
+        }
+        return [{ id, parentId: 'root' }];
+    };
+    chrome.tabs.get = async id => structuredClone(tabs.find(tab => tab.id === id));
+    chrome.tabs.remove = async id => removed.push(id);
+    chrome.bookmarks.removeTree = async () => {};
+    await store.dispatch({ action: 'delete', spaceId: 'b' });
+    assert.deepEqual(removed, []);
+    for (const event of [chrome.bookmarks.onMoved, chrome.bookmarks.onRemoved, chrome.bookmarks.onChanged]) assert.equal(event.listeners.length, 0);
 });
 
 test('registry icon recovery never copies metadata from a different UUID and metadata writes reject that mismatch', async () => {

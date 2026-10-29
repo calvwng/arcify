@@ -654,10 +654,31 @@ export class SpaceStore {
             case 'delete': {
                 const space = this.spaces.find(space => space.id === message.spaceId);
                 if (!space) break;
-                await this.closeOwnedTabs(space.id);
-                if (space.bookmarkFolderId) {
-                    await chrome.bookmarks.removeTree(space.bookmarkFolderId);
-                    await LocalStorage.removeSpaceRegistryEntry(space.bookmarkFolderId);
+                const folderId = space.bookmarkFolderId;
+                let bookmarkChanged = false;
+                const invalidate = () => { bookmarkChanged = true; };
+                const bookmarkEvents = [chrome.bookmarks.onMoved, chrome.bookmarks.onRemoved, chrome.bookmarks.onChanged];
+                if (bookmarkEvents.some(event => !event?.addListener || !event.removeListener)) throw new Error('Bookmark change observation is unavailable.');
+                for (const event of bookmarkEvents) event.addListener(invalidate);
+                const assertFolderUnchanged = () => {
+                    if (bookmarkChanged) throw new Error('The Space bookmark context changed during deletion.');
+                };
+                const validateFolder = async () => {
+                    assertFolderUnchanged();
+                    if (!this.spaces.includes(space) || space.bookmarkFolderId !== folderId) throw new Error('This Space bookmark identity has changed.');
+                    const folder = await getSpaceBookmarkFolder(space);
+                    assertFolderUnchanged();
+                    return folder;
+                };
+                try {
+                    await validateFolder();
+                    await this.closeOwnedTabs(space.id, { beforeRemove: validateFolder, assertBeforeRemove: assertFolderUnchanged });
+                    // Bookmark Manager/Sync may move the folder while tabs close.
+                    await validateFolder();
+                    await chrome.bookmarks.removeTree(folderId);
+                    await LocalStorage.removeSpaceRegistryEntry(folderId);
+                } finally {
+                    for (const event of bookmarkEvents) event.removeListener(invalidate);
                 }
                 this.spaces = this.spaces.filter(entry => entry !== space);
                 if (!this.spaces.length) this.spaces.push(await this.makeSpace(this.defaultSpaceName));
@@ -705,7 +726,7 @@ export class SpaceStore {
         this.forgetTransientOwnership();
         return clone(this.spaces);
     }
-    async closeOwnedTabs(spaceId, { windowId, temporaryOnly = false } = {}) {
+    async closeOwnedTabs(spaceId, { windowId, temporaryOnly = false, beforeRemove = null, assertBeforeRemove = null } = {}) {
         const space = this.spaces.find(space => space.id === spaceId);
         if (!space || this.isTransientWindow(windowId)) return [];
         if (windowId !== undefined) {
@@ -727,10 +748,14 @@ export class SpaceStore {
             // Revalidate the exact tab immediately before removal while holding
             // the same queue as Favorite adoption, release, cleanup and archive.
             let current;
+            if (beforeRemove) await beforeRemove();
             try { current = this.observeTab(await chrome.tabs.get(tab.id)); } catch { continue; }
             await this.transientWindows?.flushObservedUnlocked();
             if (current.windowId !== tab.windowId || current.pinned || current.incognito || this.isGlobalTab(current) || this.isTransientTab(current)
                 || ownerOf(this.spaces, current.id)?.id !== spaceId) continue;
+            // Keep the native read last. Bookmark events fence the folder across
+            // that read without introducing another asynchronous stale-tab gap.
+            assertBeforeRemove?.();
             await chrome.tabs.remove(current.id); this.forgetTab(current.id); closed.push(current.id);
         }
         return closed;
