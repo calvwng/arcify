@@ -1,5 +1,6 @@
 /** Import-safe, source-only Little Arc acceptance. The hosted paired runner owns Chrome. */
 import assert from 'node:assert/strict';
+import { readingBounds, fallbackBounds, readSizePreference } from '../little-arc-window-geometry.js';
 import { randomBytes } from 'node:crypto';
 import { spotlightSurface } from './paired-chrome-keyboard.mjs';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
@@ -214,7 +215,25 @@ export function assertLittleArcLaunch(before, after, { record, events, spotlight
     assert.deepEqual(after.tabs.filter(tab => !before.tabs.some(old => old.id === tab.id)).map(tab => tab.id).sort((a,b) => a-b), [record.tabId, record.controllerTabId].sort((a,b) => a-b));
     assert.deepEqual(after.windows.filter(window => !before.windows.some(old => old.id === window.id)).map(window => window.id), [record.windowId]);
     const window = exact(after.windows, record.windowId); assert.equal(window.type, 'normal'); assert.equal(window.incognito, false);
-    assert(window.width <= 900 && window.width > 0 && window.height <= 720 && window.height > 0);
+    const origin = exact(before.windows, originWindowId);
+    const geometry = after.launchGeometry;
+    assert(geometry?.success, 'Require observed trusted controller geometry context.');
+    const preference = readSizePreference(before.sizePreference);
+    assert.equal(preference.remember, false, 'This launch fixture qualifies default sizing only.');
+    assert.equal(preference.size, null);
+    assert(!preference.mode || preference.mode === 'default');
+    assert.deepEqual(readSizePreference(after.sizePreference), preference, 'Launch cannot change sizing preferences.');
+    assert.deepEqual(geometry.preference, preference);
+    const applied = geometry.status === 'Reading size applied.';
+    assert(applied || geometry.status.startsWith('Source-window fallback;'), 'Unconfirmed/OS-adjusted geometry requires separate qualification.');
+    const expected = applied ? readingBounds(origin, geometry.workArea) : fallbackBounds(origin);
+    assert(expected, 'Applied geometry must have a valid work area containing the source.');
+    assert.equal(window.state, 'normal');
+    for (const key of ['left', 'top', 'width', 'height']) {
+        assert.equal(window[key], expected[key], `Default Little Arc ${key} must match the observed geometry path.`);
+        assert.equal(exact(after.windows, originWindowId)[key], origin[key], 'Launch must preserve source bounds.');
+    }
+    assert.deepEqual(geometry.current, { width: window.width, height: window.height });
     const tab = exact(after.tabs, record.tabId); assert.equal(tab.windowId, record.windowId); assert.equal(tab.url, url); assert.equal(tab.pinned, false);
     assert.equal(exact(after.tabs, record.controllerTabId).windowId, record.windowId);
     assert.deepEqual(ownership(after), ownership(before)); assertLittleArcExcluded(after, [record.tabId, record.controllerTabId]);
@@ -309,10 +328,11 @@ export async function attachLittleArcControllerTargets({ targets, controllerTabI
 }
 
 export async function readLittleArcRawState() {
-        const local = await chrome.storage.local.get(['spaces', 'spaceTabSnapshot', 'pinnedTabStatesById', 'persistentFavorites', 'archivedTabs']);
+        const local = await chrome.storage.local.get(['spaces', 'spaceTabSnapshot', 'pinnedTabStatesById', 'persistentFavorites', 'archivedTabs', 'littleArcWindowSizeV1']);
         const session = await chrome.storage.session.get(['activeSpaces', 'favoriteSession', 'transientWindowSession', 'spotlightBridgeRequests']);
         return { tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, pinned, incognito, active, groupId, splitViewId }) => ({ id, windowId, index, url, pendingUrl: pendingUrl || null, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1 })).sort((a,b) => a.id-b.id),
-            windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, width, height }) => ({ id, type, incognito, focused, width, height })).sort((a,b) => a.id-b.id),
+            sizePreference: local.littleArcWindowSizeV1,
+            windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, left, top, width, height, state }) => ({ id, type, incognito, focused, left, top, width, height, state })).sort((a,b) => a.id-b.id),
             groups: (await chrome.tabGroups.query({})).sort((a,b) => a.id-b.id), spaces: local.spaces || [], savedSnapshot: local.spaceTabSnapshot || [], bindings: local.pinnedTabStatesById || {}, favorites: local.persistentFavorites || [], archivedTabs: local.archivedTabs || [],
             sessionPresence: { registry: Object.hasOwn(session, 'transientWindowSession'), journal: Object.hasOwn(session, 'spotlightBridgeRequests') },
             journal: Object.hasOwn(session, 'spotlightBridgeRequests') ? session.spotlightBridgeRequests : [], favoriteSession: session.favoriteSession || null, activeSpaces: session.activeSpaces || {}, registry: Object.hasOwn(session, 'transientWindowSession') ? session.transientWindowSession : { version: 1, records: [] }, bookmarks: await chrome.bookmarks.getTree() };
@@ -426,6 +446,12 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
             return Boolean(entries[0]?.response);
         }, Boolean, 'the exact durable successful bridge response, not merely a ready native registry');
         const after = await read(), events = await trace(), input = await source.page.evaluate(() => globalThis.__littleArcInputEvents);
+        // Read-only trusted context; never send the initial screen adjustment or
+        // mutate preferences to make an observed launch satisfy the oracle.
+        after.launchGeometry = await controller.evaluate(async token => {
+            const area = { left: screen.availLeft, top: screen.availTop, width: screen.availWidth, height: screen.availHeight };
+            return chrome.runtime.sendMessage({ type: 'arcifyLittleArcGeometry', action: 'context', token, area });
+        }, record.token);
         assertLittleArcTrustedInput(input, { action: 'open', method }); assertLittleArcLaunch(before, after, { record, events, spotlightId, originWindowId, url: prepared.url });
         assert.equal(after.pageStates[record.tabId].topLevel, true); assert.equal(after.pageStates[record.tabId].frameCount, 0);
         await checkpoint('trusted-little-arc-launch', { explicit, method, before, after, record, rows: prepared.rows, events, input, client, screenshot: await screenshot(page, `Little Arc exact top-level ${method} page`) });

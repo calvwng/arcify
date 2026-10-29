@@ -1811,7 +1811,10 @@ try {
                 if (cycle === 0) await screenshot(page,'isolated-overlay-typing-under-strict-host-csp');
                 await page.keyboard.down('Shift');
                 try { await page.keyboard.press('Tab'); } finally { await page.keyboard.up('Shift'); }
-                assert.equal(await surface.evaluate(() => document.activeElement.textContent),'Connection settings');
+                assert.deepEqual(await surface.evaluate(() => ({
+                    label: document.activeElement.textContent,
+                    isSettingsButton: document.activeElement.matches('.arcify-bridge-status > button[type="button"]')
+                })),{label:'Spotlight settings',isSettingsButton:true});
                 await page.keyboard.press('Tab');
                 assert.equal(await surface.$eval('[data-testid="spotlight-input"]',input => input === document.activeElement),true);
                 await page.keyboard.press('Tab');

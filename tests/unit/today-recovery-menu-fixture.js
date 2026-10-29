@@ -51,7 +51,7 @@ export async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOn
  for(const id of ids){selection.register(row(id));split.register(row(id),native.find(tab=>tab.id===id));}
  const select=values=>{selection.clear();for(const id of values)event(row(id),'click',{ctrlKey:true});};
  let release;const tabRead=new Promise(resolve=>{release=()=>resolve(native.find(tab=>tab.id===clicked));});
- const sessions=new EditSessionRegistry();let paints=0,pendingMutations=0;
+ const sessions=new EditSessionRegistry();let paints=0,pendingMutations=0;const idleWaiters=new Set();
  const coordinator=new RefreshCoordinator({isBusy:()=>sessions.isActive()||pendingMutations>0,schedule:()=>null,cancel:()=>{},readSpaces:async()=>context.spaces,adoptSpaces:async()=>true,render:async()=>{
   paints++;for(const id of ids){const old=row(id),copy=old.cloneNode(true);selection.register(copy);old.replaceWith(copy);}selection.reconcile();return true;
  }});
@@ -73,7 +73,7 @@ export async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOn
  },replyHook:reply=>{if(previewMode==='old-backend'&&reply.response?.preview)delete reply.response.preview.protocolVersion;if(previewMode==='malformed'&&reply.response?.preview)reply.response.preview.tabIds=[1];return reply;}});
  registerTodayRecoveryMessages(backend.store);
  const move=createTodaySpaceMoveAction({document,selection,getContext:()=>context,showStatus:report,sendRequest:()=>assert.fail('Recovery must use its bound Port'),
-  begin:()=>{pendingMutations++;},end:()=>{pendingMutations--;coordinator.schedule();}});
+  begin:()=>{pendingMutations++;},end:()=>{pendingMutations--;coordinator.schedule();if(pendingMutations===0){for(const resolve of idleWaiters)resolve();idleWaiters.clear();}}});
  const deps={selectedTabClose:()=>null,document,window,tabMenuActions:{cancelEdit(){}},spaceContextMenu:{close(){}},closeTabContextMenu,createContextMenuSession:(...args)=>{const session=createContextMenuSession(...args);if(invalidateOnClose)session.onClose(()=>selection.clear());return session;},
   tabElement:row(clicked),tab:native.find(tab=>tab.id===clicked),isPinned:false,isBookmarkOnly:false,todaySelection:selection,bookmarkSelection:bookmarks,
   todaySplit:split,moveTodaySelection:move,pendingActiveSpaceId:null,showFavoritesStatus:report,chrome:{tabs:{get:()=>tabRead}},
@@ -81,7 +81,7 @@ export async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOn
   moveTabToSpace:()=>assert.fail('No singleton legacy move'),setActiveSpace:()=>assert.fail('No Space activation'),createSpaceFromInactive:()=>assert.fail('No new Space'),saveTodaySelection(){},editorSessions:sessions};
  const open=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;let tabContextMenuRequest=0;${menuBody};return openTabContextMenu;`)(deps);
  let opening;deps.tabElement.addEventListener('contextmenu',event=>{opening=open(event);});
- return{backend,ports,sender,submits,captures,pendingMutations:()=>pendingMutations,releasePreview:()=>releasePreview,notice:()=>document.getElementById('favoritesDropStatus').textContent,document,window,context,native,row,event,select,selection,split,calls,statuses,sessions,coordinator,release,paints:()=>paints,
+ return{backend,ports,sender,submits,captures,pendingMutations:()=>pendingMutations,whenIdle:()=>pendingMutations===0?Promise.resolve():new Promise(resolve=>idleWaiters.add(resolve)),releasePreview:()=>releasePreview,notice:()=>document.getElementById('favoritesDropStatus').textContent,document,window,context,native,row,event,select,selection,split,calls,statuses,sessions,coordinator,release,paints:()=>paints,
   open:()=>{event(deps.tabElement,'contextmenu',{pageX:0,pageY:0});return opening;},cleanup:async()=>{closeTabContextMenu();await tick();Object.assign(globalThis,previous);}};
 }
 async function setup({inverted=false}={}){

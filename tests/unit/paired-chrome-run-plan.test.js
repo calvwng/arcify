@@ -393,6 +393,8 @@ test('existing callbacks retain their reviewed bytes except exact additive route
             .replace('            if (serveSpotlightSplitFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
             .replace('            if (serveLittleArcFixture(request, response)) return;\n', '')
+            // Preserve the old callback receipt except this exact current-label + semantic-focus assertion.
+            .replace("                assert.deepEqual(await surface.evaluate(() => ({\n                    label: document.activeElement.textContent,\n                    isSettingsButton: document.activeElement.matches('.arcify-bridge-status > button[type=\"button\"]')\n                })),{label:'Spotlight settings',isSettingsButton:true});", "                assert.equal(await surface.evaluate(() => document.activeElement.textContent),'Connection settings');")
             // Only the exact additive case 7 route is normalized; its original callback bytes remain guarded.
             .replace("        await exerciseBookmarkFallback({apiPage:arcifyOptions,spotlightOptions,arcifyOptions,newTabPage,ui,screenshot,poll,fixture,\n            spotlightId,arcifyId,search,sidebarInput,typeUI,clickUI,snapshot,\n            record:async observation=>{report.bookmarkFallback=observation;await saveReport();}});\n", '')
             .replace('        helperNavigation:true,\n', '') }));

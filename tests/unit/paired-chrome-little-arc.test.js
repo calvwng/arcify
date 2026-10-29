@@ -18,7 +18,7 @@ const doc = id => ({ url: URL, title: 'Same title', documentId: `document-${id}`
     value: `unsaved-${id}`, notes: `draft-${id}`, checked: true, sameDocument: true, sameInput: true, sameNotes: true });
 const nativeEvent = (type, ...data) => ({ type: `tabs.${type}`, data });
 const input = patch => ({ type: 'click', trusted: true, key: null, button: 0, repeat: false, composing: false, ctrl: false, alt: false, meta: false, shift: false, ...patch });
-const window = id => ({ id, type: 'normal', incognito: false, focused: false, width: 900, height: 720 });
+const window = id => ({ id, type: 'normal', incognito: false, focused: false, left: 100, top: 100, width: 1200, height: 900, state: 'normal' });
 const record = () => ({ token: TOKEN, windowId: 9, originWindowId: 7, controllerTabId: 201, tabId: 202, memberTabIds: [201,202], phase: 'ready' });
 const dest = () => ({ windowId: 8, spaceId: 'work', bookmarkFolderId: 'work-folder' });
 function state() {
@@ -31,6 +31,8 @@ function launched() {
     const before = state(), after = copy(before), rec = record();
     after.tabs.push(tab(201,9,`chrome-extension://${ARCIFY}/transient-window.html?token=${TOKEN}`), tab(202,9));
     after.windows.push(window(9)); after.registry.records.push(rec); after.pageStates[202] = doc(202);
+    Object.assign(after.windows.at(-1), {left:125,top:100,width:1150,height:900});
+    after.launchGeometry = {success:true,preference:{version:1,remember:false,size:null},workArea:{left:0,top:0,width:1920,height:1080},current:{width:1150,height:900},status:'Reading size applied.'};
     const events = [{ type: 'external', data: { sender: { id: PEER }, message: { type: 'arcify-bridge', version: 1, requestId: 'native-1', command: 'openTransient', windowId: 7, url: URL } } }, nativeEvent('onCreated', copy(after.tabs[2])), nativeEvent('onCreated', copy(after.tabs[3]))];
     after.journal.push({key:`${PEER}:generation:native-1`,fingerprint:JSON.stringify(events[0].data.message),response:{type:'arcify-bridge',version:1,requestId:'native-1',role:'arcify',ok:true,tabId:202,transientWindowId:9,token:TOKEN}});
     return { before, after, options: { record: rec, events, spotlightId: PEER, originWindowId: 7, url: URL } };
@@ -57,6 +59,32 @@ function promoted() {
     return { before, after, options: { record: rec, destination, events, arcifyId: ARCIFY } };
 }
 const verifyLaunch = value => assertLittleArcLaunch(value.before, value.after, value.options);
+test('launch geometry qualifies observed default work-area and explicit fallback paths', () => {
+    assert.doesNotThrow(() => verifyLaunch(launched()));
+    const small = launched();
+    for (const state of [small.before, small.after]) Object.assign(state.windows[0],{left:0,top:0,width:800,height:600});
+    Object.assign(small.after.windows.at(-1),{left:24,top:45,width:752,height:510});
+    Object.assign(small.after.launchGeometry,{workArea:{left:0,top:0,width:800,height:600},current:{width:752,height:510}});
+    assert.doesNotThrow(() => verifyLaunch(small));
+    const fallback = launched();
+    Object.assign(fallback.after.windows.at(-1),{left:125,top:168,width:1150,height:765});
+    Object.assign(fallback.after.launchGeometry,{workArea:null,current:{width:1150,height:765},status:'Source-window fallback; exact work area unavailable.'});
+    assert.doesNotThrow(() => verifyLaunch(fallback));
+});
+test('launch geometry rejects stale ceilings, wrong centering, invalid evidence and preference changes', () => {
+    for (const change of [
+        x=>x.after.windows.at(-1).width=900,
+        x=>x.after.windows.at(-1).height=720,
+        x=>x.after.windows.at(-1).left++, x=>x.after.windows.at(-1).top++,
+        x=>x.after.windows.at(-1).width=0, x=>x.after.windows.at(-1).state='maximized',
+        x=>x.after.windows[0].left++, x=>delete x.after.launchGeometry,
+        x=>x.after.launchGeometry.workArea.left=5000,
+        x=>x.after.launchGeometry.current.width++,
+        x=>x.after.launchGeometry.status='The browser adjusted the requested size. Its current bounds were kept.',
+        x=>x.after.sizePreference={version:1,remember:true,size:{width:900,height:720}},
+        x=>x.after.launchGeometry.preference.remember=true
+    ]) { const value=launched();change(value);assert.throws(()=>verifyLaunch(value)); }
+});
 const verifyRecovered = value => assertLittleArcRecovered(value.before, value.after, value.options);
 const verifyPromoted = value => assertLittleArcPromoted(value.before, value.after, value.options);
 function controls() {
