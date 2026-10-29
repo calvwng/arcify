@@ -18,6 +18,16 @@ let showTabContextMenu,closeTabContextMenu;
 const sidebar=await readFile(new URL('../../sidebar.js',import.meta.url),'utf8');
 const menuBody=sidebar.slice(sidebar.indexOf('const openTabContextMenu = async'),sidebar.indexOf("    tabElement.addEventListener('contextmenu', openTabContextMenu)"));
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
+// Capture real timers before tests mock product setTimeout for preview expiry.
+const scheduleDeadline=setTimeout,cancelDeadline=clearTimeout;
+export async function waitForRecoveryIdle(f,{timeout=10000}={}){
+ let timer;
+ try{
+  await Promise.race([f.whenIdle(),new Promise((_,reject)=>{timer=scheduleDeadline(()=>reject(new Error('Recovery mutation did not finish before the safety deadline')),timeout);})]);
+  assert.equal(f.pendingMutations(),0,'Recovery end callback must release the mutation hold');
+ }finally{cancelDeadline(timer);}
+}
+
 export async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOnClose=false,previewMode="normal",senderMode="normal",seven=false}={}){
  const backend=seven?await setupSeven({inverted}):await setup({inverted});const backendChrome=globalThis.chrome;
  const canonical=seven?[1,2,3,4,5,6,7]:[1,2,3];const ids=inverted?[...canonical].reverse():canonical;
