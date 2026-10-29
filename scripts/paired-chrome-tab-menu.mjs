@@ -1,6 +1,7 @@
 /** CI-only real paired Chrome exercise. Importing this module never launches Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { saveWithFreshStaleNotice } from './paired-chrome-stale-notice.mjs';
 import { replaceInputText, captureVisibleFailurePage, clickFreshResult } from './paired-chrome-ui.mjs';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
@@ -224,11 +225,13 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
     });
     const item = async action => ui(sidebar.page, `Choose ${action} through tab menu`, () => sidebar.page.click(`#tab-context-menu [data-action="${action}"]`));
     const openEditor = async (selector, action) => { await menu(selector); await item(action); await sidebar.page.waitForSelector('#tabEditDialog', { visible: true }); };
-    const edit = async value => ui(sidebar.page, 'Type and save exact tab-menu editor', async () => {
+    const edit = async (value, stale = false) => ui(sidebar.page, 'Type and save exact tab-menu editor', async () => {
         const input = await sidebar.page.$('#tabEditValue'); assert(input);
         try { await replaceInputText(sidebar.page, input, value); } finally { await input.dispose(); }
         assert.equal(await sidebar.page.$eval('#tabEditValue', node => node.value), value);
-        await sidebar.page.click('#tabEditSave');
+        const save = () => sidebar.page.click('#tabEditSave');
+        if (stale) return saveWithFreshStaleNotice({ page: sidebar.page, save, poll });
+        await save();
     });
     const settled = async () => sidebar.page.waitForFunction(() => !document.querySelector('#tabEditDialog'), { polling: 50 });
     const titleRendered = async (selector, title) => sidebar.page.waitForFunction(({ selector, title }) => document.querySelector(selector)?.querySelector('.tab-title-display')?.textContent === title, { polling: 50 }, { selector, title });
@@ -402,17 +405,15 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
         await openEditor(row(twin.id), 'rename');
         await apiPage.evaluate(id => chrome.tabs.remove(id), twin.id);
         const beforeClosedTab = await poll(read, state => { try { assertTabMenuClosedTargetGone(state, twin.id); return true; } catch { return false; } }, 'native and authoritative close cleanup settled before stale save');
-        await edit(`Must not rename closed ${nonce}`); await settled();
-        await sidebar.page.waitForFunction(() => document.getElementById('favoritesDropNotice')?.textContent.includes('changed'), { polling: 50 });
+        const closedTabRejection = await edit(`Must not rename closed ${nonce}`, true); await settled();
         const afterClosedTab = await read(); assertTabMenuCancelled(beforeClosedTab, afterClosedTab);
-        await capture('tab-menu-stale-closed-tab-rejected'); await checkpoint('closed-tab-stale', { externalRace: 'Exact disposable live tab closed through Chrome while its editor was open.', before: beforeClosedTab, after: afterClosedTab });
+        await capture('tab-menu-stale-closed-tab-rejected'); await checkpoint('closed-tab-stale', { externalRace: 'Exact disposable live tab closed through Chrome while its editor was open.', before: beforeClosedTab, after: afterClosedTab, rejection: closedTabRejection });
 
         await openEditor(pin(seeded.stale.id), 'editUrl');
         await apiPage.evaluate(({ id, parentId }) => chrome.bookmarks.move(id, { parentId }), { id: seeded.stale.id, parentId: space.bookmarkFolderId });
-        const beforeStale = await read(); await edit(`${base}/edited`); await settled();
-        await sidebar.page.waitForFunction(() => document.getElementById('favoritesDropNotice')?.textContent.includes('changed'), { polling: 50 });
+        const beforeStale = await read(); const movedPinRejection = await edit(`${base}/edited`, true); await settled();
         const afterStale = await read(); assertTabMenuCancelled(beforeStale, afterStale);
-        await capture('tab-menu-stale-moved-pin-rejected'); await checkpoint('stale', { externalRace: 'Exact disposable bookmark moved through real Chrome API while editor was open.', before: beforeStale, after: afterStale });
+        await capture('tab-menu-stale-moved-pin-rejected'); await checkpoint('stale', { externalRace: 'Exact disposable bookmark moved through real Chrome API while editor was open.', before: beforeStale, after: afterStale, rejection: movedPinRejection });
         await apiPage.evaluate(({ id, parentId }) => chrome.bookmarks.move(id, { parentId }), { id: seeded.stale.id, parentId: folderId });
 
         await menu(pin(seeded.live.id));

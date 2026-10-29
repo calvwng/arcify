@@ -14,6 +14,7 @@ import { exerciseMoveToNewWindow } from './paired-chrome-move-window.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
 import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership, seedFocusedReloadSpacePins } from './paired-chrome-ordinary-favorites.mjs';
 import { normalizeReloadControlWindow } from './paired-chrome-control-window.mjs';
+import { readReloadOnboardingState, readReloadOnboardingDocument, waitForExpectedReloadOnboarding } from './paired-chrome-reload-onboarding.mjs';
 import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
 import { exerciseOverlayRecovery, overlayRecoveryFixtureResponse } from './paired-chrome-overlay-recovery.mjs';
 import { exerciseSpotlightActions, serveSpotlightActionFixture, SPOTLIGHT_ACTION_CASE_NAME } from './paired-chrome-spotlight-actions.mjs';
@@ -764,11 +765,14 @@ async function reloadPairedExtension(name, { preserveForeground = false } = {}) 
     viewCdp.on('Runtime.executionContextsCleared', () => view.invalidations.push({ allContextsCleared: true }));
     report.extensionReloads ||= [];
     const evidence = { name, view, preserveForeground, observations: [], registry: [] };
+    let onboardingBefore = null;
     const expected = { ...report.extensions[name], path: resolve(name === 'arcify' ? ROOT : COMPANION, 'dist') };
     const readRegistry = async () => (await targetsCdp.send('Extensions.getExtensions')).extensions;
     const recordRegistry = async (phase, extensions) => { evidence.registry.push({ phase, extensions, observedAt: new Date().toISOString() }); await saveReport(); };
     report.extensionReloads.push(evidence);
     try {
+        onboardingBefore = name === 'arcify' ? await page.evaluate(readReloadOnboardingState) : null;
+        if (onboardingBefore) evidence.onboardingBefore = onboardingBefore;
         const installedBefore = await readRegistry();
         await recordRegistry('before-reload', installedBefore);
         assert.equal(findInstalledExtension(installedBefore, expected).enabled, true);
@@ -798,6 +802,17 @@ async function reloadPairedExtension(name, { preserveForeground = false } = {}) 
         if (name === 'arcify') arcifyOptions = reopened; else spotlightOptions = reopened;
         if (!page.isClosed()) await page.close();
         if (name === 'arcify') {
+            evidence.onboarding = await waitForExpectedReloadOnboarding({
+                before: onboardingBefore, extensionId: id, readState: () => reopened.evaluate(readReloadOnboardingState), poll,
+                readDocument: async (_tab, onboardingUrl) => {
+                    const pages = (await browser.pages()).filter(candidate => candidate.url() === onboardingUrl);
+                    assert.equal(pages.length, 1, 'Expected one exact onboarding document, without ambiguous URL selection');
+                    const onboarding = await observePage(pages[0]);
+                    await onboarding.waitForFunction(() => document.readyState === 'complete', { polling: 50, timeout: 20_000 });
+                    return onboarding.evaluate(readReloadOnboardingDocument);
+                }
+            });
+            await saveReport();
             await clickUI(spotlightOptions, '#refresh-connection', '#refresh-connection:not([disabled])');
             await spotlightOptions.waitForSelector('#connection-status[data-state="connected"]');
         } else {
