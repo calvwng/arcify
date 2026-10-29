@@ -38,7 +38,7 @@ export async function checkHelperSource(request, peerId, api = chrome) {
     if (!live) throw stale();
     let tab;
     try { tab = await api.tabs.get(source.tabId); } catch { throw stale(); }
-    if (tab?.id !== source.tabId || tab.windowId !== request.windowId || tab.url !== source.url || tab.pendingUrl || tab.status === 'loading') throw stale();
+    if (tab?.id !== source.tabId || tab.windowId !== request.windowId || tab.url !== source.nativeUrl || tab.pendingUrl || tab.status === 'loading') throw stale();
     // Chrome has no atomic conditional create/update. This check is the final
     // source read before the caller's mutation, not an atomic browser guarantee.
 }

@@ -18,11 +18,15 @@ const unsafeUrls = [undefined, null, 42, '', '/relative', 'javascript:alert(1)',
 const reject = (operation, code, label) => assert.throws(operation, { code }, label);
 
 export function assertHelperSourceContract(arcify, spotlight) {
-    const helperSource = { tabId: 17, url: `chrome-extension://${PEER}/newtab.html`, token: '00000000-0000-0000-0000-000000000001' };
+    const helperSource = { tabId: 17, url: `chrome-extension://${PEER}/newtab.html`, nativeUrl: `chrome-extension://${PEER}/newtab.html`, token: '00000000-0000-0000-0000-000000000001' };
     for (const [label, protocol] of [['Arcify', arcify], ['Spotlight', spotlight]]) {
         assert.equal(protocol.HELPER_SOURCE_FEATURE, 'helperSourceV1', `${label} helper capability`);
         const valid = request('openTab', { url: 'https://target.test/', helperSource, supportedFeatures: ['helperSourceV1'] });
         assert.deepEqual(protocol.validateRequest(valid, COMMON_COMMANDS), valid);
+        for (const nativeUrl of ['chrome://newtab', 'chrome://newtab/']) {
+            const alias = { ...valid, helperSource: { ...helperSource, nativeUrl } };
+            assert.deepEqual(protocol.validateRequest(alias, COMMON_COMMANDS), alias);
+        }
         const hello = request('hello', { supportedFeatures: ['globalFavoritesV1', 'sharedTodayV1', 'helperSourceV1'] });
         assert.deepEqual(protocol.validateRequest(hello, COMMON_COMMANDS), hello);
         const cases = [
@@ -30,6 +34,8 @@ export function assertHelperSourceContract(arcify, spotlight) {
             { ...valid, command: 'navigateTab', tabId: 17 },
             { ...valid, helperSource: null },
             ...[{ tabId: 0 }, { url: 'https://page.test/' }, { url: `chrome-extension://${PEER}/options.html` },
+                { nativeUrl: undefined }, { nativeUrl: 'chrome://newtab/?x' }, { nativeUrl: 'chrome://new-tab-page/' },
+                { nativeUrl: `chrome-extension://${'b'.repeat(32)}/newtab.html` },
                 { token: 'not-a-token' }, { extra: true }].map(patch => ({ ...valid, helperSource: { ...helperSource, ...patch } }))
         ];
         for (const message of cases) reject(() => protocol.validateRequest(message, COMMON_COMMANDS), 'INVALID_REQUEST', `${label} rejects malformed helper source`);

@@ -151,7 +151,7 @@ ${dispatchInput}  pull_request:`));
         .replace("      - 'tests/unit/paired-chrome-move-drag-wiring.test.js'\n", '')
         .replace("      - 'docs/move-drag-paired-ci.md'\n", '')
         .replace(dispatchInput, '').replaceAll(`    if: ${legacyGate}\n`, '').replace(/\n$/, '')
-        .replaceAll('75aa85e1a1ff3dcdb222374c801fa98d1818c4a0', 'c13511fd36d56358156c10336b8961b7ef95d5bc');
+        .replaceAll('b8b193c1f803179f86ab2e2397e5f1169256f49d', 'c13511fd36d56358156c10336b8961b7ef95d5bc');
     assert.equal(createHash('sha256').update(restored).digest('hex'),
         'ee6bc1245b90a30d2f4ffa17cbeb961f8ce08e95ea65aa4434316194cfc2ab74',
         'Original events, permissions, job bodies and order remain unchanged apart from the exact gate and reviewed companion-pin upgrade.');
@@ -186,7 +186,7 @@ test('all paired scopes use the same exact reconciled companion pin and retain a
     const littleArcPin = source.match(/const PINNED_LITTLE_ARC_SPOTLIGHT = '([0-9a-f]{40})';/)?.[1];
     assert(littleArcPin, 'Little Arc must have a reviewed literal full commit ID, never a placeholder or a mutable branch.');
     assert.equal(littleArcPin, legacyPin);
-    assert.equal(legacyPin, '75aa85e1a1ff3dcdb222374c801fa98d1818c4a0');
+    assert.equal(legacyPin, 'b8b193c1f803179f86ab2e2397e5f1169256f49d');
     for (const name of legacyJobNames) {
         assert.equal(jobSource(name).match(/repository: calvwng\/arcify-spotlight\n          ref: (.*)/)?.[1], legacyPin);
         assert(jobSource(name).includes(littleArcPin));

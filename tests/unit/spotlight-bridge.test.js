@@ -47,7 +47,7 @@ const getTab = id => {
     return tab;
 };
 const helperPayload = () => ({ url: 'https://new.test/', supportedFeatures: ['helperSourceV1'],
-    helperSource: { tabId: 1, url: `chrome-extension://${PEER}/newtab.html`, token: '00000000-0000-0000-0000-000000000001' } });
+    helperSource: { tabId: 1, url: `chrome-extension://${PEER}/newtab.html`, nativeUrl: `chrome-extension://${PEER}/newtab.html`, token: '00000000-0000-0000-0000-000000000001' } });
 function reorder(windowId, ids, index) {
     const ordered = tabs.filter(tab => tab.windowId === windowId).sort((a, b) => a.index - b.index);
     const moving = ids.map(getTab);
@@ -1212,8 +1212,35 @@ test('helper source rejects absent negotiation, foreign helper URL and refused g
     const store = await makeStore(), handle = createSpotlightBridge(store), payload = helperPayload(); getTab(1).url = payload.helperSource.url;
     const { supportedFeatures, ...unnegotiated } = payload;
     assertError(await handle(request('openTab', unnegotiated, 'unnegotiated'), SENDER), 'INVALID_REQUEST');
-    assertError(await handle(request('openTab', { ...payload, helperSource: { ...payload.helperSource, url: `chrome-extension://${SELF}/newtab.html` } }, 'foreign'), SENDER), 'STALE_HELPER_SOURCE');
+    assertError(await handle(request('openTab', { ...payload, helperSource: { ...payload.helperSource, url: `chrome-extension://${SELF}/newtab.html`, nativeUrl: `chrome-extension://${SELF}/newtab.html` } }, 'foreign'), SENDER), 'STALE_HELPER_SOURCE');
     chrome.runtime.sendMessage = (peer, message, reply) => reply({ live: false });
     assertError(await handle(request('openTab', payload, 'refused'), SENDER), 'STALE_HELPER_SOURCE');
     assert.equal(writes('tab.create').length, 0);
+});
+
+for (const nativeUrl of ['chrome://newtab', 'chrome://newtab/']) test(`provider accepts own helper document attested over exact native alias ${nativeUrl}`, async () => {
+    const store = await makeStore(), payload = helperPayload();
+    payload.helperSource.nativeUrl = nativeUrl; getTab(1).url = nativeUrl;
+    chrome.runtime.sendMessage = (peer, message, reply) => {
+        assert.equal(peer, PEER); assert.equal(message.url, `chrome-extension://${PEER}/newtab.html`);
+        assert.equal(message.nativeUrl, nativeUrl); assert.equal(message.tabId, 1); reply({ live: true });
+    };
+    const response = await createSpotlightBridge(store)(request('openTab', payload), SENDER);
+    assert.equal(response.ok, true, JSON.stringify(response)); assert.equal(writes('tab.create').length, 1);
+});
+
+for (const changed of ['chrome://newtab', `chrome-extension://${PEER}/newtab.html`, 'https://other.test/']) test(`provider rejects captured native alias changed to ${changed} during attestation without an event`, async () => {
+    const store = await makeStore(), payload = helperPayload();
+    payload.helperSource.nativeUrl = 'chrome://newtab/'; getTab(1).url = payload.helperSource.nativeUrl;
+    chrome.runtime.sendMessage = (peer, message, reply) => { getTab(1).url = changed; reply({ live: true }); };
+    assertError(await createSpotlightBridge(store)(request('openTab', payload), SENDER), 'STALE_HELPER_SOURCE');
+    assert.equal(writes('tab.create').length, 0);
+});
+
+test('provider never accepts an aliased helper owned by a different extension document', async () => {
+    const store = await makeStore(), payload = helperPayload();
+    payload.helperSource.nativeUrl = 'chrome://newtab/'; payload.helperSource.url = `chrome-extension://${SELF}/newtab.html`; getTab(1).url = 'chrome://newtab/';
+    let challenged = false; chrome.runtime.sendMessage = () => { challenged = true; };
+    assertError(await createSpotlightBridge(store)(request('openTab', payload), SENDER), 'STALE_HELPER_SOURCE');
+    assert.equal(challenged, false); assert.equal(writes('tab.create').length, 0);
 });
