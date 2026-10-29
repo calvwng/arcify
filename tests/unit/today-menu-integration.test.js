@@ -46,7 +46,7 @@ async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOnClose=f
   try{const batch=await moveTodayTabsToSpace(store,request);context.spaces=store.spaces;return{success:true,batch};}
   catch(error){return{success:false,error:error.message,...(error.batch?{batch:error.batch}:{})};}
  }});
- const deps={document,window,tabMenuActions:{cancelEdit(){}},spaceContextMenu:{close(){}},closeTabContextMenu,createContextMenuSession:(...args)=>{const session=createContextMenuSession(...args);if(invalidateOnClose)session.onClose(()=>selection.clear());return session;},
+ const deps={selectedTabClose:()=>null,document,window,tabMenuActions:{cancelEdit(){}},spaceContextMenu:{close(){}},closeTabContextMenu,createContextMenuSession:(...args)=>{const session=createContextMenuSession(...args);if(invalidateOnClose)session.onClose(()=>selection.clear());return session;},
   tabElement:row(clicked),tab:native.find(tab=>tab.id===clicked),isPinned:false,isBookmarkOnly:false,todaySelection:selection,bookmarkSelection:{clear(){}},
   todaySplit:split,moveTodaySelection:move,pendingActiveSpaceId:null,showFavoritesStatus:value=>statuses.push(value),chrome:{tabs:{get:()=>tabRead}},
   actionsForTabRow:(element,options)=>({selectionCount:options.selectionCount}),showTabContextMenu,closeTab(){},spaces:context.spaces,

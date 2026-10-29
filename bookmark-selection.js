@@ -12,6 +12,7 @@ const sameContext = (a, b) => a && b && ['windowId', 'spaceId', 'bookmarkFolderI
 export function createBookmarkSelection({ document, getContext, onGesture = () => {} }) {
     const registered = new WeakMap();
     let selected = new Map(), anchor = null, scope = null, view = [], revision = 0, interaction = 0, image = null;
+    let activationAnchorPending = false;
     const status = document.createElement('div');
     status.id = 'bookmarkSelectionStatus'; status.className = 'bookmark-selection-status';
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); status.setAttribute('aria-atomic', 'true');
@@ -67,7 +68,7 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
     function clear() {
         interaction++;
         if (selected.size || anchor) revision++;
-        selected.clear(); anchor = null; scope = null; paint();
+        selected.clear(); anchor = null; scope = null; activationAnchorPending = false; paint();
     }
     function clearForActivation() {
         // Activation/blur clears the batch, but a still-visible exact saved
@@ -91,17 +92,23 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
         }
         if (anchor) {
             const nextAnchor = entries.find(entry => entry.bookmarkId === anchor.bookmarkId);
-            if (!sameBookmark(anchor, nextAnchor)) { anchor = null; changed = true; }
+            if (!sameBookmark(anchor, nextAnchor)) { anchor = null; activationAnchorPending = false; changed = true; }
             else anchor = nextAnchor;
         }
         if (changed) { revision++; paint(); }
         return entries;
     }
-    function select(element, event) {
+    function select(element, event, extendActivation = false) {
         const entries = reconcile(), index = entries.findIndex(entry => entry.element === element);
         if (index < 0) return false;
         onGesture();
         const entry = entries[index], additive = event.ctrlKey || event.metaKey;
+        // A plain activation is the first row of a subsequent Ctrl/Cmd-click
+        // batch. Consume this once; toggling the batch empty must not resurrect it.
+        if (extendActivation && additive && !event.shiftKey && activationAnchorPending && anchor && anchor.bookmarkId !== entry.bookmarkId) {
+            selected.set(anchor.bookmarkId, anchor);
+        }
+        activationAnchorPending = false;
         if (event.shiftKey) {
             const start = entries.findIndex(item => item.bookmarkId === anchor?.bookmarkId);
             if (!additive) selected.clear();
@@ -124,14 +131,14 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
             if ((event.button ?? 0) !== 0) { clear(); return; }
             if (modifiers(event)) {
                 // Even an unavailable/hidden row must not activate on a modifier.
-                event.preventDefault(); event.stopImmediatePropagation(); select(element, event);
+                event.preventDefault(); event.stopImmediatePropagation(); select(element, event, true);
             } else {
                 onGesture();
                 const entry = reconcile().find(item => item.element === element);
                 clear();
                 // Ordinary activation clears the batch but establishes the
                 // familiar Shift anchor for as long as this exact view survives.
-                if (entry) { scope = context(); anchor = entry; revision++; }
+                if (entry) { scope = context(); anchor = entry; activationAnchorPending = true; revision++; }
             }
         }, true);
         element.addEventListener('dblclick', event => {
@@ -147,6 +154,7 @@ export function createBookmarkSelection({ document, getContext, onGesture = () =
         interaction++;
         const entries = reconcile(), entry = entries.find(item => item.element === element);
         if (!entry) { clear(); return null; }
+        activationAnchorPending = false;
         onGesture();
         if (!selected.has(entry.bookmarkId)) { selected = new Map([[entry.bookmarkId, entry]]); anchor = entry; revision++; paint(); }
         if (selected.size > MAX_BOOKMARK_SELECTION) return { error: `Select at most ${MAX_BOOKMARK_SELECTION} bookmarks for one action. Nothing was changed.` };

@@ -1,3 +1,5 @@
+import { createPeekService, PEEK_RECEIPTS_KEY } from '../../peek.js';
+import { createLittleArcHeaderService } from '../../little-arc-header.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SpaceStore, ownerOf } from '../../space-store.js';
@@ -280,4 +282,92 @@ test('orphan recovery rejects an ordinary-window page even when its URL matches'
     assert.equal(f.mutations.length, mutationCount); assert.equal(ownerOf(store.spaces, 1)?.id, 'a');
     const [record] = await store.transientWindows.listUnlocked();
     assert.equal(record.phase, 'orphan'); assert.equal(record.tabId, null); assert.equal(store.isTransientTab(original.tabId), true);
+});
+
+
+async function peekFixture(t) {
+ const f=fixture(); t.after(async()=>{f.failCheckpoint(false);await new Promise(r=>setTimeout(r,250));await f.store.run(()=>{});}); await f.store.run(()=>{});
+ f.tabs.get(1).active=true; f.windows.get(10).focused=true; f.store.active[10]='a';
+ chrome.runtime.sendMessage=async()=>({authorized:true,selection:{mode:'original',url:'https://peek.test/original',documentId:null,frameId:null,revision:null}});
+ chrome.tabs.update=async(id,change)=>{const tab=f.tabs.get(id);if(change.active)for(const other of f.tabs.values())if(other.windowId===tab.windowId)other.active=other.id===id;Object.assign(tab,change);return copy(tab);};
+ chrome.windows.update=async(id,change)=>{Object.assign(f.windows.get(id),change);return copy(f.windows.get(id));};
+ chrome.tabs.remove=async id=>{f.mutations.push(['remove',id]);f.tabs.delete(id);};
+ const service=createPeekService(f.store),source={tabId:1,windowId:10,url:'https://same.test/'},connection='11111111-1111-4111-8111-111111111111';
+ const prepared=await f.store.run(()=>service.prepare(source,'https://peek.test/original',connection,'paired','g',async()=>{}));
+ return {...f,service,source,connection,prepared,execute:()=>f.store.run(()=>service.execute(source,connection,prepared.operation,'expand','paired','g',async()=>{}))};
+}
+test('Peek immediate controller cleanup preserves ownership after queued native creation/removal events',async t=>{
+ const f=await peekFixture(t);f.store.active[10]='b';
+ // Match background.js event-time window provenance, not only SpaceStore.install.
+ const createWindow=chrome.windows.create;chrome.windows.create=async options=>{const result=await createWindow(options);chrome.tabs.onUpdated.emit(result.tabs[0].id,{url:result.tabs[0].url},copy(result.tabs[0]));return result;};
+ chrome.windows.onRemoved.addListener(id=>{f.store.transientWindows.observeWindowRemoved(id);f.store.run(()=>f.store.transientWindows.flushObservedUnlocked()).catch(()=>{});});
+ chrome.tabs.remove=async id=>{const tab=f.tabs.get(id);f.mutations.push(['remove',id]);f.tabs.delete(id);chrome.tabs.onRemoved.emit(id,{windowId:tab.windowId,isWindowClosing:true});
+  if(![...f.tabs.values()].some(v=>v.windowId===tab.windowId)){f.windows.delete(tab.windowId);chrome.windows.onRemoved.emit(tab.windowId);}
+ };
+ const result=await f.execute();await f.store.run(()=>{});
+ const records=await f.store.transientWindows.listUnlocked();
+ assert.equal(ownerOf(f.store.spaces,result.tabId)?.id,'b',JSON.stringify({records,spaces:f.store.spaces,tab:await chrome.tabs.get(result.tabId)}));
+ assert.equal(f.local.spaceTabSnapshot.filter(r=>r.tabId===result.tabId&&r.spaceId==='b').length,1);
+ assert.equal(f.mutations.filter(m=>m[0]==='tabCreate').length,1);assert.equal(f.store.isTransientTab(result.tabId),false);
+});
+test('Peek through real transient journal creates one page, commits current action-time Space, acknowledges and survives restart',async t=>{
+ const f=await peekFixture(t);f.store.active[10]='b';const result=await f.execute();await f.store.run(()=>{});
+ assert.equal(result.completed,true);assert.equal(result.spaceId,'b');assert.equal(f.mutations.filter(m=>m[0]==='tabCreate').length,1);assert.equal(f.mutations.filter(m=>m[0]==='tabMove').length,1);
+ assert.equal(ownerOf(f.store.spaces,result.tabId)?.id,'b');assert.equal(f.local.spaceTabSnapshot.filter(r=>r.tabId===result.tabId&&r.spaceId==='b').length,1);
+ assert.equal(f.store.isTransientTab(result.tabId),false);assert.equal(f.session[PEEK_RECEIPTS_KEY][0].phase,'completed');
+ await f.store.run(()=>f.service.acknowledge(f.source,f.connection,f.prepared.operation,async()=>{}));assert.equal(f.session[PEEK_RECEIPTS_KEY].length,0);
+ const cold=f.makeStore();await cold.run(()=>{});assert.equal(ownerOf(cold.spaces,result.tabId)?.id,'b');
+});
+for(const fault of ['unknownCreate','membershipWrite','cancelBeforeMove','cancelAfterMove','navigationDuringCommit'])test(`Peek real transient ${fault} preserves exact page/quarantine and never retries`,async t=>{
+ const f=await peekFixture(t);let knownOpened=false;
+ if(fault==='unknownCreate'){const create=chrome.tabs.create;chrome.tabs.create=async options=>{const tab=await create(options);throw Error('native acknowledgement lost');};}
+ if(fault==='membershipWrite')f.failCheckpoint(true);
+ if(fault==='cancelBeforeMove'){const create=chrome.tabs.create;chrome.tabs.create=async options=>{const tab=await create(options);chrome.runtime.sendMessage=async()=>({authorized:false});return tab;};}
+ if(fault==='cancelAfterMove'){const move=chrome.tabs.move;chrome.tabs.move=async(...args)=>{const tab=await move(...args);chrome.runtime.sendMessage=async()=>({authorized:false});return tab;};}
+ if(fault==='navigationDuringCommit'){
+  const persist=f.store.persist.bind(f.store);f.store.persist=async options=>{const result=await persist(options);f.tabs.get(1).url='https://source.test/new';return result;};
+  // After move dispatch, exact validated destination persistence can finish.
+  // No rollback is attempted; native move/ownership receipt determines outcome.
+ }
+ try{const result=await f.execute();knownOpened=result.completed;}catch{}
+ f.failCheckpoint(false);await f.store.run(()=>{});
+ const creates=f.mutations.filter(m=>m[0]==='tabCreate');assert.equal(creates.length,1);
+ const page=[...f.tabs.values()].find(tab=>tab.url==='https://peek.test/original');assert(page);assert(f.tabs.has(1));
+ await assert.rejects(f.execute());assert.equal(f.mutations.filter(m=>m[0]==='tabCreate').length,1);
+ if(!knownOpened){assert.equal(ownerOf(f.store.spaces,page.id),undefined);assert.equal(f.store.isTransientTab(page.id),true);}
+ const cold=f.makeStore();await cold.run(()=>{});if(!knownOpened){assert.equal(cold.isTransientTab(page.id),true);assert.equal(ownerOf(cold.spaces,page.id),undefined);}
+ if(fault==='navigationDuringCommit'){assert.equal(knownOpened,true);assert.equal(ownerOf(cold.spaces,page.id)?.id,'a');}
+ else{f.tabs.get(1).active=true;f.windows.get(10).focused=true;const newService=createPeekService(cold);await assert.rejects(newService.prepare(f.source,'https://peek.test/original',crypto.randomUUID(),'paired','g',async()=>{}));}
+});
+
+test('header review through real store preserves native page until separately authenticated controller promotion',async t=>{
+ const f=fixture();t.after(async()=>{await new Promise(r=>setTimeout(r,250));await f.store.run(()=>{});});await f.store.run(()=>{});
+ const created=await f.store.run(()=>f.store.transientWindows.openUnlocked({url:'https://same.test/',originWindowId:10}));await f.store.run(()=>{});
+ chrome.runtime.sendMessage=async()=>{};
+ chrome.tabs.update=async(id,change)=>{const tab=f.tabs.get(id);Object.assign(tab,change);if(change.active)chrome.tabs.onActivated.emit({tabId:id,windowId:tab.windowId});return copy(tab);};
+ chrome.windows.update=async(id,change)=>{Object.assign(f.windows.get(id),change);return copy(f.windows.get(id));};
+ const service=createLittleArcHeaderService(f.store);f.store.littleArcHeader=service;f.store.active[10]='a';service.remember(created,10);
+ const source={tabId:created.tabId,windowId:created.windowId,url:'https://same.test/'};
+ const context=await f.store.run(()=>service.inspect(source,'paired','generation'));
+ await f.store.run(()=>service.review(source,context.viewId,{windowId:10,spaceId:'b',bookmarkFolderId:'b'},'paired','generation',async()=>{}));
+ assert.equal(f.tabs.get(created.tabId).windowId,created.windowId);assert.equal(ownerOf(f.store.spaces,created.tabId),undefined);assert.equal(f.mutations.filter(m=>m[0]==='tabMove').length,0);
+ const control=createTransientControlHandler(f.store),sender=controlSender(f,created);
+ const preview=await control({type:'arcifyTransientWindow',action:'context',token:created.token},sender);assert.equal(preview.reviewDraft.spaceId,'b');
+ const result=await control({type:'arcifyTransientWindow',action:'promote',token:created.token,tabId:created.tabId,windowId:10,spaceId:'b',bookmarkFolderId:'b'},sender);
+ assert.equal(result.tabId,created.tabId);assert.equal(f.tabs.get(created.tabId).windowId,10);assert.equal(f.tabs.get(created.tabId).url,'https://same.test/');assert.equal(ownerOf(f.store.spaces,created.tabId)?.id,'b');assert.equal(ownerOf(f.store.spaces,1)?.id,'a');assert.equal(f.mutations.filter(m=>m[0]==='tabMove').length,1);
+});
+
+
+test('direct Shift-click Little Arc remains transient until explicit header placement moves the same page',async t=>{
+ const f=await peekFixture(t);f.store.littleArcHeader=createLittleArcHeaderService(f.store);
+ const opened=await f.store.run(()=>f.service.execute(f.source,f.connection,f.prepared.operation,'fallback','paired','g',async()=>{}));await f.store.run(()=>{});
+ assert.equal(opened.completed,true);assert.equal(opened.action,'fallback');assert.equal(f.mutations.filter(m=>m[0]==='tabCreate').length,1);assert.equal(f.mutations.filter(m=>m[0]==='tabMove').length,0);
+ assert.equal(ownerOf(f.store.spaces,opened.tabId),undefined);assert.equal(f.store.isTransientTab(opened.tabId),true);
+ const [record]=await f.store.transientWindows.listUnlocked();assert.equal(record.tabId,opened.tabId);
+ const source={tabId:opened.tabId,windowId:opened.windowId,url:'https://peek.test/original'};
+ const context=await f.store.run(()=>f.store.littleArcHeader.inspect(source,'paired','g'));
+ await f.store.run(()=>f.store.littleArcHeader.review(source,context.viewId,{windowId:10,spaceId:'b',bookmarkFolderId:'b'},'paired','g',async()=>{}));
+ assert.equal(f.mutations.filter(m=>m[0]==='tabMove').length,0);
+ const control=createTransientControlHandler(f.store);const result=await control({type:'arcifyTransientWindow',action:'promote',token:record.token,tabId:opened.tabId,windowId:10,spaceId:'b',bookmarkFolderId:'b'},controlSender(f,record));
+ assert.equal(result.tabId,opened.tabId);assert.equal(ownerOf(f.store.spaces,opened.tabId)?.id,'b');assert.equal(f.mutations.filter(m=>m[0]==='tabCreate').length,1);assert.equal(f.mutations.filter(m=>m[0]==='tabMove').length,1);
 });

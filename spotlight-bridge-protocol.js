@@ -1,9 +1,11 @@
+import { normalizeBrowserPageUrl } from './browser-page-url.js';
 // Protocol v1 is deliberately extension-to-extension only. No website origin is trusted.
 export const BRIDGE_TYPE = 'arcify-bridge';
 export const BRIDGE_VERSION = 1;
 export const PEER_KEY = 'arcifyBridgePeerId';
 export const PAIRING_GENERATION_KEY = 'arcifyBridgePairingGeneration';
 export const GLOBAL_FAVORITES_FEATURE = 'globalFavoritesV1';
+export const ROUTED_OPEN_FEATURE = 'sourceRoutedOpenV1';
 export const SPACE_ACTIONS_FEATURE = 'spaceActionsV1';
 export const ARCHIVE_ACTIONS_FEATURE = 'archiveActionsV1';
 export const SPLIT_ACTIONS_FEATURE = 'splitActionsV1';
@@ -13,7 +15,7 @@ export const TAB_ACTION_COMMANDS = ['renameCurrentTab', 'editCurrentPinUrl', 'du
 export const SPACE_ACTION_COMMANDS = ['openSettings', 'createSpaceFolder', 'pinCurrentTab', 'removeCurrentPin'];
 export const SPACE_NAVIGATION_FEATURE = 'spaceNavigationV1';
 export const SPACE_NAVIGATION_COMMANDS = ['switchSpace', 'moveCurrentTodayTab'];
-const supportedFeatures = [GLOBAL_FAVORITES_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, ARCHIVE_ACTIONS_FEATURE, SPLIT_ACTIONS_FEATURE];
+const supportedFeatures = ['sharedTodayV1', GLOBAL_FAVORITES_FEATURE, ROUTED_OPEN_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, ARCHIVE_ACTIONS_FEATURE, SPLIT_ACTIONS_FEATURE];
 export const isExtensionId = value => typeof value === 'string' && /^[a-p]{32}$/.test(value);
 export const isWindowId = value => Number.isSafeInteger(value) && value > 0;
 const isId = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
@@ -27,7 +29,11 @@ export function trustedSender(sender, peerId) {
 export function isSafeUrl(value) {
     if (typeof value !== 'string' || value.length > 16384) return false;
     if (value === 'about:blank') return true;
-    try { return ['http:', 'https:', 'file:', 'chrome:'].includes(new URL(value).protocol); }
+    try {
+        const protocol = new URL(value).protocol;
+        return ['chrome:', 'helium:'].includes(protocol) ? normalizeBrowserPageUrl(value) !== null
+            : ['http:', 'https:', 'file:'].includes(protocol);
+    }
     catch { return false; }
 }
 // Saved Favorites preserve the narrower bookmark-drop HTTP(S) boundary.
@@ -44,6 +50,8 @@ export function isTransientUrl(value) {
     } catch { return false; }
 }
 const commandFields = {
+    openRoutedTab: ['url', 'source'],
+    openSharedToday: ['tabId', 'ownerWindowId', 'spaceId', 'bookmarkFolderId'],
     splitActionContext: ['tabId'], createSplitView: ['context', 'target'], endSplitView: ['context'],
     archiveContext: ['tabId'], reopenArchivedTab: ['context', 'viewId', 'entryId'],
     hello: [], snapshot: [], invalidate: [], activateSpace: ['spaceId'], activateTab: ['tabId'],
@@ -148,7 +156,13 @@ export function validateRequest(message, commands) {
         || new Set(message.supportedFeatures).size !== message.supportedFeatures.length
         || message.supportedFeatures.some(feature => !supportedFeatures.includes(feature))))
         throw bridgeError('INVALID_REQUEST', 'Invalid supported feature marker.');
-    if (['activateSpace', 'openBookmark'].includes(message.command) && !isId(message.spaceId)
+    if (message.command === 'openRoutedTab' && (!message.supportedFeatures?.includes(ROUTED_OPEN_FEATURE)
+        || !isTransientUrl(message.url) || !exactKeys(message.source, ['tabId','url','token'])
+        || !isTabId(message.source.tabId) || !isTransientUrl(message.source.url)
+        || typeof message.source.token !== 'string' || !/^[0-9a-f-]{36}$/.test(message.source.token)))
+        throw bridgeError('INVALID_REQUEST', 'Invalid exact routed source.');
+    if (message.command === 'openSharedToday' && (!isTabId(message.tabId) || !isWindowId(message.ownerWindowId) || !isId(message.spaceId) || !isId(message.bookmarkFolderId) || !message.supportedFeatures?.includes('sharedTodayV1'))
+        || ['activateSpace', 'openBookmark'].includes(message.command) && !isId(message.spaceId)
         || message.command === 'openTab' && message.spaceId !== undefined && !isId(message.spaceId)
         || ['activateTab', 'navigateTab', 'startupSuggestion', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext', 'splitActionContext'].includes(message.command) && !isTabId(message.tabId)
         || ['openTab', 'navigateTab'].includes(message.command) && !isSafeUrl(message.url)

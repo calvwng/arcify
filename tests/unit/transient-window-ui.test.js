@@ -175,3 +175,13 @@ test('a delayed post-recovery context refresh never reenables the old recovery c
     assert.equal(f.calls.filter(request => request.action === 'recover').length, 1);
     assert.equal(f.calls.some(request => request.action === 'promote'), false);
 });
+
+
+test('header draft preselects exact target but requires separate trusted final submit',async()=>{
+ const context=data();context.reviewDraft={draftId:'draft',windowId:30,spaceId:'work',bookmarkFolderId:'folder'};
+ const f=await fixture({context});assert.equal(f.node('destination-window').value,'30');assert.equal(f.node('destination-space').value,'work');assert.match(f.node('status').textContent,/Nothing moved/);assert.match(f.node('promote').textContent,/Confirm: Open in Work/);
+ assert.equal(f.calls.filter(r=>r.action==='promote').length,0);f.submit(false);await tick();assert.equal(f.calls.filter(r=>r.action==='promote').length,0);f.submit(true);await tick();assert.equal(f.calls.filter(r=>r.action==='promote').length,1);assert.equal(f.calls.find(r=>r.action==='promote').windowId,30);
+});
+test('stale header draft never silently selects replacement folder or missing window',async()=>{
+ for(const draft of [{draftId:'a',windowId:99,spaceId:'work',bookmarkFolderId:'folder'},{draftId:'b',windowId:30,spaceId:'work',bookmarkFolderId:'replacement'}]){const context=data();context.reviewDraft=draft;const f=await fixture({context});assert.equal(f.node('destination-space').value,'');assert.equal(f.node('promote').disabled,true);assert.equal(f.calls.filter(r=>r.action==='promote').length,0);}
+});

@@ -22,7 +22,7 @@ beforeEach(() => {
     globalThis.chrome = {
         runtime: { getURL: path => `chrome-extension://arcify/${path}` },
         storage: { local: area(local), session: area(session), sync: area(sync), onChanged: event() },
-        tabs: { onCreated: event(), onUpdated: event(), onRemoved: event(), onReplaced: event(), onActivated: event(), onMoved: event(), query: async query => tabs.filter(t => query.groupId === undefined || query.groupId === t.groupId),
+        tabs: { onCreated: event(), onUpdated: event(), onRemoved: event(), onReplaced: event(), onActivated: event(), onMoved: event(), query: async query => structuredClone(tabs.filter(t => query.groupId === undefined || query.groupId === t.groupId)),
             group: async args => { mutations.push(['group', args]); const id = args.groupId ?? 100 + groups.length; if (!groups.some(g => g.id === id)) groups.push({ id, windowId: 1 }); tabs.filter(t => args.tabIds.includes(t.id)).forEach(t => t.groupId = id); return id; },
             move: async (...args) => mutations.push(['move', ...args]) },
         tabGroups: { move: async (...args) => mutations.push(['groupMove', ...args]), onRemoved: event(), onUpdated: event(), query: async () => groups, update: async (id, attrs) => { mutations.push(['update', id, attrs]); Object.assign(groups.find(g => g.id === id), attrs); } },
@@ -67,6 +67,59 @@ test('worker restart preserves session membership and opener determines new tab 
     const next = new SpaceStore(); await next.dispatch({ action: 'get' });
     assert.deepEqual(next.spaces[1].temporaryTabs, [3, 2]);
 });
+test('queued creation resolves a moved native ID and peers in its current window', async () => {
+    const store=new SpaceStore();await store.run(()=>{});store.install();store.active[1]='a';store.active[2]='b';
+    const child={id:3,windowId:1,url:'https://new.test/',openerTabId:1,groupId:-1};tabs.push(child);
+    const tracked=[],track=store.track.bind(store);store.track=(tab,options)=>{tracked.push({tab:structuredClone(tab),peers:options?.nativeTabs?.map(v=>v.windowId)});return track(tab,options);};
+    chrome.tabs.onCreated.emit(structuredClone(child));child.windowId=2;await store.run(()=>{});
+    assert.equal(ownerOf(store.spaces,3)?.id,'b');assert.equal(tracked.find(v=>v.tab.id===3)?.tab.windowId,2);
+    assert(tracked.find(v=>v.tab.id===3).peers.every(id=>id===2));
+});
+test('queued creation never adopts a closed captured tab', async () => {
+    const store=new SpaceStore();await store.run(()=>{});store.install();const child={id:3,windowId:1,url:'https://closed.test/',groupId:-1};tabs.push(child);
+    const tracked=[],track=store.track.bind(store);store.track=(tab,options)=>{tracked.push(tab.id);return track(tab,options);};
+    chrome.tabs.onCreated.emit(structuredClone(child));tabs=tabs.filter(t=>t.id!==3);chrome.tabs.onRemoved.emit(3,{windowId:1,isWindowClosing:false});await store.run(()=>{});
+    assert.equal(tracked.includes(3),false);assert.equal(store.pendingCreations.has(3),false);assert.equal(ownerOf(store.spaces,3),undefined);
+});
+for(const kind of ['create','update'])test(`queued ${kind} query failure does not track a stale event snapshot`,async()=>{
+    const store=new SpaceStore();await store.run(()=>{});store.install();const query=store.queryTabs.bind(store);let failures=2;
+    store.queryTabs=async(...args)=>{if(failures-->0)throw Error('native read unavailable');return query(...args);};
+    const tracked=[],track=store.track.bind(store);store.track=(tab,options)=>{tracked.push(tab.id);return track(tab,options);};
+    if(kind==='create'){const child={id:3,windowId:1,url:'https://new.test/',groupId:-1};tabs.push(child);chrome.tabs.onCreated.emit(structuredClone(child));}
+    else chrome.tabs.onUpdated.emit(1,{pinned:true},{...tabs[0],pinned:true});
+    await store.run(()=>{});assert.equal(tracked.length,0);assert.equal(ownerOf(store.spaces,1)?.id,'a');
+    if(kind==='create'){
+        assert.equal(store.pendingCreations.has(3),true);assert.equal(ownerOf(store.spaces,3),undefined);
+        tabs.find(t=>t.id===3).openerTabId=2;
+        chrome.tabs.onUpdated.emit(3,{url:'https://new.test/'},structuredClone(tabs.find(t=>t.id===3)));await store.run(()=>{});
+        assert.deepEqual(local.spaces.find(s=>s.id==='b').temporaryTabs,[3,2]);assert.equal(store.pendingCreations.has(3),false);
+    }
+});
+
+test('one-shot creation query failure retries only the read and preserves opener placement',async()=>{
+    const store=new SpaceStore();await store.run(()=>{});store.install();const query=store.queryTabs.bind(store);let failures=1;
+    store.queryTabs=async(...args)=>{if(failures-->0)throw Error('one-shot native read failure');return query(...args);};
+    const child={id:3,windowId:1,url:'https://new.test/',openerTabId:2,groupId:-1};tabs.push(child);
+    chrome.tabs.onCreated.emit(structuredClone(child));await store.run(()=>{});
+    assert.deepEqual(local.spaces.find(s=>s.id==='b').temporaryTabs,[3,2]);assert.equal(store.pendingCreations.has(3),false);assert.deepEqual(mutations,[]);
+});
+test('queued update reads current protection state and cannot replay a stale pinned snapshot',async()=>{
+    const store=new SpaceStore();await store.run(()=>{});store.install();chrome.tabs.onUpdated.emit(1,{pinned:true},{...tabs[0],pinned:true});await store.run(()=>{});
+    assert.equal(ownerOf(store.spaces,1)?.id,'a');assert.equal(local.spaces.find(s=>s.id==='a').temporaryTabs.includes(1),true);
+});
+
+test('non-creation unpin update retains current Space adoption rather than historical opener',async()=>{
+    const store=new SpaceStore();await store.run(()=>{});store.install();store.active[1]='a';
+    const released={id:3,windowId:1,url:'https://released.test/',openerTabId:2,pinned:false,groupId:-1};tabs.push(released);
+    chrome.tabs.onUpdated.emit(3,{pinned:false},structuredClone(released));await store.run(()=>{});
+    assert.deepEqual(local.spaces.find(s=>s.id==='a').temporaryTabs,[1,3]);assert.deepEqual(local.spaces.find(s=>s.id==='b').temporaryTabs,[2]);
+});
+test('queued update does not track a removed native ID',async()=>{
+    const store=new SpaceStore();await store.run(()=>{});store.install();const stale=structuredClone(tabs[0]),tracked=[],track=store.track.bind(store);
+    store.track=(tab,options)=>{tracked.push(tab.id);return track(tab,options);};chrome.tabs.onUpdated.emit(1,{url:'https://old.test/'},stale);tabs=tabs.filter(t=>t.id!==1);await store.run(()=>{});
+    assert.equal(tracked.includes(1),false);assert.equal(ownerOf(store.spaces,1),undefined);
+});
+
 test('explicit assignment beats creation fallback', async () => {
     const store = new SpaceStore(); await store.dispatch({ action: 'get' });
     await store.dispatch({ action: 'assign', tabId: 1, spaceId: 'b', pinned: true });
@@ -637,7 +690,7 @@ for (const openerTabId of [1, 2]) test(`browser child from split pane ${openerTa
     assert.equal(tabs[0].splitViewId, 77); assert.equal(tabs[1].splitViewId, 77); assert.deepEqual(mutations, []);
 });
 
-for (const uncertain of ['missing-peer', 'native-gap', 'group-mismatch', 'query-failure']) test(`uncertain split opener ${uncertain} appends without native repair`, async () => {
+for (const uncertain of ['missing-peer', 'native-gap', 'group-mismatch']) test(`uncertain split opener ${uncertain} appends without native repair`, async () => {
     local.spaces = [space('a', [1, 2, 4])];
     tabs.push({ id: 4, windowId: 1, url: 'https://tail.test/', index: 2, groupId: -1 });
     tabs[0].index = 0; tabs[1].index = 1;
@@ -646,8 +699,6 @@ for (const uncertain of ['missing-peer', 'native-gap', 'group-mismatch', 'query-
     if (uncertain === 'missing-peer') tabs[1].splitViewId = -1;
     if (uncertain === 'native-gap') tabs[1].index = 3;
     if (uncertain === 'group-mismatch') tabs[1].groupId = 5;
-    const query = chrome.tabs.query;
-    if (uncertain === 'query-failure') chrome.tabs.query = async args => { if (args.windowId) throw new Error('Transient native read'); return query(args); };
     const child = { id: 3, windowId: 1, openerTabId: 1, url: 'https://child.test/', index: 4, groupId: -1 };
     tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
     assert.deepEqual(store.spaces[0].temporaryTabs, [1, 2, 4, 3]); assert.deepEqual(mutations, []);
@@ -1089,4 +1140,130 @@ test('legacy archive Space-ID write failure cannot commit model v2 and retry pre
     refuse = false; await store.dispatch({ action: 'get' });
     assert.equal(local.spaceModelVersion, 2); assert.equal(local.archivedTabs[0].spaceId, local.spaces[0].id);
     assert.equal(local.archivedTabs[0].entryId, entryId); assert.equal(local.archivedTabs[0].extra, 'keep'); assert.equal(local.archivedTabs[0].archivedAt, 12);
+});
+
+// Recovery identity and live child placement have separate evidence requirements.
+async function recoveringParentFixture() {
+    sync.todayNewTabsAtTop = true;
+    local.spaces = [space('a', [1, 2, 4]), space('b')];
+    tabs.push({ id: 4, windowId: 1, url: 'https://tail.test/', index: 2, groupId: -1 });
+    tabs[0].index = 0; tabs[1].index = 1;
+    session.activeSpaces = { 1: 'a' };
+    session.spaceRecoveryCandidates = [1];
+    session.spaceRestoreQueue = ['historical-a', 'historical-b'].map((windowKey, order) => ({
+        tabId: 90 + order, spaceId: 'a', section: 'temporaryTabs', order,
+        url: tabs[0].url, windowKey, tabIndex: order
+    }));
+    const store = new SpaceStore(); store.install(); await store.run(() => {});
+    assert(store.recoveryCandidates.has(1));
+    return store;
+}
+
+for (const inverted of [false, true]) test(`recovery parent places pendingUrl child locally without adopting history inverted=${inverted}`, async () => {
+    sync.invertTabOrder = inverted;
+    const store = await recoveringParentFixture();
+    const pendingIds = store.restoreQueue.map(record => record.tabId);
+    const historical = store.restoreQueue.map(({ order, ...identity }) => identity);
+    const child = { id: 3, windowId: 1, openerTabId: 1, pendingUrl: 'https://child.test/', groupId: -1 };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    const visible = visibleToday(store);
+    assert.equal(visible[visible.indexOf(1) + 1], 3);
+    assert.equal(ownerOf(store.spaces, 3).id, 'a');
+    assert(store.recoveryCandidates.has(1)); assert(!store.recoveryCandidates.has(3));
+    assert.deepEqual(store.restoreQueue.map(record => record.tabId), pendingIds);
+    assert.deepEqual(store.restoreQueue.map(({ order, ...identity }) => identity), historical);
+    assert(session.spaceRecoveryCandidates.includes(1));
+    assert.equal(store.restoreWindowKeys.size, 0);
+    assert.equal(local.pinnedTabStatesById, undefined);
+    // Manual order wins over every later navigation, and a worker reload.
+    const before = structuredClone(store.spaces), after = structuredClone(before);
+    after[0].temporaryTabs = [3, 4, 2, 1];
+    await store.dispatch({ action: 'patch', before, after });
+    const intended = [...store.spaces[0].temporaryTabs];
+    for (let n = 0; n < 2; n++) {
+        child.url = `https://child.test/navigation-${n}`; delete child.pendingUrl;
+        chrome.tabs.onUpdated.emit(3, { url: child.url }, structuredClone(child)); await store.run(() => {});
+        assert.deepEqual(store.spaces[0].temporaryTabs, intended);
+    }
+    const reload = new SpaceStore(); await reload.initialize();
+    assert.deepEqual(reload.spaces[0].temporaryTabs, intended);
+    assert(reload.recoveryCandidates.has(1));
+    assert.equal(reload.restoreQueue.length, 2); assert.deepEqual(mutations, []);
+});
+
+test('provisional parent can position locally without clearing its flag or selecting a Space', async () => {
+    const store = await recoveringParentFixture(); store.provisional.add(1);
+    const child = { id: 3, windowId: 1, openerTabId: 1, pendingUrl: 'https://child.test/' }; tabs.push(child);
+    assert.equal(store.exactTodayOpener(child, tabs), null);
+    const pending = structuredClone(store.restoreQueue);
+    store.track(child, { nativeTabs: tabs, created: true });
+    assert.equal(visibleToday(store)[visibleToday(store).indexOf(1) + 1], 3);
+    assert(store.provisional.has(1)); assert(store.recoveryCandidates.has(1));
+    assert.deepEqual(store.restoreQueue.map(({order,...r})=>r), pending.map(({order,...r})=>r));
+});
+
+for (const reason of ['other-space', 'other-window', 'ambiguous-owner', 'closed-parent', 'no-opener', 'saved-binding', 'native-pin', 'favorite', 'transient', 'incognito', 'blank', 'newtab']) test(`recovery placement refuses ${reason}`, async () => {
+    const store = await recoveringParentFixture();
+    if (reason === 'other-space') store.active[1] = 'b';
+    if (reason === 'other-window') tabs[0].windowId = 2;
+    if (reason === 'ambiguous-owner') store.spaces[1].temporaryTabs.push(1);
+    if (reason === 'closed-parent') tabs = tabs.filter(t => t.id !== 1);
+    if (reason === 'saved-binding') local.pinnedTabStatesById = { 1: { bookmarkId: 'pin' } };
+    if (reason === 'native-pin') tabs[0].pinned = true;
+    if (reason === 'favorite') {
+        store.favoriteStore = { initialize: async () => {}, reconcile: async () => {}, noteSpaceExclusion() {} };
+        store.isGlobalTab = value => (typeof value === 'object' ? value.id : value) === 1;
+    }
+    if (reason === 'transient') store.isTransientTab = value => (typeof value === 'object' ? value.id : value) === 1;
+    if (reason === 'incognito') tabs[0].incognito = true;
+    const child = { id: 3, windowId: 1, ...(reason === 'no-opener' ? {} : { openerTabId: 1 }),
+        pendingUrl: reason === 'blank' ? 'about:blank' : reason === 'newtab' ? 'chrome://newtab/' : 'https://child.test/', groupId: -1 };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    const destination = reason === 'other-space' ? 'b' : 'a';
+    assert.equal(ownerOf(store.spaces, 3).id, destination);
+    assert.equal(visibleToday(store, destination)[0], 3);
+    assert(local.spaces.find(s => s.id === destination).temporaryTabs.includes(3));
+});
+
+test('recovery placement reads current parent window instead of stale creation/cache evidence', async () => {
+    const store = await recoveringParentFixture();
+    store.liveTabs = new Map(tabs.map(tab => [tab.id, structuredClone(tab)]));
+    const child = { id: 3, windowId: 1, openerTabId: 1, pendingUrl: 'https://child.test/' }; tabs.push(child);
+    chrome.tabs.onCreated.emit(structuredClone(child)); tabs[0].windowId = 2;
+    await store.run(() => {});
+    assert.equal(visibleToday(store)[0], 3);
+});
+
+test('a restored child retains its saved section and Space ahead of recovery-parent adjacency', async () => {
+    const store = await recoveringParentFixture();
+    store.restoreQueue.push({ spaceId: 'b', section: 'spaceBookmarks', order: 0, url: 'https://restored-child.test/' });
+    const child = { id: 3, windowId: 1, openerTabId: 1, pendingUrl: 'https://restored-child.test/' }; tabs.push(child);
+    chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    assert.deepEqual(store.spaces[1].spaceBookmarks, [3]);
+    assert(!store.spaces[0].temporaryTabs.includes(3)); assert(store.recoveryCandidates.has(1));
+});
+
+for (const inverted of [false, true]) for (const shape of ['intact', 'native-gap', 'owner-mismatch', 'missing-peer']) test(`recovery-parent split boundary ${shape} inverted=${inverted}`, async () => {
+    sync.invertTabOrder = inverted;
+    const store = await recoveringParentFixture();
+    tabs[0].splitViewId = tabs[1].splitViewId = 77;
+    if (shape === 'native-gap') tabs[1].index = 4;
+    if (shape === 'owner-mismatch') { store.spaces[0].temporaryTabs = [1, 4]; store.spaces[1].temporaryTabs = [2]; }
+    if (shape === 'missing-peer') tabs[1].splitViewId = -1;
+    const child = { id: 3, windowId: 1, openerTabId: 1, pendingUrl: 'https://child.test/', index: 5, groupId: -1 };
+    tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    const before = shape === 'owner-mismatch' ? [1, 4] : [1, 2, 4];
+    const expected = shape === 'intact' ? (inverted ? [3, 1, 2, 4] : [1, 2, 3, 4]) : inverted ? [...before, 3] : [3, ...before];
+    assert.deepEqual(store.spaces[0].temporaryTabs, expected);
+    assert.equal(tabs[0].splitViewId, 77); assert.deepEqual(mutations, []);
+});
+
+test('recovery-parent siblings retain existing newest-nearest-parent policy', async () => {
+    const store = await recoveringParentFixture();
+    for (const id of [3, 5]) {
+        const child = { id, windowId: 1, openerTabId: 1, pendingUrl: `https://child.test/${id}` }; tabs.push(child);
+        chrome.tabs.onCreated.emit(child); await store.run(() => {});
+    }
+    const visible = visibleToday(store), parent = visible.indexOf(1);
+    assert.deepEqual(visible.slice(parent + 1, parent + 3), [5, 3]); assert(store.recoveryCandidates.has(1));
 });

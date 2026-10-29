@@ -288,3 +288,14 @@ The paired Spotlight fork adds window-aware search over Arcify's authoritative
 spaces without depending on Chrome tab groups. Setup, protocol, and update steps:
 [Spotlight bridge guide](docs/spotlight-bridge.md). Browser verification limits and
 manual acceptance checks: [validation record](docs/bridge-validation.md).
+
+- [Shared Today across windows (candidate)](docs/shared-today.md)
+
+- [Little Arc header and link action (candidate)](docs/little-arc-header.md)
+
+### EVOO reconciliation
+
+[Reconciliation status and validation limits](docs/release-reconciliation.md).
+[Today recovery and Move troubleshooting](docs/today-recovery-move-incident.md),
+[Today placement and latency postmortem](docs/today-opener-latency-postmortem.md), and
+[native Ctrl+W deferred research](docs/ctrl-w-research-deferred.md).

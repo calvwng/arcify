@@ -87,6 +87,7 @@ globalThis.chrome = {
     },
     storage: { local: area(local), session: area(session), sync: area({}) },
     windows: {
+        async getAll() { return [{ id: WINDOW, type: 'normal' }, { id: 8, type: 'normal' }]; },
         async get(id) { assert([WINDOW, 8].includes(id)); return { id, type: 'normal' }; },
         async update(id, values) { assert.equal(id, WINDOW); return { id, ...values }; }
     },

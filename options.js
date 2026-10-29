@@ -1,4 +1,5 @@
 import { normalizeColorOverrides, DEFAULT_SPACE_COLORS } from './space-colors.js';
+import { mountRecoveryVisibility } from './recovery-visibility-ui.js';
 import { setSpaceColorOverrides } from './sidebar-theme.js';
 import './spotlight-bridge-options.js';
 import './sidebar-appearance-options.js';
@@ -262,6 +263,7 @@ function setupAutoSave() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  mountRecoveryVisibility(document, chrome);
   setupAdvancedOptions();
   try {
     await restoreOptions();

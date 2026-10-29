@@ -31,7 +31,7 @@ function harness(transform = value => value) {
 
 test('Python fake-library and failure-cleanup tests are part of npm test:unit, without loading X', () => {
     const path = fileURLToPath(new URL('./paired_chrome_native_close_test.py', import.meta.url));
-    const output = execFileSync('python3', [path], {
+    const output = execFileSync(process.env.ARCIFY_TEST_PYTHON || 'python3', [path], {
         encoding: 'utf8', timeout: 20_000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' }, stdio: 'pipe',
     });
     assert.equal(output, '');

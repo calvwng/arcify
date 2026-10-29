@@ -437,3 +437,30 @@ test('native split creation including ID zero and End Split refresh only the exa
     await chrome.tabs.onUpdated.emit(1, { splitViewId: -1 }, f.tabs[0]);
     await f.tick(); assert.deepEqual(targets(f), []);
 });
+
+
+test('opted-in shared reader refreshes after remote title and ownership changes without broadening legacy peers', async t => {
+ const f=await fixture(t); await f.settleStartup(); f.store.sharedTodayWindows=new Set([1]);
+ await chrome.tabs.onUpdated.emit(11,{title:'Changed remote page'},f.tabs.find(t=>t.id===11));
+ await f.tick();await f.tick();assert.deepEqual(targets(f),[1]);f.sent.length=0;
+ await f.store.dispatch({action:'assign',tabId:11,spaceId:'b'});await f.tick();await f.tick();
+ assert.deepEqual(new Set(targets(f)),new Set([1,2]));
+ assert(f.sent.every(item=>!JSON.stringify(item.message).includes('Changed remote page')));
+});
+
+
+test('multiple subscribed shared windows drain a finite notification batch without ping-pong',async t=>{
+ const f=await fixture(t);await f.settleStartup();f.store.sharedTodayWindows=new Set([1,2]);
+ await chrome.tabs.onUpdated.emit(11,{title:'changed'},f.tabs.find(t=>t.id===11));
+ for(let i=0;i<20;i++)await f.tick();assert.deepEqual(new Set(targets(f)),new Set([1,2]));assert.equal(f.sent.length,2);
+ for(let i=0;i<20;i++)await f.tick();assert.equal(f.sent.length,2);
+});
+
+
+test('shared subscribers refresh remote aliases and pin bindings with bounded fanout',async t=>{
+ const f=await fixture(t);await f.settleStartup();f.store.sharedTodayWindows=new Set([1,2]);
+ await chrome.storage.local.set({tabNameOverridesById:{11:{name:'Remote alias'}}});
+ for(let i=0;i<5;i++)await f.tick();assert.deepEqual(new Set(targets(f)),new Set([1,2]));assert.equal(f.sent.length,2);f.sent.length=0;
+ await chrome.storage.local.set({pinnedTabStatesById:{11:{bookmarkId:'saved',pinnedUrl:'https://eleven.test/'}}});
+ for(let i=0;i<10;i++)await f.tick();assert.deepEqual(new Set(targets(f)),new Set([1,2]));assert.equal(f.sent.length,2);
+});

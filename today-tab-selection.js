@@ -10,6 +10,7 @@ const same = (a, b) => a && b && a.tabId === b.tabId && a.url === b.url;
 export function createTodayTabSelection({ document, getContext, onGesture = () => {} }) {
     const registered = new WeakMap();
     let selected = new Map(), anchor = null, scope = null, revision = 0, interaction = 0;
+    let activationAnchorPending = false;
     const status = document.createElement('div');
     status.id = 'todaySelectionStatus'; status.className = 'bookmark-selection-status';
     status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
@@ -57,7 +58,7 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
     function clear({ keepAnchor = false } = {}) {
         interaction++;
         if (selected.size || (!keepAnchor && anchor)) revision++;
-        selected.clear(); if (!keepAnchor) { anchor = null; scope = null; }
+        selected.clear(); if (!keepAnchor) { anchor = null; scope = null; activationAnchorPending = false; }
         paint();
     }
     function reconcile() {
@@ -71,17 +72,23 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
         }
         if (anchor) {
             const next = entries.find(item => item.tabId === anchor.tabId);
-            if (!same(anchor, next)) { anchor = null; changed = true; }
+            if (!same(anchor, next)) { anchor = null; activationAnchorPending = false; changed = true; }
             else anchor = next;
         }
         if (changed) { revision++; paint(); }
         return entries;
     }
-    function select(element, event) {
+    function select(element, event, extendActivation = false) {
         const entries = reconcile(), index = entries.findIndex(item => item.element === element);
         if (index < 0) return false;
         onGesture();
         const entry = entries[index], additive = event.ctrlKey || event.metaKey;
+        // A plain activation is the first row of a subsequent Ctrl/Cmd-click
+        // batch. Consume this once; toggling the batch empty must not resurrect it.
+        if (extendActivation && additive && !event.shiftKey && activationAnchorPending && anchor && anchor.tabId !== entry.tabId) {
+            selected.set(anchor.tabId, anchor);
+        }
+        activationAnchorPending = false;
         if (event.shiftKey) {
             const start = entries.findIndex(item => item.tabId === anchor?.tabId);
             if (!additive) selected.clear();
@@ -103,11 +110,11 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
         element.addEventListener('click', event => {
             if (event.target.closest(CONTROL) || (event.button ?? 0) !== 0) { clear(); return; }
             if (modifiers(event)) {
-                event.preventDefault(); event.stopImmediatePropagation(); select(element, event);
+                event.preventDefault(); event.stopImmediatePropagation(); select(element, event, true);
             } else {
                 const entry = reconcile().find(item => item.element === element);
                 clear(); onGesture();
-                if (entry) { scope = context(); anchor = entry; revision++; }
+                if (entry) { scope = context(); anchor = entry; activationAnchorPending = true; revision++; }
             }
         }, true);
         element.addEventListener('dblclick', event => {
@@ -122,6 +129,7 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
     function freeze(element) {
         const entries = reconcile(), entry = entries.find(item => item.element === element);
         if (!entry) { clear(); return null; }
+        activationAnchorPending = false;
         onGesture(); interaction++;
         if (!selected.has(entry.tabId)) { selected = new Map([[entry.tabId, entry]]); anchor = entry; revision++; paint(); }
         if (selected.size > MAX_TODAY_SELECTION) return { error: `Select at most ${MAX_TODAY_SELECTION} Today tabs. No action was taken.` };
@@ -140,7 +148,7 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
         return () => { if (started === interaction) { clear({ keepAnchor: true }); reconcile(); } };
     }
     document.addEventListener('click', event => {
-        if (event.target.closest?.('#tab-context-menu, #todayFolderDialog, #favoritesDropNotice')) return;
+        if (event.target.closest?.('#tab-context-menu, #todayFolderDialog, #todayRecoveryDialog, #favoritesDropNotice')) return;
         const row = event.target.closest?.(ROW);
         if (!row || !descriptor(row, context())) clear();
     }, true);

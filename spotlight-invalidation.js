@@ -85,6 +85,7 @@ export function registerSpotlightInvalidation(store) {
         if (area === 'local' && changes.persistentFavorites || area === 'session' && changes.favoriteSession) invalidateAll();
         if (area === 'local' && changes.spaces) {
             const before = project(changes.spaces.oldValue), after = project(changes.spaces.newValue);
+            if (!same(before, after)) invalidateShared();
             if (!same(metadata(before), metadata(after))) pending.all = true;
             else if (!same(before, after)) {
                 // SpaceStore.persist refreshes its live-tab map before writing spaces.
@@ -127,7 +128,7 @@ export function registerSpotlightInvalidation(store) {
             for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
                 // Both bookmark identity and the pinned URL affect displayed titles.
                 if ((String(before[key]?.bookmarkId) !== String(after[key]?.bookmarkId)
-                    || before[key]?.pinnedUrl !== after[key]?.pinnedUrl) && isWindowId(Number(key))) pending.tabs.add(Number(key));
+                    || before[key]?.pinnedUrl !== after[key]?.pinnedUrl) && isWindowId(Number(key))) { pending.tabs.add(Number(key)); invalidateShared(); }
             }
         }
         if (area === 'local' && changes.tabNameOverridesById) {
@@ -136,9 +137,10 @@ export function registerSpotlightInvalidation(store) {
                 // originalDomain is bookkeeping; ordinary aliases follow the tab ID
                 // across navigation. Resolve its current window when the batch flushes.
                 const name = value => typeof value?.name === 'string' ? value.name : '';
-                if (name(before[key]) !== name(after[key]) && isWindowId(Number(key))) pending.tabs.add(Number(key));
+                if (name(before[key]) !== name(after[key]) && isWindowId(Number(key))) { pending.tabs.add(Number(key)); invalidateShared(); }
             }
         }
+        if (area === 'session' && ['spaceRecoveryCandidates','spaceProvisionalTabs'].some(key => changes[key])) invalidateShared();
         schedule();
     };
     const onSplitUpdated = (tabId, change, tab) => {
@@ -147,6 +149,14 @@ export function registerSpotlightInvalidation(store) {
         else if (isWindowId(tabId)) pending.tabs.add(tabId);
         schedule();
     };
+    const invalidateShared = () => {
+        for (const id of store.sharedTodayWindows || []) pending.windows.add(id);
+        schedule();
+    };
+    const sharedUpdated = (_id, change) => { if (['title','url','pendingUrl','pinned','splitViewId'].some(key => Object.hasOwn(change,key))) invalidateShared(); };
+    const sharedEvents = [chrome.tabs?.onCreated, chrome.tabs?.onRemoved, chrome.tabs?.onAttached, chrome.tabs?.onDetached, chrome.tabs?.onMoved, chrome.tabs?.onReplaced, chrome.windows?.onRemoved];
+    for (const event of sharedEvents) event?.addListener(invalidateShared);
+    chrome.tabs?.onUpdated?.addListener(sharedUpdated);
     chrome.tabs?.onUpdated?.addListener(onSplitUpdated);
     chrome.storage.onChanged.addListener(onChanged);
     // One-shot recovery after worker suspension/restart; no polling or durable queue.
@@ -155,5 +165,7 @@ export function registerSpotlightInvalidation(store) {
         stopped = true; generation++; clear();
         chrome.storage.onChanged.removeListener(onChanged);
         chrome.tabs?.onUpdated?.removeListener(onSplitUpdated);
+        chrome.tabs?.onUpdated?.removeListener(sharedUpdated);
+        for (const event of sharedEvents) event?.removeListener(invalidateShared);
     } };
 }

@@ -77,6 +77,14 @@ test('real sidebar reload retains reversed exact URL twins, nested bindings, ali
     assert.deepEqual(reopened.patches, [], 'A second fresh sidebar module must also leave ordered ownership untouched');
 });
 
+test('native title change after initial fragment commit and before handler installation is not lost', async () => {
+    const data = fixture(); data.handoffTabId = 9;
+    const result = await initialize(data);
+    assert.equal(result.handoffObserved, true);
+    assert.equal(result.handoffBefore, 'Live 9', 'The event is deliberately after the old fragment committed');
+    assert.equal(result.rows.find(row => row.tabId === 9).title, 'New title during initialization handoff');
+});
+
 test('real sidebar demotes only unmatched current-window pins and retains native metadata and unclassified IDs', async () => {
     const data = fixture();
     data.tabs.push({ id: 6, windowId: 10, pinned: false, title: 'Stale binding', url: 'https://same.test/' },

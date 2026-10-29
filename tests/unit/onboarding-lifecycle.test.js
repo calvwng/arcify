@@ -27,10 +27,11 @@ function background(completed = false, onboardingVersion = undefined, version = 
         registerBookmarkListeners() {},
         registerSpotlightBridge() {},
         enqueueBookmarkOrder: async () => [],
-        createTransientWindowStore: () => ({ initialize: async () => {}, observe() {}, observeRemoved() {}, observeWindowRemoved() {},
+        createLittleArcWindowGeometry: () => ({}), createTransientWindowStore: () => ({ initialize: async () => {}, observe() {}, observeRemoved() {}, observeWindowRemoved() {},
             observeReplacement() {}, observeDetached() {}, flushObservedUnlocked: async () => {}, isExcluded: () => false, isTransientWindow: () => false }),
         registerTransientControlMessages() {},
-        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTodayMoveMessages() {}, registerSavedMoveMessages() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {}, registerMoveTabWindowMessages() {}, registerArchiveMessages() {},
+        registerPeek() {}, registerRecoveryObservation() {}, summarizeRecoveryObservation() {},
+        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTodayMoveMessages() {}, registerTodayRecoveryMessages() {}, registerSharedToday() {}, registerLittleArcHeader() {}, registerLittleArcLinkMenu() {}, registerSavedMoveMessages() {}, registerSelectedTabClose() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {}, registerMoveTabWindowMessages() {}, registerArchiveMessages() {},
         SpaceStore: class { isTransientTab() { return false; } isTransientWindow() { return false; } install() {} async dispatch() { return [{ id: 'home' }]; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: false }) },
         Logger: { log() {}, error() {} }

@@ -8,7 +8,7 @@ const spaceSelect = document.getElementById('destination-space');
 const submit = document.getElementById('promote');
 const refresh = document.getElementById('refresh');
 const status = document.getElementById('status');
-let context = null, pending = false, blocked = false, revision = 0;
+let context = null, pending = false, blocked = false, revision = 0, appliedDraft = null;
 const request = async fields => {
     let timer;
     try {
@@ -31,14 +31,17 @@ function option(select, value, label, selected = false) {
     const item = document.createElement('option'); item.value = value; item.textContent = label; select.append(item);
     if (selected) { for (const sibling of select.options) sibling.selected = sibling === item; }
 }
+function choose(select,value) { for(const option of select.options) option.selected=option.value===String(value); }
 async function load() {
     if (pending) return;
+    const previous = { windowId: windowSelect.value, spaceId: spaceSelect.value, bookmarkFolderId: context?.spaces.find(s=>s.id===spaceSelect.value)?.bookmarkFolderId };
     const read = ++revision;
     try {
         const response = await request({ action: 'context' });
         if (read !== revision) return;
         if (!response?.success) throw new Error(response?.error || 'The temporary-window state could not be read.');
         context = response;
+        if(document.getElementById('direct-mode'))document.getElementById('direct-mode').checked=response.directEnabled===true;
         document.getElementById('page-title').textContent = context.page?.title
             || (context.record.phase === 'orphan' ? 'Choose a restored page' : 'Temporary page closed');
         document.getElementById('page-url').textContent = context.page?.url || '';
@@ -48,6 +51,12 @@ async function load() {
         for (const window of context.windows) option(windowSelect, String(window.id), `${window.origin ? 'Original window · ' : ''}${window.title} (${window.id})`, window.origin);
         spaceSelect.replaceChildren(); option(spaceSelect, '', 'Choose a Space…', true);
         for (const space of context.spaces) option(spaceSelect, space.id, space.name || space.id);
+        if (context.windows.some(w=>String(w.id)===previous.windowId) && context.spaces.some(s=>s.id===previous.spaceId && s.bookmarkFolderId===previous.bookmarkFolderId)) { choose(windowSelect,previous.windowId); choose(spaceSelect,previous.spaceId); }
+        if (context.reviewDraft && context.reviewDraft.draftId !== appliedDraft) {
+            const draft=context.reviewDraft;
+            if(context.windows.some(w=>w.id===draft.windowId) && context.spaces.some(s=>s.id===draft.spaceId && s.bookmarkFolderId===draft.bookmarkFolderId)) { choose(windowSelect,draft.windowId); choose(spaceSelect,draft.spaceId); appliedDraft=draft.draftId; }
+        }
+        submit.textContent=spaceSelect.value ? `Confirm: Open in ${context.spaces.find(s=>s.id===spaceSelect.value)?.name || 'Space'}` : 'Open in Space';
         if (context.record.phase === 'committed') status.textContent = 'This page has been moved into its Space. You can close this control tab.';
         else if (context.record.phase === 'orphan') status.textContent = context.recoveryTabs?.length
             ? 'Choose a page from this restored window first. Every page stays outside your Spaces until you explicitly move it.'
@@ -56,7 +65,7 @@ async function load() {
         else if (!context.page) status.textContent = 'The page was closed. It will not be recreated.';
         else if (context.page.windowId !== context.record.windowId) status.textContent = 'The page was moved out of this temporary window. It has not been automatically filed into a Space.';
         else if (!context.windows.some(window => window.origin)) status.textContent = 'The original browser window is gone. Choose a window and Space explicitly.';
-        else if (!blocked) status.textContent = '';
+        else if (!blocked) status.textContent = context.reviewDraft ? 'Review the destination from the page header. Nothing moved. Confirm below in this trusted control tab.' : '';
     } catch (error) { context = null; status.textContent = error.message; }
     controls();
 }
@@ -104,6 +113,16 @@ form.addEventListener('submit', async event => {
         status.textContent = error.message || 'The move was not confirmed. Check your windows; it will not be retried.';
     } finally { pending = false; controls(); }
 });
-for (const select of [windowSelect, spaceSelect, recoverySelect]) select.addEventListener('change', controls);
+for (const select of [windowSelect, spaceSelect, recoverySelect]) select.addEventListener('change', () => { controls(); submit.textContent=spaceSelect.value ? `Confirm: Open in ${context?.spaces.find(s=>s.id===spaceSelect.value)?.name || 'Space'}` : 'Open in Space'; });
+chrome.runtime.onMessage?.addListener((message,sender)=>{ if(message?.type==='littleArcReviewReady' && sender.id===chrome.runtime.id && !sender.tab) chrome.tabs.getCurrent().then(tab=>{if(tab?.id===message.controllerTabId)load();}); });
+globalThis.window?.addEventListener('focus',()=>load());
 refresh.addEventListener('click', event => { if (event.isTrusted) load(); });
 load();
+
+const directMode=document.getElementById('direct-mode');
+directMode?.addEventListener('change',async event=>{
+ if(!event.isTrusted)return;const desired=directMode.checked;directMode.disabled=true;
+ const message=document.getElementById('direct-mode-status');
+ try{const response=await request({action:'directMode',enabled:desired});if(response?.success!==true||response.directEnabled!==desired)throw Error('Setting was not confirmed. Refresh the trusted controls before trying again.');message.textContent=desired?'Direct placement enabled. Refresh header choices to use it.':'Trusted confirmation enabled.';}
+ catch(error){directMode.checked=!desired;message.textContent=error.message;}finally{directMode.disabled=false;}
+});

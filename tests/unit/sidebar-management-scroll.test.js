@@ -82,6 +82,7 @@ globalThis.chrome = {
         async sendMessage(message) {
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: [] };
             if (message.type === 'sidebarTour') return { success: true, state: null };
+            if (message.type === 'arcifySharedToday') return { success: true, entries: [] };
             assert.equal(message.type, 'spaceStore');
             if (message.action === 'patch') {
                 storedSpaces = applySpacePatch(storedSpaces, message.before, message.after);

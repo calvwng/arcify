@@ -52,6 +52,14 @@
             </div>
         </section>
 
+        <section class="options-section" aria-labelledby="recoveryStatusHeading">
+            <h2 id="recoveryStatusHeading" class="options-section-title">Recovery status</h2>
+            <p class="options-description">Read current browser and Space recovery counts without restoring, adopting or closing tabs. Saved URL candidates do not prove page identity. A browser restart and an extension reload are different events; this report does not establish what Helium restored.</p>
+            <button type="button" id="recovery-status-refresh" class="appearance-reset">Read recovery status</button>
+            <p id="recovery-status-notice" class="options-description" role="status" aria-live="polite">No status read requested.</p>
+            <div id="recovery-status-output" aria-label="Recovery observation"></div>
+        </section>
+
         <section class="options-section" aria-labelledby="tabsHeading">
             <h2 id="tabsHeading" class="options-section-title">Tabs &amp; spaces</h2>
             <div class="options-setting-item options-setting-field">

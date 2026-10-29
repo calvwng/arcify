@@ -341,8 +341,23 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         contextMenu.appendChild(archiveOption);
     }
 
-    // Close Tab / Remove Bookmark
-    if (!multiple) {
+    if (tabActions?.closeSelection) {
+        const close = tabActions.closeSelection;
+        const option = document.createElement('div');
+        option.className = 'context-menu-item'; option.dataset.action = 'closeSelectedTabs';
+        option.setAttribute('role', 'menuitem'); option.tabIndex = 0;
+        option.textContent = close.count === 1 ? (isPinned ? 'Close Tab (Keep Pin)' : 'Close Tab') : `Close ${close.count} Tabs (Keep Saved Pins)`;
+        option.addEventListener('click', () => {
+            if (!session.active || !contextMenu.contains(option)) return;
+            try { void close.close(); } finally { closeMenu(); }
+        });
+        option.addEventListener('keydown', event => {
+            if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); option.click(); }
+        });
+        contextMenu.append(option);
+    }
+    // A closed pin remains an explicit Remove Pin action, never a batch close.
+    if (!multiple && !tabActions?.closeSelection) {
         const closeOption = document.createElement('div');
         closeOption.className = 'context-menu-item';
         closeOption.textContent = isBookmarkOnly ? 'Remove Pin' : isPinned ? 'Close Tab (Keep Pin)' : 'Close Tab';
@@ -618,14 +633,15 @@ export function setupQuickPinListener(moveTabToSpace, moveTabToPinned, moveTabTo
         } else if (request.action === "activatePinnedTab") {
             Logger.log("[Sidebar] Activating pinned tab:", request);
 
-            // Switch to the space if needed
-            if (request.spaceId && currentActiveSpaceId !== request.spaceId) {
-                Logger.log("[Sidebar] Switching to space:", request.spaceId, request.spaceName);
-                setActiveSpaceFunc(request.spaceId);
-            }
-
-            // Use the utility function to handle pinned tab activation
-            activatePinnedTabByURL(request.bookmarkUrl, request.spaceId, request.spaceName, request.bookmarkId || null);
+            // Hidden Spaces now have shells only. Await a current rendered view;
+            // the initial currentActiveSpaceId argument is not a live selection.
+            // Switching here must not activate an unrelated last-used tab.
+            void (async () => {
+                if (!request.spaceId || await setActiveSpaceFunc(request.spaceId, false) !== true) {
+                    throw new Error('The selected Space changed or is still loading. Choose the pin again.');
+                }
+                await activatePinnedTabByURL(request.bookmarkUrl, request.spaceId, request.spaceName, request.bookmarkId || null);
+            })().catch(error => report(error.message));
         }
     });
 }

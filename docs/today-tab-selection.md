@@ -8,7 +8,8 @@ focused row, Enter activates it, and Escape clears selection.
 Selections use exact live tab IDs in the active Space and sidebar window.
 Same-URL tabs remain distinct. Ranges follow the current displayed order, including
 inverted order, and exclude hidden rows. An ordinary click activates the tab and
-seeds the next Shift anchor. Harmless rerenders can retain a selected live ID and
+seeds the next Shift anchor. A following Ctrl/Cmd-click on another row includes
+that first row in the batch; later toggles do not resurrect deselected rows. Harmless rerenders can retain a selected live ID and
 URL, but navigation, closure, lost ownership or source hiding removes that row.
 
 Pinned-bookmark and Today selections are separate. A gesture in one section clears

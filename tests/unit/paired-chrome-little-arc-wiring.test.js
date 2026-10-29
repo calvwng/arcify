@@ -150,10 +150,11 @@ ${dispatchInput}  pull_request:`));
     const restored = workflow.slice(0, workflow.indexOf('  # Supplemental fresh-profile case 38:'))
         .replace("      - 'tests/unit/paired-chrome-move-drag-wiring.test.js'\n", '')
         .replace("      - 'docs/move-drag-paired-ci.md'\n", '')
-        .replace(dispatchInput, '').replaceAll(`    if: ${legacyGate}\n`, '').replace(/\n$/, '');
+        .replace(dispatchInput, '').replaceAll(`    if: ${legacyGate}\n`, '').replace(/\n$/, '')
+        .replaceAll('56cf43b1f773eab0e7d82d0645b9a48927e05616', 'c13511fd36d56358156c10336b8961b7ef95d5bc');
     assert.equal(createHash('sha256').update(restored).digest('hex'),
         'ee6bc1245b90a30d2f4ffa17cbeb961f8ce08e95ea65aa4434316194cfc2ab74',
-        'Every original workflow byte, including events, permissions, job bodies, pins and order, must be preserved apart from the exact manual opt-in gate.');
+        'Original events, permissions, job bodies and order remain unchanged apart from the exact gate and reviewed companion-pin upgrade.');
 });
 
 test('the additional job gate selects only the exact same-repository PR and leaves all eight legacy jobs selected', () => {
@@ -180,15 +181,15 @@ test('the additional job gate selects only the exact same-repository PR and leav
     }
 });
 
-test('Little Arc alone uses its exact reviewed companion pin and shared actual-event provenance guard', () => {
+test('all paired scopes use the same exact reconciled companion pin and retain actual-event provenance guards', () => {
     const legacyPin = source.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})';/)[1];
     const littleArcPin = source.match(/const PINNED_LITTLE_ARC_SPOTLIGHT = '([0-9a-f]{40})';/)?.[1];
     assert(littleArcPin, 'Little Arc must have a reviewed literal full commit ID, never a placeholder or a mutable branch.');
-    assert.notEqual(littleArcPin, legacyPin);
-    assert.equal(legacyPin, 'c13511fd36d56358156c10336b8961b7ef95d5bc');
+    assert.equal(littleArcPin, legacyPin);
+    assert.equal(legacyPin, '56cf43b1f773eab0e7d82d0645b9a48927e05616');
     for (const name of legacyJobNames) {
         assert.equal(jobSource(name).match(/repository: calvwng\/arcify-spotlight\n          ref: (.*)/)?.[1], legacyPin);
-        assert(!jobSource(name).includes(littleArcPin));
+        assert(jobSource(name).includes(littleArcPin));
     }
     assert(littleArcJob.includes(`ARCIFY_SPOTLIGHT_HEAD: ${littleArcPin}\n`));
     assert(littleArcJob.includes(`repository: calvwng/arcify-spotlight\n          ref: ${littleArcPin}\n`));
@@ -212,7 +213,7 @@ test('Little Arc alone uses its exact reviewed companion pin and shared actual-e
             head: path => path === 'main' ? 'a'.repeat(40) : expected };
         new vm.Script(guard).runInNewContext(context);
         assert.equal(context.report.environment.expectedSpotlightHead, expected);
-        for (const wrongHead of [runMode === 'little-arc' ? legacyPin : littleArcPin, 'b'.repeat(40)]) {
+        for (const wrongHead of ['c13511fd36d56358156c10336b8961b7ef95d5bc', '3b0b178f2c11b3add351c430a1e7734f54f25c8f', 'b'.repeat(40)]) {
             assert.throws(() => new vm.Script(guard).runInNewContext({ ...context,
                 head: path => path === 'main' ? 'a'.repeat(40) : wrongHead }), /reviewed pinned commit/);
         }
@@ -220,7 +221,7 @@ test('Little Arc alone uses its exact reviewed companion pin and shared actual-e
             head: path => path === 'main' ? 'b'.repeat(40) : expected }));
         if (runMode === 'little-arc') for (const mismatch of [
             { ARCIFY_TEST_HEAD: undefined }, { ARCIFY_TEST_HEAD: 'main' }, { GITHUB_SHA: 'b'.repeat(40) },
-            { ARCIFY_SPOTLIGHT_HEAD: legacyPin }, { GITHUB_EVENT_NAME: 'pull_request' }
+            { ARCIFY_SPOTLIGHT_HEAD: 'c13511fd36d56358156c10336b8961b7ef95d5bc' }, { GITHUB_EVENT_NAME: 'pull_request' }
         ]) assert.throws(() => new vm.Script(guard).runInNewContext({ ...context,
             process: { env: { ...context.process.env, ...mismatch } } }));
     }

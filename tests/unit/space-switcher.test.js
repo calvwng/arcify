@@ -345,3 +345,15 @@ test('hosted theme preview plan resolves to the real visible marker and cancella
     assert.equal(f.line.hidden, true);
     assert.deepEqual(f.ids(), ids); assert.deepEqual(f.moves, []); assert.deepEqual(f.activations, []);
 });
+
+test('render assigns each stable Space chip a separate authoritative tint and preserves icon/fallback',()=>{
+ const f=setup();f.setSpaces([{id:'a',name:'Home',icon:'home',color:'blue'},{id:'b',name:'Work',icon:'code',color:'green',customTint:'#123456'},{id:'c',name:'Fallback',color:'invalid'}]);f.control.render();
+ assert.deepEqual(f.buttons().map(b=>b.style.getPropertyValue('--space-chip-tint')),['#8bb3f3','#123456','#cccccc']);
+ assert(f.buttons()[0].querySelector('.space-icon'));assert(f.buttons()[2].querySelector('.space-icon-fallback'));assert.deepEqual(f.moves,[]);assert.deepEqual(f.activations,[]);
+});
+test('theme repaint during drag retains source node, marker and reorder state',async()=>{
+ const {setThemeMode,setSpaceColorOverrides}=await import('../../sidebar-theme.js');const f=setup();f.container.className='space-switcher';
+ const source=f.buttons()[2];f.event(source,'dragstart');f.event(f.buttons()[0],'dragover',{clientX:1});
+ setThemeMode(f.document,'dark');setSpaceColorOverrides(f.document,{grey:'#123456'});assert.equal(f.buttons()[2],source);assert(source.classList.contains('dragging-switcher'));assert.equal(f.line.hidden,false);
+ assert.equal(source.style.getPropertyValue('--space-chip-tint'),'#123456');f.event(f.document,'keydown',{key:'Escape'});assert.equal(f.moves.length,0);
+});

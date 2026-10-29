@@ -133,6 +133,8 @@ const Utils = {
         const originalDomain = new URL(url).hostname;
         return this._serializeTabNameOp(async () => {
             const overrides = await this.getTabNameOverrides();
+            const previous = overrides[tabId];
+            if (previous && Object.keys(previous).length === 2 && previous.name === name && previous.originalDomain === originalDomain) return;
             overrides[tabId] = { name, originalDomain };
             await this.saveTabNameOverrides(overrides);
         });
@@ -193,6 +195,9 @@ const Utils = {
             if (beforeWrite) await beforeWrite();
             const previous = states[tabId] ? { ...states[tabId] } : undefined;
             const written = { pinnedUrl: state.pinnedUrl || null, bookmarkId: state.bookmarkId || null };
+            // Equality is checked inside the lock, after caller revalidation.
+            // A no-op must still reject a changed owner or failed native guard.
+            if (previous && Object.keys(previous).length === 2 && previous.pinnedUrl === written.pinnedUrl && previous.bookmarkId === written.bookmarkId) return;
             states[tabId] = written;
             try {
                 await this.savePinnedTabStates(states);

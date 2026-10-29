@@ -2482,3 +2482,24 @@ select:focus-visible,
 .tab[data-split-outline="first"]::after { border-style: solid; border-bottom: 0; border-radius: 10px 10px 0 0; }
 .tab[data-split-outline="last"]::after { border-style: solid; border-top: 0; border-radius: 0 0 10px 10px; }
 .tab[data-split-outline] .today-split-badge { opacity: 1; font-weight: 600; white-space: normal; }
+
+.shared-today-remote { display:block; width:100%; text-align:left; padding:8px; margin:2px 0; border:0; border-radius:6px; background:transparent; color:inherit; font:inherit; cursor:pointer; overflow-wrap:anywhere; }
+.shared-today-remote:hover, .shared-today-remote:focus-visible { background:rgba(127,127,127,.18); }
+
+
+/* Bottom Space switcher: every chip owns its tint; the strip and + keep theirs. */
+:root[data-theme] #spaceSwitcher.space-switcher button[data-space-id] {
+    background: var(--space-chip-bg, var(--sidebar-secondary-bg));
+    color: var(--space-chip-text, var(--sidebar-text-color));
+}
+:root[data-theme] #spaceSwitcher.space-switcher button[data-space-id]:hover {
+    background: var(--space-chip-hover, var(--tab-hover-bg));
+}
+:root[data-theme] #spaceSwitcher.space-switcher button[data-space-id].active {
+    background: var(--space-chip-selected, var(--theme-selected-bg));
+    color: var(--space-chip-selectedText, var(--theme-selected-text));
+    box-shadow: inset 0 0 0 2px var(--space-chip-marker, currentColor), 0 2px 8px #0000001a;
+}
+:root[data-theme] #spaceSwitcher.space-switcher button[data-space-id]:focus-visible {
+    outline-color: var(--space-chip-marker, currentColor);
+}

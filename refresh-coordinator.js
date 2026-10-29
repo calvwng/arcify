@@ -1,7 +1,7 @@
 export class RefreshCoordinator {
     constructor({ readSpaces, adoptSpaces, render, isBusy = () => false, onError = () => {}, delay = 100, maxRetries = 3,
         schedule = (callback, timeout) => globalThis.setTimeout(callback, timeout),
-        cancel = timer => globalThis.clearTimeout(timer) }) {
+        cancel = timer => globalThis.clearTimeout(timer), now = () => performance.now() }) {
         this.readSpaces = readSpaces;
         this.adoptSpaces = adoptSpaces;
         this.render = render;
@@ -11,6 +11,12 @@ export class RefreshCoordinator {
         this.maxRetries = maxRetries;
         this.scheduleFn = schedule;
         this.cancelFn = cancel;
+        this.now = now;
+        this.promptPending = false;
+        this.promptTimer = false;
+        this.nextPromptAt = -Infinity;
+        this.scheduleToken = 0;
+        this.destroyed = false;
         this.bookmarkGeneration = 0;
         this.handledBookmarkGeneration = 0;
         this.spacesGeneration = 0;
@@ -50,12 +56,40 @@ export class RefreshCoordinator {
             this.activeViewGeneration > this.handledActiveViewGeneration;
     }
 
+    // A discarded display can retry promptly once per normal debounce interval.
+    // Keep that wake fixed: later invalidations coalesce rather than postpone it.
+    retrySupersededRender() {
+        if (this.destroyed) return;
+        this.promptPending = true;
+        this.schedule();
+    }
+
     schedule(delay = this.delay) {
+        if (this.destroyed || this.timer !== null && this.promptTimer) return;
         if (this.timer !== null) this.cancelFn(this.timer);
+        const token = ++this.scheduleToken;
+        this.promptTimer = this.promptPending;
+        const wait = this.promptPending ? Math.max(0, this.nextPromptAt - this.now()) : delay;
         this.timer = this.scheduleFn(() => {
+            if (this.destroyed || token !== this.scheduleToken) return;
             this.timer = null;
+            this.promptTimer = false;
+            // A wake consumed during another drain or an editor stays pending
+            // until the existing completion/idle hook can safely retry it.
+            if (this.promptPending && !this.running && !this.isBusy()) {
+                this.promptPending = false;
+                this.nextPromptAt = this.now() + Math.max(1, this.delay);
+            }
             return this.drain().catch(this.onError);
-        }, delay);
+        }, wait);
+    }
+
+    destroy() {
+        this.destroyed = true;
+        this.scheduleToken++;
+        if (this.timer !== null) this.cancelFn(this.timer);
+        this.timer = null;
+        this.promptTimer = this.promptPending = false;
     }
 
     retry() {
@@ -64,7 +98,7 @@ export class RefreshCoordinator {
     }
 
     async drain() {
-        if (this.running) return;
+        if (this.destroyed || this.running) return;
         if (!this.hasWork()) return;
         if (this.isBusy()) return;
 
@@ -74,7 +108,7 @@ export class RefreshCoordinator {
         const activeViewGeneration = this.activeViewGeneration;
         // A render must not commit or acknowledge work superseded while it awaited
         // storage, bookmark trees, or tabs. Busy work is resumed by its idle hook.
-        const isCurrent = () => !this.isBusy() && generation === this.bookmarkGeneration &&
+        const isCurrent = () => !this.destroyed && !this.isBusy() && generation === this.bookmarkGeneration &&
             spacesGeneration === this.spacesGeneration && activeViewGeneration === this.activeViewGeneration;
         let failed = false;
         try {
@@ -97,6 +131,11 @@ export class RefreshCoordinator {
             this.retryCount = 0;
         } catch (error) {
             failed = true;
+            // A prompt display retry must never bypass failure backoff.
+            this.promptPending = this.promptTimer = false;
+            if (this.timer !== null) this.cancelFn(this.timer);
+            this.timer = null;
+            this.scheduleToken++;
             this.onError(error);
             if (this.retryCount < this.maxRetries) {
                 const retryDelay = this.delay * (2 ** this.retryCount);

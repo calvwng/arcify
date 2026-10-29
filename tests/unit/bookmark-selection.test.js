@@ -356,3 +356,52 @@ test('mixed successful batch names unsupported bookmarks and keeps skipped disti
     assert.match(partial, /1 completed, 1 failed, 1 not attempted, 1 skipped/);
     assert.match(partial, /Skipped “Extension Settings”/); assert.match(partial, /Nothing was retried automatically/);
 });
+
+
+test('ordinary saved-row activation followed by Ctrl-click includes the exact saved anchor', () => {
+    const f=fixture();f.click('a');f.selection.captureActivation()();f.event(f.window,'blur');
+    const old=f.row('a'),replacement=old.cloneNode(true);replacement.dataset.tabId='42';old.replaceWith(replacement);f.selection.register(replacement);f.selection.reconcile();
+    f.click('b',{ctrlKey:true});
+    assert.deepEqual(f.ids(),['a','b']);
+    assert.deepEqual(f.selection.freeze(f.row('b')).entries.map(e=>e.bookmarkId),['a','b']);
+});
+
+
+test('plain-click additive seed is consumed once and never resurrects deselected rows', () => {
+    const f=fixture();f.click('a');f.click('b',{ctrlKey:true});f.click('a',{ctrlKey:true});f.click('b',{ctrlKey:true});
+    assert.deepEqual(f.ids(),[]);f.click('d',{ctrlKey:true});assert.deepEqual(f.ids(),['d']);
+});
+
+test('plain-click seed does not change Space toggle or singleton context target semantics', () => {
+    const f=fixture();f.click('a');f.event(f.row('b'),'keydown',{key:' '});assert.deepEqual(f.ids(),['b']);
+    f.selection.clear();f.click('a');assert.deepEqual(f.selection.freeze(f.row('b')).entries.map(e=>e.bookmarkId),['b']);
+    f.selection.clear();f.click('a');f.click('a',{metaKey:true});assert.deepEqual(f.ids(),['a']);
+});
+
+test('cancelled, hidden, navigated or context-changed plain anchors cannot join a Ctrl-click batch', () => {
+    for(const change of ['escape','outside','hidden','url','window','control']){
+        const f=fixture();f.click('a');
+        if(change==='escape')f.event(f.document.body,'keydown',{key:'Escape'});
+        if(change==='outside')f.event(f.document.body,'click');
+        if(change==='hidden')f.row('a').hidden=true;
+        if(change==='url')f.row('a').dataset.url='https://changed.test/';
+        if(change==='window')f.context.windowId=99;
+        if(change==='control')f.event(f.row('a').querySelector('button'),'click');
+        f.click('b',{ctrlKey:true});assert.deepEqual(f.ids(),['b'],change);
+    }
+});
+
+
+test('Cmd-click extends a fresh activation, and late activation completion respects the newer gesture', () => {
+    const f=fixture();f.click('a');const complete=f.selection.captureActivation();f.click('b',{metaKey:true});complete();
+    assert.deepEqual(f.ids(),['a','b']);
+});
+
+test('removed plain-click anchor never substitutes an equal-URL row', () => {
+    const f=fixture();f.click('a');f.row('a').remove();f.click('b',{ctrlKey:true});assert.deepEqual(f.ids(),['b']);
+});
+
+
+test('moved saved anchor loses pending additive eligibility', () => {
+    const f=fixture();f.click('a');f.document.querySelector('.folder-content').append(f.row('a'));f.click('d',{ctrlKey:true});assert.deepEqual(f.ids(),['d']);
+});

@@ -15,7 +15,8 @@ Object.defineProperty(window.HTMLSelectElement.prototype, 'value', {
     get() { return this.querySelector('option[selected]')?.value || ''; },
     set(value) { for (const option of this.querySelectorAll('option')) option.toggleAttribute('selected', option.value === value); }
 });
-const listeners = () => ({ addListener() {} });
+const listeners = () => { const callbacks = []; return { addListener(callback) { callbacks.push(callback); }, async emit(...args) { await Promise.all(callbacks.map(callback => callback(...args))); } }; };
+let handoffObserved = false, handoffBefore = null;
 const area = state => ({
     async get(keys) {
         const names = typeof keys === 'string' ? [keys] : Array.isArray(keys) ? keys : Object.keys(keys || state);
@@ -63,7 +64,15 @@ globalThis.chrome = {
     windows: { getCurrent(_options, callback) { callback?.({ id: windowId }); return Promise.resolve({ id: windowId }); } },
     tabs: {
         ...Object.fromEntries(['onActivated', 'onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
-        async query(query) { return structuredClone(tabs.filter(tab =>
+        async query(query) {
+            if (workerData.handoffTabId && query.active && query.currentWindow && !handoffObserved) {
+                handoffObserved = true;
+                const tab = tabs.find(tab => tab.id === workerData.handoffTabId);
+                handoffBefore = document.querySelector(`.space.active [data-tab-id="${tab.id}"] .tab-title-display`)?.textContent;
+                tab.title = 'New title during initialization handoff';
+                await chrome.tabs.onUpdated.emit(tab.id, { title: tab.title }, structuredClone(tab));
+            }
+            return structuredClone(tabs.filter(tab =>
             (!query.windowId || tab.windowId === query.windowId) && (!query.currentWindow || tab.windowId === windowId) &&
             (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id) { const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Missing tab'); return structuredClone(tab); }
@@ -89,7 +98,15 @@ Logger.warn = (...args) => warnings.push(args.map(String));
 Logger.error = (...args) => warnings.push(args.map(String));
 await import('../../sidebar.js');
 await Promise.all(domReady.map(callback => callback()));
+if (workerData.handoffTabId) {
+    const deadline = Date.now() + 2500;
+    while (document.querySelector(`.space.active [data-tab-id="${workerData.handoffTabId}"] .tab-title-display`)?.textContent !== 'New title during initialization handoff') {
+        assert(Date.now() < deadline, 'The initialization handoff event must settle without another user action');
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+}
 parentPort.postMessage({
+    handoffObserved, handoffBefore,
     local, session, patches, bookmarkWrites, warnings,
     rows: [...document.querySelectorAll('.space.active .tab')].map(row => ({
         tabId: row.dataset.tabId ? Number(row.dataset.tabId) : null,

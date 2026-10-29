@@ -121,3 +121,26 @@ test('palette disposal suppresses an outstanding read; failures report once and 
     await failed.ready; assert.deepEqual(errors, ['Unavailable']); assert.equal(getDocumentSpaceTint(document, { color: 'blue' }), DEFAULT_SPACE_COLORS.blue);
     failed.dispose(); assert.equal(listeners.size, 0);
 });
+
+test('switcher chips own their Space themes while live palette/appearance changes preserve DOM identity', async () => {
+    const {applySpaceSwitcherTheme}=await import('../../sidebar-theme.js');
+    const document=doc();document.body.insertAdjacentHTML('beforeend','<div class="space-switcher"><button data-space-id="a">Home</button><button data-space-id="b">Work</button></div><button id="plus">+</button>');
+    const [a,b]=document.querySelectorAll('.space-switcher button');const spaces=[{id:'a',color:'blue'},{id:'b',color:'green',customTint:'#001122'}];
+    setThemeMode(document,'dark');applySpaceSwitcherTheme(document,a,spaces[0]);applySpaceSwitcherTheme(document,b,spaces[1]);
+    const ownB=b.style.getPropertyValue('--space-chip-bg');assert.notEqual(a.style.getPropertyValue('--space-chip-bg'),ownB);
+    applySpaceTheme(document,spaces[0]);applySpaceTheme(document,{color:'red'});assert.equal(b.style.getPropertyValue('--space-chip-bg'),ownB);
+    assert.equal(document.querySelector('[data-space-id="a"]'),a);assert.equal(document.getElementById('plus').getAttribute('style'),null);
+    setSpaceColorOverrides(document,{blue:'#aabbcc'});assert.equal(a.style.getPropertyValue('--space-chip-tint'),'#aabbcc');assert.equal(b.style.getPropertyValue('--space-chip-tint'),'#001122');
+    setThemeMode(document,'light');assert.equal(b.style.getPropertyValue('--space-chip-bg'),deriveSpaceTheme('#001122','light').secondary);assert.equal(document.querySelector('[data-space-id="b"]'),b);
+});
+test('invalid switcher tint falls back and cannot inject arbitrary CSS', async()=>{
+    const {applySpaceSwitcherTheme}=await import('../../sidebar-theme.js');const document=doc(),button=document.createElement('button');
+    const theme=applySpaceSwitcherTheme(document,button,{color:'var(--evil)',customTint:'url(https://evil.test)'});assert.equal(theme.tint,'#cccccc');
+    for(const key of ['tint','bg','text','hover','selected','selectedText','marker'])assert.match(button.style.getPropertyValue('--space-chip-'+key),/^#[0-9a-f]{6}$/);
+});
+test('Space chip CSS preserves own hover/selection contrast, circle sizing and separate plus',async()=>{
+    const css=await readFile(new URL('../../styles.css',import.meta.url),'utf8');
+    const delta=css.slice(css.indexOf('/* Bottom Space switcher: every chip owns its tint;'));
+    assert.match(delta,/button\[data-space-id\]\.active/);assert.match(delta,/--space-chip-selectedText/);assert.match(delta,/inset 0 0 0 2px var\(--space-chip-marker/);
+    assert.doesNotMatch(delta,/add-space-toggle|width:|height:|border-radius:/);
+});

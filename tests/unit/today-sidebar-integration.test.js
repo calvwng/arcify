@@ -1,3 +1,4 @@
+import { readSharedToday, openSharedToday } from '../../shared-today.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -60,6 +61,7 @@ const area = state => ({ async get(keys) {
     return structuredClone({ ...(Array.isArray(keys) ? {} : keys), ...state });
 }, async set(next) { Object.assign(state, structuredClone(next)); }, async remove(key) { delete state[key]; } });
 let beforeTree, beforeGetBookmarks, beforeRemove, beforeGetTab, beforeTabMenuRequest, beforeTodayMoveRequest;
+const closeRequests = [];
 const mutations = [], saveRequests = [], splitRequests = [], nativeSplitCalls = [], todayMoveRequests = [], savedMoveRequests = [];
 const settings = { invertTabOrder: false };
 let nextBookmarkId = 100;
@@ -77,6 +79,7 @@ Object.assign(globalThis, { window, document, Event: window.Event, Node: window.
 globalThis.chrome = {
     runtime: { onMessage, getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'closeSelectedTabs') { closeRequests.push(structuredClone(message)); return { success: true, completed: message.entries.map(e => e.tabId), uncertain: false }; }
             if (message.type === 'moveSavedItemsToSpace') {
                 savedMoveRequests.push(structuredClone(message));
                 return { success: true, batch: { total: message.entries.length, completed: message.entries.map(entry => entry.bookmarkId),
@@ -102,6 +105,7 @@ globalThis.chrome = {
                 try { return { success: true, ...await runTabMenuAction(store, message) }; }
                 catch (error) { return { success: false, error: error.message }; }
             }
+            if (message.type === 'arcifySharedToday') { try { return { success: true, ...(message.action === 'read' ? { entries: await readSharedToday(store) } : await openSharedToday(store, message)) }; } catch (error) { return { success: false, error: error.message }; } }
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: [] };
             if (message.type === 'sidebarTour') return { success: true, state: null };
             assert.equal(message.type, 'spaceStore');
@@ -113,7 +117,7 @@ globalThis.chrome = {
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
     storage: { onChanged, local: area(local), sync: area(settings), session: area(session) },
-    windows: { async get(id) { return { id, type: 'normal', incognito: false }; }, getCurrent(_options, callback) { callback?.({ id: 10 }); return Promise.resolve({ id: 10 }); } },
+    windows: { async update(id, properties) { mutations.push(['window-update',id,properties]); return {id,...properties}; }, async getAll() { return [{id:10,type:'normal'}, {id:20,type:'normal'}]; }, async get(id) { return { id, type: 'normal', incognito: false }; }, getCurrent(_options, callback) { callback?.({ id: 10 }); return Promise.resolve({ id: 10 }); } },
     tabs: { ...Object.fromEntries(['onActivated', 'onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active))); },
         async get(id) { await beforeGetTab?.(id); return structuredClone(tabs.find(tab => tab.id === id)); },
@@ -121,7 +125,7 @@ globalThis.chrome = {
         async duplicate(id) { const next = { ...structuredClone(tabs.find(tab => tab.id === id)), id: 88, active: false }; tabs.push(next); return next; },
         async update(id, properties) { mutations.push(['tab-update', id, properties]); Object.assign(tabs.find(tab => tab.id === id), properties); return this.get(id); }
     },
-    bookmarks: {
+    bookmarks: { ...Object.fromEntries(['onCreated', 'onChanged', 'onMoved', 'onRemoved', 'onChildrenReordered', 'onImportEnded'].map(name => [name, listeners()])),
         async create(data) { const node = { ...data, id: String(nextBookmarkId++) }; (node.url ? bookmarks : folders).push(node); mutations.push(['bookmark-create', structuredClone(node)]); return structuredClone(node); },
         async get(id) { await beforeGetBookmarks?.(id); const ids = Array.isArray(id) ? id : [id]; return structuredClone([...folders, ...bookmarks].filter(node => ids.includes(node.id))); },
         async getSubTree(id) {
@@ -130,7 +134,13 @@ globalThis.chrome = {
         },
         async search({ title }) { return structuredClone(folders.filter(node => node.title === title)); },
         async getChildren(id) { await beforeTree?.(); return structuredClone([...folders, ...bookmarks].filter(node => node.parentId === id).sort((a, b) => (a.index ?? Number(a.id.slice(1)) ?? 0) - (b.index ?? Number(b.id.slice(1)) ?? 0))); },
-        async update(id, values) { Object.assign(bookmarks.find(node => node.id === id), values); mutations.push(['bookmark-update', id, values]); return structuredClone(bookmarks.find(node => node.id === id)); },
+        async update(id, values) {
+            Object.assign(bookmarks.find(node => node.id === id), values); mutations.push(['bookmark-update', id, values]);
+            // Real Chrome emits this event for API writes as well as external edits.
+            // The display proof must see it before a later action reuses saved rows.
+            await this.onChanged.emit(id, structuredClone(values));
+            return structuredClone(bookmarks.find(node => node.id === id));
+        },
         async remove(id) { bookmarks.splice(bookmarks.findIndex(node => node.id === id), 1); await onMessage.emit({ action: 'arcifyBookmarksChanged' }); }
     },
     tabGroups: { async query() { return []; } }
@@ -172,10 +182,29 @@ test('real sidebar registers Today modifier selection without activation, and re
     event(live(3), 'click', { ctrlKey: true }); event(live(5), 'click', { shiftKey: true });
     assert.deepEqual(selected(), [3, 4, 5]);
     assert.equal(document.getElementById('todaySelectionStatus').dataset.count, '3');
-    assert.equal(live(9), null, 'Other-window identity is excluded from the actual Today render');
+    assert.equal(live(9), null, 'Remote identity must not be a local tab row');
+    const remote = content().querySelector('.shared-today-remote');
+    assert(remote); assert.match(remote.textContent,/Window 20/);
+    assert.equal(remote.matches('[data-tab-id],.tab,.pinned-favicon'),false);
+    event(remote,'contextmenu');event(remote,'click',{ctrlKey:true});
+    assert.deepEqual(selected(),[3,4,5]);
     assert.equal(mutations.length, before); assert.equal(tabs.find(tab => tab.id === 1).active, true);
     const drag = event(live(3), 'dragstart', { dataTransfer: { setData() { assert.fail('Batch may not become a singleton drag'); } } });
     assert.equal(drag.defaultPrevented, true); assert.equal(document.querySelector('.dragging'), null);
+});
+
+test('production remote row opens its existing owner window without entering the selected local batch',async()=>{
+ const remote=content().querySelector('.shared-today-remote');assert(remote);
+ const originalGet=chrome.windows.get,originalUpdate=chrome.windows.update;
+ let focusedWindow=10;
+ chrome.windows.get=async id=>({id,type:'normal',incognito:false,focused:id===focusedWindow});
+ chrome.windows.update=async(id,properties)=>{assert.deepEqual(properties,{focused:true});focusedWindow=id;return chrome.windows.get(id);};
+ const before=tabs.map(t=>({id:t.id,windowId:t.windowId,url:t.url})),sourceSpace=store.active[10];
+ try {
+  const click=new window.Event('click',{bubbles:true});Object.defineProperty(click,'isTrusted',{value:true});remote.dispatchEvent(click);await wait(120);
+  assert.equal(focusedWindow,20);assert.equal(store.active[20],'alpha');assert.equal(store.active[10],sourceSpace);
+  assert.deepEqual(tabs.map(t=>({id:t.id,windowId:t.windowId,url:t.url})),before);assert.deepEqual(selected(),[3,4,5]);assert.equal(tabs.find(t=>t.id===1).active,true);
+ } finally {chrome.windows.get=originalGet;chrome.windows.update=originalUpdate;}
 });
 
 test('dragging an unselected Today row keeps ordinary singleton drag semantics', async () => {
@@ -190,7 +219,8 @@ test('dragging an unselected Today row keeps ordinary singleton drag semantics',
 
 test('real context menu retains a selected batch, switches unselected singleton, and Cancel performs no save', async () => {
     await context(4); assert.match(document.getElementById('saveTodayTabsInNewFolder').textContent, /Save 3 tabs/);
-    assert.equal(document.querySelectorAll('#tab-context-menu .context-menu-item').length, 1, 'Batch menu must not imply singular mutations affect the entire selection');
+    assert.equal(document.querySelectorAll('#tab-context-menu  .context-menu-item:not([data-action="reviewTodayRecovery"]):not([data-action="closeSelectedTabs"])').length, 1, 'Batch menu must not imply singular mutations affect the entire selection');
+    assert.equal(document.querySelectorAll('#tab-context-menu [data-action="reviewTodayRecovery"]').length,1);
     const before = structuredClone(mutations);
     dialog(); assert(document.getElementById('todayFolderDialog'));
     event(document.getElementById('todayFolderCancel'), 'click'); await wait(40);
@@ -860,4 +890,65 @@ test('real sidebar wires closed/live saved batches and clicked folders to exact 
         }
         assert.deepEqual(mutations, beforeMutations); assert.deepEqual(tabs, beforeTabs);
     } finally { settings.invertTabOrder = false; clear(); await refresh(); }
+});
+
+
+test('real sidebar close selected pins keeps closed pins out of live request and consumes selection', async () => {
+    clear(); await refresh();
+    const a = row('b0'), b = row('b10'); assert(a && b);
+    event(a, 'click', { ctrlKey: true }); event(b, 'click', { ctrlKey: true });
+    event(b, 'contextmenu', { pageX: 20, pageY: 20 }); await wait(40);
+    const close = menuItem('closeSelectedTabs'); assert(close);
+    const before = closeRequests.length;
+    event(close, 'click'); await wait(300);
+    assert.equal(closeRequests.length, before + 1);
+    assert.deepEqual(closeRequests.at(-1).entries.map(e => e.tabId), [1]);
+    assert.equal(closeRequests.at(-1).entries[0].bookmarkId, 'b0');
+    assert.equal(document.querySelectorAll('.bookmark-selected').length, 0);
+});
+
+test('real sidebar Delete closes selected Today IDs; outside focused row uses singleton semantics', async () => {
+    clear(); await refresh();
+    const rows = [...document.querySelectorAll('.space.active [data-tab-type="temporary"] .tab[data-tab-id]')];
+    assert(rows.length >= 2);
+    event(rows[0], 'click', { ctrlKey: true }); event(rows[1], 'click', { ctrlKey: true });
+    const ids = rows.slice(0, 2).map(e => Number(e.dataset.tabId));
+    event(rows[0], 'keydown', { key: 'Delete' }); await wait(300);
+    assert.deepEqual(closeRequests.at(-1).entries.map(e => e.tabId), ids);
+    clear(); await refresh();
+    const first = live(ids[0]), second = live(ids[1]);
+    event(first, 'click', { ctrlKey: true });
+    event(second, 'keydown', { key: 'Delete' }); await wait(300);
+    assert.deepEqual(closeRequests.at(-1).entries.map(e => e.tabId), [ids[1]]);
+});
+
+test('selected saved rows reconcile across selective refresh and close uses fresh row URL', async () => {
+    clear(); await refresh();
+    const oldRow=row('b0'), closedRow=row('b10'); assert(oldRow && closedRow);
+    event(oldRow,'click',{ctrlKey:true});event(closedRow,'click',{ctrlKey:true});
+    const tab=tabs.find(t=>t.id===1), originalUrl=tab.url;tab.url='https://fresh-selected-pin.test/';tab.title='Fresh selected pin';
+    await chrome.tabs.onUpdated.emit(1,{url:tab.url,title:tab.title},structuredClone(tab));await wait(400);
+    const replacement=row('b0');assert.notEqual(replacement,oldRow);assert.equal(row('b10'),closedRow);
+    assert(replacement.classList.contains('bookmark-selected'));assert(closedRow.classList.contains('bookmark-selected'));
+    event(replacement,'contextmenu',{pageX:20,pageY:20});await wait(40);
+    const close=menuItem('closeSelectedTabs');assert(close);
+    const before=closeRequests.length;event(close,'click');await wait(300);
+    assert.equal(closeRequests.length,before+1);assert.deepEqual(closeRequests.at(-1).entries,[{tabId:1,url:tab.url,bookmarkId:'b0',parentId:'p'}]);
+    event(oldRow,'contextmenu',{pageX:20,pageY:20});await wait(40);assert.equal(closeRequests.length,before+1);assert.equal(menuItem('closeSelectedTabs'),null);
+    tab.url=originalUrl;await refresh();
+});
+
+
+test('plain activation then Ctrl-click keeps both Today rows through refresh for menu and Delete', async () => {
+    for(const action of ['menu','delete']) {
+        clear();await refresh();const rows=[...document.querySelectorAll('.space.active [data-tab-type="temporary"] .tab[data-tab-id]')];assert(rows.length>=3);
+        const ids=rows.slice(0,2).map(e=>Number(e.dataset.tabId));
+        event(rows[0],'click');await activate(ids[0]);await refresh();
+        event(live(ids[1]),'click',{ctrlKey:true});await refresh();
+        assert.deepEqual([...document.querySelectorAll('.today-selected')].map(e=>Number(e.dataset.tabId)),ids);
+        const before=closeRequests.length;
+        if(action==='menu'){event(live(ids[1]),'contextmenu',{pageX:20,pageY:20});await wait(40);const close=menuItem('closeSelectedTabs');assert.match(close.textContent,/Close 2 Tabs/);event(close,'click');}
+        else event(live(ids[1]),'keydown',{key:'Delete'});
+        await wait(300);assert.equal(closeRequests.length,before+1);assert.deepEqual(closeRequests.at(-1).entries.map(e=>e.tabId),ids);
+    }
 });

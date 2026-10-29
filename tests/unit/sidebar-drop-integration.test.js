@@ -79,6 +79,7 @@ globalThis.chrome = {
                 try { return { success: true, ...await enqueueBookmarkOperation(message.operation, { beforeWrite: createNativeSplitWriteGuard(message.guardTab) }) }; }
                 catch (error) { return { success: false, error: error.message, code: error.code, moved: error.moved, createdId: error.createdId }; }
             }
+            if (message.type === 'arcifySharedToday') return { success: true, entries: [] };
             assert.equal(message.type, 'spaceStore');
             if (message.action === 'get') { const result = structuredClone(storedSpaces); return { success: true, spaces: result }; }
             if (message.action === 'patch') storedSpaces = applySpacePatch(storedSpaces, message.before, message.after);
@@ -91,7 +92,7 @@ globalThis.chrome = {
     tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id, callback) { const result = structuredClone(tabs.find(tab => tab.id === id)); callback?.(result); return result; } },
-    bookmarks: { async get(id) { await hooks.bookmarkGet?.(id); return structuredClone(nodes().filter(node => node.id === id)); },
+    bookmarks: { onChanged: listeners(), async get(id) { await hooks.bookmarkGet?.(id); return structuredClone(nodes().filter(node => node.id === id)); },
         async search({ title }) { return structuredClone(nodes().filter(node => node.title === title)); },
         async getChildren(id) { return structuredClone((getNode(id)?.children || []).map(node => ({ ...node, parentId: id }))); },
         async move(id, { parentId, index }) {
@@ -488,9 +489,16 @@ function assertFolder(collapsed) {
 }
 async function startFolderRefresh(path) {
     if (path === 'coordinator') await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' });
-    // This real settings listener calls refreshActiveSpaceUI directly. Keep the
-    // setting value unchanged so only the refresh path differs between cases.
-    else await onChanged.emit({ invertTabOrder: { newValue: false } }, 'sync');
+    // Settings now coalesce through the coordinator. The native attachment
+    // handler still has a real direct-render path; dispatch without awaiting
+    // the deliberate render gate, and surface any asynchronous failure.
+    else {
+        // This race deliberately targets a full saved-tree read. A Today-only
+        // attachment can now correctly skip it, so establish a bookmark revision
+        // first without scheduling a coordinator render or mutating fixture data.
+        await chrome.bookmarks.onChanged.emit('f', { title: getNode('f').title });
+        void chrome.tabs.onAttached.emit(2, { newWindowId: 10 }).catch(error => alerts.push(error.message));
+    }
 }
 function folderRaceViewport() {
     const content = root().closest('.space-content');
@@ -548,7 +556,7 @@ for (const path of ['coordinator', 'direct']) {
         const viewport = folderRaceViewport(), assertUnchanged = folderRaceBaseline();
         const folderWrites = [];
         let reads = 0;
-        hooks.storageRead = key => key === 'folderCollapsed:g' ? (++reads === 1 ? oldRender.pause() : reads === 2 ? recovery.pause() : undefined) : undefined;
+        hooks.storageRead = key => (Array.isArray(key) && key.includes('folderCollapsed:g')) ? (++reads === 1 ? oldRender.pause() : reads === 2 ? recovery.pause() : undefined) : undefined;
         hooks.storageSet = next => { if ('folderCollapsed:f' in next) folderWrites.push(next['folderCollapsed:f']); };
         const collapsed = scenario === 'collapse';
         try {
@@ -584,12 +592,12 @@ for (const path of ['coordinator', 'direct']) {
         const viewport = folderRaceViewport(), assertUnchanged = folderRaceBaseline();
         let first = true, recovering = false;
         hooks.storageReadResult = (key, result) => {
-            if (key === 'folderCollapsed:f' && first) {
-                first = false; assert.equal(result[key], true); return oldRead.pause();
+            if (Array.isArray(key) && key.includes('folderCollapsed:f') && first) {
+                first = false; assert.equal(result['folderCollapsed:f'], true); return oldRead.pause();
             }
         };
         hooks.beforeStorageSet = next => 'folderCollapsed:f' in next ? write.pause() : undefined;
-        hooks.storageRead = key => key === 'folderCollapsed:g' && recovering ? recovery.pause() : undefined;
+        hooks.storageRead = key => Array.isArray(key) && key.includes('folderCollapsed:g') && recovering ? recovery.pause() : undefined;
         try {
             await startFolderRefresh(path); await reached(oldRead);
             toggleFolder(); assertFolder(false); await reached(write);
@@ -618,7 +626,7 @@ for (const path of ['coordinator', 'direct']) {
         const old = row('f'), oldRender = renderGate(), recovery = renderGate();
         const viewport = folderRaceViewport(), assertUnchanged = folderRaceBaseline();
         let reads = 0;
-        hooks.storageRead = key => key === 'folderCollapsed:g' ? (++reads === 1 ? oldRender.pause() : reads === 2 ? recovery.pause() : undefined) : undefined;
+        hooks.storageRead = key => (Array.isArray(key) && key.includes('folderCollapsed:g')) ? (++reads === 1 ? oldRender.pause() : reads === 2 ? recovery.pause() : undefined) : undefined;
         try {
             await startFolderRefresh(path); await reached(oldRender);
             const oldValue = local['folderCollapsed:f'];

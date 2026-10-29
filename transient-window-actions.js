@@ -1,3 +1,4 @@
+const DIRECT_MODE_KEY='littleArcDirectPlacementEnabled';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { Utils } from './utils.js';
 import { assertNotNativeSplit } from './native-split-safety.js';
@@ -10,7 +11,7 @@ const fail = (code, message) => { throw Object.assign(new Error(message), { code
 const exact = (value, keys) => value && !Array.isArray(value) && typeof value === 'object'
     && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 
-async function destinationSpace(store, request) {
+export async function destinationSpace(store, request) {
     const matches = store.spaces.filter(space => space.id === request.spaceId);
     const space = matches[0];
     if (matches.length !== 1 || space.bookmarkFolderId !== request.bookmarkFolderId
@@ -112,14 +113,15 @@ export function createTransientControlHandler(store) {
     const validateSelection = createTransientRecoverySelectionValidator(store);
     return (request, sender) => store.run(async () => {
         if (!store.transientWindows || !text(request?.token) || request.type !== TRANSIENT_CONTROL_TYPE
-            || !['context', 'recover', 'promote'].includes(request.action)) fail('INVALID_REQUEST', 'Invalid temporary-window request.');
-        const fields = request.action === 'context' ? ['type', 'action', 'token']
+            || !['context', 'recover', 'promote', 'directMode'].includes(request.action)) fail('INVALID_REQUEST', 'Invalid temporary-window request.');
+        const fields = request.action === 'directMode' ? ['type','action','token','enabled'] : request.action === 'context' ? ['type', 'action', 'token']
             : request.action === 'recover' ? ['type', 'action', 'token', 'tabId']
                 : ['type', 'action', 'token', 'tabId', 'windowId', 'spaceId', 'bookmarkFolderId'];
-        if (!exact(request, fields) || request.action !== 'context' && !positive(request.tabId)
+        if (!exact(request, fields) || !['context','directMode'].includes(request.action) && !positive(request.tabId)
             || request.action === 'promote' && (!positive(request.windowId) || !text(request.spaceId) || !text(request.bookmarkFolderId)))
             fail('INVALID_REQUEST', 'Choose the exact page, window, and Space.');
         const record = await verifyController(store, request, sender);
+        if(request.action==='directMode'){if(typeof request.enabled!=='boolean')fail('INVALID_REQUEST','Choose direct mode explicitly.');await chrome.storage.local.set({[DIRECT_MODE_KEY]:request.enabled});return {directEnabled:request.enabled};}
         if (request.action === 'recover') return store.transientWindows.recoverUnlocked({ token: request.token, tabId: request.tabId }, {
             beforeMutation: () => verifyController(store, request, sender), validateSelection
         });
@@ -169,7 +171,8 @@ export function createTransientControlHandler(store) {
             catch { continue; }
             spaces.push({ id: space.id, bookmarkFolderId: space.bookmarkFolderId, name: space.name });
         }
-        return { record: { token: record.token, phase: record.phase, windowId: record.windowId,
+        const reviewDraft = await store.littleArcHeader?.getDraft(record) || null;
+        return { directEnabled:(await chrome.storage.local.get(DIRECT_MODE_KEY))[DIRECT_MODE_KEY]===true, ...(reviewDraft ? {reviewDraft} : {}), record: { token: record.token, phase: record.phase, windowId: record.windowId,
             originWindowId: record.originWindowId, tabId: record.tabId }, page: pageTab ? {
             id: pageTab.id, windowId: pageTab.windowId, title: pageTab.title || '', url: pageTab.url || pageTab.pendingUrl || ''
         } : null, recoveryTabs, windows, spaces };

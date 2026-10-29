@@ -1,4 +1,5 @@
 import { getSpaceIcon } from './space-icons.js';
+import { applySpaceSwitcherTheme } from './sidebar-theme.js';
 
 const CHIP = 'button[data-space-id]';
 const BEFORE = 'space-drop-before';
@@ -61,6 +62,7 @@ export function createSpaceSwitcher({ container, getSpaces, getActiveSpaceId, ac
             }
             const name = document.createElement('span'); name.className = 'space-switcher-name'; name.textContent = space.name; button.appendChild(name);
             button.dataset.spaceId = space.id;
+            applySpaceSwitcherTheme(document, button, space);
             button.draggable = true;
             button.classList.toggle('active', space.id === getActiveSpaceId());
             button.setAttribute('aria-label', `Switch to space ${space.name}`);

@@ -89,6 +89,7 @@ globalThis.chrome = {
                 try { return { success: true, ...await enqueueBookmarkOperation(message.operation) }; }
                 catch (error) { return { success: false, error: error.message, code: error.code }; }
             }
+            if (message.type === 'arcifySharedToday') return { success: true, entries: [] };
             assert.equal(message.type, 'spaceStore');
             if (hooks.spaceStore) return { success: true, spaces: await hooks.spaceStore.dispatch(message) };
             if (message.action === 'get') { const result = structuredClone(storedSpaces); return { success: true, spaces: result }; }

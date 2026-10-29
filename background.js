@@ -1,3 +1,10 @@
+import { registerSelectedTabClose } from './selected-tab-close.js';
+import { registerPeek } from './peek.js';
+import { registerRecoveryObservation } from './recovery-observation.js';
+import { summarizeRecoveryObservation } from './recovery-report-adapter.js';
+import { registerLittleArcLinkMenu } from './little-arc-link-menu.js';
+import { registerLittleArcHeader } from './little-arc-header.js';
+import { registerSharedToday } from './shared-today.js';
 import { registerTourMessages } from './tour-state.js';
 import { registerStartupLauncher } from './startup-launcher.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
@@ -17,6 +24,7 @@ registerTourMessages();
 
 import { registerArchiveMessages } from './archive-store.js';
 import { SpaceStore, ownerOf } from './space-store.js';
+import { registerTodayRecoveryMessages } from './today-recovery-store.js';
 import { createFavoriteContinuity } from './favorite-continuity.js';
 import { FavoriteStore, registerFavoriteMessages } from './favorite-store.js';
 import { registerSpotlightBridge } from './spotlight-bridge.js';
@@ -30,11 +38,17 @@ import { registerTabMenuMessages } from './tab-menu-actions.js';
 import { registerMoveTabWindowMessages } from './move-tab-new-window.js';
 import { registerTodaySplitMessages } from './today-split-action.js';
 import { createNativeSplitWriteGuard } from './native-split-safety.js';
+import { createLittleArcWindowGeometry } from './little-arc-window-geometry.js';
 import { createTransientWindowStore } from './transient-window-store.js';
 import { registerTransientControlMessages } from './transient-window-actions.js';
 
 const spaceStore = new SpaceStore();
-spaceStore.transientWindows = createTransientWindowStore();
+const windowGeometry = createLittleArcWindowGeometry({readRecord: token => spaceStore.transientWindows?.geometryRecord(token)});
+spaceStore.transientWindows = createTransientWindowStore({geometry:windowGeometry});
+registerSharedToday(spaceStore);
+registerLittleArcHeader(spaceStore);
+registerPeek(spaceStore);
+registerLittleArcLinkMenu(spaceStore);
 // Observe native identity before ordinary lifecycle handlers queue adoption.
 chrome.tabs.onCreated.addListener(tab => spaceStore.transientWindows.observe(tab));
 chrome.tabs.onUpdated.addListener((_id, _change, tab) => spaceStore.transientWindows.observe(tab));
@@ -50,8 +64,10 @@ registerStartupLauncher(chrome, { beforeWindowRead: () => spaceStore.transientWi
 registerArchiveMessages(spaceStore);
 registerTodayFolderMessages(spaceStore);
 registerTodayMoveMessages(spaceStore);
+registerTodayRecoveryMessages(spaceStore);
 registerSavedMoveMessages(spaceStore);
 registerTabMenuMessages(spaceStore);
+registerSelectedTabClose(spaceStore);
 registerTodaySplitMessages(spaceStore);
 const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity({ isTransientTab: tab => spaceStore.isTransientTab(tab),
     isTransientWindow: id => spaceStore.isTransientWindow(id) }) });
@@ -59,6 +75,7 @@ favoriteStore.install();
 registerFavoriteMessages(favoriteStore);
 registerMoveTabWindowMessages(spaceStore, favoriteStore);
 const spotlightInvalidation = registerSpotlightBridge(spaceStore);
+registerRecoveryObservation(spaceStore, chrome, summarizeRecoveryObservation);
 registerBookmarkListeners(() => spotlightInvalidation.invalidateAll());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'spaceStore') return;
@@ -131,23 +148,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         chrome.tabs.create({ url: 'installation-onboarding.html', active: true });
     }
 
-    if (chrome.contextMenus) {
-        chrome.contextMenus.create({
-            id: "openArcify",
-            title: "Arcify",
-            contexts: ["all"]
-        });
-    }
 });
-
-// Handle context menu clicks
-if (chrome.contextMenus) {
-    chrome.contextMenus.onClicked.addListener((info, tab) => {
-        info.menuItemId === "openArcify" && chrome.sidePanel.open({
-            windowId: tab.windowId
-        })
-    });
-}
 
 // Listen for messages from the content script (sidebar)
 // Do not return a Promise for unrelated messages: it can win the response race

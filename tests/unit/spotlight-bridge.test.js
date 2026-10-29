@@ -4,6 +4,7 @@ import { SpaceStore, ownerOf } from '../../space-store.js';
 import { createSpotlightBridge, getBridgeSnapshot, runBridgeAction, registerSpotlightBridge } from '../../spotlight-bridge.js';
 import { BRIDGE_TYPE, BRIDGE_VERSION, PEER_KEY, PAIRING_GENERATION_KEY } from '../../spotlight-bridge-protocol.js';
 import { pngIcon } from '../fixtures/favorite-icons.js';
+import { registerLittleArcHeader, HEADER_TYPE } from '../../little-arc-header.js';
 
 // These are API-level mocks, not claims of verification in a running browser.
 const PEER = 'a'.repeat(32);
@@ -99,6 +100,7 @@ beforeEach(() => {
         runtime: { id: SELF, getURL: path => `chrome-extension://${SELF}/${path}`, onMessage: event(), onMessageExternal: event() },
         storage: { local: area(local, 'local'), session: area(session, 'session'), sync: area(sync, 'sync'), onChanged: event() },
         windows: {
+            async getAll() { return clone(windows); },
             onRemoved: event(),
             async get(id) { const window = windows.find(window => window.id === id); if (!window) throw new Error('No such window'); return clone(window); },
             async update(id, update) { mutations.push(['window.update', id, clone(update)]); return Object.assign(windows.find(window => window.id === id), update); }
@@ -372,6 +374,73 @@ test('openTab defaults to the selected space and does not reuse an existing URL 
     assert.equal(local.pinnedTabStatesById[100], undefined);
 });
 
+for (const command of ['openTab', 'navigateTab']) for (const suffix of ['', '/appearance']) test(command + ' canonicalizes a permitted raw Helium address before the native API: ' + suffix, async () => {
+    const store = await makeStore();
+    const canonical = 'chrome://settings' + suffix;
+    const result = await createSpotlightBridge(store)(request(command, {
+        url: 'helium://settings' + suffix, ...(command === 'navigateTab' ? { tabId: 1 } : {})
+    }), SENDER);
+    assert.equal(result.ok, true);
+    if (command === 'openTab') assert.equal(writes('tab.create')[0][1].url, canonical);
+    else assert.deepEqual(writes('tab.update'), [['tab.update', 1, { url: canonical }]]);
+});
+
+for (const command of ['openTab', 'navigateTab']) test(command + ' rejects malformed and command-like internal addresses before native mutation', async () => {
+    const handle = createSpotlightBridge(await makeStore());
+    for (const url of ['helium://quit', 'helium://settings/%2e%2e/quit', 'helium://settings:80/',
+        'helium://user@settings/', 'chrome://settings/../quit', 'chrome://settings?command=reset',
+        'javascript:alert(1)', 'data:text/html,test', 'chrome-extension://' + SELF + '/options.html']) {
+        const response = await handle(request(command, { url, ...(command === 'navigateTab' ? { tabId: 1 } : {}) }), SENDER);
+        assertError(response, 'INVALID_REQUEST');
+    }
+    assert.deepEqual(mutations, []);
+});
+
+test('native dispatch leaves ordinary URL spelling and encoded components unchanged', async () => {
+    const url = 'https://example.test/path?x=a%2fb#mark';
+    const handle = createSpotlightBridge(await makeStore());
+    assert.equal((await handle(request('openTab', { url }), SENDER)).ok, true);
+    assert.equal(writes('tab.create')[0][1].url, url);
+    assert.equal((await handle(request('navigateTab', { tabId: 1, url }), SENDER)).ok, true);
+    assert.equal(writes('tab.update').find(entry => entry[1] === 1)[2].url, url);
+});
+
+for (const url of ['helium://settings/appearance', 'helium://bookmarks/?id=123']) test('closed saved alias path fails before mutation: ' + url, async () => {
+    nodes.find(node => node.id === 'twin-2').url = url;
+    const store = await makeStore();
+    const savedNodes = clone(nodes), savedBindings = clone(local.pinnedTabStatesById), savedSpaces = clone(store.spaces);
+    const response = await createSpotlightBridge(store)(request('openBookmark', { spaceId: 'a', bookmarkId: 'twin-2' }), SENDER);
+    assertError(response, 'UNSUPPORTED_URL');
+    assert.match(response.error.message, /chrome:\/\/ address.*Spotlight/);
+    assert.deepEqual(mutations, []);
+    assert.deepEqual(nodes, savedNodes);
+    assert.deepEqual(local.pinnedTabStatesById, savedBindings);
+    assert.deepEqual(store.spaces, savedSpaces);
+});
+
+test('a live saved Helium path still activates its exact bound tab without navigating', async () => {
+    nodes.find(node => node.id === 'twin-1').url = 'helium://settings/appearance';
+    local.pinnedTabStatesById[4].pinnedUrl = 'helium://settings/appearance';
+    const savedBindings = clone(local.pinnedTabStatesById);
+    const response = await createSpotlightBridge(await makeStore())(request('openBookmark', { spaceId: 'a', bookmarkId: 'twin-1' }), SENDER);
+    assert.equal(response.ok, true);
+    assert.equal(response.tabId, 4);
+    assert.equal(getTab(4).url, 'https://navigated.test/');
+    assert.deepEqual(writes('tab.create'), []);
+    assert.deepEqual(writes('tab.update'), [['tab.update', 4, { active: true }]]);
+    assert.deepEqual(local.pinnedTabStatesById, savedBindings);
+});
+
+test('a root-only saved Helium alias keeps its saved identity and native opening', async () => {
+    nodes.find(node => node.id === 'twin-2').url = 'helium://settings';
+    const savedNodes = clone(nodes);
+    const response = await createSpotlightBridge(await makeStore())(request('openBookmark', { spaceId: 'a', bookmarkId: 'twin-2' }), SENDER);
+    assert.equal(response.ok, true);
+    assert.equal(writes('tab.create')[0][1].url, 'helium://settings');
+    assert.deepEqual(local.pinnedTabStatesById[response.tabId], { bookmarkId: 'twin-2', pinnedUrl: 'helium://settings' });
+    assert.deepEqual(nodes, savedNodes);
+});
+
 test('openBookmark focuses its exact existing pin without opening a duplicate or resetting navigation', async () => {
     const store = await makeStore();
     const result = await createSpotlightBridge(store)(request('openBookmark', { spaceId: 'a', bookmarkId: 'twin-1' }), SENDER);
@@ -641,6 +710,24 @@ test('registered external listeners retain the response channel and enforce pair
     assert.equal(response.ok, true);
     const blocked = await new Promise(resolve => listener(request('snapshot'), { id: SELF }, resolve));
     assertError(blocked, 'UNAUTHORIZED');
+});
+
+test('production external bridge and header listeners answer only their own namespace', async () => {
+    const store = await makeStore();
+    store.run = work => work();
+    store.transientWindows = { listUnlocked: async () => [] };
+    registerLittleArcHeader(store);
+    registerSpotlightBridge(store);
+    const responses = [];
+    const message = { type: HEADER_TYPE, action: 'inspect', source: { tabId: 2, windowId: 1, url: 'https://same.test/' } };
+    const returns = chrome.runtime.onMessageExternal.listeners.map(listener => listener(message, SENDER, response => responses.push(response)));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(returns, [true, undefined]);
+    assert.deepEqual(responses, [{ success: true, context: null }]);
+    const before = responses.length;
+    for (const listener of chrome.runtime.onMessageExternal.listeners) assert.equal(listener({ type: 'unrelated-extension-feature' }, SENDER, response => responses.push(response)), undefined);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(responses.length, before);
 });
 
 test('dedicated sidebar messages bypass the queued workspace handler', async () => {
@@ -1052,4 +1139,24 @@ for (const phase of ['assignment', 'selection']) test(`Archive ${phase} persist 
     assert.equal(local.archivedTabs.length, phase === 'assignment' ? 1 : 0);
     assert.equal(local.archiveReopenClaims.entries['archive-refusal'].phase, phase === 'assignment' ? 'created' : 'consumed');
     assert.equal(writes('tab.create').length, 1);
+});
+
+
+test('shared Today is opt-in and leaves legacy local snapshot membership unchanged',async()=>{
+ const store=await makeStore();const bridge=createSpotlightBridge(store);
+ const legacy=await bridge(request('hello'),SENDER);assert.equal(legacy.ok,true);assert.equal(legacy.snapshot.sharedToday,undefined);
+ const shared=await bridge(request('hello',{supportedFeatures:['sharedTodayV1']},'shared-hello'),SENDER);
+ assert.equal(shared.ok,true,JSON.stringify(shared));assert(shared.capabilities.includes('sharedTodayV1'));
+ assert.deepEqual(shared.snapshot.sharedToday.map(r=>r.id),[3,1,11,2,12]);
+ assert.deepEqual(shared.snapshot.tabs.map(t=>t.id),legacy.snapshot.tabs.map(t=>t.id));
+ assert.deepEqual(shared.snapshot.spaces,legacy.snapshot.spaces);assert.equal(mutations.length,0);
+});
+test('shared Today external command retains pairing and exact folder/window identity checks',async()=>{
+ const store=await makeStore();const bridge=createSpotlightBridge(store);
+ const base={tabId:11,ownerWindowId:2,spaceId:'a',bookmarkFolderId:'folder-a',supportedFeatures:['sharedTodayV1']};
+ const bad=await bridge(request('openSharedToday',{...base,bookmarkFolderId:'other'},'bad-shared'),SENDER);assertError(bad,'STALE_SHARED_TODAY');assert.equal(mutations.length,0);
+ const unmarked={...base};delete unmarked.supportedFeatures;assertError(await bridge(request('openSharedToday',unmarked,'unmarked'),SENDER),'INVALID_REQUEST');
+ const original=chrome.windows.update;chrome.windows.update=async(id,update)=>{const result=await original(id,update);Object.assign(windows.find(w=>w.id===id),update);return {...result,...update};};
+ const response=await bridge(request('openSharedToday',base,'open-shared'),SENDER);assert.equal(response.ok,true,JSON.stringify(response));assert.equal(response.tabId,11);assert.equal(store.active[1],'a');assert.equal(store.active[2],'a');assert.equal(getTab(11).windowId,2);assert.equal(writes('tab.create').length,0);assert.equal(writes('tab.move').length,0);assert.equal(writes('tab.update').length,1);
+ const replay=await bridge(request('openSharedToday',base,'open-shared'),SENDER);assert.equal(writes('tab.update').length,1);assert.equal(replay.ok,true);
 });

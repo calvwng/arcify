@@ -15,7 +15,9 @@ other, and Shift ranges never combine their different identities.
   adds that range to the existing selection.
 - An ordinary click still opens or activates the bookmark and clears the selected
   batch. That bookmark becomes the range anchor while its exact saved identity
-  remains visible in the same Space/window view. Finishing asynchronous opening
+  remains visible in the same Space/window view. A following Ctrl/Cmd-click on
+  another row includes that first bookmark in the batch once. Explicitly
+  deselected bookmarks are not re-added by later toggles. Finishing asynchronous opening
   bookkeeping does not reactivate that tab over a newer user tab choice.
 - Internal refreshes retain visible selection for the same saved bookmark IDs,
   parents and saved URLs in the same Space/window, including a closed bookmark

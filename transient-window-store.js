@@ -72,7 +72,7 @@ function validateOpen(request) {
 // This registry is session-only. No persisted URL, URL lookup, restore/replay,
 // ownership-model mutation, automatic cleanup, tab removal, or window removal.
 // Unlocked methods belong inside the caller's existing SpaceStore queue.
-export function createTransientWindowStore({ api = chrome } = {}) {
+export function createTransientWindowStore({ api = chrome, geometry = null } = {}) {
     const controllerPage = api.runtime.getURL('transient-window.html');
     const marker = token => `${controllerPage}?token=${token}`;
     const markerToken = tab => {
@@ -306,7 +306,8 @@ export function createTransientWindowStore({ api = chrome } = {}) {
                     if (entry.windowId === null) continue;
                     let live = false;
                     try {
-                        await getWindow(entry.windowId); live = true;
+                        const liveWindow = await getWindow(entry.windowId); live = true;
+                        geometry?.restore(entry, liveWindow);
                         await getController(entry);
                         if (entry.phase === 'ready') await getPage(entry);
                     } catch {
@@ -353,6 +354,7 @@ export function createTransientWindowStore({ api = chrome } = {}) {
         try {
             diagnostic?.stage('opening-journal'); await save();
             diagnostic?.stage('origin-before-controller'); await origin();
+            const initialBounds = geometry ? await geometry.begin(entry, await getWindow(request.originWindowId)) : {width:900,height:720};
             // Pairing/controller authority can change during every awaited read,
             // including the pending journal write. The guard is the last
             // persisted authority read; only synchronous checks follow it.
@@ -363,9 +365,9 @@ export function createTransientWindowStore({ api = chrome } = {}) {
             if (windowKnown(request.originWindowId)) throw stale();
             openingFence.stop();
             diagnostic?.stage('create-controller');
-            try { created = await api.windows.create({ url: marker(token), type: 'normal', width: 900, height: 720, focused: true, incognito: false }); }
+            try { created = await api.windows.create({ url: marker(token), type: 'normal', ...initialBounds, focused: true, incognito: false }); }
             catch (cause) { diagnostic?.rejected(cause); return await quarantine(entry, uncertain()); }
-        } catch (cause) { diagnostic?.rejected(cause); throw cause; }
+        } catch (cause) { geometry?.abandon(entry); diagnostic?.rejected(cause); throw cause; }
         finally { openingFence.stop(); }
         if (nativeId(created?.id)) extraWindows.add(created.id);
         for (const tab of Array.isArray(created?.tabs) ? created.tabs : []) if (nativeId(tab?.id)) extraIds.add(tab.id);
@@ -379,6 +381,7 @@ export function createTransientWindowStore({ api = chrome } = {}) {
             if (!nativeId(controller?.id) || controller.windowId !== created.id || markerToken(controller) !== token
                 || entry.windowId !== null && (entry.windowId !== created.id || entry.controllerTabId !== controller.id)) throw uncertain();
             entry.windowId = created.id; entry.controllerTabId = controller.id; include(entry, controller.id); changed();
+            geometry?.created(entry, created);
             // Cover the first marker commit before the first post-create yield.
             // A loading controller is not yet a navigation-stable authority.
             const startup = observeInitialTransientController({ api, controller, windowId: entry.windowId,
@@ -388,6 +391,7 @@ export function createTransientWindowStore({ api = chrome } = {}) {
                 // Journal exact returned controller/window IDs before any web tab.
                 diagnostic?.stage('controller-journal'); await save();
                 diagnostic?.stage('controller-initial-readiness'); await startup.wait();
+                await geometry?.adjust(entry, () => startup.assert());
                 // Synchronous overlap: no event or awaited read can fall between
                 // startup observation and the unchanged strict navigation fence.
                 const webFence = fence([entry.controllerTabId], [request.originWindowId, entry.windowId], entry.controllerTabId, null, diagnostic, 'web');
@@ -419,9 +423,10 @@ export function createTransientWindowStore({ api = chrome } = {}) {
             if (entry.phase !== 'opening') throw uncertain();
             entry.phase = 'ready'; changed();
             diagnostic?.stage('ready-journal'); await save();
+            geometry?.finish(entry);
             diagnostic?.complete();
             return copy(entry);
-        } catch (cause) { diagnostic?.rejected(cause); return quarantine(entry, cause.code === 'UNCERTAIN_RESULT' ? cause : uncertain()); }
+        } catch (cause) { geometry?.abandon(entry); diagnostic?.rejected(cause); return quarantine(entry, cause.code === 'UNCERTAIN_RESULT' ? cause : uncertain()); }
     }
     // Explicitly select an observed orphan member, without moving or admitting
     // it. The pending journal is uncertain so interruption cannot auto-select a
@@ -453,6 +458,7 @@ export function createTransientWindowStore({ api = chrome } = {}) {
             validateOpen({ url: tab.pendingUrl || tab.url, originWindowId: entry.windowId });
             return tab;
         };
+        let observedWindow;
         const validate = async () => {
             await getWindow(entry.windowId); await getController(entry);
             const tab = await readSelection();
@@ -460,7 +466,7 @@ export function createTransientWindowStore({ api = chrome } = {}) {
                 const result = await validateSelection(tab, copy(resolved));
                 if (result === false || result?.success === false) throw stale();
             }
-            await getWindow(entry.windowId); await getController(entry);
+            observedWindow = await getWindow(entry.windowId); await getController(entry);
             return readSelection();
         };
         assertSelection();
@@ -477,6 +483,7 @@ export function createTransientWindowStore({ api = chrome } = {}) {
             entry.phase = 'ready'; changed(); await save();
             await validate(); await beforeMutation(); selectionFence.assert(); assertHealthy(); assertSelection();
             if (entry.phase !== 'ready' || entry.tabId !== request.tabId) throw uncertain();
+            geometry?.restore(entry, observedWindow);
             return copy(entry);
         } catch (cause) {
             if (journaled) return quarantine(entry, cause);
@@ -558,6 +565,9 @@ export function createTransientWindowStore({ api = chrome } = {}) {
                 spaceId: resolved.spaceId, bookmarkFolderId: resolved.bookmarkFolderId, phase: 'committed' };
         } catch { return quarantine(entry, partial()); }
     }
+    // Diagnostics must not hydrate or flush the registry merely to read it.
+    // No capability, controller token, URL or record identity leaves this seam.
+    const observationState = () => ({ initialized, provenanceReady, healthy: !failure, revision, savedRevision });
     async function listUnlocked() { await flushObservedUnlocked(); return copy(records); }
-    return { initialize, isExcluded, isKnownExcluded, isTransientWindow, isKnownTransientWindow, observe, observeReplacement, observeDetached, observeRemoved, observeWindowRemoved, openUnlocked, recoverUnlocked, promoteUnlocked, listUnlocked, withAdmission, flushObservedUnlocked };
+    return { observationState, geometryRecord: token => !failure ? copy(records.find(entry => entry.token === token)) : null, initialize, isExcluded, isKnownExcluded, isTransientWindow, isKnownTransientWindow, observe, observeReplacement, observeDetached, observeRemoved, observeWindowRemoved, openUnlocked, recoverUnlocked, promoteUnlocked, listUnlocked, withAdmission, flushObservedUnlocked };
 }

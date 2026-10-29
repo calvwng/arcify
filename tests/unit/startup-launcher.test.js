@@ -335,11 +335,11 @@ test('settings default is false and archives refuse launcher URLs even with stal
     assert.deepEqual(state.removed, []);
 });
 
-test('Arcify keeps its permissions and has no new-tab override; launcher is a Vite HTML input', () => {
+test('Arcify declares only the approved link-menu addition and has no new-tab override; launcher is a Vite HTML input', () => {
     const read = name => readFileSync(new URL(`../../${name}`, import.meta.url), 'utf8');
     const manifest = JSON.parse(read('manifest.json'));
     assert.equal(manifest.chrome_url_overrides, undefined);
-    assert.deepEqual(manifest.permissions, ['tabs', 'tabGroups', 'sidePanel', 'storage', 'bookmarks', 'alarms', 'commands', 'favicon', 'scripting', 'clipboardWrite', 'offscreen']);
+    assert.deepEqual(manifest.permissions, ['tabs', 'tabGroups', 'sidePanel', 'storage', 'bookmarks', 'alarms', 'commands', 'favicon', 'scripting', 'clipboardWrite', 'offscreen', 'contextMenus']);
     assert.match(read('vite-plugins/vite-plugin-arcify-extension.js'), /'startup-launcher': resolve\(process.cwd\(\), 'startup-launcher.html'\)/);
 });
 

@@ -1,3 +1,5 @@
+import { captureRoutedOpenSource, runRoutedOpen, ROUTED_OPEN_FEATURE } from './spotlight-routed-open.js';
+import { readSharedToday, openSharedToday } from './shared-today.js';
 import { nativeSplitAvailable } from './today-split-action.js';
 import { readSplitActionContext, runSplitAction } from './spotlight-split-actions.js';
 import { SpotlightArchiveActions, ARCHIVE_OPEN_TYPE } from './spotlight-archive-actions.js';
@@ -8,6 +10,7 @@ import { ownerOf, tabIds } from './space-store.js';
 import { getSpaceBookmarkById, getSpaceBookmarkTree } from './space-bookmarks.js';
 import { Utils } from './utils.js';
 import { projectTabTitle } from './tab-title-projection.js';
+import { normalizeBrowserPageUrl } from './browser-page-url.js';
 import { SIDEBAR_COMMAND_TYPE, createSidebarCommandHandler } from './sidebar-command.js';
 import { registerSpotlightInvalidation } from './spotlight-invalidation.js';
 import { readSpaceNavigationContext, runSpaceNavigation } from './spotlight-space-navigation.js';
@@ -15,17 +18,18 @@ import { readTabActionContext, runTabAction } from './spotlight-tab-actions.js';
 import { readSpaceActionContext, runSpaceAction } from './spotlight-space-actions.js';
 import { SPLIT_ACTIONS_FEATURE, SPLIT_ACTION_COMMANDS, ARCHIVE_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, SPACE_NAVIGATION_COMMANDS, TAB_ACTIONS_FEATURE, TAB_ACTION_COMMANDS, SPACE_ACTIONS_FEATURE, SPACE_ACTION_COMMANDS, GLOBAL_FAVORITES_FEATURE, PAIRING_GENERATION_KEY, PEER_KEY, bridgeError, trustedSender, validateRequest, responseFor, sendBridgeRequest, isWindowId, isSafeUrl } from './spotlight-bridge-protocol.js';
 
-const COMMANDS = ['splitActionContext', ...SPLIT_ACTION_COMMANDS, 'archiveContext', 'reopenArchivedTab', 'hello', 'snapshot', 'activateSpace', 'activateTab', 'openTransient', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
+const COMMANDS = ['openRoutedTab', 'openSharedToday', 'splitActionContext', ...SPLIT_ACTION_COMMANDS, 'archiveContext', 'reopenArchivedTab', 'hello', 'snapshot', 'activateSpace', 'activateTab', 'openTransient', 'openTab', 'navigateTab', 'openBookmark', 'openFavorite', 'actionContext', 'tabActionContext', 'navigationContext', ...SPACE_NAVIGATION_COMMANDS, ...SPACE_ACTION_COMMANDS, ...TAB_ACTION_COMMANDS];
 const JOURNAL_KEY = 'spotlightBridgeRequests';
 
 // Only reads Arcify's authoritative model. Group IDs/names never enter the protocol.
-export async function getBridgeSnapshot(store, windowId) {
+export async function getBridgeSnapshot(store, windowId, sharedToday = false) {
     const window = await chrome.windows.get(windowId);
     if (window.incognito || window.type && window.type !== 'normal' || store.isTransientWindow?.(windowId)) throw bridgeError('INVALID_WINDOW', 'Choose a normal browser window.');
-    return store.run(() => readBridgeSnapshot(store, windowId));
+    return store.run(() => readBridgeSnapshot(store, windowId, sharedToday));
 }
 
-async function readBridgeSnapshot(store, windowId) {
+async function readBridgeSnapshot(store, windowId, sharedToday = false) {
+    if (sharedToday) (store.sharedTodayWindows ||= new Set()).add(windowId);
     // The queue hydrates transient ownership. A cold-worker check before run()
     // cannot yet prove that this window is ordinary.
     if (store.isTransientWindow?.(windowId)) throw bridgeError('INVALID_WINDOW', 'Use Open in Space from the Little Arc control tab.');
@@ -69,7 +73,7 @@ async function readBridgeSnapshot(store, windowId) {
     return { windowId, capturedAt: Date.now(), activeSpaceId: spaces.some(s => s.id === store.active[windowId])
         ? store.active[windowId] : ownerOf(store.spaces, live.find(t => t.active)?.id)?.id || spaces[0]?.id || null,
     // Keep auxiliary local icon bytes out of v1: older peers reject extra keys.
-    spaces, bookmarks, warnings, ...(favorites ? { favorites: favorites
+    spaces, bookmarks, warnings, ...(sharedToday ? { sharedToday: await readSharedToday(store) } : {}), ...(favorites ? { favorites: favorites
         .map(({ id, title, url, sourceBookmarkId, tabId }) => {
             // Native close/move/unpin can happen after FavoriteStore.read, even
             // while this worker queue is held. Export bindings against the same
@@ -90,10 +94,12 @@ async function readBridgeSnapshot(store, windowId) {
 // Use the same activate/assign operations as the sidebar; never replace stored spaces.
 export async function runBridgeAction(store, request, snapshot, { beforeMutation = async () => {} } = {}) {
     const { command, windowId } = request;
+    if (command === 'openSharedToday') return openSharedToday(store, { ...request, id: request.tabId }, { beforeMutation });
     if (store.isTransientWindow?.(windowId)) throw bridgeError('INVALID_WINDOW', 'Use Open in Space from the Little Arc control tab.');
     if (command === 'openTransient') {
         if (!store.transientWindows) throw bridgeError('UNSUPPORTED_COMMAND', 'This Arcify build does not support Little Arc.');
         const record = await store.transientWindows.openUnlocked({ url: request.url, originWindowId: windowId }, { beforeMutation });
+        store.littleArcHeader?.remember(record, windowId);
         return { tabId: record.tabId, transientWindowId: record.windowId, token: record.token };
     }
     const spaceId = request.spaceId || snapshot.activeSpaceId;
@@ -137,7 +143,7 @@ export async function runBridgeAction(store, request, snapshot, { beforeMutation
         if (store.isTransientTab?.(current)) throw bridgeError('STALE_TAB', 'Use Open in Space from the Little Arc control tab.');
         if (current.windowId !== windowId) throw bridgeError('STALE_TAB', 'This tab moved to another window.');
         await beforeMutation();
-        await chrome.tabs.update(tab.id, { url: request.url });
+        await chrome.tabs.update(tab.id, { url: normalizeBrowserPageUrl(request.url) ?? request.url });
         return { tabId: tab.id };
     }
     if (command === 'openFavorite') {
@@ -159,10 +165,21 @@ export async function runBridgeAction(store, request, snapshot, { beforeMutation
             await store.applyAction({ action: 'activate', windowId, spaceId });
             return { tabId: await focus(existing) };
         }
+        // Helium's native alias handling can drop a WebUI path on navigation.
+        // Do not reinterpret a saved pin's URL or binding to compensate. A live
+        // binding above still activates by ID; a closed path needs an explicit
+        // canonical bookmark edit or an ordinary typed Spotlight URL selection.
+        if (/^helium:/i.test(bookmark.url)) {
+            const savedUrl = new URL(bookmark.url);
+            if (!['', '/'].includes(savedUrl.pathname) || savedUrl.search) {
+                throw bridgeError('UNSUPPORTED_URL', 'This saved Helium browser-page path cannot be reopened safely. Use its chrome:// address in the bookmark, or enter the address directly in Spotlight.');
+            }
+        }
     }
     // Create inactive first so the onActivated event cannot select an incidental opener's space.
     await beforeMutation();
-    const tab = await chrome.tabs.create({ windowId, url: bookmark?.url || request.url, active: false });
+    const url = bookmark ? bookmark.url : normalizeBrowserPageUrl(request.url) ?? request.url;
+    const tab = await chrome.tabs.create({ windowId, url, active: false });
     if (bookmark) {
         // Initialize the same exact-bookmark metadata as sidebar reopening before
         // publishing membership, so the first rendered row retains its saved name.
@@ -178,7 +195,7 @@ export async function runBridgeAction(store, request, snapshot, { beforeMutation
 
 export function createSpotlightBridge(store, archiveActions = new SpotlightArchiveActions(store)) {
     let chain = Promise.resolve();
-    const handle = async (request, sender) => {
+    const handle = async (request, sender, routedGuard) => {
         const initialPairing = await chrome.storage.local.get([PEER_KEY, PAIRING_GENERATION_KEY]);
         const peerId = initialPairing[PEER_KEY], generation = initialPairing[PAIRING_GENERATION_KEY];
         const checkPairing = async () => {
@@ -194,7 +211,8 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
         const navigation = SPACE_NAVIGATION_COMMANDS.includes(request.command);
         const splitAction = SPLIT_ACTION_COMMANDS.includes(request.command);
         const archiveAction = request.command === 'reopenArchivedTab';
-        const contextualAction = spaceAction || tabAction || navigation || archiveAction || splitAction;
+        const routedAction = request.command === 'openRoutedTab';
+        const contextualAction = routedAction || spaceAction || tabAction || navigation || archiveAction || splitAction;
         if ((splitAction || request.command === 'splitActionContext') && (!request.supportedFeatures?.includes(SPLIT_ACTIONS_FEATURE) || !nativeSplitAvailable()))
             throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate supported native Split View actions before sending this request.');
         if ((archiveAction || request.command === 'archiveContext') && (!request.supportedFeatures?.includes(ARCHIVE_ACTIONS_FEATURE) || !archiveActions.supported()))
@@ -205,7 +223,7 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
             throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate tab actions before sending this request.');
         if ((spaceAction || request.command === 'actionContext') && !request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE))
             throw bridgeError('UNSUPPORTED_FEATURE', 'Negotiate Space actions before sending this request.');
-        if (contextualAction && request.context.pairingGeneration !== (generation ?? null))
+        if (contextualAction && !routedAction && request.context.pairingGeneration !== (generation ?? null))
             throw bridgeError('UNAUTHORIZED', 'The companion pairing changed. Refresh Spotlight.');
         const requireFeatures = async () => {
             if (!request.supportedFeatures?.includes(GLOBAL_FAVORITES_FEATURE)
@@ -219,18 +237,23 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
         // A small session journal prevents repeated request IDs (including worker reloads)
         // from duplicating tabs. Pending outcomes are never replayed automatically.
         const { [JOURNAL_KEY]: journal = [] } = await chrome.storage.session.get(JOURNAL_KEY);
-        const key = `${sender.id}:${generation ? `${generation}:` : ''}${request.requestId}`;
+        const canonical = value => JSON.stringify(value, (key,item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(k=>[k,item[k]])) : item);
+        const digest = async value => [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(value)))].map(byte=>byte.toString(16).padStart(2,'0')).join('');
+        const fingerprint = routedAction ? await digest(canonical(request)) : JSON.stringify(request);
+        // The source grant is one-use even if a caller changes requestId.
+        const identity = routedAction ? 'route:' + await digest(request.source.token) : request.requestId;
+        const key = `${sender.id}:${generation ? `${generation}:` : ''}${identity}`;
         const prior = journal.find(entry => entry.key === key);
         if (!readOnly && prior) {
-            if (prior.fingerprint !== JSON.stringify(request)) throw bridgeError('INVALID_REQUEST', 'Request ID was reused with different data.');
+            if (prior.fingerprint !== fingerprint) throw bridgeError('INVALID_REQUEST', 'Request ID was reused with different data.');
             if (prior.response) {
-                const snapshot = await getBridgeSnapshot(store, request.windowId);
+                const snapshot = await getBridgeSnapshot(store, request.windowId, request.supportedFeatures?.includes('sharedTodayV1'));
                 await checkPairing();
                 return { ...prior.response, snapshot };
             }
             throw bridgeError('UNCERTAIN_RESULT', 'The previous action may have completed. Refresh before trying again.');
         }
-        const snapshot = contextualAction ? null : await getBridgeSnapshot(store, request.windowId);
+        const snapshot = contextualAction ? null : await getBridgeSnapshot(store, request.windowId, request.supportedFeatures?.includes('sharedTodayV1'));
         await checkPairing();
         if (readOnly) {
             const splitContext = request.command === 'splitActionContext' ? await store.run(() => readSplitActionContext(store, request,
@@ -247,19 +270,24 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
             return responseFor(request, 'arcify', { ok: true, extensionId: chrome.runtime.id, snapshot,
                 ...(splitContext || {}), ...(archiveContext ? { archiveActions: archiveContext } : {}), ...(actionContext ? { actionContext } : {}), ...(tabActionContext ? { tabActionContext } : {}), ...(navigationContext || {}), ...(commandCapabilities(request, chrome, store)) });
         }
-        const entry = { key, fingerprint: JSON.stringify(request) };
-        const next = [...journal.slice(-99), entry];
+        const protectedEntries = journal.filter(entry => entry.routed === true && (!entry.response || !Number.isFinite(entry.createdAt) || Date.now()-entry.createdAt < 60000));
+        if (routedAction && protectedEntries.filter(entry=>!entry.response).length >= 100)
+            throw bridgeError('ROUTING_LIMIT', 'Too many unconfirmed openings need review. No page was opened.');
+        const entry = { key, fingerprint, ...(routedAction ? {routed:true,createdAt:Date.now()} : {}) };
+        // Unresolved claims are never evicted. Confirmed receipts outlive the
+        // original 20-second source grant, then use the normal bounded history.
+        const next = [...journal.filter(entry=>!protectedEntries.includes(entry)).slice(-99), ...protectedEntries, entry];
         await chrome.storage.session.set({ [JOURNAL_KEY]: next });
         const data = await store.run(async () => {
             await checkPairing();
             await requireFeatures();
             // Serialize with native tab events and sidebar writes; validate again at execution.
-            const snapshot = contextualAction ? null : await readBridgeSnapshot(store, request.windowId);
+            const snapshot = contextualAction ? null : await readBridgeSnapshot(store, request.windowId, request.supportedFeatures?.includes('sharedTodayV1'));
             // Capability checks may await storage too. Pairing must be the last
             // persisted authority read before the caller's mutation boundary.
             const beforeMutation = async () => { await requireFeatures(); await checkPairing(); };
             await beforeMutation();
-            return splitAction ? runSplitAction(store, request, { beforeMutation }) : archiveAction ? archiveActions.reopenUnlocked(request, { peerId, pairingGeneration: generation ?? null, beforeMutation }) : navigation ? runSpaceNavigation(store, request, { beforeMutation }) : tabAction ? runTabAction(store, request, { beforeMutation }) : spaceAction ? runSpaceAction(store, request, { beforeMutation })
+            return routedAction ? runRoutedOpen(store, request, routedGuard, { beforeMutation, peerId }) : splitAction ? runSplitAction(store, request, { beforeMutation }) : archiveAction ? archiveActions.reopenUnlocked(request, { peerId, pairingGeneration: generation ?? null, beforeMutation }) : navigation ? runSpaceNavigation(store, request, { beforeMutation }) : tabAction ? runTabAction(store, request, { beforeMutation }) : spaceAction ? runSpaceAction(store, request, { beforeMutation })
                 : runBridgeAction(store, request, snapshot, { beforeMutation });
         });
         if (contextualAction) {
@@ -269,14 +297,14 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
                 await checkPairing();
                 entry.response = responseFor(request, 'arcify', { ok: true, ...data });
                 await chrome.storage.session.set({ [JOURNAL_KEY]: next });
-                const snapshot = await getBridgeSnapshot(store, request.windowId);
+                const snapshot = await getBridgeSnapshot(store, request.windowId, request.supportedFeatures?.includes('sharedTodayV1'));
                 await checkPairing();
                 return { ...entry.response, snapshot };
             } catch (error) {
                 throw bridgeError('PARTIAL_COMMIT', `The action committed, but its final confirmation or display refresh failed. Check Arcify before trying again. ${error.message}`);
             }
         }
-        const response = responseFor(request, 'arcify', { ok: true, ...data, snapshot: await getBridgeSnapshot(store, request.windowId) });
+        const response = responseFor(request, 'arcify', { ok: true, ...data, snapshot: await getBridgeSnapshot(store, request.windowId, request.supportedFeatures?.includes('sharedTodayV1')) });
         await checkPairing();
         // Do not retain a full browsing snapshot in the journal.
         entry.response = { ...response };
@@ -285,7 +313,14 @@ export function createSpotlightBridge(store, archiveActions = new SpotlightArchi
         return response;
     };
     return (request, sender) => {
-        const pending = chain.then(() => handle(request, sender));
+        let routedGuard;
+        try {
+            if (request?.command === 'openRoutedTab') {
+                validateRequest(request, COMMANDS);
+                routedGuard = captureRoutedOpenSource(store, request);
+            }
+        } catch (error) { return Promise.resolve(responseFor(request, 'arcify', {ok:false,error:{code:error.code || 'FAILED',message:error.message}})); }
+        const pending = chain.then(() => handle(request, sender, routedGuard)).finally(() => routedGuard?.dispose());
         chain = pending.catch(() => {});
         return pending.catch(error => responseFor(request, 'arcify', { ok: false,
             error: { code: error.code || 'FAILED', message: error.message || 'Arcify request failed.' } }));
@@ -301,6 +336,9 @@ export function registerSpotlightBridge(store) {
     chrome.runtime.onMessageExternal.addListener((request, sender, sendResponse) => {
         if (request?.type === ARCHIVE_OPEN_TYPE) return archiveActions.open(request, sender, sendResponse);
         if (request?.type === SIDEBAR_COMMAND_TYPE) return handleSidebar(request, sender, sendResponse);
+        // Other production listeners own their namespaces. Only one listener
+        // may answer a runtime message; do not race their asynchronous replies.
+        if (request?.type !== 'arcify-bridge') return;
         handle(request, sender).then(sendResponse);
         return true;
     });
@@ -329,7 +367,8 @@ export function registerSpotlightBridge(store) {
 function commandCapabilities(request, browser, store) {
     return request.command === 'hello' ? { capabilities: [
         ...(typeof browser.sidePanel?.open === 'function' ? ['openSidebar'] : []),
-        ...(store.transientWindows ? ['transientWindowsV1'] : []),
+        ...(store.transientWindows ? ['transientWindowsV1', ...(request.supportedFeatures?.includes(ROUTED_OPEN_FEATURE) ? [ROUTED_OPEN_FEATURE] : [])] : []),
+        ...(request.supportedFeatures?.includes('sharedTodayV1') ? ['sharedTodayV1'] : []),
         ...(nativeSplitAvailable(browser) && request.supportedFeatures?.includes(SPLIT_ACTIONS_FEATURE) ? [SPLIT_ACTIONS_FEATURE] : []),
         ...(store.archiveStore && request.supportedFeatures?.includes(ARCHIVE_ACTIONS_FEATURE) ? [ARCHIVE_ACTIONS_FEATURE] : []),
         ...(request.supportedFeatures?.includes(SPACE_ACTIONS_FEATURE) ? [SPACE_ACTIONS_FEATURE] : []),

@@ -22,3 +22,7 @@ button { font-size:13px; background:#333b35; color:inherit; cursor:pointer; }
 .buttons { display:flex; justify-content:space-between; gap:12px; margin-top:18px; }
 #status { color:#c6cfc8; font-size:13px; line-height:1.6; min-height:42px; overflow-wrap:anywhere; }
 @media(prefers-color-scheme:light) { :root { color:#253329; background:#f1f3ed; } .eyebrow,.description,label,#status { color:#58695c; } section,select { background:#e7ece3; border-color:#c2cec0; } #page-url { color:#58695c; } button { color:#253329; background:#e7ece3; border-color:#a7b7a7; } #promote { background:#304b37; color:#fff; border-color:#304b37; } }
+
+.size-fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}.size-fields input,#size-ratio{display:block;width:100%;padding:8px;color:inherit;background:#202321;border:1px solid #536056;border-radius:6px}#size-preview,#size-current,#size-saved{font-size:12px;line-height:1.5}#size-preview{color:#c8decf}#save-size{margin:8px 0}#window-size p{font-size:12px;line-height:1.5}
+
+#size-dimensions>label,#window-size>label{display:block;margin-top:10px}#size-ratio-label{display:block;margin-top:12px}#save-size{display:block;margin:12px 0}#window-size input[type=checkbox]{margin-right:5px}

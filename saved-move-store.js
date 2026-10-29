@@ -141,7 +141,7 @@ export async function checkpointSavedMove(journal, data, liveCount) {
     if (JSON.stringify(largestReceipt).length > 2000000) fail('This saved move is too large for one operation. Nothing further was moved.');
     return value;
 }
-function journalValid(journal) {
+export function journalValid(journal) {
     try {
         if (!allowedKeys(journal, ['version', 'operationId', 'sessionToken', 'phase', 'request', 'roots', 'rootByBookmark', 'sourceFolder', 'targetFolder', 'parents', 'ancestors', 'live', 'receipt', 'checkpoint']) ||
             journal.version !== 1 || !id(journal.operationId) || !id(journal.sessionToken) || !['prepared', 'committed'].includes(journal.phase) ||

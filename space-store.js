@@ -341,20 +341,26 @@ export class SpaceStore {
         this.todayNewTabsAtTop = setting.todayNewTabsAtTop !== false;
         this.todayPinnedBindings = bindings.pinnedTabStatesById || {};
     }
-    exactTodayOpener(tab, nativeTabs, openerTabId = tab.openerTabId) {
+    exactTodayOpener(tab, nativeTabs, openerTabId = tab.openerTabId, placementSpace = null) {
         const opener = nativeTabs?.find(item => item.id === openerTabId);
         if (this.isTransientTab(tab) || !opener || this.isTransientTab(opener) || opener.windowId !== tab.windowId || opener.incognito || opener.pinned || this.isGlobalTab(opener)
             || this.todayPinnedBindings?.[opener.id]?.bookmarkId
-            || this.provisional?.has(opener.id) || this.recoveryCandidates?.has(opener.id) || isStartupLauncherTab(opener)) return null;
+            || isStartupLauncherTab(opener)) return null;
         const owners = this.spaces.flatMap(space => sections.flatMap(section =>
             (space[section] || []).filter(id => id === opener.id).map(() => ({ space, section }))));
-        return owners.length === 1 && owners[0].section === 'temporaryTabs' ? { tab: opener, space: owners[0].space } : null;
+        if (owners.length !== 1 || owners[0].section !== 'temporaryTabs') return null;
+        // Historical uncertainty cannot select a child's Space. Once its destination
+        // is independently established, exact live ownership can place it locally
+        // without consuming recovery records or certifying the parent's history.
+        if ((this.provisional?.has(opener.id) || this.recoveryCandidates?.has(opener.id))
+            && owners[0].space !== placementSpace) return null;
+        return { tab: opener, space: owners[0].space };
     }
     insertCreatedToday(space, tab, { nativeTabs = [], openerTabId = null } = {}) {
         this.observeTab(tab);
         if (this.isTransientTab(tab)) return;
         const before = [...space.temporaryTabs];
-        const opener = this.exactTodayOpener(tab, nativeTabs, openerTabId);
+        const opener = this.exactTodayOpener(tab, nativeTabs, openerTabId, space);
         const validOpener = opener?.space === space ? opener.tab : null;
         let insertAt = getTodayInsertionIndex(before, { inverted: this.todayOrderInverted,
             newTabsAtTop: this.todayNewTabsAtTop, openerTabId: validOpener?.id });
@@ -363,7 +369,7 @@ export class SpaceStore {
                 && item.splitViewId === validOpener.splitViewId);
             const indices = peers.map(item => before.indexOf(item.id));
             const intact = peers.length === 2 && indices.every(index => index >= 0) && Math.abs(indices[0] - indices[1]) === 1
-                && peers.every(item => this.exactTodayOpener(tab, nativeTabs, item.id)?.space === space
+                && peers.every(item => this.exactTodayOpener(tab, nativeTabs, item.id, space)?.space === space
                     && item.groupId === validOpener.groupId && item.pinned === validOpener.pinned)
                 && Number.isInteger(peers[0].index) && Number.isInteger(peers[1].index) && Math.abs(peers[0].index - peers[1].index) === 1;
             // Never insert between a verified pair; uncertainty means standalone.
@@ -531,7 +537,10 @@ export class SpaceStore {
         for (const windowId of liveWindows) {
             if (!this.windowKeys.has(windowId)) this.windowKeys.set(windowId, crypto.randomUUID());
             const key = this.windowKeys.get(windowId);
-            if (!windowSnapshot.some(w => w.key === key)) windowSnapshot.push({ key, tabs: captureWindowTabs([...tabs.values()].filter(t => t.windowId === windowId && !this.isGlobalTab(t) && !this.isTransientTab(t) && !isStartupLauncherTab(t))) });
+            if (!windowSnapshot.some(w => w.key === key)) windowSnapshot.push({ key,
+                ...(!this.restoreWindowKeys.has(windowId) && [...tabs.values()].some(tab =>
+                    tab.windowId === windowId && this.recoveryCandidates.has(tab.id)) ? { recoveryRole: 'current-only' } : {}),
+                tabs: captureWindowTabs([...tabs.values()].filter(t => t.windowId === windowId && !this.isGlobalTab(t) && !this.isTransientTab(t) && !isStartupLauncherTab(t))) });
         }
         this.savedWindows = windowSnapshot;
         const identity = await this.favoriteStore?.ownershipPersistence?.browserIdentity?.();
@@ -728,22 +737,30 @@ export class SpaceStore {
     }
     install() {
         const handle = operation => this.run(async () => { await operation(); await this.persist(); }).catch(console.error);
+        const trackCurrent = async id => {
+            if (this.pendingCreations.has(id)) await this.readTodayPlacement();
+            // Events may wait behind a move and controller/window cleanup.
+            // Resolve the live ID and its current peers, never the old snapshot.
+            // Retry only this read once; persistent failure retains creation
+            // intent for a later native update without adopting stale evidence.
+            let nativeTabs;
+            try { nativeTabs = await this.queryTabs({}); }
+            catch { nativeTabs = await this.queryTabs({}); }
+            const current = nativeTabs.find(item => item.id === id);
+            if (!current) { this.pendingCreations.delete(id); return; }
+            if (this.pendingCreations.has(id)) this.track(current, {
+                nativeTabs: nativeTabs.filter(item => item.windowId === current.windowId), created: true });
+            else this.track(current);
+        };
         chrome.tabs.onCreated.addListener(tab => {
             // Event-time quarantine must precede any older queued persistence.
             this.observeTab(tab);
             this.pendingCreations.add(tab.id);
-            handle(async () => {
-                await this.readTodayPlacement();
-                let nativeTabs;
-                try { nativeTabs = (await this.queryTabs({ windowId: tab.windowId })).filter(item => item.windowId === tab.windowId); }
-                catch { nativeTabs = []; }
-                const current = nativeTabs.find(item => item.id === tab.id);
-                this.track(current || tab, { nativeTabs: current ? nativeTabs : [], created: this.pendingCreations.has(tab.id) });
-            });
+            handle(() => trackCurrent(tab.id));
         });
         chrome.tabs.onUpdated.addListener((id, change, tab) => {
             this.observeTab(tab);
-            if (change.url || change.pinned !== undefined) handle(() => this.track(tab));
+            if (change.url || change.pinned !== undefined) handle(() => trackCurrent(id));
         });
         chrome.tabs.onRemoved.addListener((id, info) => {
             // Public exclusion deliberately fails closed before registry loading.

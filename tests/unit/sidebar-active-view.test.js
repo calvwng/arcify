@@ -3,12 +3,21 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { parseHTML } from 'linkedom';
 import { applySpacePatch } from '../../space-store.js';
+import { BookmarkUtils } from '../../bookmark-utils.js';
 
 // Import and initialize the real sidebar and all its modules against a DOM.
 // Only browser facilities and persisted fixtures are substituted; no source
 // extraction or replacement implementation of the event/render paths is used.
 const { window } = parseHTML(await readFile(new URL('../../sidebar.html', import.meta.url), 'utf8'));
 const { document } = window;
+const renderCommits = [];
+const appendChild = window.HTMLElement.prototype.appendChild;
+window.HTMLElement.prototype.appendChild = function (child) {
+    if (child.nodeType === 11 && this.dataset.tabType === 'temporary') renderCommits.push({
+        spaceId: this.closest('.space')?.dataset.spaceId, text: child.textContent
+    });
+    return appendChild.call(this, child);
+};
 window.HTMLElement.prototype.getBoundingClientRect = () => ({ top: 0, bottom: 20, left: 0, right: 100, width: 100, height: 20 });
 window.HTMLElement.prototype.scrollTo = () => {};
 // LinkeDOM exposes the select getter but does not implement browser assignment.
@@ -59,6 +68,7 @@ globalThis.chrome = {
             if (message.type === 'spotlightBridgeLaunch') { newTabRequests.push(structuredClone(message)); return beforeNewTab?.(message) || { ok: true, outcome: 'spotlight' }; }
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: tabs.filter(tab => tab.pinned) };
             if (message.type === 'sidebarTour') return { success: true, state: null };
+            if (message.type === 'arcifySharedToday') return { success: true, entries: [] };
             assert.equal(message.type, 'spaceStore');
             if (message.action === 'get') { const result = structuredClone(storedSpaces); await beforeRead?.(); return { success: true, spaces: result }; }
             if (message.action === 'patch') storedSpaces = applySpacePatch(storedSpaces, message.before, message.after);
@@ -72,7 +82,7 @@ globalThis.chrome = {
         async get(id) { return structuredClone(tabs.find(tab => tab.id === id)); } },
     bookmarks: { async get(id) { return structuredClone(folders.filter(folder => folder.id === id)); },
         async search({ title }) { return structuredClone(folders.filter(folder => folder.title === title)); },
-        async getChildren(id) { await beforeTree?.(id); return []; } },
+        async getChildren(id) { await beforeTree?.(id); return structuredClone(folders.filter(node => node.parentId === id)); } },
     tabGroups: { async query() { return []; } }
 };
 // Capture the asynchronous DOMContentLoaded callback so initialization failures
@@ -104,6 +114,12 @@ async function selectTab(id) {
     for (const tab of tabs) tab.active = tab.id === id;
     await onActivated.emit({ windowId: 10, tabId: id });
 }
+
+test('cold initialization renders the selected Space once and leaves hidden shells unloaded', () => {
+    assert.deepEqual(renderCommits.map(item => item.spaceId), ['alpha']);
+    assert.equal(document.querySelector('.space[data-space-id="beta"] .tab'), null);
+    assert.equal(document.querySelector('.space[data-space-id="empty"] .tab'), null);
+});
 
 test('real sidebar renders session-only selection of an empty space', async () => {
     await settled('alpha');
@@ -562,4 +578,85 @@ test('actual sidebar profile theme and Space tint changes retain rows, New Tab a
     storedSpaces.find(item => item.id === 'alpha').color = 'purple'; await publishSpaces(); await wait(200);
     assert.equal(document.querySelector('.space[data-space-id="alpha"]'), space); assert.equal(space.querySelector('.tab'), row);
     assert.equal(space.querySelector('#spaceColorSelect').value, 'purple');
+});
+
+test('hidden Space uses fresh metadata on switch and an interrupted display batch cannot commit old aliases', async () => {
+    await selectSession('alpha'); await settled('alpha'); await wait(200);
+    local.tabNameOverridesById = { 2: { name: 'Hidden alias updated', originalDomain: 'beta.test' } };
+    await onChanged.emit({ tabNameOverridesById: { newValue: structuredClone(local.tabNameOverridesById) } }, 'local');
+    await wait(200);
+    const started = deferred(), release = deferred();
+    beforeTree = async id => { if (id !== 'folder-beta') return; beforeTree = null; started.resolve(); await release.promise; };
+    const firstCommit = renderCommits.length;
+    await selectSession('beta'); await started.promise;
+    local.tabNameOverridesById[2].name = 'Newest alias after wait';
+    await onChanged.emit({ tabNameOverridesById: { newValue: structuredClone(local.tabNameOverridesById) } }, 'local');
+    release.resolve(); await settled('beta'); await wait(300);
+    assert.equal(document.querySelector('.space[data-space-id="beta"] .tab-title-display').textContent, 'Newest alias after wait');
+    assert(!renderCommits.slice(firstCommit).some(item => item.text?.includes('Hidden alias updated')), 'Do not commit a stale fragment then repair it');
+    delete local.tabNameOverridesById;
+    await onChanged.emit({ tabNameOverridesById: {} }, 'local'); await wait(250);
+});
+
+test('native update during a delayed render fences the old tab title and settles without duplicate commits', async () => {
+    await selectSession('alpha'); await settled('alpha'); await wait(200);
+    const started = deferred(), release = deferred();
+    beforeTree = async id => { if (id !== 'folder-beta') return; beforeTree = null; started.resolve(); await release.promise; };
+    const firstCommit = renderCommits.length;
+    await selectSession('beta'); await started.promise;
+    tabs[1].title = 'Native title after read';
+    await chrome.tabs.onUpdated.emit(2, { title: tabs[1].title }, structuredClone(tabs[1]));
+    release.resolve(); await settled('beta'); await wait(300);
+    const commits = renderCommits.slice(firstCommit).filter(item => item.spaceId === 'beta');
+    assert.equal(commits.length, 1);
+    assert.equal(document.querySelector('.space[data-space-id="beta"] .tab-title-display').textContent, tabs[1].title);
+});
+
+test('ordering change during a held settings read cannot commit the earlier observation', async () => {
+    await selectSession('alpha'); await settled('alpha'); await wait(200);
+    const get = chrome.storage.sync.get, started = deferred(), release = deferred();
+    let first = true;
+    chrome.storage.sync.get = async keys => {
+        const value = await get(keys);
+        if (first && keys?.invertTabOrder !== undefined) { first = false; started.resolve(); await release.promise; }
+        return value;
+    };
+    const firstCommit = renderCommits.length;
+    try {
+        await selectSession('beta'); await started.promise;
+        await onChanged.emit({ invertTabOrder: { newValue: true } }, 'sync');
+        release.resolve(); await settled('beta'); await wait(300);
+        assert.equal(renderCommits.slice(firstCommit).filter(item => item.spaceId === 'beta').length, 1);
+    } finally { release.resolve(); chrome.storage.sync.get = get; }
+});
+
+test('runtime pin opening waits for a never-rendered hidden Space and rejects superseded activation', async () => {
+    const open = BookmarkUtils.openBookmarkAsTab, calls = [];
+    BookmarkUtils.openBookmarkAsTab = async (bookmark, spaceId, row) => {
+        calls.push({ bookmark, spaceId, connected: row.isConnected });
+    };
+    async function addSpace(id) {
+        const space = { id, name: id, color: 'blue', bookmarkFolderId: 'folder-' + id, spaceBookmarks: [], temporaryTabs: [] };
+        storedSpaces.push(space);
+        folders.push({ id: space.bookmarkFolderId, parentId: 'root', title: id },
+            { id: 'pin-' + id, parentId: space.bookmarkFolderId, title: 'Closed pin', url: 'https://closed.test/' + id });
+        await publishSpaces(); await wait(220);
+        assert.equal(document.querySelector(`.space[data-space-id="${id}"] .tab`), null);
+    }
+    try {
+        await selectSession('alpha'); await settled('alpha'); await wait(200);
+        for (const superseded of [false, true]) {
+            const id = superseded ? 'hidden-stale' : 'hidden-pin'; await addSpace(id);
+            const started = deferred(), release = deferred();
+            beforeTree = async folderId => { if (folderId !== 'folder-' + id) return; beforeTree = null; started.resolve(); await release.promise; };
+            await chrome.runtime.onMessage.emit({ action: 'activatePinnedTab', spaceId: id, spaceName: id,
+                bookmarkId: 'pin-' + id, bookmarkUrl: 'https://closed.test/' + id }, {}, () => {});
+            await started.promise;
+            assert.equal(calls.length, superseded ? 1 : 0, 'No opening before the render completes');
+            if (superseded) await selectSession('alpha');
+            release.resolve(); await wait(350);
+            assert.equal(calls.length, 1);
+        }
+        assert.equal(calls[0].spaceId, 'hidden-pin'); assert.equal(calls[0].bookmark.bookmarkId, 'pin-hidden-pin'); assert(calls[0].connected);
+    } finally { BookmarkUtils.openBookmarkAsTab = open; beforeTree = null; }
 });

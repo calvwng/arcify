@@ -82,6 +82,7 @@ globalThis.chrome = {
         async sendMessage(message) {
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: [] };
             if (message.type === 'sidebarTour') return { success: true, state: null };
+            if (message.type === 'arcifySharedToday') return { success: true, entries: [] };
             assert.equal(message.type, 'spaceStore');
             if (['metadata', 'newFolder'].includes(message.action)) {
                 mutations.push(['space-action', structuredClone(message)]); store.spaces = structuredClone(storedSpaces);

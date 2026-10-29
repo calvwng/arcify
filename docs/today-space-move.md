@@ -69,6 +69,11 @@ and its exact status/error still require manual confirmation.
 
 ## Persistence, recovery and optional groups
 
+For an explicit selected-tab recovery choice, see
+[Confirm current Today membership](today-recovery-confirmation.md). The choice
+preserves historical records and requires its own preview and confirmation;
+ordinary Move never silently overrides recovery protection.
+
 An unresolved session-recovery candidate is deliberately ineligible for ordinary
 Today Move: its visible Space may still be provisional while saved identity is
 matched. It returns the static `TODAY_RECOVERY_PENDING` reason without exposing

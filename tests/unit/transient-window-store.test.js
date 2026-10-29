@@ -62,7 +62,7 @@ function fixture(initial) {
     api.tabs.onReplaced.addListener((added, removed) => store?.observeReplacement(added, removed));
     api.tabs.onRemoved.addListener(id => store?.observeRemoved(id));
     api.windows.onRemoved.addListener(id => store?.observeWindowRemoved(id));
-    const makeStore = () => (store = createTransientWindowStore({ api }));
+    const makeStore = geometry => (store = createTransientWindowStore({ api, geometry }));
     makeStore();
     let tail = Promise.resolve();
     const run = fn => { const result = tail.then(fn); tail = result.catch(() => {}); return result; };
@@ -701,14 +701,24 @@ test('unchanged initial controller completion during final page-create guard per
     assert.equal(f.store.isExcluded(record.tabId), true);
 });
 
-async function orphanFixture() {
+async function orphanFixture(geometry) {
     const f = fixture(); seed(f); f.data = {};
+    if (geometry) f.makeStore(geometry);
     f.tabs.set(102, { ...clone(f.tabs.get(101)), id: 102 });
     await f.store.initialize();
     const [orphan] = await f.store.listUnlocked();
     const recover = (tabId = 101, options = {}) => f.run(() => f.store.recoverUnlocked({ token: orphan.token, tabId }, options));
     return { f, orphan, recover };
 }
+
+test('explicit orphan recovery starts geometry tracking without resizing the window', async () => {
+    const seen=[];
+    const { f, recover } = await orphanFixture({restore:(entry,window)=>seen.push({entry:clone(entry),window:clone(window)})});
+    await recover();
+    assert.equal(seen.filter(item=>item.entry.phase==='ready').length,1);
+    assert.equal(seen.at(-1).window.id,20);
+    assert.deepEqual(mutations(f),[]);
+});
 
 test('explicit orphan selection records only the chosen exact ID and preserves every other member', async () => {
     const { f, orphan, recover } = await orphanFixture();
