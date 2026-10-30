@@ -7,10 +7,12 @@ const signature = tabs => JSON.stringify([...tabs].sort((a, b) => a.index - b.in
 const positioned = tabs => tabs.length && tabs.every(t => Number.isInteger(t.index) && urlOf(t));
 
 export function captureWindowTabs(tabs) {
-    return tabs.map(t => ({ index: t.index, url: urlOf(t), pinned: Boolean(t.pinned) }));
+    return tabs.filter(t => !t.incognito).map(t => ({ index: t.index, url: urlOf(t), pinned: Boolean(t.pinned) }));
 }
 
 export function matchRestoreRecord(tab, queue, savedWindows, windowKeys, liveTabs) {
+    if (tab.incognito) return -1;
+    liveTabs = liveTabs.filter(tab => !tab.incognito);
     const url = urlOf(tab);
     if (!url || !queue.length) return -1;
     const liveWindows = new Map();

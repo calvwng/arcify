@@ -189,6 +189,8 @@ chrome.commands.onCommand.addListener(async function (command) {
 async function updateTabLastActivity(tabId) {
     if (!tabId) return;
     try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.incognito) return;
         const result = await chrome.storage.local.get(TAB_ACTIVITY_STORAGE_KEY);
         const activityData = result[TAB_ACTIVITY_STORAGE_KEY] || {};
         activityData[tabId] = Date.now();
@@ -288,7 +290,7 @@ async function runAutoArchiveCheck() {
         const tabsToArchive = [];
 
         for (const tab of tabs) {
-            if (isStartupLauncherTab(tab) || spaceStore.isTransientTab(tab)) continue;
+            if (tab.incognito || isStartupLauncherTab(tab) || spaceStore.isTransientTab(tab)) continue;
             // Skip audible, active, or recently active tabs
             if (tab.audible || tab.active) {
                 await updateTabLastActivity(tab.id); // Update activity for active/audible tabs
@@ -413,7 +415,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     } else if (message.action === 'searchTabs') {
         return handleAsyncMessage(async () => {
-            const tabs = await spaceStore.run(async () => projectLiveTabTitles(await chrome.tabs.query({}), spaceStore.spaces));
+            const tabs = await spaceStore.run(async () => projectLiveTabTitles((await chrome.tabs.query({})).filter(tab => !tab.incognito), spaceStore.spaces));
             const query = message.query?.toLowerCase() || '';
             const filteredTabs = tabs.filter(tab => {
                 if (!tab.title || !tab.url || isStartupLauncherTab(tab)) return false;
@@ -426,7 +428,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     } else if (message.action === 'getRecentTabs') {
         return handleAsyncMessage(async () => {
-            const tabs = await spaceStore.run(async () => projectLiveTabTitles(await chrome.tabs.query({}), spaceStore.spaces));
+            const tabs = await spaceStore.run(async () => projectLiveTabTitles((await chrome.tabs.query({})).filter(tab => !tab.incognito), spaceStore.spaces));
             const storage = await chrome.storage.local.get([TAB_ACTIVITY_STORAGE_KEY]);
             const activityData = storage[TAB_ACTIVITY_STORAGE_KEY] || {};
 

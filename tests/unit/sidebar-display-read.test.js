@@ -22,7 +22,7 @@ test('display observations fence native, bookmark and relevant storage events, w
 
 test('one metadata read handles missing maps and does not expose a mutation helper', async () => {
     const requests = [];
-    globalThis.chrome = { storage: { local: { async get(keys) { requests.push(keys); return {}; } } } };
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: { async get(keys) { requests.push(keys); return {}; } } } };
     assert.deepEqual(await readRowDisplayMetadata(), { pinnedStatesById: {}, overrides: {} });
     assert.deepEqual(requests, [['pinnedTabStatesById', 'tabNameOverridesById']]);
 });
@@ -30,7 +30,7 @@ test('one metadata read handles missing maps and does not expose a mutation help
 test('nested folder display batch waits for pending toggles and preserves independent defaults', async () => {
     let release; const held = new Promise(resolve => { release = resolve; });
     const data = {}, reads = [];
-    globalThis.chrome = { storage: { local: {
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: {
         async get(keys) { reads.push(keys); return { ...data }; },
         async set(value) { await held; Object.assign(data, value); }
     } } };
@@ -44,7 +44,7 @@ test('nested folder display batch waits for pending toggles and preserves indepe
 
 function utilityFixture() {
     const data = { pinnedTabStatesById: {}, tabNameOverridesById: {} }, writes = [], locks = [];
-    globalThis.chrome = { storage: { local: {
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: {
         async get(key) { return { [key]: structuredClone(data[key]) }; },
         async set(value) { writes.push(structuredClone(value)); Object.assign(data, structuredClone(value)); }
     } } };

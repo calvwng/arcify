@@ -144,3 +144,24 @@ test('background builds the queued live bookmark split guard and propagates nati
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(replies[0].success, true); assert.equal(replies[0].createdId, 'created'); assert.equal(app.bookmarkCreates.length, 1);
 });
+
+test('private tabs are excluded from background search, recents, activity writes and automatic archive', async () => {
+    const app = fixture();
+    app.tabs[1].incognito = true;
+    const original = JSON.stringify(app.local), writes = [];
+    app.context.chrome.storage.local.set = async values => { writes.push(values); Object.assign(app.local, values); };
+    await app.context.updateTabLastActivity(2);
+    assert.equal(JSON.stringify(app.local), original); assert.equal(writes.length, 0);
+    await app.context.runAutoArchiveCheck();
+    assert.deepEqual(app.archives, []); assert.deepEqual(app.removed, []);
+    for (const action of ['searchTabs', 'getRecentTabs']) {
+        const replies = [];
+        for (const listener of app.messages) listener({ action }, {}, reply => replies.push(reply));
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(replies.length, 1); assert.equal(replies[0].success, true);
+        assert.deepEqual(Array.from(replies[0].tabs), []);
+    }
+    app.tabs[1].incognito = false;
+    await app.context.updateTabLastActivity(2); assert.equal(writes.length, 1);
+    assert(app.local.tabLastActivity[2] > 1);
+});

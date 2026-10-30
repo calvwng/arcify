@@ -416,11 +416,12 @@ export class ArchiveStore {
             const bindings = await Utils.getPinnedTabStates();
             const tab = await chrome.tabs.get(tabId), owners = locations(this.store, tabId);
             assertNotTransient(this.store, { windowId, tab });
-            if (!tab || tab.id !== tabId || tab.windowId !== windowId || tab.url !== url || tab.incognito || tab.pinned
+            if (!tab || tab.id !== tabId || tab.windowId !== windowId || tab.url !== url
+                || tab.pendingUrl && tab.pendingUrl !== url || tab.incognito || tab.pinned
                 || this.store.isGlobalTab(tab) || isStartupLauncherTab(tab) || owners.length !== 1 || owners[0].space.id !== spaceId) stale();
             assertNotNativeSplit(tab);
             if (automatic && (tab.active || tab.audible || owners[0].section === 'spaceBookmarks' || bindings[tabId]?.bookmarkId
-                || protectedUrlKeys.has(Utils.getPinnedUrlKey(tab.url)))) stale();
+                || [tab.url, tab.pendingUrl].some(value => value && protectedUrlKeys.has(Utils.getPinnedUrlKey(value))))) stale();
             return tab;
         };
         const tab = await resolve();

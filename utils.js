@@ -32,7 +32,7 @@ const Utils = {
     processBookmarkFolder: async function (folder, spaceId) {
         const bookmarks = [];
         const items = await chrome.bookmarks.getChildren(folder.id);
-        const tabs = await getSpaceTabs(spaceId);
+        const tabs = (await getSpaceTabs(spaceId)).filter(tab => !tab.incognito);
         for (const item of items) {
             if (item.url) {
                 // This is a bookmark
@@ -133,6 +133,8 @@ const Utils = {
         const originalDomain = new URL(url).hostname;
         return this._serializeTabNameOp(async () => {
             const overrides = await this.getTabNameOverrides();
+            const tab = await chrome.tabs.get(tabId);
+            if (tab.incognito) throw new Error('Private tabs cannot store Space metadata.');
             const previous = overrides[tabId];
             if (previous && Object.keys(previous).length === 2 && previous.name === name && previous.originalDomain === originalDomain) return;
             overrides[tabId] = { name, originalDomain };
@@ -192,6 +194,8 @@ const Utils = {
             }
             // Optional callers can revalidate native state after queue/lock and
             // storage-read waits, immediately before this binding write.
+            const tab = await chrome.tabs.get(tabId);
+            if (tab.incognito) throw new Error('Private tabs cannot store Space metadata.');
             if (beforeWrite) await beforeWrite();
             const previous = states[tabId] ? { ...states[tabId] } : undefined;
             const written = { pinnedUrl: state.pinnedUrl || null, bookmarkId: state.bookmarkId || null };

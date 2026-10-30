@@ -7,6 +7,7 @@ function mockTabs() {
     const tabs = [], created = [];
     globalThis.chrome = { runtime: { getURL: path => base + path }, tabs: {
         async query({ windowId }) { return tabs.filter(tab => tab.windowId === windowId); },
+        async get(id) { const tab = tabs.find(tab => tab.id === id); if (!tab) throw new Error('Missing tab'); return structuredClone(tab); },
         async create(options) { created.push(options); const tab = { ...options, id: tabs.length + 1 }; tabs.push(tab); return tab; }
     } };
     return { tabs, created };
@@ -62,5 +63,32 @@ test('finishing cleanup closes only untouched practice tabs', async () => {
     chrome.tabs.remove = async id => removed.push(id);
     const closed = await cleanupPracticeTabs({ windowId: 7, practiceTabs: { pins: 9, folders: 10, favorites: 11 } });
     assert.deepEqual(closed, [9]);
+    assert.deepEqual(removed, [9]);
+});
+
+for (const change of ['pending', 'committed', 'window', 'private', 'closed']) for (const timing of ['initial', 'earlier-removal']) {
+    test(`practice cleanup preserves ${change} change at ${timing}`, async () => {
+        const { tabs } = mockTabs(), removed = [];
+        tabs.push({ id: 9, windowId: 7, url: practiceUrl('test', 'pins') },
+            { id: 10, windowId: 7, url: practiceUrl('test', 'folders') });
+        const changeTarget = () => {
+            if (change === 'pending') tabs[1].pendingUrl = 'https://example.com/real-work';
+            if (change === 'committed') tabs[1].url = 'https://example.com/real-work';
+            if (change === 'window') tabs[1].windowId = 8;
+            if (change === 'private') tabs[1].incognito = true;
+            if (change === 'closed') tabs.splice(1, 1);
+        };
+        chrome.tabs.query = async ({ windowId }) => structuredClone(tabs.filter(tab => tab.windowId === windowId));
+        chrome.tabs.remove = async id => { removed.push(id); if (timing === 'earlier-removal' && id === 9) changeTarget(); };
+        if (timing === 'initial') changeTarget();
+        assert.deepEqual(await cleanupPracticeTabs({ windowId: 7, practiceTabs: { pins: 9, folders: 10 } }), [9]);
+        assert.deepEqual(removed, [9]);
+    });
+}
+test('practice cleanup accepts pending navigation to the same captured lesson', async () => {
+    const { tabs } = mockTabs(), removed = [], url = practiceUrl('test', 'pins');
+    tabs.push({ id: 9, windowId: 7, url, pendingUrl: url });
+    chrome.tabs.remove = async id => removed.push(id);
+    assert.deepEqual(await cleanupPracticeTabs({ windowId: 7, practiceTabs: { pins: 9 } }), [9]);
     assert.deepEqual(removed, [9]);
 });

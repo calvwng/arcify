@@ -37,6 +37,7 @@ test('provenance accepts one unchanged own-sidebar row, never transfer payload o
 
 test('independent pinned-state writers use the origin lock and preserve both bindings', async () => {
     const f = fixture();
+    f.tabs.push({ id: 1, incognito: false }, { id: 2, incognito: false });
     const one = { ...Utils, _pinnedStateChain: Promise.resolve() }, two = { ...Utils, _pinnedStateChain: Promise.resolve() };
     f.hooks.bindingSet = async () => { await new Promise(resolve => setTimeout(resolve, 2)); };
     await Promise.all([one.setPinnedTabState(1, { bookmarkId: 'first' }), two.setPinnedTabState(2, { bookmarkId: 'second' })]);

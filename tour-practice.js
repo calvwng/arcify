@@ -10,11 +10,18 @@ export async function cleanupPracticeTabs(state) {
     const ids = new Set(Object.values(state?.practiceTabs || {}).filter(id => Number.isInteger(id)));
     if (!ids.size) return [];
     const tabs = await chrome.tabs.query({ windowId: state.windowId });
-    const practiceIds = tabs
-        .filter(tab => ids.has(tab.id) && isPracticeUrl(tab.url || tab.pendingUrl))
-        .map(tab => tab.id);
-    for (const id of practiceIds) await chrome.tabs.remove(id);
-    return practiceIds;
+    const untouched = (tab, url) => tab?.windowId === state.windowId && !tab.incognito
+        && isPracticeUrl(url) && (tab.url || tab.pendingUrl) === url && (!tab.pendingUrl || tab.pendingUrl === url);
+    const candidates = tabs.filter(tab => ids.has(tab.id) && untouched(tab, tab.url || tab.pendingUrl));
+    const removed = [];
+    for (const candidate of candidates) {
+        let current;
+        try { current = await chrome.tabs.get(candidate.id); } catch { continue; }
+        if (!untouched(current, candidate.url || candidate.pendingUrl)) continue;
+        await chrome.tabs.remove(candidate.id);
+        removed.push(candidate.id);
+    }
+    return removed;
 }
 // Called from the serialized tour queue, so reopening a panel cannot create duplicates.
 export async function preparePractice(state, message, steps) {

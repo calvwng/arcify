@@ -229,6 +229,41 @@ test('manual and queued automatic writers use same authoritative core without ne
     await Promise.all([f.store.run(() => f.archive.archiveUnlocked(request, { automatic: true })), f.archive.add(original())]);
     assert.equal(f.local.archivedTabs.length, 2); assert.deepEqual(f.effects.filter(([kind]) => kind === 'remove').map(([, id]) => id), [1]);
 });
+for (const automatic of [false, true]) for (const timing of ['initial', 'before-write', 'after-write']) {
+    for (const change of ['pending', 'committed']) test(`${automatic ? 'automatic' : 'manual'} archive rejects ${change} navigation ${timing}`, async () => {
+        const f = fixture([]); f.tabs[0].active = false;
+        const request = { tabId: 1, windowId: 10, spaceId: 'source', bookmarkFolderId: 'source-folder', url: f.tabs[0].url };
+        const destination = 'https://saved.test/important';
+        const navigate = () => { f.tabs[0][change === 'pending' ? 'pendingUrl' : 'url'] = destination; };
+        if (timing === 'initial') navigate();
+        if (timing === 'before-write') f.hooks.get = keys => { if (keys === ARCHIVE_KEY) navigate(); };
+        if (timing === 'after-write') f.hooks.afterSet = values => { if (values[ARCHIVE_KEY]) navigate(); };
+        const options = { automatic, protectedUrlKeys: new Set([Utils.getPinnedUrlKey(destination)]) };
+        await assert.rejects(f.archive.archive(request, options), { code: 'STALE_ARCHIVE' });
+        assert(f.tabs.some(tab => tab.id === 1), 'Changed native tab is preserved.');
+        assert.equal(f.effects.some(([kind]) => kind === 'remove'), false);
+        assert.equal(f.local[ARCHIVE_KEY].length, timing === 'after-write' ? 1 : 0);
+        if (timing === 'after-write') {
+            assert.equal(f.local[ARCHIVE_KEY][0].url, request.url, 'Already committed archive record remains recoverable.');
+            await assert.rejects(f.archive.archive(request, options), { code: 'STALE_ARCHIVE' });
+            assert.equal(f.local[ARCHIVE_KEY].length, 1, 'Rejected retries cannot duplicate the record.');
+        }
+    });
+}
+for (const automatic of [false, true]) test(`${automatic ? 'automatic' : 'manual'} archive permits same-destination pending navigation once`, async () => {
+    const f = fixture([]); f.tabs[0].active = false; f.tabs[0].pendingUrl = f.tabs[0].url;
+    const request = { tabId: 1, windowId: 10, spaceId: 'source', bookmarkFolderId: 'source-folder', url: f.tabs[0].url };
+    const result = await f.archive.archive(request, { automatic });
+    assert.equal(result.archived, true); assert.equal(f.local[ARCHIVE_KEY].length, 1);
+    assert.deepEqual(f.effects.filter(([kind]) => kind === 'remove'), [['remove', 1]]);
+});
+test('automatic archive protects a same-destination pending saved URL', async () => {
+    const f = fixture([]); f.tabs[0].active = false; f.tabs[0].pendingUrl = f.tabs[0].url;
+    await assert.rejects(f.archive.archive({ tabId: 1, windowId: 10, spaceId: 'source', bookmarkFolderId: 'source-folder', url: f.tabs[0].url },
+        { automatic: true, protectedUrlKeys: new Set([Utils.getPinnedUrlKey(f.tabs[0].pendingUrl)]) }), { code: 'STALE_ARCHIVE' });
+    assert.equal(f.local[ARCHIVE_KEY].length, 0); assert.equal(f.effects.some(([kind]) => kind === 'remove'), false);
+});
+
 test('manual archive storage failure never closes source; stale native move after add leaves source alive', async () => {
     const f = fixture([]), request = { tabId: 1, windowId: 10, spaceId: 'source', bookmarkFolderId: 'source-folder', url: f.tabs[0].url };
     f.hooks.beforeSet = values => { if (values.archivedTabs) throw new Error('Save failed'); };

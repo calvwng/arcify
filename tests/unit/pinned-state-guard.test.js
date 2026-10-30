@@ -5,7 +5,7 @@ import { Utils } from '../../utils.js';
 for (const boundary of ['queue', 'read']) test(`pinned binding callback validates after ${boundary} wait before write`, async () => {
     const writes = [], events = []; let release;
     const held = new Promise(resolve => { release = resolve; });
-    globalThis.chrome = { storage: { local: {
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: {
         async get() { events.push('read'); if (boundary === 'read') await held; return { pinnedTabStatesById: { 7: { bookmarkId: 'existing' } } }; },
         async set(value) { writes.push(value); }
     } } };
@@ -20,7 +20,7 @@ for (const boundary of ['queue', 'read']) test(`pinned binding callback validate
 for (const previous of [undefined, { bookmarkId: 'old', pinnedUrl: 'https://old.test/' }]) test(`guarded binding restores ${previous ? 'existing' : 'absent'} prior state when native split appears during storage write`, async () => {
     let bindings = { 7: { bookmarkId: 'unrelated', pinnedUrl: 'https://other.test/' }, ...(previous ? { 8: previous } : {}) };
     const before = structuredClone(bindings), writes = []; let split = false;
-    globalThis.chrome = { storage: { local: {
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: {
         async get() { return { pinnedTabStatesById: structuredClone(bindings) }; },
         async set(value) { bindings = structuredClone(value.pinnedTabStatesById); writes.push(structuredClone(bindings)); split = true; }
     } } };
@@ -32,7 +32,7 @@ for (const previous of [undefined, { bookmarkId: 'old', pinnedUrl: 'https://old.
 test('guarded cleanup never overwrites another writer’s newer binding', async () => {
     let bindings = {}, checks = 0, writes = 0;
     const newer = { bookmarkId: 'newer', pinnedUrl: 'https://newer.test/' };
-    globalThis.chrome = { storage: { local: {
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: {
         async get() { return { pinnedTabStatesById: structuredClone(bindings) }; },
         async set(value) { bindings = structuredClone(value.pinnedTabStatesById); writes++; }
     } } };
@@ -45,7 +45,7 @@ test('guarded cleanup never overwrites another writer’s newer binding', async 
 
 for (const failure of ['read', 'write']) test(`guarded cleanup ${failure} failure explicitly reports uncertainty`, async () => {
     let bindings = {}, split = false, reads = 0, writes = 0;
-    globalThis.chrome = { storage: { local: {
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: {
         async get() { if (++reads > 1 && failure === 'read') throw new Error('Read failed'); return { pinnedTabStatesById: structuredClone(bindings) }; },
         async set(value) { if (++writes > 1 && failure === 'write') throw new Error('Write failed'); bindings = structuredClone(value.pinnedTabStatesById); split = true; }
     } } };
@@ -58,7 +58,7 @@ for (const failure of ['read', 'write']) test(`guarded cleanup ${failure} failur
 for (const newer of [false, true]) test(`guarded binding removal restores its exact batch${newer ? ' while preserving a newer binding' : ''}`, async () => {
     const original = { 1: { bookmarkId: 'pin', pinnedUrl: 'https://old.test/' }, 2: { bookmarkId: 'pin', pinnedUrl: 'https://old.test/' }, 7: { bookmarkId: 'other' } };
     let bindings = structuredClone(original), checks = 0, writes = 0;
-    globalThis.chrome = { storage: { local: {
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: {
         async get() { return { pinnedTabStatesById: structuredClone(bindings) }; },
         async set(value) { bindings = structuredClone(value.pinnedTabStatesById); writes++; }
     } } };
@@ -71,7 +71,7 @@ for (const newer of [false, true]) test(`guarded binding removal restores its ex
 
 for (const failure of ['read', 'write']) test(`guarded binding removal reports uncertain ${failure} cleanup without hiding partial deletion`, async () => {
     let bindings = { 1: { bookmarkId: 'pin', pinnedUrl: 'https://old.test/' } }, checks = 0, reads = 0, writes = 0;
-    globalThis.chrome = { storage: { local: {
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: {
         async get() { if (++reads > 1 && failure === 'read') throw new Error('Read failed'); return { pinnedTabStatesById: structuredClone(bindings) }; },
         async set(value) { if (++writes > 1 && failure === 'write') throw new Error('Write failed'); bindings = structuredClone(value.pinnedTabStatesById); }
     } } };
@@ -83,7 +83,7 @@ for (const failure of ['read', 'write']) test(`guarded binding removal reports u
 
 test('guarded removal rejects a replacement bookmark before writing any binding', async () => {
     let writes = 0;
-    globalThis.chrome = { storage: { local: { async get() { return { pinnedTabStatesById: { 1: { bookmarkId: 'newer' } } }; }, async set() { writes++; } } } };
+    globalThis.chrome = { tabs: { get: async id => ({ id, incognito: false }) }, storage: { local: { async get() { return { pinnedTabStatesById: { 1: { bookmarkId: 'newer' } } }; }, async set() { writes++; } } } };
     const utils = { ...Utils, _pinnedStateChain: Promise.resolve() };
     await assert.rejects(utils.removePinnedTabState(1, { expectedBookmarkId: 'old', beforeWrite: async () => {} }), /different bookmark/);
     assert.equal(writes, 0);

@@ -256,7 +256,7 @@ export const BookmarkUtils = {
         const items = folder.children || await chrome.bookmarks.getChildren(folder.id);
         const { spaces = [] } = await chrome.storage.local.get('spaces');
         const pinnedIds = new Set(spaces.find(s => s.id === spaceId)?.spaceBookmarks || []);
-        const tabs = (await getSpaceTabs(spaceId)).filter(tab => !tab.pinned && pinnedIds.has(tab.id) && (windowId === null || tab.windowId === windowId));
+        const tabs = (await getSpaceTabs(spaceId)).filter(tab => !tab.incognito && !tab.pinned && pinnedIds.has(tab.id) && (windowId === null || tab.windowId === windowId));
         const claimed = claimedTabIds || new Set();
         const { pinnedTabStatesById = {} } = await chrome.storage.local.get('pinnedTabStatesById');
 

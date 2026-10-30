@@ -9,9 +9,9 @@ import { applySpacePatch } from '../../space-store.js';
 const { window } = parseHTML(await readFile(new URL('../../sidebar.html', import.meta.url), 'utf8'));
 const { document } = window;
 const listeners = () => {
-    const callbacks = [];
-    return { addListener(callback) { callbacks.push(callback); },
-        async emit(...args) { await Promise.all(callbacks.map(callback => callback(...args))); } };
+    const callbacks = new Set();
+    return { addListener(callback) { callbacks.add(callback); }, removeListener(callback) { callbacks.delete(callback); },
+        async emit(...args) { await Promise.all([...callbacks].map(callback => callback(...args))); } };
 };
 const onChanged = listeners(), onMessage = listeners();
 let focused = document.body;
@@ -100,10 +100,15 @@ globalThis.chrome = {
         async update(id, properties) { Object.assign(tabs.find(tab => tab.id === id), properties); return this.get(id); }
     },
     bookmarks: {
+        ...Object.fromEntries(['onMoved', 'onRemoved', 'onChanged'].map(name => [name, listeners()])),
         async get(id) { return structuredClone([...folders, ...bookmarks].filter(node => node.id === id)); },
         async search({ title }) { return structuredClone(folders.filter(node => node.title === title)); },
         async getChildren(id) { await beforeTree?.(); return structuredClone([...folders, ...bookmarks].filter(node => node.parentId === id)); },
-        async remove(id) { bookmarks.splice(bookmarks.findIndex(node => node.id === id), 1); await onMessage.emit({ action: 'arcifyBookmarksChanged' }); }
+        async remove(id) {
+            const [node] = bookmarks.splice(bookmarks.findIndex(node => node.id === id), 1);
+            await chrome.bookmarks.onRemoved.emit(id, { parentId: node.parentId, node });
+            await onMessage.emit({ action: 'arcifyBookmarksChanged' });
+        }
     },
     tabGroups: { async query() { return []; } }
 };

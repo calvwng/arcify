@@ -23,7 +23,8 @@ Object.defineProperty(window.HTMLSelectElement.prototype, 'value', {
 const listeners = () => {
     const callbacks = [];
     return { callbacks, addListener(callback) { callbacks.push(callback); },
-        async emit(...args) { await Promise.all(callbacks.map(callback => callback(...args))); } };
+        removeListener(callback) { const index = callbacks.indexOf(callback); if (index >= 0) callbacks.splice(index, 1); },
+        async emit(...args) { await Promise.all([...callbacks].map(callback => callback(...args))); } };
 };
 const onChanged = listeners();
 const tabs = [1, 2, 3].map(id => ({ id, windowId: 10, active: id === 2, pinned: false, title: `Tab ${id}`, url: `https://tab-${id}.test/` }));
@@ -92,7 +93,7 @@ globalThis.chrome = {
     tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id, callback) { const result = structuredClone(tabs.find(tab => tab.id === id)); callback?.(result); return result; } },
-    bookmarks: { onChanged: listeners(), async get(id) { await hooks.bookmarkGet?.(id); return structuredClone(nodes().filter(node => node.id === id)); },
+    bookmarks: { ...Object.fromEntries(['onChanged', 'onMoved', 'onRemoved'].map(name => [name, listeners()])), async get(id) { await hooks.bookmarkGet?.(id); return structuredClone(nodes().filter(node => node.id === id)); },
         async search({ title }) { return structuredClone(nodes().filter(node => node.title === title)); },
         async getChildren(id) { return structuredClone((getNode(id)?.children || []).map(node => ({ ...node, parentId: id }))); },
         async move(id, { parentId, index }) {
@@ -102,10 +103,17 @@ globalThis.chrome = {
             oldParent.children.splice(oldParent.children.findIndex(child => child.id === id), 1);
             getNode(parentId).children.splice(index, 0, node);
             writes.push({ kind: 'move', id, parentId, index });
+            await chrome.bookmarks.onMoved.emit(id, { parentId, oldParentId: parent.id, index });
             return structuredClone(node);
         },
         async create(data) { const node = { ...data, id: `created-${nextId++}` }; getNode(data.parentId).children.splice(data.index, 0, node); writes.push({ kind: 'create', id: node.id }); await hooks.afterCreate?.(node); return structuredClone(node); },
-        async remove(id) { const parent = nodes().find(item => item.children?.some(child => child.id === id)); getNode(parent.id).children.splice(getNode(parent.id).children.findIndex(child => child.id === id), 1); writes.push({ kind: 'remove', id }); await hooks.afterRemove?.(id); }
+        async remove(id) {
+            const parent = nodes().find(item => item.children?.some(child => child.id === id));
+            const [node] = getNode(parent.id).children.splice(getNode(parent.id).children.findIndex(child => child.id === id), 1);
+            writes.push({ kind: 'remove', id });
+            await chrome.bookmarks.onRemoved.emit(id, { parentId: parent.id, node });
+            await hooks.afterRemove?.(id);
+        }
     },
     tabGroups: { async query() { return []; } }
 };

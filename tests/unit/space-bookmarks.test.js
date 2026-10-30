@@ -2,15 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getSpaceBookmarkById, removeSpacePin, getSpaceBookmarkFolder, getSpaceBookmarkTree } from '../../space-bookmarks.js';
 import { BookmarkUtils } from '../../bookmark-utils.js';
+function event() { const listeners = new Set(); return { addListener: fn => listeners.add(fn), removeListener: fn => listeners.delete(fn), emit: (...args) => [...listeners].forEach(fn => fn(...args)), listeners }; }
 function mock() {
     const removed = [];
     const tree = { root: [{ id: 'space', parentId: 'root', title: 'Renamed' }, { id: 'other', parentId: 'root', title: 'Old name' }], space: [{ id: 'folder', parentId: 'space', title: 'Nested' }], folder: [
         { id: 'first', title: 'Twin', url: 'https://saved.test/' }, { id: 'bound', title: 'Saved', url: 'https://saved.test/' }
     ] };
     const pins = { 1: { bookmarkId: 'bound', pinnedUrl: 'https://saved.test/' } };
-    globalThis.chrome = { storage: { local: { async get() { return { pinnedTabStatesById: pins, spaces: [{ id: 's', spaceBookmarks: [1], temporaryTabs: [2] }] }; } } },
+    globalThis.chrome = { storage: { onChanged: event(), local: { async get() { return { pinnedTabStatesById: pins, spaces: [{ id: 's', spaceBookmarks: [1], temporaryTabs: [2] }] }; } } },
         tabs: { async query() { return [{ id: 1, url: 'https://navigated.test/' }, { id: 2, url: 'https://saved.test/' }]; } },
-        bookmarks: { async search() { return [{ id: 'url-twin', url: 'https://arcify.io' }, { id: 'root', title: 'Arcify' }]; },
+        bookmarks: { onMoved: event(), onRemoved: event(), onChanged: event(), async search() { return [{ id: 'url-twin', url: 'https://arcify.io' }, { id: 'root', title: 'Arcify' }]; },
             async get(id) { return Object.values(tree).flat().filter(node => node.id === id); }, async getChildren(id) { return tree[id] || []; }, async remove(id) { removed.push(id); } } };
     return { removed, tree };
 }

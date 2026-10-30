@@ -7,6 +7,6 @@ export async function spaceRequest(action, payload = {}) {
 export async function getSpaceTabs(spaceId) {
     const { spaces = [] } = await chrome.storage.local.get('spaces');
     const space = spaces.find(s => s.id === spaceId);
-    const tabs = new Map((await chrome.tabs.query({})).map(t => [t.id, t]));
+    const tabs = new Map((await chrome.tabs.query({})).filter(t => !t.incognito).map(t => [t.id, t]));
     return [...(space?.spaceBookmarks || []), ...(space?.temporaryTabs || [])].map(id => tabs.get(id)).filter(Boolean);
 }

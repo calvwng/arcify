@@ -46,6 +46,7 @@ function fixture(bookmarkId = 'bound', spaceId = 'space-a') {
         storage: { local: { async get() { return { pinnedTabStatesById: { 7: { bookmarkId: 'bound', pinnedUrl: 'https://same.test/' } } }; } } },
         tabs: { async remove(id) { effects.closedTabs.push(id); } },
         bookmarks: {
+            ...Object.fromEntries(['onMoved', 'onRemoved', 'onChanged'].map(name => [name, { addListener() {}, removeListener() {} }])),
             async get(id) { return structuredClone(nodes.filter(node => node.id === id)); },
             async search({ title }) { return structuredClone(nodes.filter(node => node.title === title)); },
             async getChildren(id) { return structuredClone(nodes.filter(node => node.parentId === id)); },

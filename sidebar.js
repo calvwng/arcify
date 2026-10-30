@@ -1415,7 +1415,18 @@ async function moveTabToPinned(space, tab) {
 }
 
 async function moveTabToTemp(space, tab, { temporaryDisplayOrder = null, inverted = false, refresh = true } = {}) {
-    const guard = async () => assertNotNativeSplit(await chrome.tabs.get(tab.id));
+    const spaceId = space.id, folderId = space.bookmarkFolderId, windowId = tab.windowId;
+    const guard = async () => {
+        const live = await chrome.tabs.get(tab.id);
+        const current = spaces.find(value => value.id === spaceId);
+        const owners = spaces.flatMap(value => ['spaceBookmarks', 'temporaryTabs'].flatMap(section =>
+            (value[section] || []).filter(id => id === tab.id).map(() => ({ space: value, section }))));
+        if (!current || current !== space || current.bookmarkFolderId !== folderId || owners.length !== 1 || owners[0].space !== current ||
+            owners[0].section !== 'spaceBookmarks' || live.windowId !== windowId || live.pinned || live.incognito) {
+            throw new Error('This saved pin or its live tab changed. Refresh before trying again.');
+        }
+        assertNotNativeSplit(live);
+    };
     await guard();
     space = spaces.find(s => s.id === space.id);
     if (!space) return;

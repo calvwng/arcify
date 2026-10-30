@@ -292,12 +292,22 @@ export class SpaceStore {
     isGlobalTab(tabOrId) { return this.favoriteStore?.ownsTab(tabOrId) || false; }
     isTransientTab(tabOrId) { return this.transientWindows?.isExcluded(tabOrId) || false; }
     isTransientWindow(windowId) { return this.transientWindows?.isTransientWindow(windowId) || false; }
-    observeTab(tab) { this.transientWindows?.observe(tab); return tab; }
+    observeTab(tab) {
+        // Keep only ephemeral identity evidence for private tabs. In spanning
+        // mode Chrome sends their events to this worker; they must never enter
+        // the ordinary Space snapshots or close-to-restore queue.
+        if (tab?.incognito) {
+            (this.privateTabIds ||= new Set()).add(tab.id);
+            (this.privateWindowIds ||= new Set()).add(tab.windowId);
+            return tab;
+        }
+        this.transientWindows?.observe(tab); return tab;
+    }
     async queryTabs(query = {}) {
         const tabs = await chrome.tabs.query(query);
         for (const tab of tabs) this.observeTab(tab);
         await this.transientWindows?.flushObservedUnlocked();
-        return tabs;
+        return tabs.filter(tab => !tab.incognito);
     }
     excludeTransientMembership(spaces = this.spaces) {
         for (const space of spaces || []) {
@@ -417,6 +427,18 @@ export class SpaceStore {
         this.observeTab(tab);
         for (const nativeTab of nativeTabs || []) this.observeTab(nativeTab);
         if (created && this.initialized) this.pendingCreations.delete(tab.id);
+        if (tab.incognito || this.privateTabIds?.has(tab.id)) {
+            // Do not remove historical restoration records by numeric ID: an
+            // older browser session may have used the same ID for a normal tab.
+            for (const space of this.spaces) {
+                for (const section of sections) space[section] = space[section].filter(id => id !== tab.id);
+                if (space.lastTab === tab.id) delete space.lastTab;
+            }
+            this.liveTabs.delete(tab.id); this.snapshotByTab.delete(tab.id);
+            this.provisional.delete(tab.id); this.recoveryCandidates.delete(tab.id);
+            this.restoredRanks.delete(tab.id);
+            return;
+        }
         this.liveTabs.set(tab.id, tab);
         const url = tab.url || tab.pendingUrl;
         if (tab.pinned || this.isGlobalTab(tab) || this.isTransientTab(tab) || isStartupLauncherTab(tab)) {
@@ -479,7 +501,7 @@ export class SpaceStore {
         const transientChanged = () => [...tabs.values()].some(tab => this.isTransientTab(tab) && !excludedAtRead.has(tab.id));
         const retry = () => this.persist({ skipGroupSync, beforeWrite, savedMove });
         const liveWindows = new Set([...tabs.values()].filter(tab => !this.isTransientTab(tab) && !this.isTransientWindow(tab.windowId)).map(t => t.windowId));
-        for (const windowId of Object.keys(this.active)) if (this.isTransientWindow(Number(windowId))) delete this.active[windowId];
+        for (const windowId of Object.keys(this.active)) if (this.isTransientWindow(Number(windowId)) || this.privateWindowIds?.has(Number(windowId))) delete this.active[windowId];
         for (const keys of [this.windowKeys, this.restoreWindowKeys]) {
             for (const id of keys.keys()) if (!liveWindows.has(id)) keys.delete(id);
         }
@@ -499,7 +521,7 @@ export class SpaceStore {
         const overrides = metadata.tabNameOverridesById || {};
         if (this.restoredMetadata.length) {
             for (const record of this.restoredMetadata) {
-                if (this.isTransientTab(record.tabId)) continue;
+                if (this.isTransientTab(record.tabId) || this.privateTabIds?.has(record.tabId)) continue;
                 if (record.pinnedState) pinnedStates[record.tabId] = record.pinnedState;
                 if (record.nameOverride) overrides[record.tabId] = record.nameOverride;
             }
@@ -511,7 +533,10 @@ export class SpaceStore {
         const snapshot = [];
         for (const space of this.spaces) for (const section of sections) {
             space[section] = [...new Set(space[section])].filter(id => {
-                if (!tabs.has(id)) return false;
+                if (!tabs.has(id)) {
+                    if (this.privateTabIds?.has(id)) this.snapshotByTab.delete(id);
+                    return false;
+                }
                 if (tabs.get(id).pinned || this.isGlobalTab(tabs.get(id)) || this.isTransientTab(tabs.get(id)) || isStartupLauncherTab(tabs.get(id))) { this.snapshotByTab.delete(id); return false; }
                 return true;
             });
@@ -704,10 +729,14 @@ export class SpaceStore {
             }
             case 'import': {
                 if (this.isTransientWindow(message.windowId)) break;
+                // Read native privacy before copying group names into durable
+                // Space definitions, including a newly opened private window.
+                await this.queryTabs({ windowId: message.windowId });
+                if (this.privateWindowIds?.has(message.windowId)) throw new Error('Private windows cannot be imported into Spaces.');
                 const groups = await chrome.tabGroups.query({ windowId: message.windowId });
                 const tabs = await this.queryTabs({ windowId: message.windowId });
                 for (const group of groups) {
-                    if (this.isTransientWindow(group.windowId)) continue;
+                    if (this.isTransientWindow(group.windowId) || this.privateWindowIds?.has(group.windowId)) continue;
                     let name = group.title || 'Imported space';
                     const base = name;
                     for (let i = 2; this.spaces.some(s => s.name === name); i++) name = `${base} ${i}`;
@@ -803,7 +832,7 @@ export class SpaceStore {
             this.pendingCreations.delete(id);
             return handle(() => {
                 const record = this.snapshotByTab.get(id);
-                if (!wasTransient && !this.isTransientTab(id) && !this.isTransientWindow(info?.windowId) && info?.isWindowClosing && record && this.spaces.some(s => s.id === record.spaceId)) this.restoreQueue.push(record);
+                if (!this.privateTabIds?.has(id) && !this.privateWindowIds?.has(info?.windowId) && !wasTransient && !this.isTransientTab(id) && !this.isTransientWindow(info?.windowId) && info?.isWindowClosing && record && this.spaces.some(s => s.id === record.spaceId)) this.restoreQueue.push(record);
                 this.snapshotByTab.delete(id);
                 this.provisional.delete(id);
                 this.recoveryCandidates.delete(id);

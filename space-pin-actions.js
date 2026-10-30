@@ -2,7 +2,7 @@ import { assertNotTransient, isTransientTab } from './transient-safety.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { Utils } from './utils.js';
 import { assertNotNativeSplit } from './native-split-safety.js';
-import { getSpaceBookmarkById } from './space-bookmarks.js';
+import { getSpaceBookmarkById, observeSpaceBookmarkRemoval } from './space-bookmarks.js';
 
 const partial = (message, error, code = 'PARTIAL_COMMIT') => Object.assign(new Error(`${message} ${error.message} Nothing was retried or recreated.`), { code });
 
@@ -75,11 +75,7 @@ export async function removeSavedSpacePin(store, { getSpace, bookmarkId, parentI
     // Observe bookmark changes across both so the final ownership check cannot
     // make an earlier ancestry read authoritative again. Watch all moves/removals
     // because an intermediate ancestor can change while the tree is traversed.
-    const bookmarkEvents = [chrome.bookmarks.onMoved, chrome.bookmarks.onRemoved, chrome.bookmarks.onChanged];
-    if (bookmarkEvents.some(event => !event?.addListener || !event.removeListener)) throw new Error('Bookmark change observation is unavailable.');
-    let bookmarkChanged = false;
-    const invalidate = () => { bookmarkChanged = true; };
-    for (const event of bookmarkEvents) event.addListener(invalidate);
+    const observation = observeSpaceBookmarkRemoval();
     try {
         await guard();
         const bookmark = await getSpaceBookmarkById(getSpace(), bookmarkId);
@@ -87,14 +83,14 @@ export async function removeSavedSpacePin(store, { getSpace, bookmarkId, parentI
         // Recheck linked tabs after the bookmark reads (for example a new Split),
         // retaining the bookmark event fence through this final awaited guard.
         await guard();
-        if (bookmarkChanged) throw new Error('The saved pin bookmark context changed during removal.');
+        observation.assertUnchanged();
         try { await chrome.bookmarks.remove(bookmarkId); }
         catch (error) {
             if (stopOnPartial) throw partial('The saved bookmark removal could not be confirmed. Check Pinned before trying again.', error, 'UNCERTAIN_RESULT');
             throw error;
         }
     } finally {
-        for (const event of bookmarkEvents) event.removeListener(invalidate);
+        observation.stop();
     }
     state.bookmarkRemoved = true;
     try {
