@@ -450,7 +450,8 @@ async function activatePinnedTabByURL(bookmarkUrl, targetSpaceId, spaceName, boo
 }
 
 // Initialize the sidebar when the DOM is loaded
-document.addEventListener('DOMContentLoaded', async () => {
+async function initializeNormalSidebar() {
+    document.body.removeAttribute('data-sidebar-pending');
     Logger.log('DOM loaded, initializing sidebar...');
     const palette = initializeSpaceColorOverrides({ document, onError: error => Logger.error('Could not load color palette:', error) });
     await initializeSidebarAppearance({ document, onChange: () => { favoritesDropFeedback.refresh(); spaceSwitcherController.refresh(); },
@@ -600,7 +601,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             }, 400); // 400ms cooldown
         }
     }, { passive: false }); // 'passive: false' is required to use preventDefault()
-});
+}
+if (document.readyState === 'interactive' || document.readyState === 'complete') queueMicrotask(initializeNormalSidebar);
+else document.addEventListener('DOMContentLoaded', initializeNormalSidebar, { once: true });
 
 const spaceSaveQueue = new SpacePatchQueue(
     (before, after) => spaceRequest('patch', { before, after }),

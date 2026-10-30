@@ -3,12 +3,14 @@ import { readFile } from 'node:fs/promises';
 import { parentPort, workerData } from 'node:worker_threads';
 import { parseHTML } from 'linkedom';
 import { applySpacePatch } from '../../space-store.js';
+import { startSidebar } from '../../sidebar-context.js';
 
 // Each worker imports a fresh real sidebar/module graph, like reopening the
 // panel. Only Chrome facilities and DOM layout are substituted.
 const { local, session, tabs, bookmarks, windowId = 10, concurrentPin } = workerData;
 const { window } = parseHTML(await readFile(new URL('../../sidebar.html', import.meta.url), 'utf8'));
 const { document } = window;
+Object.defineProperty(document, 'readyState', { value: workerData.readyState || 'loading' });
 window.HTMLElement.prototype.getBoundingClientRect = () => ({ top: 0, bottom: 20, left: 0, right: 300, width: 300, height: 20 });
 window.HTMLElement.prototype.scrollTo = () => {};
 Object.defineProperty(window.HTMLSelectElement.prototype, 'value', {
@@ -61,7 +63,7 @@ globalThis.chrome = {
         }
     },
     storage: { onChanged: listeners(), local: area(local), sync: area({ invertTabOrder: false }), session: area(session) },
-    windows: { getCurrent(_options, callback) { callback?.({ id: windowId }); return Promise.resolve({ id: windowId }); } },
+    windows: { getCurrent(_options, callback) { callback?.({ id: windowId, incognito: false }); return Promise.resolve({ id: windowId, incognito: false }); } },
     tabs: {
         ...Object.fromEntries(['onActivated', 'onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) {
@@ -88,6 +90,9 @@ globalThis.chrome = {
     tabGroups: { async query() { return []; } }
 };
 const domReady = [];
+const queuedInitialization = [];
+const scheduleMicrotask = globalThis.queueMicrotask;
+globalThis.queueMicrotask = callback => scheduleMicrotask(() => queuedInitialization.push(Promise.resolve(callback())));
 const addListener = document.addEventListener.bind(document);
 document.addEventListener = (name, callback, ...rest) => {
     if (name === 'DOMContentLoaded') domReady.push(callback);
@@ -96,8 +101,16 @@ document.addEventListener = (name, callback, ...rest) => {
 const { Logger } = await import('../../logger.js');
 Logger.warn = (...args) => warnings.push(args.map(String));
 Logger.error = (...args) => warnings.push(args.map(String));
-await import('../../sidebar.js');
+await startSidebar({ chrome, document,
+    loadNormal: () => import('../../sidebar.js'),
+    loadPrivate: () => assert.fail('Normal window must never initialize private sidebar')
+});
+assert.equal(document.body.hasAttribute('data-sidebar-pending'), false);
+assert.ok(document.getElementById('spacesList'), 'Normal sidebar DOM is retained at the entry boundary');
 await Promise.all(domReady.map(callback => callback()));
+await Promise.all(queuedInitialization);
+globalThis.queueMicrotask = scheduleMicrotask;
+assert.equal(document.querySelector('.private-sidebar'), null);
 if (workerData.handoffTabId) {
     const deadline = Date.now() + 2500;
     while (document.querySelector(`.space.active [data-tab-id="${workerData.handoffTabId}"] .tab-title-display`)?.textContent !== 'New title during initialization handoff') {
