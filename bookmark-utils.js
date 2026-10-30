@@ -182,14 +182,15 @@ export const BookmarkUtils = {
         }
 
         // Assign the new tab in extension storage
-        await spaceRequest('assign', { tabId: newTab.id, spaceId: targetSpaceId, pinned: isPinned });
-        for (const space of spaces) {
+        const assigned = await spaceRequest('assign', { tabId: newTab.id, spaceId: targetSpaceId,
+            pinned: isPinned, ...(!isPinned ? { newTodayTab: true } : {}) });
+        if (!isPinned) {
+            // Keep the background's exact Today placement, including concurrent
+            // rows, rather than following assignment with a stale local append.
+            spaces.splice(0, spaces.length, ...assigned);
+        } else for (const space of spaces) {
             space.spaceBookmarks = space.spaceBookmarks.filter(id => id !== newTab.id);
             space.temporaryTabs = space.temporaryTabs.filter(id => id !== newTab.id);
-        }
-        if (!isPinned) {
-            spaces.find(s => s.id === targetSpaceId)?.temporaryTabs.push(newTab.id);
-            await saveSpaces();
         }
 
         if (isPinned) {
@@ -204,7 +205,7 @@ export const BookmarkUtils = {
         }
 
         // Persist the bookmark section order independently of the native tab strip.
-        if (typeof persistSpaceTabOrder === 'function') {
+        if (isPinned && typeof persistSpaceTabOrder === 'function') {
             await persistSpaceTabOrder(targetSpaceId, { source: 'arcify', movedTabId: newTab.id });
         }
 
@@ -220,16 +221,20 @@ export const BookmarkUtils = {
                 bookmarkId: bookmarkData.bookmarkId || null
             };
             const activeTabElement = await createTabElement(activeTabData, true, false);
-            activeTabElement.classList.add('active');
             replaceElement.replaceWith(activeTabElement);
         }
 
-        // Ensure the tab is actually active
-        await chrome.tabs.update(newTab.id, { active: true });
-
-        // Visually activate the tab
+        // Creation already performed the requested activation. Bookkeeping
+        // can outlast a newer user tab choice; never activate the new tab again.
+        // Paint only the actual current source-window tab after row replacement.
         if (activateTabInDOM) {
-            activateTabInDOM(newTab.id);
+            try {
+                const [activeTab] = await chrome.tabs.query({ active: true, windowId: currentWindow.id });
+                activateTabInDOM(activeTab?.id ?? null);
+            } catch (error) {
+                // An unavailable observation grants no fallback focus/highlight.
+                Logger.warn('[BookmarkUtils] Could not refresh active tab highlight:', error);
+            }
         }
 
         Logger.log('[BookmarkUtils] Successfully opened bookmark as tab:', newTab.id);
@@ -251,7 +256,7 @@ export const BookmarkUtils = {
         const items = folder.children || await chrome.bookmarks.getChildren(folder.id);
         const { spaces = [] } = await chrome.storage.local.get('spaces');
         const pinnedIds = new Set(spaces.find(s => s.id === spaceId)?.spaceBookmarks || []);
-        const tabs = (await getSpaceTabs(spaceId)).filter(tab => !tab.pinned && pinnedIds.has(tab.id) && (windowId === null || tab.windowId === windowId));
+        const tabs = (await getSpaceTabs(spaceId)).filter(tab => !tab.incognito && !tab.pinned && pinnedIds.has(tab.id) && (windowId === null || tab.windowId === windowId));
         const claimed = claimedTabIds || new Set();
         const { pinnedTabStatesById = {} } = await chrome.storage.local.get('pinnedTabStatesById');
 
@@ -261,15 +266,16 @@ export const BookmarkUtils = {
                 // been bound to another bookmark in this run, so URL twins don't both
                 // get claimed by a single bookmark.
                 const available = tabs.filter(t => !claimed.has(t.id));
-                let tab = available.find(t => pinnedTabStatesById[t.id]?.bookmarkId === item.id)
-                    || available.find(t => t.url === item.url && !pinnedTabStatesById[t.id]?.bookmarkId);
+                const exact = available.filter(t => pinnedTabStatesById[t.id]?.bookmarkId === item.id);
+                let tab = exact[0] || available.find(t => t.url === item.url && !pinnedTabStatesById[t.id]?.bookmarkId);
                 // Legacy recovery is limited to already-pinned members without a binding.
                 // Ordinary temporary tabs must never be promoted by a matching URL.
                 if (!tab && getUrlKey) {
                     const targetKey = getUrlKey(item.url);
                     tab = available.find(t => !pinnedTabStatesById[t.id]?.bookmarkId && getUrlKey(t.url) === targetKey);
                 }
-                if (tab) {
+                const matches = exact.length ? exact : tab ? [tab] : [];
+                for (const tab of matches) {
                     claimed.add(tab.id);
                     bookmarks.push(tab.id);
                     // Set tab name override with the bookmark's title if needed

@@ -1,4 +1,13 @@
+import { registerSelectedTabClose } from './selected-tab-close.js';
+import { registerPeek } from './peek.js';
+import { registerRecoveryObservation } from './recovery-observation.js';
+import { summarizeRecoveryObservation } from './recovery-report-adapter.js';
+import { registerLittleArcLinkMenu } from './little-arc-link-menu.js';
+import { registerLittleArcHeader } from './little-arc-header.js';
+import { registerSharedToday } from './shared-today.js';
 import { registerTourMessages } from './tour-state.js';
+import { registerStartupLauncher } from './startup-launcher.js';
+import { isStartupLauncherTab } from './startup-launcher-tab.js';
 registerTourMessages();
 /**
  * Background Service Worker (Manifest V3) - Core extension orchestrator
@@ -13,27 +22,90 @@ registerTourMessages();
  * - All content script Chrome API requests must route through here via message passing
  */
 
+import { registerArchiveMessages } from './archive-store.js';
 import { SpaceStore, ownerOf } from './space-store.js';
+import { registerTodayRecoveryMessages } from './today-recovery-store.js';
+import { createFavoriteContinuity } from './favorite-continuity.js';
+import { FavoriteStore, registerFavoriteMessages } from './favorite-store.js';
+import { registerSpotlightBridge } from './spotlight-bridge.js';
 import { isProtectedFavorite } from './favorite-safety.js';
 import { registerBookmarkListeners } from './bookmark-events.js';
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
-
-registerBookmarkListeners();
+import { registerTodayFolderMessages } from './today-folder-store.js';
+import { registerTodayMoveMessages } from './today-move-store.js';
+import { registerSavedMoveMessages } from './saved-move-store.js';
+import { registerTabMenuMessages } from './tab-menu-actions.js';
+import { registerMoveTabWindowMessages } from './move-tab-new-window.js';
+import { registerTodaySplitMessages } from './today-split-action.js';
+import { createNativeSplitWriteGuard } from './native-split-safety.js';
+import { createLittleArcWindowGeometry } from './little-arc-window-geometry.js';
+import { createTransientWindowStore } from './transient-window-store.js';
+import { registerTransientControlMessages } from './transient-window-actions.js';
 
 const spaceStore = new SpaceStore();
+const windowGeometry = createLittleArcWindowGeometry({readRecord: token => spaceStore.transientWindows?.geometryRecord(token)});
+spaceStore.transientWindows = createTransientWindowStore({geometry:windowGeometry});
+registerSharedToday(spaceStore);
+registerLittleArcHeader(spaceStore);
+registerPeek(spaceStore);
+registerLittleArcLinkMenu(spaceStore);
+// Observe native identity before ordinary lifecycle handlers queue adoption.
+chrome.tabs.onCreated.addListener(tab => spaceStore.transientWindows.observe(tab));
+chrome.tabs.onUpdated.addListener((_id, _change, tab) => spaceStore.transientWindows.observe(tab));
+chrome.tabs.onDetached?.addListener((id, info) => spaceStore.transientWindows.observe({ id, windowId: info.oldWindowId }));
+chrome.windows.onRemoved.addListener(id => {
+    spaceStore.transientWindows.observeWindowRemoved(id);
+    spaceStore.run(() => spaceStore.transientWindows.flushObservedUnlocked()).catch(console.error);
+});
 spaceStore.install();
+registerTransientControlMessages(spaceStore);
+registerStartupLauncher(chrome, { beforeWindowRead: () => spaceStore.transientWindows.initialize(),
+    isExcludedWindow: id => spaceStore.isTransientWindow(id) });
+registerArchiveMessages(spaceStore);
+registerTodayFolderMessages(spaceStore);
+registerTodayMoveMessages(spaceStore);
+registerTodayRecoveryMessages(spaceStore);
+registerSavedMoveMessages(spaceStore);
+registerTabMenuMessages(spaceStore);
+registerSelectedTabClose(spaceStore);
+registerTodaySplitMessages(spaceStore);
+const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity({ isTransientTab: tab => spaceStore.isTransientTab(tab),
+    isTransientWindow: id => spaceStore.isTransientWindow(id) }) });
+favoriteStore.install();
+registerFavoriteMessages(favoriteStore);
+registerMoveTabWindowMessages(spaceStore, favoriteStore);
+const spotlightInvalidation = registerSpotlightBridge(spaceStore);
+registerRecoveryObservation(spaceStore, chrome, summarizeRecoveryObservation);
+registerBookmarkListeners(() => spotlightInvalidation.invalidateAll());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'spaceStore') return;
+    if (message.action === 'clean' || message.action === 'delete') {
+        const ownUrl = chrome.runtime.getURL('');
+        const fields = message.action === 'clean' ? ['type', 'action', 'spaceId', 'windowId'] : ['type', 'action', 'spaceId'];
+        if (sender?.id !== chrome.runtime.id || sender.url && !sender.url.startsWith(ownUrl)
+            || sender.origin && sender.origin !== ownUrl.replace(/\/$/, '')
+            || message.action === 'clean' && sender.tab && sender.tab.windowId !== message.windowId) {
+            sendResponse({ success: false, code: 'UNAUTHORIZED', error: 'Invalid Space sender.' }); return;
+        }
+        if (typeof message.spaceId !== 'string' || !message.spaceId || message.spaceId.length > 200
+            || Object.keys(message).some(key => !fields.includes(key))
+            || message.action === 'clean' && (!Number.isSafeInteger(message.windowId) || message.windowId <= 0)) {
+            sendResponse({ success: false, code: 'INVALID_REQUEST', error: 'Invalid Space cleanup request.' }); return;
+        }
+    }
     spaceStore.dispatch(message).then(spaces => sendResponse({ success: true, spaces }), error => sendResponse({ success: false, error: error.message }));
     return true;
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'bookmarkOrder') return;
-    enqueueBookmarkOperation(message.operation).then(
+    let beforeWrite;
+    try { beforeWrite = createNativeSplitWriteGuard(message.guardTab); }
+    catch (error) { sendResponse({ success: false, error: error.message }); return; }
+    enqueueBookmarkOperation(message.operation, { beforeWrite }).then(
         result => sendResponse({ success: true, ...result }),
         error => sendResponse({ success: false, error: error.message, code: error.code,
-            observedOrders: error.observedOrders, moved: error.moved })
+            observedOrders: error.observedOrders, moved: error.moved, createdId: error.createdId })
     );
     return true;
 });
@@ -41,6 +113,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 import { Utils } from './utils.js';
 import { Logger } from './logger.js';
 import { copyCurrentTabUrlWithFallback } from './url-copy.js';
+import { projectLiveTabTitles } from './tab-title-projection.js';
 
 const AUTO_ARCHIVE_ALARM_NAME = 'autoArchiveTabsAlarm';
 const TAB_ACTIVITY_STORAGE_KEY = 'tabLastActivity'; // Key to store timestamps
@@ -75,23 +148,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         chrome.tabs.create({ url: 'installation-onboarding.html', active: true });
     }
 
-    if (chrome.contextMenus) {
-        chrome.contextMenus.create({
-            id: "openArcify",
-            title: "Arcify",
-            contexts: ["all"]
-        });
-    }
 });
-
-// Handle context menu clicks
-if (chrome.contextMenus) {
-    chrome.contextMenus.onClicked.addListener((info, tab) => {
-        info.menuItemId === "openArcify" && chrome.sidePanel.open({
-            windowId: tab.windowId
-        })
-    });
-}
 
 // Listen for messages from the content script (sidebar)
 // Do not return a Promise for unrelated messages: it can win the response race
@@ -132,6 +189,8 @@ chrome.commands.onCommand.addListener(async function (command) {
 async function updateTabLastActivity(tabId) {
     if (!tabId) return;
     try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.incognito) return;
         const result = await chrome.storage.local.get(TAB_ACTIVITY_STORAGE_KEY);
         const activityData = result[TAB_ACTIVITY_STORAGE_KEY] || {};
         activityData[tabId] = Date.now();
@@ -231,6 +290,7 @@ async function runAutoArchiveCheck() {
         const tabsToArchive = [];
 
         for (const tab of tabs) {
+            if (tab.incognito || isStartupLauncherTab(tab) || spaceStore.isTransientTab(tab)) continue;
             // Skip audible, active, or recently active tabs
             if (tab.audible || tab.active) {
                 await updateTabLastActivity(tab.id); // Update activity for active/audible tabs
@@ -239,7 +299,7 @@ async function runAutoArchiveCheck() {
 
             // Protect Arcify favorites: never archive a tab whose URL matches a bookmark
             // in the Arcify tree (compared by origin+pathname to tolerate query/hash drift).
-            if (isProtectedFavorite(tab, protectedIds, bindings, protectedUrlKeys)) {
+            if (isProtectedFavorite(tab, protectedIds, bindings, protectedUrlKeys, favoriteStore)) {
                 // Refresh activity so protected favorites aren't re-checked repeatedly.
                 await updateTabLastActivity(tab.id);
                 continue;
@@ -262,21 +322,19 @@ async function runAutoArchiveCheck() {
 
 
         for (const tab of tabsToArchive) {
-            const tabData = {
-                url: tab.url,
-                name: tab.title || tab.url, // Use URL if title is empty
-                spaceId: ownerOf(await spaceStore.dispatch({ action: 'get' }), tab.id)?.id
-            };
-
-            // Archive only tabs owned by an extension space.
-            if (tabData.spaceId) {
-                await Utils.addArchivedTab(tabData);
-                await chrome.tabs.remove(tab.id); // Close the tab after archiving
-                await removeTabLastActivity(tab.id); // Remove activity timestamp after archiving
-            } else {
-                // Decide if you want to update its activity or leave it for next check
-                // await updateTabLastActivity(tab.id);
-            }
+            await spaceStore.run(async () => {
+                let current;
+                try { current = await chrome.tabs.get(tab.id); } catch { return; }
+                const spaceId = ownerOf(spaceStore.spaces, current.id)?.id;
+                const currentProtectedIds = new Set(spaceStore.spaces.flatMap(space => space.spaceBookmarks));
+                if (!spaceId || current.windowId !== tab.windowId || current.incognito || current.active || current.audible
+                    || isStartupLauncherTab(current) || spaceStore.isGlobalTab(current) || spaceStore.isTransientTab(current)
+                    || isProtectedFavorite(current, currentProtectedIds, await Utils.getPinnedTabStates(), protectedUrlKeys)) return;
+                const space = spaceStore.spaces.find(space => space.id === spaceId);
+                await spaceStore.archiveStore.archiveUnlocked({ tabId: current.id, windowId: current.windowId,
+                    spaceId, bookmarkFolderId: space.bookmarkFolderId, url: current.url }, { automatic: true, protectedUrlKeys });
+                await removeTabLastActivity(current.id);
+            });
         }
 
     } catch (error) {
@@ -357,10 +415,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     } else if (message.action === 'searchTabs') {
         return handleAsyncMessage(async () => {
-            const tabs = await chrome.tabs.query({});
+            const tabs = await spaceStore.run(async () => projectLiveTabTitles((await chrome.tabs.query({})).filter(tab => !tab.incognito), spaceStore.spaces));
             const query = message.query?.toLowerCase() || '';
             const filteredTabs = tabs.filter(tab => {
-                if (!tab.title || !tab.url) return false;
+                if (!tab.title || !tab.url || isStartupLauncherTab(tab)) return false;
                 if (!query) return true;
                 return tab.title.toLowerCase().includes(query) ||
                     tab.url.toLowerCase().includes(query);
@@ -370,12 +428,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     } else if (message.action === 'getRecentTabs') {
         return handleAsyncMessage(async () => {
-            const tabs = await chrome.tabs.query({});
+            const tabs = await spaceStore.run(async () => projectLiveTabTitles((await chrome.tabs.query({})).filter(tab => !tab.incognito), spaceStore.spaces));
             const storage = await chrome.storage.local.get([TAB_ACTIVITY_STORAGE_KEY]);
             const activityData = storage[TAB_ACTIVITY_STORAGE_KEY] || {};
 
             const tabsWithActivity = tabs
-                .filter(tab => tab.url && tab.title)
+                .filter(tab => tab.url && tab.title && !isStartupLauncherTab(tab))
                 .map(tab => ({ ...tab, lastActivity: activityData[tab.id] || 0 }))
                 .sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0))
                 .slice(0, message.limit || 5);

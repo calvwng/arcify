@@ -1,3 +1,6 @@
+import { archiveRequest } from './archive-client.js';
+import { isStartupLauncherTab, isStartupLauncherUrl } from './startup-launcher-tab.js';
+import { getTodayOrderInverted } from './today-order.js';
 import { isPracticeUrl } from './tour-practice.js';
 import { getSpaceTabs, spaceRequest } from './space-client.js';
 /**
@@ -17,8 +20,6 @@ import { getSpaceTabs, spaceRequest } from './space-client.js';
 import { BookmarkUtils } from './bookmark-utils.js';
 import { Logger } from './logger.js';
 
-const MAX_ARCHIVED_TABS = 100;
-const ARCHIVED_TABS_KEY = 'archivedTabs';
 
 const Utils = {
 
@@ -31,7 +32,7 @@ const Utils = {
     processBookmarkFolder: async function (folder, spaceId) {
         const bookmarks = [];
         const items = await chrome.bookmarks.getChildren(folder.id);
-        const tabs = await getSpaceTabs(spaceId);
+        const tabs = (await getSpaceTabs(spaceId)).filter(tab => !tab.incognito);
         for (const item of items) {
             if (item.url) {
                 // This is a bookmark
@@ -92,10 +93,13 @@ const Utils = {
     getSettings: async function () {
         const defaultSettings = {
             defaultSpaceName: 'Home',
+            startupLauncherEnabled: false, // Explicit opt-in; never opens the panel automatically
             autoArchiveEnabled: false, // Default: disabled
             autoArchiveIdleMinutes: 360, // Default: 6 hours
             syncTabGroups: false,
-            invertTabOrder: true, // Default: enabled (New tabs/High index on top)
+            ordinaryFavoriteTabs: false, // Prospective; existing Favorite tabs keep their mode
+            invertTabOrder: true, // Saved pin/folder display only; preserve the legacy default
+            todayNewTabsAtTop: true, // Future standalone Today tabs; existing order stays unchanged
             colorOverrides: null, // Default: no color overrides
             debugLoggingEnabled: false, // Default: disabled (controls debug logging)
             showAllOpenTabsInCollapsedFolders: false, // Default: Arc behavior (only show active tab in collapsed folder)
@@ -116,32 +120,35 @@ const Utils = {
         await chrome.storage.local.set({ tabNameOverridesById: overrides }); // Changed key
     },
 
-    // Set or update a single override using tabId
-    setTabNameOverride: async function (tabId, url, name) { // Added tabId, kept url for domain
-        if (!tabId || !url || !name) return; // Basic validation
-
-        const overrides = await this.getTabNameOverrides();
-        try {
-            // Still store originalDomain in case we need it later, derived from the URL at time of setting
-            const originalDomain = new URL(url).hostname;
-            overrides[tabId] = { name: name, originalDomain: originalDomain }; // Use tabId as key
-            await this.saveTabNameOverrides(overrides);
-            Logger.log(`Override set for tab ${tabId}: ${name}`);
-        } catch (e) {
-            Logger.error("Error setting override - invalid URL?", url, e);
-        }
+    _tabNameChain: Promise.resolve(),
+    _serializeTabNameOp: function (operation) {
+        const locked = () => globalThis.navigator?.locks?.request
+            ? globalThis.navigator.locks.request('arcify-tab-names', operation) : operation();
+        const run = this._tabNameChain.then(locked, locked);
+        this._tabNameChain = run.then(() => {}, () => {});
+        return run;
     },
-
-    // Remove an override using tabId
-    removeTabNameOverride: async function (tabId) { // Changed parameter to tabId
-        if (!tabId) return;
-
-        const overrides = await this.getTabNameOverrides();
-        if (overrides[tabId]) { // Check using tabId
-            delete overrides[tabId]; // Delete using tabId
+    setTabNameOverride: async function (tabId, url, name) {
+        if (!tabId || !url || !name) return;
+        const originalDomain = new URL(url).hostname;
+        return this._serializeTabNameOp(async () => {
+            const overrides = await this.getTabNameOverrides();
+            const tab = await chrome.tabs.get(tabId);
+            if (tab.incognito) throw new Error('Private tabs cannot store Space metadata.');
+            const previous = overrides[tabId];
+            if (previous && Object.keys(previous).length === 2 && previous.name === name && previous.originalDomain === originalDomain) return;
+            overrides[tabId] = { name, originalDomain };
             await this.saveTabNameOverrides(overrides);
-            Logger.log(`Override removed for tab ${tabId}`);
-        }
+        });
+    },
+    removeTabNameOverride: async function (tabId) {
+        if (!tabId) return;
+        return this._serializeTabNameOp(async () => {
+            const overrides = await this.getTabNameOverrides();
+            if (!overrides[tabId]) return;
+            delete overrides[tabId];
+            await this.saveTabNameOverrides(overrides);
+        });
     },
 
     // --- Pinned (Space Bookmark) Tab State ---
@@ -168,31 +175,109 @@ const Utils = {
     // dropping favorites' tab<->bookmark links (B10). Chaining makes each op atomic.
     _pinnedStateChain: Promise.resolve(),
     _serializePinnedStateOp: function (op) {
-        const run = this._pinnedStateChain.then(op, op);
+        // Also serialize across sidebar documents; local Promise chains alone
+        // can overwrite another window's newly saved bookmark binding.
+        const locked = () => globalThis.navigator?.locks?.request
+            ? globalThis.navigator.locks.request('arcify-pinned-tab-state', op) : op();
+        const run = this._pinnedStateChain.then(locked, locked);
         // Keep the chain alive even if an op rejects, so one failure can't wedge the queue.
         this._pinnedStateChain = run.then(() => { }, () => { });
         return run;
     },
 
-    setPinnedTabState: async function (tabId, state) {
+    setPinnedTabState: async function (tabId, state, { onlyIfUnboundOrMatching = false, beforeWrite = null } = {}) {
         if (!tabId || !state) return;
         return this._serializePinnedStateOp(async () => {
             const states = await this.getPinnedTabStates();
-            states[tabId] = {
-                pinnedUrl: state.pinnedUrl || null,
-                bookmarkId: state.bookmarkId || null
-            };
-            await this.savePinnedTabStates(states);
+            if (onlyIfUnboundOrMatching && states[tabId]?.bookmarkId && String(states[tabId].bookmarkId) !== String(state.bookmarkId)) {
+                throw new Error('The tab is now linked to a different bookmark. Refresh and try again.');
+            }
+            // Optional callers can revalidate native state after queue/lock and
+            // storage-read waits, immediately before this binding write.
+            const tab = await chrome.tabs.get(tabId);
+            if (tab.incognito) throw new Error('Private tabs cannot store Space metadata.');
+            if (beforeWrite) await beforeWrite();
+            const previous = states[tabId] ? { ...states[tabId] } : undefined;
+            const written = { pinnedUrl: state.pinnedUrl || null, bookmarkId: state.bookmarkId || null };
+            // Equality is checked inside the lock, after caller revalidation.
+            // A no-op must still reject a changed owner or failed native guard.
+            if (previous && Object.keys(previous).length === 2 && previous.pinnedUrl === written.pinnedUrl && previous.bookmarkId === written.bookmarkId) return;
+            states[tabId] = written;
+            try {
+                await this.savePinnedTabStates(states);
+                if (beforeWrite) await beforeWrite();
+            } catch (error) {
+                if (!beforeWrite) throw error;
+                // A native split may appear while storage.set is resolving.
+                // Restore only this call's exact binding, under the same lock;
+                // never overwrite a newer binding or delete the saved bookmark.
+                const sameBinding = (a, b) => a && b && Object.keys(a).length === Object.keys(b).length &&
+                    Object.keys(b).every(key => a[key] === b[key]);
+                try {
+                    const latest = await this.getPinnedTabStates();
+                    if (sameBinding(latest[tabId], written)) {
+                        if (previous) latest[tabId] = previous;
+                        else delete latest[tabId];
+                        await this.savePinnedTabStates(latest);
+                        const verified = (await this.getPinnedTabStates())[tabId];
+                        if (previous ? !sameBinding(verified, previous) : verified !== undefined) throw new Error('The restored binding could not be verified.');
+                    }
+                } catch {
+                    throw Object.assign(new Error(`${error.message} The live-tab binding cleanup could not be confirmed. Check Pinned before trying again.`), { cleanupUncertain: true });
+                }
+                throw error;
+            }
         });
     },
 
-    removePinnedTabState: async function (tabId) {
+    removePinnedTabState: async function (tabId, options = {}) {
         if (!tabId) return;
+        return this.removePinnedTabStates([tabId], options);
+    },
+
+    // Exact linked panes are removed together so one failing native guard cannot
+    // leave earlier panes demoted while later panes still belong to the pin.
+    removePinnedTabStates: async function (tabIds, { preserveNativePinned = false, beforeWrite = null, expectedBookmarkId = null } = {}) {
         return this._serializePinnedStateOp(async () => {
+            const ids = [];
+            for (const tabId of [...new Set(tabIds)].filter(Boolean)) {
+                if (preserveNativePinned) {
+                    try { if ((await chrome.tabs.get(tabId))?.pinned) continue; }
+                    catch { /* A closed tab's stale binding can be removed. */ }
+                }
+                ids.push(tabId);
+            }
             const states = await this.getPinnedTabStates();
-            if (states[tabId]) {
-                delete states[tabId];
+            if (beforeWrite) await beforeWrite();
+            const previous = {};
+            for (const tabId of ids) {
+                if (expectedBookmarkId && states[tabId]?.bookmarkId !== expectedBookmarkId) throw new Error('The tab is now linked to a different bookmark. Refresh and try again.');
+                if (!states[tabId]) continue;
+                previous[tabId] = { ...states[tabId] }; delete states[tabId];
+            }
+            if (!Object.keys(previous).length) return;
+            try {
                 await this.savePinnedTabStates(states);
+                if (beforeWrite) await beforeWrite();
+            } catch (error) {
+                if (!beforeWrite) throw error;
+                try {
+                    const latest = await this.getPinnedTabStates(), restored = [];
+                    for (const [key, binding] of Object.entries(previous)) {
+                        // Our write removed this key. A new binding wins.
+                        if (latest[key] !== undefined) continue;
+                        latest[key] = binding; restored.push(key);
+                    }
+                    if (restored.length) {
+                        await this.savePinnedTabStates(latest);
+                        const verified = await this.getPinnedTabStates();
+                        if (restored.some(key => !verified[key] || Object.keys(verified[key]).length !== Object.keys(previous[key]).length ||
+                            Object.keys(previous[key]).some(field => verified[key][field] !== previous[key][field]))) throw new Error('The restored binding could not be verified.');
+                    }
+                } catch {
+                    throw Object.assign(new Error(`${error.message} The live-tab binding cleanup could not be confirmed. Check Pinned before trying again.`), { cleanupUncertain: true });
+                }
+                throw error;
             }
         });
     },
@@ -227,100 +312,36 @@ const Utils = {
         return settings.autoArchiveEnabled;
     },
 
-    // Get all archived tabs
-    getArchivedTabs: async function () {
-        const result = await chrome.storage.local.get(ARCHIVED_TABS_KEY);
-        return result[ARCHIVED_TABS_KEY] || [];
+    // Existing readers retain the same array shape; migration is authoritative.
+    getArchivedTabs: async function () { return archiveRequest('list'); },
+    getArchiveView: async function (windowId) { return archiveRequest('view', { windowId }); },
+    // A full replacement requires its exact prior snapshot; a stale sidebar
+    // cannot erase concurrent manual/automatic archive additions.
+    saveArchivedTabs: async function (tabs, expected) {
+        return archiveRequest('replace', { entries: tabs, expected });
     },
-
-    // Save all archived tabs
-    saveArchivedTabs: async function (tabs) {
-        await chrome.storage.local.set({ [ARCHIVED_TABS_KEY]: tabs });
+    addArchivedTab: async function (tabData) {
+        if (!tabData?.url || !tabData.name || !tabData.spaceId || isStartupLauncherUrl(tabData.url)) return;
+        return archiveRequest('add', { entry: tabData });
     },
-
-    // Add a tab to the archive
-    addArchivedTab: async function (tabData) { // tabData = { url, name, spaceId, archivedAt }
-        if (!tabData || !tabData.url || !tabData.name || !tabData.spaceId) return;
-
-        const archivedTabs = await this.getArchivedTabs();
-
-        // Check if URL already exists in archive (regardless of space)
-        const existingTab = archivedTabs.find(t => t.url === tabData.url);
-        if (existingTab) {
-            Logger.log(`Tab with URL already archived: ${tabData.name} (${tabData.url})`);
-            return; // Don't add duplicates based on URL
-        }
-
-        // Add new tab with timestamp
-        const newArchiveEntry = { ...tabData, archivedAt: Date.now() };
-        archivedTabs.push(newArchiveEntry);
-
-        // Sort by timestamp (newest first for potential slicing, though FIFO means oldest removed)
-        archivedTabs.sort((a, b) => b.archivedAt - a.archivedAt);
-
-        // Enforce limit (remove oldest if over limit - FIFO)
-        if (archivedTabs.length > MAX_ARCHIVED_TABS) {
-            archivedTabs.splice(MAX_ARCHIVED_TABS); // Remove items from the end (oldest)
-        }
-
-        await this.saveArchivedTabs(archivedTabs);
-        Logger.log(`Archived tab: ${tabData.name} from space ${tabData.spaceId}`);
-    },
-
-    // Function to archive a tab (likely called from context menu)
-    archiveTab: async function (tabId) {
-        try {
-            const tab = await chrome.tabs.get(tabId);
+    archiveTab: async function (tabId, expectedTab = null, expectedSpace = null) {
+        const tab = expectedTab || await chrome.tabs.get(tabId);
+        if (!tab || isStartupLauncherTab(tab)) return;
+        let space = expectedSpace;
+        if (!space) {
             const spaces = await spaceRequest('get');
-            const space = spaces.find(s => [...s.spaceBookmarks, ...s.temporaryTabs].includes(tabId));
-            if (!tab || !space) return;
-
-            const tabData = {
-                url: tab.url,
-                name: tab.title,
-                spaceId: space.id
-            };
-
-            await this.addArchivedTab(tabData);
-            await chrome.tabs.remove(tabId); // Close the original tab
-            // Optionally: Refresh sidebar view if needed, though handleTabRemove should cover it
-
-        } catch (error) {
-            Logger.error(`Error archiving tab ${tabId}:`, error);
+            const owners = spaces.filter(space => [...space.spaceBookmarks, ...space.temporaryTabs].includes(tabId));
+            if (owners.length !== 1) throw new Error('This tab changed. Reopen its menu and try again.');
+            space = owners[0];
         }
+        return archiveRequest('archive', { tabId, windowId: tab.windowId, spaceId: space.id,
+            bookmarkFolderId: space.bookmarkFolderId, url: tab.url });
     },
-
-    // Remove a tab from the archive (e.g., after restoration)
-    removeArchivedTab: async function (url, spaceId) {
-        if (!url || !spaceId) return;
-
-        let archivedTabs = await this.getArchivedTabs();
-        archivedTabs = archivedTabs.filter(tab => !(tab.url === url && tab.spaceId === spaceId));
-        await this.saveArchivedTabs(archivedTabs);
-        Logger.log(`Removed archived tab: ${url} from space ${spaceId}`);
-    },
-
-    restoreArchivedTab: async function (archivedTabData) {
-        try {
-            // Reopen the archived URL and restore its extension-owned membership.
-            const newTab = await chrome.tabs.create({
-                url: archivedTabData.url,
-                active: true, // Make it active
-                // windowId: currentWindow.id // Ensure it's in the current window
-            });
-
-            await spaceRequest('assign', { tabId: newTab.id, spaceId: archivedTabData.spaceId });
-
-            // Remove from archive storage
-            await this.removeArchivedTab(archivedTabData.url, archivedTabData.spaceId);
-
-            // Return the created tab so caller can pin it if needed
-            return newTab;
-
-        } catch (error) {
-            Logger.error(`Error restoring archived tab ${archivedTabData.url}:`, error);
-            throw error;
-        }
+    // URL-only removal is intentionally no longer supported. Legacy objects
+    // resolve only when their complete unchanged tuple is unique.
+    removeArchivedTab: async function (expected) { return archiveRequest('remove', { expected }); },
+    restoreArchivedTab: async function (archivedTabData, { windowId, context, bookmarkFolderId, requestId = crypto.randomUUID() } = {}) {
+        return archiveRequest('reopen', { requestId, windowId, context, bookmarkFolderId, expected: archivedTabData });
     },
 
     setArchivingEnabled: async function (enabled) {
@@ -346,13 +367,26 @@ const Utils = {
         await chrome.storage.sync.set({ useArcLikePositioning: enabled });
     },
 
+    // Saved bookmark/folder display only. Today has a frozen local representation.
     getInvertTabOrder: async function () {
         const settings = await this.getSettings();
         return settings.invertTabOrder;
     },
 
     setInvertTabOrder: async function (enabled) {
+        await this.getTodayOrderInverted();
         await chrome.storage.sync.set({ invertTabOrder: enabled });
+    },
+
+    getTodayOrderInverted,
+
+    getTodayNewTabsAtTop: async function () {
+        const settings = await this.getSettings();
+        return settings.todayNewTabsAtTop !== false;
+    },
+
+    setTodayNewTabsAtTop: async function (enabled) {
+        await chrome.storage.sync.set({ todayNewTabsAtTop: enabled });
     },
 
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { selectWindowSpaceTabs, mergeVisibleOrder, mergeCapturedTemporaryOrder, saveBookmarkOrder } from '../../sidebar-tabs.js';
+import { selectWindowSpaceTabs, reconcileWindowPinOrder, mergeVisibleOrder, mergeCapturedTemporaryOrder, saveBookmarkOrder } from '../../sidebar-tabs.js';
 
 test('window-scoped space tabs retain extension order despite native order and duplicate URLs', () => {
     const space = { spaceBookmarks: [3, 2], temporaryTabs: [4, 1, 5] };
@@ -11,9 +11,26 @@ test('window-scoped space tabs retain extension order despite native order and d
     assert.deepEqual(selectWindowSpaceTabs(space, tabs, 10).map(t => t.id), [3]);
     assert.deepEqual(selectWindowSpaceTabs(space, tabs, 20).map(t => t.id), [2, 4, 1]);
 });
+test('launcher is omitted from rendered tabs even when membership is stale', () => {
+    globalThis.chrome = { runtime: { getURL: path => `chrome-extension://arcify/${path}` } };
+    const space = { spaceBookmarks: [1], temporaryTabs: [2, 3] };
+    const tabs = [
+        { id: 1, windowId: 1, url: 'chrome-extension://arcify/startup-launcher.html' },
+        { id: 2, windowId: 1, url: 'about:blank', pendingUrl: 'chrome-extension://arcify/startup-launcher.html' },
+        { id: 3, windowId: 1, url: 'https://example.test/' }
+    ];
+    assert.deepEqual(selectWindowSpaceTabs(space, tabs, 1).map(tab => tab.id), [3]);
+});
 test('reordering one window preserves other window slots and membership', () => {
     assert.deepEqual(mergeVisibleOrder([1, 2, 3, 4], [3, 1]), [3, 2, 1, 4]);
     assert.deepEqual(mergeVisibleOrder([1, 2, 3], [3, 1, 5]), [3, 2, 1, 5]);
+});
+test('pin validation retains verified order and foreign-window slots, demotes stale local pins and appends only new IDs', () => {
+    const windowIds = new Set([1, 2, 3, 4]);
+    assert.deepEqual(reconcileWindowPinOrder([2, 20, 1, 21], [1, 2], windowIds), [2, 20, 1, 21]);
+    assert.deepEqual(reconcileWindowPinOrder([2, 20, 3, 1, 21], [1, 2, 4], windowIds), [2, 20, 1, 21, 4]);
+    assert.deepEqual(reconcileWindowPinOrder([2, 20, 2, 1, 21], [1, 2, 4, 4], windowIds), [2, 20, 1, 21, 4]);
+    assert.deepEqual(reconcileWindowPinOrder([2, 20, 1, 21], [], windowIds), [20, 21]);
 });
 test('captured temporary drop order survives delayed demotion and preserves other-window slots', () => {
     assert.deepEqual(mergeCapturedTemporaryOrder([1, 20, 2, 21, 3], [3, 1, 2], false), [3, 20, 1, 21, 2]);

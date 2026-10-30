@@ -19,13 +19,20 @@ function background(completed = false, onboardingVersion = undefined, version = 
         commands: { onCommand: event },
         alarms: { onAlarm: event, clear: async () => {} },
         storage: { onChanged: event, sync: { get: async () => ({ onboardingCompleted: completed, onboardingVersion }) } },
-        tabs: { create: async tab => opened.push(tab), onActivated: event, onUpdated: event, onRemoved: event }
+        windows: { onRemoved: event },
+        tabs: { onCreated: event, create: async tab => opened.push(tab), onActivated: event, onUpdated: event, onRemoved: event }
     };
     runInNewContext(source, {
-        chrome, console, registerTourMessages() {},
+        chrome, console, registerTourMessages() {}, registerStartupLauncher() {},
         registerBookmarkListeners() {},
+        registerSpotlightBridge() {},
         enqueueBookmarkOrder: async () => [],
-        SpaceStore: class { install() {} async dispatch() { return [{ id: 'home' }]; } },
+        createLittleArcWindowGeometry: () => ({}), createTransientWindowStore: () => ({ initialize: async () => {}, observe() {}, observeRemoved() {}, observeWindowRemoved() {},
+            observeReplacement() {}, observeDetached() {}, flushObservedUnlocked: async () => {}, isExcluded: () => false, isTransientWindow: () => false }),
+        registerTransientControlMessages() {},
+        registerPeek() {}, registerRecoveryObservation() {}, summarizeRecoveryObservation() {},
+        createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTodayMoveMessages() {}, registerTodayRecoveryMessages() {}, registerSharedToday() {}, registerLittleArcHeader() {}, registerLittleArcLinkMenu() {}, registerSavedMoveMessages() {}, registerSelectedTabClose() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {}, registerMoveTabWindowMessages() {}, registerArchiveMessages() {},
+        SpaceStore: class { isTransientTab() { return false; } isTransientWindow() { return false; } install() {} async dispatch() { return [{ id: 'home' }]; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: false }) },
         Logger: { log() {}, error() {} }
     });

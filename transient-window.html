@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Little Arc · Open in Space</title><link rel="stylesheet" href="transient-window.css"></head>
+<body>
+  <main>
+    <p class="eyebrow">LITTLE ARC</p>
+    <h1>A little room to explore.</h1>
+    <p class="description">Your page is open in the next tab. Keep browsing here, close this window when you're done, or move the same page into an Arcify Space.</p>
+    <p id="restart-warning" class="description" role="note"><strong>After a restart:</strong> if this control tab is missing or your page restores in another window, temporary status cannot be preserved. That page behaves like an ordinary restored tab. The same applies when an extension reload or update clears session state.</p>
+    <section aria-label="Temporary page"><p id="page-title">Loading your page…</p><p id="page-url"></p></section>
+    <form id="recovery-form" hidden>
+      <p class="description">This restored window has no remembered page selection. Choose the exact page you want to keep using. This step does not move it or add it to a Space.</p>
+      <label for="recovery-page">Restored page in this window</label>
+      <select id="recovery-page" required disabled><option value="">Choose a restored page…</option></select>
+      <button id="recover" type="submit" disabled>Use this page</button>
+    </form>
+    <form id="transfer-form">
+      <label for="destination-window">Browser window</label>
+      <select id="destination-window" required disabled><option value="">Loading windows…</option></select>
+      <label for="destination-space">Space</label>
+      <select id="destination-space" required disabled><option value="">Choose a Space…</option></select>
+      <div class="buttons"><button id="refresh" type="button">Refresh choices</button><button id="promote" type="submit" disabled>Open in Space</button></div>
+    </form>
+    <details id="more-settings"><summary>More</summary><section id="window-size" aria-labelledby="window-size-heading"><h2 id="window-size-heading">Window size</h2><p id="size-current">Current outer size: checking…</p><p id="size-saved">Saved size: checking…</p><label for="size-mode">Future window sizing</label><select id="size-mode"><option value="default">Default reading size</option><option value="fixed">Fixed dimensions (pixels)</option><option value="percent">Percentage of usable work area</option></select><div id="size-dimensions" hidden><div class="size-fields"><label>Width <input id="size-width" type="number" min="240" max="32768" step="1"></label><label>Height (when unlocked) <input id="size-height" type="number" min="240" max="32768" step="1"></label></div><label><input id="size-lock" type="checkbox"> Lock width-to-height aspect ratio</label><label id="size-ratio-label" hidden>Aspect ratio (width ÷ height) <input id="size-ratio" type="number" min="0.25" max="4" step="0.01" value="1.5"></label><p>With ratio locked, width determines height. Percentage mode uses the launch monitor’s usable area.</p></div><p id="size-preview" role="status"></p><button id="save-size" type="button">Save for future windows</button><label><input id="remember-size" type="checkbox" disabled> Remember last normal size (Default mode only)</label><p>Remember normal Little Arc resizes for future windows. Position is always recalculated for the window you opened from. Maximized and fullscreen sizes are ignored.</p><button id="reset-size" type="button" disabled>Reset size</button><p id="window-size-status" role="status" aria-live="polite"></p></section><h2>Direct placement</h2><p>Optional: move directly from the webpage header. A malicious webpage can obscure or reposition that header and trick a real click. Trusted controls remain available. No move occurs when enabling this setting.</p><label><input id="direct-mode" type="checkbox"> Enable direct placement from Little Arc headers</label><p id="direct-mode-status" role="status"></p></details>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <script type="module" src="little-arc-window-size-controls.js"></script>
+  <script type="module" src="transient-window.js"></script>
+</body>
+</html>

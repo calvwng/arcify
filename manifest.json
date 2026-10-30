@@ -14,7 +14,8 @@
     "favicon",
     "scripting",
     "clipboardWrite",
-    "offscreen"
+    "offscreen",
+    "contextMenus"
   ],
   "side_panel": {
     "default_path": "sidebar.html"

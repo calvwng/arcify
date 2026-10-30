@@ -37,10 +37,58 @@ export async function getSpaceBookmarkById(space, bookmarkId) {
     return find(folder.id);
 }
 
-export async function removeSpacePin(space, tab) {
-    const binding = tab.id ? await Utils.getPinnedTabState(tab.id) : null;
-    const bookmarkId = tab.bookmarkId || binding?.bookmarkId;
-    if (!bookmarkId) throw new Error('Cannot remove a favorite without its bookmark identity.');
-    const bookmark = await getSpaceBookmarkById(space, bookmarkId);
-    if (bookmark) await chrome.bookmarks.remove(bookmark.id);
+// Removal callers keep this observation through their final native/ownership
+// reads. Any ancestor may move during traversal, including away and back.
+export function observeSpaceBookmarkRemoval() {
+    const events = [chrome.bookmarks.onMoved, chrome.bookmarks.onRemoved, chrome.bookmarks.onChanged];
+    if (events.some(event => !event?.addListener || !event.removeListener)) throw new Error('Bookmark change observation is unavailable.');
+    let changed = false;
+    const invalidate = () => { changed = true; };
+    for (const event of events) event.addListener(invalidate);
+    return {
+        assertUnchanged() { if (changed) throw new Error('The saved pin bookmark context changed during removal.'); },
+        stop() { for (const event of events) event.removeListener(invalidate); }
+    };
+}
+
+export async function removeSpacePin(space, tab, { beforeWrite = null } = {}) {
+    const storageEvent = tab.id ? chrome.storage.onChanged : null;
+    if (tab.id && (!storageEvent?.addListener || !storageEvent.removeListener)) throw new Error('Saved pin binding observation is unavailable.');
+    const observation = observeSpaceBookmarkRemoval();
+    let changed = false;
+    const bindingChanged = (changes, area) => {
+        if (area === 'local' && changes.pinnedTabStatesById &&
+            JSON.stringify(changes.pinnedTabStatesById.oldValue?.[tab.id]) !== JSON.stringify(changes.pinnedTabStatesById.newValue?.[tab.id])) changed = true;
+    };
+    const folderId = space?.bookmarkFolderId;
+    storageEvent?.addListener(bindingChanged);
+    let bookmarkId, removed = false;
+    try {
+        const binding = tab.id ? await Utils.getPinnedTabState(tab.id) : null;
+        bookmarkId = tab.bookmarkId || binding?.bookmarkId;
+        if (!bookmarkId) throw new Error('Cannot remove a favorite without its bookmark identity.');
+        if (tab.id && binding?.bookmarkId !== bookmarkId) throw new Error('This tab now belongs to another saved pin.');
+        const bookmark = await getSpaceBookmarkById(space, bookmarkId);
+        if (tab.id && (await Utils.getPinnedTabState(tab.id))?.bookmarkId !== bookmarkId) throw new Error('This tab now belongs to another saved pin.');
+        if (beforeWrite) await beforeWrite();
+        observation.assertUnchanged();
+        if (changed || space?.bookmarkFolderId !== folderId) throw new Error('The saved pin bookmark context changed during removal.');
+        if (bookmark) {
+            try { await chrome.bookmarks.remove(bookmark.id); }
+            catch (error) {
+                throw Object.assign(new Error(`The saved bookmark removal could not be confirmed. ${error.message} Check Pinned before trying again. Nothing was retried or recreated.`), { code: 'UNCERTAIN_RESULT' });
+            }
+            removed = true;
+        }
+    } finally {
+        observation.stop();
+        storageEvent?.removeListener(bindingChanged);
+    }
+    if (removed) {
+        try { if (beforeWrite) await beforeWrite(); }
+        catch (error) {
+            throw Object.assign(new Error(`The saved pin was removed, but its live tab was not moved. ${error.message} Nothing was retried or recreated.`), { bookmarkRemoved: true });
+        }
+    }
+    return { bookmarkId, removed };
 }

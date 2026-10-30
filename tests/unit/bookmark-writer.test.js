@@ -153,3 +153,23 @@ test('malformed create membership is rejected before creating a bookmark', async
     assert.equal(state.creates.length, 0);
     assert.deepEqual(state.ids('p'), ['a', 'b']);
 });
+
+test('trusted live-source guard runs after queued reads immediately before create, cross-parent move, and every reorder', async () => {
+    for (const kind of ['create', 'move', 'reorder']) {
+        const state = install({ p: ['a', 'b', 'c'], q: [] });
+        const reject = async () => { throw new Error('End Split View'); };
+        const parents = [{ parentId: 'p', expectedCanonicalIds: ['a', 'b', 'c'], desiredCanonicalIds: kind === 'create' ? ['a', '$new', 'b', 'c'] : kind === 'move' ? ['b', 'c'] : ['c', 'b', 'a'] }];
+        if (kind === 'move') parents.push({ parentId: 'q', expectedCanonicalIds: [], desiredCanonicalIds: ['a'] });
+        await assert.rejects(enqueueBookmarkOperation({ parents,
+            ...(kind === 'create' ? { relocation: { kind, parentId: 'p', title: 'New', url: 'https://new.test/' } } : kind === 'move' ? { relocation: { kind, parentId: 'q', bookmarkId: 'a' } } : {})
+        }, { beforeWrite: reject }), /End Split View/);
+        assert.deepEqual(state.ids('p'), ['a', 'b', 'c']); assert.deepEqual(state.moves, []); assert.deepEqual(state.creates, []);
+    }
+});
+
+test('guard refusal between multiple reorder writes reports a retained partial order without retry', async () => {
+    const state = install({ p: ['a', 'b', 'c', 'd'] }); let checks = 0;
+    await assert.rejects(enqueueBookmarkOperation({ parents: [{ parentId: 'p', expectedCanonicalIds: ['a', 'b', 'c', 'd'], desiredCanonicalIds: ['c', 'd', 'a', 'b'] }] },
+        { beforeWrite: async () => { if (++checks === 2) throw new Error('End Split View'); } }), error => /End Split View/.test(error.message) && error.moved === true);
+    assert.deepEqual(state.ids('p'), ['c', 'a', 'b', 'd']); assert.equal(state.moves.length, 1);
+});

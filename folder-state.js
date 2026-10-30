@@ -21,3 +21,19 @@ export async function loadFolderCollapsed(folderId) {
     // Existing folders keep the previous collapsed default until toggled.
     return saved[key] !== false;
 }
+
+// One display read for the whole tree, after this document's queued toggles.
+// The caller fences storage events before committing its rendered fragment.
+export async function loadFolderStates(tree) {
+    const ids = [];
+    const visit = node => {
+        for (const child of node?.children || []) {
+            if (!child.url) { ids.push(child.id); visit(child); }
+        }
+    };
+    visit(tree);
+    if (!ids.length) return new Map();
+    await Promise.all(ids.map(id => pendingWrites.get(id)));
+    const saved = await chrome.storage.local.get(ids.map(keyFor));
+    return new Map(ids.map(id => [id, saved[keyFor(id)] !== false]));
+}

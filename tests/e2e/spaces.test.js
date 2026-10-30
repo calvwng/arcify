@@ -166,7 +166,7 @@ describe('Space Management', () => {
         await sidebarPage.evaluate(() => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.textContent.trim() === 'Space to Delete') {
+            if (btn.querySelector('.space-switcher-name').textContent.trim() === 'Space to Delete') {
               btn.click();
               break;
             }
@@ -282,7 +282,7 @@ describe('Space Management', () => {
         await sidebarPage.evaluate((targetName) => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.textContent.trim() === targetName) {
+            if (btn.querySelector('.space-switcher-name').textContent.trim() === targetName) {
               btn.click();
               break;
             }
@@ -309,7 +309,7 @@ describe('Space Management', () => {
         await sidebarPage.evaluate(() => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.textContent.trim() === 'Switch Target') {
+            if (btn.querySelector('.space-switcher-name').textContent.trim() === 'Switch Target') {
               btn.click();
               break;
             }
@@ -352,7 +352,7 @@ describe('Space Management', () => {
         await sidebarPage.evaluate((targetName) => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.textContent.trim() === targetName) {
+            if (btn.querySelector('.space-switcher-name').textContent.trim() === targetName) {
               btn.click();
               break;
             }
@@ -426,7 +426,7 @@ describe('Space Management', () => {
         // Get all switcher button texts
         const switcherNames = await sidebarPage.evaluate(() => {
           const buttons = document.querySelectorAll('.space-switcher button');
-          return Array.from(buttons).map(btn => btn.textContent.trim());
+          return Array.from(buttons).map(btn => btn.querySelector('.space-switcher-name').textContent.trim());
         });
         logTestStep(`Switcher buttons: ${switcherNames.join(', ')}`);
 
@@ -444,6 +444,12 @@ describe('Space Management', () => {
 
   describe('Space Name Edge Cases', () => {
     test('should handle renaming space to empty string', async () => {
+      let validationDialog = null;
+      const onDialog = async dialog => {
+        validationDialog = {type:dialog.type(),message:dialog.message()};
+        await dialog.dismiss();
+      };
+      sidebarPage.on('dialog',onDialog);
       try {
         logTestStep('Attempting to rename space to empty string...');
 
@@ -495,8 +501,9 @@ describe('Space Management', () => {
         });
         logTestStep(`Name after empty rename attempt: '${nameAfterClear}'`);
 
-        // Space name should either revert to original or use a default, but not be empty
-        // The UI might allow empty (placeholder visible), so we check the DOM exists and is functional
+        expect(validationDialog).toEqual({type:'alert',message:'Enter a Space name between 1 and 256 characters.'});
+        expect(nameAfterClear).toBe(originalName);
+        // Invalid empty metadata is rejected; the exact existing name stays visible.
         const spaceStillExists = await sidebarPage.evaluate(() => {
           const spaces = document.querySelectorAll('.space');
           for (const space of spaces) {
@@ -511,7 +518,7 @@ describe('Space Management', () => {
       } catch (error) {
         await takeScreenshotOnFailure(sidebarPage, 'empty-name-failure');
         throw error;
-      }
+      } finally { sidebarPage.off('dialog',onDialog); }
     });
 
     test('should handle very long space name without breaking UI', async () => {
@@ -617,7 +624,7 @@ describe('Space Management', () => {
         const switcherHasName = await sidebarPage.evaluate((name) => {
           const buttons = document.querySelectorAll('.space-switcher button');
           for (const btn of buttons) {
-            if (btn.classList.contains('active') && btn.textContent.trim() === name) {
+            if (btn.classList.contains('active') && btn.querySelector('.space-switcher-name').textContent.trim() === name) {
               return true;
             }
           }

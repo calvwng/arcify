@@ -7,10 +7,12 @@ const signature = tabs => JSON.stringify([...tabs].sort((a, b) => a.index - b.in
 const positioned = tabs => tabs.length && tabs.every(t => Number.isInteger(t.index) && urlOf(t));
 
 export function captureWindowTabs(tabs) {
-    return tabs.map(t => ({ index: t.index, url: urlOf(t), pinned: Boolean(t.pinned) }));
+    return tabs.filter(t => !t.incognito).map(t => ({ index: t.index, url: urlOf(t), pinned: Boolean(t.pinned) }));
 }
 
 export function matchRestoreRecord(tab, queue, savedWindows, windowKeys, liveTabs) {
+    if (tab.incognito) return -1;
+    liveTabs = liveTabs.filter(tab => !tab.incognito);
     const url = urlOf(tab);
     if (!url || !queue.length) return -1;
     const liveWindows = new Map();
@@ -18,7 +20,10 @@ export function matchRestoreRecord(tab, queue, savedWindows, windowKeys, liveTab
         if (!liveWindows.has(live.windowId)) liveWindows.set(live.windowId, []);
         liveWindows.get(live.windowId).push(live);
     }
-    const availableSaved = savedWindows.filter(w => ![...windowKeys.values()].includes(w.key));
+    // A window snapshot authored beside unresolved recovery tabs describes the
+    // current layout, not an independently recovered historical window.
+    const evidenceWindows = savedWindows.filter(w => w.recoveryRole !== 'current-only');
+    const availableSaved = evidenceWindows.filter(w => ![...windowKeys.values()].includes(w.key));
     const availableLive = [...liveWindows].filter(([id]) => !windowKeys.has(id));
     // Exact layouts identify windows without trusting query/creation order.
     for (const [id, tabs] of availableLive) {
@@ -39,7 +44,7 @@ export function matchRestoreRecord(tab, queue, savedWindows, windowKeys, liveTab
         }
         return owners;
     };
-    const oldOwners = uniqueWindows(savedWindows.map(w => [w.key, w.tabs]));
+    const oldOwners = uniqueWindows(evidenceWindows.map(w => [w.key, w.tabs]));
     const newOwners = uniqueWindows([...liveWindows]);
     const candidates = new Map();
     for (const [url, old] of oldOwners) {
@@ -69,6 +74,13 @@ export function matchRestoreRecord(tab, queue, savedWindows, windowKeys, liveTab
     // Older snapshots have no window context. Keep their unique-URL recovery,
     // but leave duplicates pending rather than applying arbitrary metadata.
     if (matching.length === 1 && !matching[0].record.windowKey
+        && liveTabs.filter(t => urlOf(t) === url).length === 1) return matching[0].index;
+    // Recover only unadorned ordinary membership from explicitly labelled new
+    // snapshots, without claiming a window association or applying saved identity.
+    const currentOnly = matching.length === 1 && savedWindows.some(w =>
+        w.key === matching[0].record.windowKey && w.recoveryRole === 'current-only');
+    if (currentOnly && matching[0].record.section === 'temporaryTabs'
+        && !matching[0].record.pinnedState && !matching[0].record.nameOverride
         && liveTabs.filter(t => urlOf(t) === url).length === 1) return matching[0].index;
     return -1;
 }
