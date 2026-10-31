@@ -1,6 +1,7 @@
 /** Geometry is ancillary: it grants no tab/Space ownership and never retries creation. */
 export const GEOMETRY_TYPE = 'arcifyLittleArcGeometry';
 export const GEOMETRY_KEY = 'littleArcWindowSizeV1';
+export const PREVIEW_KEY = 'littleArcSizePreviewV1';
 const MARGIN = 24;
 const own = (v, keys) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === keys.length && keys.every(k => Object.hasOwn(v, k));
 const integer = (v, min, max) => Number.isSafeInteger(v) && v >= min && v <= max;
@@ -54,9 +55,13 @@ export function fallbackBounds(origin, remembered=null) {
     return readingBounds(origin,area,remembered) || {width:Math.max(240,Math.min(1150,origin.width)),height:Math.max(240,Math.min(800,origin.height)),left:origin.left,top:origin.top};
 }
 
-export function createLittleArcWindowGeometry({api=chrome,readRecord,waitMs=900,debounceMs=400,now=Date.now}={}) {
+export function createLittleArcWindowGeometry({api=chrome,readRecord,waitMs=900,debounceMs=400,previewMs=120000,now=Date.now}={}) {
     const pending=new Map(),tracked=new Map(),removers=[];
     let epoch=0,writeTail=Promise.resolve(),disposed=false;
+    let trial=null,quarantine=null,previewError=false;
+    const tabVersions=new Map();
+    const version=id=>tabVersions.get(id)||0;
+    const previewReady=api.storage.session?api.storage.session.get(PREVIEW_KEY).then(v=>{quarantine=v[PREVIEW_KEY]||null;}).catch(()=>{previewError=true;}):Promise.resolve();
     const listen=(event,fn)=>{event?.addListener(fn);removers.push(()=>event?.removeListener(fn));};
     const url=token=>`${api.runtime.getURL('transient-window.html')}?token=${encodeURIComponent(token)}`;
     const preference=async()=>readSizePreference((await api.storage.local.get(GEOMETRY_KEY))[GEOMETRY_KEY]);
@@ -70,9 +75,9 @@ export function createLittleArcWindowGeometry({api=chrome,readRecord,waitMs=900,
     async function verify(sender,token) {
         if(!baseSender(sender,token))fail("Use this Little Arc window's trusted controls.");
         const r=readRecord(token);
-        if(!r||r.windowId!==sender.tab.windowId||r.controllerTabId!==sender.tab.id||!['opening','ready','orphan'].includes(r.phase))fail('This temporary window changed.');
+        if(!r||r.token!==token||r.windowId!==sender.tab.windowId||r.controllerTabId!==sender.tab.id||!['opening','ready','orphan'].includes(r.phase))fail('This temporary window changed.');
         const [t,w]=await Promise.all([api.tabs.get(r.controllerTabId),api.windows.get(r.windowId)]);
-        if(t.id!==r.controllerTabId||t.windowId!==r.windowId||t.url!==url(token)||t.pendingUrl&&t.pendingUrl!==t.url||t.incognito||w.type!=='normal'||w.incognito)fail('This trusted controller changed.');
+        if(t.id!==r.controllerTabId||t.windowId!==r.windowId||t.url!==url(token)||t.pendingUrl&&t.pendingUrl!==t.url||t.incognito||w.id!==r.windowId||w.type!=='normal'||w.incognito)fail('This trusted controller changed.');
         const latest=readRecord(token);if(!latest||latest.windowId!==r.windowId||latest.controllerTabId!==r.controllerTabId||latest.phase!==r.phase)fail('This temporary window changed.');
         return {r:latest,w};
     }
@@ -84,6 +89,7 @@ export function createLittleArcWindowGeometry({api=chrome,readRecord,waitMs=900,
     }
     async function remember(s,candidate,generation,revision) {
         await queued(async()=>{
+            await previewReady;if(quarantine||previewError)return;
             if(disposed||generation!==epoch||tracked.get(s.windowId)!==s||s.revision!==revision||recordFor(s)?.phase!=='ready')return;
             const prefs=await preference();if(!prefs.remember||prefs.version===2&&prefs.mode!=='default'||generation!==epoch)return;
             const current=await api.windows.get(s.windowId);
@@ -92,6 +98,7 @@ export function createLittleArcWindowGeometry({api=chrome,readRecord,waitMs=900,
         }).catch(()=>{s.status='Could not confirm remembered size. Use trusted controls to check it.';});
     }
     listen(api.windows.onBoundsChanged,w=>{
+        if(trial?.windowId===w.id&&!same(trial.expected,w)&&!(trial.applying&&['left','top','width','height'].every(k=>w[k]===trial.requested?.[k])&&normal(w))){trial.conflict=true;}
         for(const s of pending.values())if(s.origin.id===w.id&&!same(s.origin,w)){s.originChanged=true;s.revision++;}
         const s=tracked.get(w.id);if(!s)return;
         if(s.applying){s.last=bounds(w);return;}
@@ -106,9 +113,65 @@ export function createLittleArcWindowGeometry({api=chrome,readRecord,waitMs=900,
         s.timer=setTimeout(()=>{s.timer=null;void remember(s,candidate,generation,revision);},debounceMs);
     });
     listen(api.windows.onRemoved,id=>{
+        if(trial?.windowId===id){clearTimeout(trial.timer);trial=null;}
+        void queued(async()=>{await previewReady;if(quarantine?.windowId===id)await journal(null);}).catch(()=>{});
         const s=tracked.get(id);if(s){clearTimeout(s.timer);tracked.delete(id);pending.delete(s.token);s.resolve?.();}
         for(const p of pending.values())if(p.origin.id===id){p.originChanged=true;p.revision++;}
     });
+    // Navigation/controller replacement invalidates rollback authority, even at the same URL.
+    const invalidate=id=>{tabVersions.set(id,version(id)+1);if(trial?.controllerTabId===id)trial.conflict=true;};
+    for(const name of ['onRemoved','onDetached','onReplaced'])listen(api.tabs[name],(...ids)=>{ids.filter(Number.isSafeInteger).forEach(invalidate);if(name==='onRemoved')void queued(async()=>{await previewReady;if(quarantine?.controllerTabId===ids[0]){await journal(null);if(trial)clearTimeout(trial.timer);trial=null;}}).catch(()=>{});});
+    listen(api.tabs.onUpdated,(id,change)=>{
+        if(change.status==='loading'||Object.hasOwn(change,'url'))invalidate(id);
+        if(Object.hasOwn(change,'url'))void queued(async()=>{await previewReady;if(quarantine?.controllerTabId===id&&change.url!==url(quarantine.token)){await journal(null);if(trial)clearTimeout(trial.timer);trial=null;}}).catch(()=>{});
+    });
+    async function journal(value) {
+        if(!api.storage.session||previewError)fail('Size preview storage is unavailable. Nothing was resized.');
+        if(value)quarantine=value; // Uncertain journal writes must still suppress size memory.
+        await api.storage.session.set({[PREVIEW_KEY]:value});
+        const actual=(await api.storage.session.get(PREVIEW_KEY))[PREVIEW_KEY];
+        if(JSON.stringify(actual)!==JSON.stringify(value))fail('Size preview state was not confirmed. Reopen controls.');
+        quarantine=value;
+    }
+    const previewState=()=>trial?{id:trial.id,active:true,conflict:trial.conflict,expires:trial.expires}:quarantine?{active:false,interrupted:true}:null;
+    async function endPreview(sender,token,restore=true) {
+        const t=trial;
+        if(!quarantine)return;
+        if(quarantine.token!==token)fail('Another Little Arc has a size preview. Resolve it there first.');
+        const initial=version(sender.tab?.id),{r,w}=await verify(sender,token);
+        if(disposed||trial!==t)fail('Preview changed before cancellation. Nothing was moved.');
+        if(t&&sender.documentId!==t.documentId)fail('These preview controls changed. Reopen them to resolve the interrupted preview.');
+        if(t&&restore&&!t.conflict&&r.phase==='ready'&&initial===version(sender.tab.id)&&normal(w)&&same(w,t.expected)){
+            t.applying=true;t.requested=t.original;const s=tracked.get(t.windowId);if(s)s.applying=true;
+            try{await api.windows.update(t.windowId,t.original);const actual=await api.windows.get(t.windowId);if(!same(actual,t.original)){t.conflict=true;fail('Original size was not confirmed. Check the window; nothing was retried.');}if(s)s.last=bounds(actual);}
+            finally{t.applying=false;if(s)s.applying=false;}
+        }
+        await journal(null);if(t)clearTimeout(t.timer);trial=null;
+    }
+    async function previewSize(request,sender,initial) {
+        const current=()=>{if(disposed||initial!==version(sender.tab?.id))fail('Controller navigation changed during preview. Nothing was retried.');};current();
+        if(typeof sender.documentId!=='string'||!sender.documentId)fail('Current controller document could not be verified.');
+        if(!own(request.config,['mode','dimensions','aspectRatio']))fail('Invalid size configuration.');validateSizeConfig(request.config);
+        let {r,w}=await verify(sender,request.token);current();
+        if(r.phase!=='ready'||!normal(w)||!validWorkArea(request.area,w))fail('Preview needs a normal Little Arc window and verified current monitor.');
+        if(quarantine&&!trial)fail('A previous preview was interrupted. Choose Cancel to clear it without changing this window.');
+        if(trial&&(trial.token!==request.token||trial.documentId!==sender.documentId||trial.conflict||now()>=trial.expires||!same(w,trial.expected)))fail('Preview changed or expired. Choose Cancel; newer window changes will be kept.');
+        const prefs=await preference();current();const target=readingBounds(trial?.original||w,request.area,configuredSize({...prefs,version:2,...request.config},request.area));
+        if(!target)fail('This size cannot fit the current monitor.');
+        if(!trial){
+            await journal({token:request.token,windowId:r.windowId,controllerTabId:r.controllerTabId});
+            current();trial={id:crypto.randomUUID(),token:request.token,windowId:r.windowId,controllerTabId:r.controllerTabId,documentId:sender.documentId,sender:structuredClone(sender),original:bounds(w),expected:bounds(w),preference:JSON.stringify(prefs),expires:now()+previewMs,conflict:false};
+            const t=trial;t.timer=setTimeout(()=>{void queued(async()=>{if(trial!==t)return;try{await endPreview(t.sender,t.token);}catch{t.conflict=true;}});},previewMs);t.timer.unref?.();
+        }
+        const t=trial;
+        ({r,w}=await verify(sender,request.token));current();
+        if(r.phase!=='ready'||t.conflict||now()>=t.expires||!same(w,t.expected))fail('Window changed or preview expired. Choose Cancel.');
+        t.applying=true;t.requested=target;const s=tracked.get(t.windowId);if(s)s.applying=true;
+        try{await api.windows.update(t.windowId,target);const actual=await api.windows.get(t.windowId);if(!normal(actual)||!['left','top','width','height'].every(k=>actual[k]===target[k])){t.conflict=true;fail('Browser adjusted the preview. Choose Cancel to keep its current bounds; nothing was saved.');}t.expected=bounds(actual);t.config=structuredClone(request.config);if(s)s.last=bounds(actual);}
+        catch(error){t.conflict=true;throw error;}
+        finally{t.applying=false;if(s)s.applying=false;}
+        return {preference:await preference(),current:{width:t.expected.width,height:t.expected.height},preview:previewState(),status:'Preview only. Save keeps this size and saves future preferences; Cancel restores the original size. Preview expires after two minutes.'};
+    }
     async function begin(entry,origin) {
         let resolve;const signal=new Promise(r=>{resolve=r;});
         const s={token:entry.token,origin:{id:origin.id,...bounds(origin)},prefs:{version:1,remember:false,size:null},epoch,createdAt:now(),revision:0,ready:false,screen:null,signal,resolve,status:'Source-window fallback; exact work area unavailable.'};
@@ -151,31 +214,56 @@ export function createLittleArcWindowGeometry({api=chrome,readRecord,waitMs=900,
     function abandon(entry) {const s=pending.get(entry.token);if(s){pending.delete(entry.token);s.resolve?.();}const live=tracked.get(entry.windowId);if(live){clearTimeout(live.timer);tracked.delete(entry.windowId);}}
     function restore(entry,w) {if(entry.phase==='ready'&&!tracked.has(w.id))tracked.set(w.id,{token:entry.token,windowId:w.id,controllerTabId:entry.controllerTabId,last:bounds(w),ready:true,wasNonNormal:!normal(w),revision:0,status:'Existing window kept in place.'});}
     async function handle(request,sender) {
+        const initial=version(sender?.tab?.id);
         if(!request||request.type!==GEOMETRY_TYPE||typeof request.token!=='string')fail('Invalid size request.');
         if(request.action==='screen'&&own(request,['type','action','token','area'])){
             const s=pending.get(request.token);
             if(!s||s.screen||!baseSender(sender,request.token)||!validWorkArea(request.area,s.origin))fail('Current monitor could not be confirmed.');
             s.screen={area:structuredClone(request.area),sender:structuredClone(sender)};s.resolve();return {accepted:true};
         }
-        const fields=request.action==='remember'?['type','action','token','enabled']:request.action==='save'?['type','action','token','config']:request.action==='context'&&Object.hasOwn(request,'area')?['type','action','token','area']:['type','action','token'];
-        if(!own(request,fields)||!['context','remember','reset','save'].includes(request.action))fail('Invalid size request.');
+        const fields=request.action==='preview'?['type','action','token','config','area']:request.action==='remember'?['type','action','token','enabled']:request.action==='save'?['type','action','token','config']:request.action==='context'&&Object.hasOwn(request,'area')?['type','action','token','area']:['type','action','token'];
+        if(['save','cancel-preview'].includes(request.action)&&Object.hasOwn(request,'previewId'))fields.push('previewId');
+        if(!own(request,fields)||!['context','remember','reset','save','preview','cancel-preview'].includes(request.action))fail('Invalid size request.');
+        await previewReady;
         const {r,w}=await verify(sender,request.token);
+        if(quarantine)await queued(async()=>{
+            if(!quarantine)return;
+            const owner=readRecord(quarantine.token);
+            let gone=!owner||owner.phase!=='ready'||owner.windowId!==quarantine.windowId||owner.controllerTabId!==quarantine.controllerTabId;
+            if(!gone){try{const ownerTab=await api.tabs.get(quarantine.controllerTabId);gone=ownerTab.id!==quarantine.controllerTabId||ownerTab.windowId!==quarantine.windowId||ownerTab.url!==url(quarantine.token)||!!ownerTab.pendingUrl&&ownerTab.pendingUrl!==ownerTab.url;}catch{/* Ambiguous API failure does not authorize marker cleanup. */}}
+            if(gone){await journal(null);if(trial)clearTimeout(trial.timer);trial=null;}
+        });
         if(request.action==='context'){
             const prefs=await preference(),area=validWorkArea(request.area,w)?request.area:null;
-            return {preference:prefs,current:{width:w.width,height:w.height},workArea:area,resolved:area?readingBounds(w,area,configuredSize(prefs,area)):null,status:tracked.get(r.windowId)?.status||'Existing window kept in place.'};
+            if(disposed||initial!==version(sender.tab.id))fail('These controls navigated while reading preview state.');
+            if(trial&&trial.token===request.token&&trial.documentId!==sender.documentId)await queued(async()=>{if(disposed||initial!==version(sender.tab.id))fail('These controls navigated while reading preview state.');if(trial&&trial.token===request.token&&trial.documentId!==sender.documentId){clearTimeout(trial.timer);trial=null;}});
+            return {preference:prefs,current:{width:w.width,height:w.height},preview:previewState(),workArea:area,resolved:area?readingBounds(w,area,configuredSize(prefs,area)):null,status:quarantine&&!trial?'Preview interrupted. Cancel clears it without moving this window. Current saved settings are shown.':tracked.get(r.windowId)?.status||'Existing window kept in place.'};
         }
+        if(request.action==='preview'){++epoch;cancelTimers();return queued(()=>previewSize(request,sender,initial));}
+        if(request.action==='cancel-preview'){++epoch;cancelTimers();return queued(async()=>{if(trial&&request.previewId!==trial.id||request.previewId&&!trial)fail('Preview changed. Refresh these controls before canceling.');await endPreview(sender,request.token);const {w:current}=await verify(sender,request.token);return {preference:await preference(),current:{width:current.width,height:current.height},preview:null,status:'Preview ended. Current saved preferences are shown. Original bounds restored only if the window was unchanged.'};});}
         if(request.action==='remember'&&typeof request.enabled!=='boolean')fail('Choose size memory explicitly.');
         if(request.action==='save'){if(!own(request.config,['mode','dimensions','aspectRatio']))fail('Invalid size configuration.');validateSizeConfig(request.config);}
         ++epoch;cancelTimers();
+        const hadPreview=!!trial;
         const result=await queued(async()=>{
             const before=await preference();await verify(sender,request.token);
+            if(previewError)fail('Preview state unavailable. Settings were kept.');
+            if(request.previewId&&(!trial||trial.id!==request.previewId))fail('Preview ended. Refresh these controls before saving.');
+            if(quarantine){
+                if(request.action!=='save'||!trial||request.previewId!==trial.id||trial.token!==request.token||trial.documentId!==sender.documentId||trial.conflict||now()>=trial.expires)fail('Resolve the size preview with Cancel before changing settings.');
+                const {r:owner,w:current}=await verify(sender,request.token);
+                if(owner.phase!=='ready'||disposed||now()>=trial.expires||initial!==version(sender.tab.id)||!normal(current)||!same(current,trial.expected)||JSON.stringify(request.config)!==JSON.stringify(trial.config)||JSON.stringify(before)!==trial.preference)fail('Preview, draft or saved preference changed. Cancel before saving.');
+            }
             if(request.action==='remember'&&request.enabled&&before.version===2&&before.mode!=='default')fail('Choose Default before enabling remember-last-size. Fixed and percentage settings were kept.');
             const next=request.action==='save'?{version:2,remember:request.config.mode==='default'&&before.remember,size:before.size,...request.config}:request.action==='reset'?before.version===1?{...before,size:null}:{version:2,remember:false,size:null,mode:'default',dimensions:null,aspectRatio:null}:{...before,remember:request.enabled};
-            return writePreference(next);
+            if(trial){trial.conflict=true;clearTimeout(trial.timer);} // A dispatched Save may commit even if its acknowledgement fails; never roll it back.
+            const result=await writePreference(next);
+            if(trial){await journal(null);clearTimeout(trial.timer);trial=null;}
+            return result;
         });
-        return {preference:result,current:{width:w.width,height:w.height},status:request.action==='reset'?'Saved size cleared for future windows. This window was not resized.':request.action==='save'?'Saved for future windows. This window was not resized.':result.remember?'Normal Little Arc resizes will be remembered.':'Size memory is off.'};
+        return {preference:result,current:{width:w.width,height:w.height},preview:null,status:request.action==='reset'?'Saved size cleared for future windows. This window was not resized.':request.action==='save'?hadPreview?'Preview kept and size saved for future windows.':'Saved for future windows. This window was not resized.':result.remember?'Normal Little Arc resizes will be remembered.':'Size memory is off.'};
     }
     const listener=(request,sender,respond)=>{if(request?.type!==GEOMETRY_TYPE)return;handle(request,sender).then(v=>respond({success:true,...v}),e=>respond({success:false,error:e.message}));return true;};
     listen(api.runtime.onMessage,listener);
-    return {begin,created,adjust,finish,abandon,restore,handle,dispose(){disposed=true;++epoch;cancelTimers();for(const s of pending.values())s.resolve?.();pending.clear();tracked.clear();removers.forEach(remove=>remove());}};
+    return {begin,created,adjust,finish,abandon,restore,handle,dispose(){disposed=true;++epoch;cancelTimers();if(trial)clearTimeout(trial.timer);trial=null;for(const s of pending.values())s.resolve?.();pending.clear();tracked.clear();removers.forEach(remove=>remove());}};
 }
