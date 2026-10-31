@@ -4,6 +4,9 @@ import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { assertNotNativeSplit, assertNativeSplitMembershipPreserved } from './native-split-safety.js';
 import { Utils } from './utils.js';
 import { readSpaceRankCheckpoint } from './space-continuity.js';
+import { stageExplicitToday, explicitTodayEpoch, EXPLICIT_TODAY_CHECKPOINT, readExplicitCheckpoint } from './explicit-today-ownership.js';
+import { encodeFavoriteContinuityState as encode } from './favorite-continuity.js';
+import { needsExplicitSubsetChoice } from './durable-today-layout.js';
 
 const MAX_TABS = 100;
 const positive = value => Number.isSafeInteger(value) && value > 0;
@@ -50,6 +53,7 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
         const ids = entries.map(entry => entry.tabId), selected = new Set(ids);
         const batch = { total: ids.length, completed: [], remaining: [...ids], uncertain: false, destinationSpaceId };
         let staged = false, writeAttempted = false, beforeSpaces, beforeRanks, beforeQueue, expectedRanks, expectedSourceIds, expectedTargetIds;
+        let beforeExplicit, beforeEpoch, beforeEpochs, beforeCandidates, explicit;
         const getSpaces = () => {
             assertNotTransient(store, { windowId });
             for (const entry of entries) assertNotTransient(store, { tabId: entry.tabId });
@@ -65,7 +69,7 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
         };
         const validLive = (tab, entry, bindings) => tab?.id === entry.tabId && tab.windowId === windowId && !tab.incognito && !tab.pinned &&
             !isStartupLauncherTab(tab) && !isTransientTab(store, tab) && !store.isGlobalTab?.(tab.id) && !store.isGlobalTab?.(tab) &&
-            !bindings[tab.id]?.bookmarkId && !store.provisional?.has(tab.id) && !store.recoveryCandidates?.has(tab.id) &&
+            !bindings[tab.id]?.bookmarkId && !store.provisional?.has(tab.id) &&
             tab.url === entry.url && (!tab.pendingUrl || tab.pendingUrl === entry.url);
         async function validate(owner = spaceId) {
             const { source } = getSpaces();
@@ -75,6 +79,8 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             await getSpaceBookmarkFolder(getSpaces().target);
             if (Boolean(await getOrder()) !== inverted) throw changed();
             const bindings = await Utils.getPinnedTabStates();
+            if (staged && explicit && (encode(await explicitTodayEpoch(store)) !== encode(explicit.epoch)
+                || encode(store.restoreQueue) !== encode(beforeQueue))) throw changed();
             // One fresh native snapshot validates the complete batch. In particular,
             // a duplicate-URL neighbor can never replace a closed or moved tab ID.
             const tabs = await chrome.tabs.query({});
@@ -83,10 +89,7 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
                 const matches = tabs.filter(tab => tab.id === entry.tabId), tab = matches[0];
                 assertNotTransient(store, { windowId, tab });
                 assertNotNativeSplit(tab);
-                if (matches.length === 1 && tab?.id === entry.tabId && tab.windowId === windowId &&
-                    ownsToday(store.spaces, owner, entry.tabId) && store.recoveryCandidates?.has(entry.tabId)) throw Object.assign(new Error(
-                    'Some selected tabs are still being matched to their saved Spaces. Choose fully restored Today tabs and try again.'
-                ), { code: 'TODAY_RECOVERY_PENDING' });
+                if (staged && !explicit && store.recoveryCandidates?.has(entry.tabId)) throw changed();
                 if (matches.length !== 1 || !validLive(tab, entry, bindings) || !ownsToday(store.spaces, owner, entry.tabId)) throw changed();
             }
             const current = getSpaces();
@@ -99,8 +102,16 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
         }
         try {
             const tabs = await validate();
+            if (ids.some(id => store.recoveryCandidates?.has(id) || store.explicitToday?.has(id) || store.layoutProvisional?.has(id)
+                || needsExplicitSubsetChoice(store,tabs.find(t=>t.id===id)))) {
+                explicit = await stageExplicitToday(store, tabs.filter(tab => selected.has(tab.id)), {spaceId: destinationSpaceId, bookmarkFolderId: destinationBookmarkFolderId});
+                await validate();
+            }
             beforeSpaces = structuredClone(store.spaces); beforeRanks = new Map(store.restoredRanks);
             beforeQueue = structuredClone(store.restoreQueue);
+            beforeExplicit = new Map(store.explicitToday || []); beforeEpoch = store.explicitTodayEpoch;
+            beforeEpochs = store.explicitTodayEpochs;
+            beforeCandidates = new Set(store.recoveryCandidates);
             const next = structuredClone(store.spaces);
             const source = next.find(space => space.id === spaceId), target = next.find(space => space.id === destinationSpaceId);
             source.temporaryTabs = source.temporaryTabs.filter(id => !selected.has(id));
@@ -110,11 +121,15 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             if (selected.has(source.lastTab)) delete source.lastTab;
             assertNativeSplitMembershipPreserved(store.spaces, next, tabs);
             expectedSourceIds = [...source.temporaryTabs]; expectedTargetIds = [...target.temporaryTabs];
-            store.spaces = next; staged = true;
+            store.spaces = next;
+            if (explicit) { store.explicitToday = explicit.bindings; store.explicitTodayEpoch = explicit.epoch; store.explicitTodayEpochs = explicit.epochs; }
+            staged = true;
             for (const space of [source, target]) store.rebaseSectionRanks(space, 'temporaryTabs',
                 beforeSpaces.find(previous => previous.id === space.id).temporaryTabs);
+            // Rebase live ranks without rewriting the historical records' order.
+            if (explicit) store.restoreQueue = structuredClone(beforeQueue);
             expectedRanks = new Map(store.restoredRanks);
-            await store.persist({ skipGroupSync, beforeWrite: async () => {
+            await store.persist({ skipGroupSync, preserveRecoveryQueue: !!explicit, beforeWrite: async () => {
                 // persist awaits metadata and continuity before writing. Recheck at
                 // that final boundary, not only before staging the in-memory move.
                 const fresh = await validate(destinationSpaceId);
@@ -122,11 +137,22 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
                 writeAttempted = true;
             } });
             await validate(destinationSpaceId);
+            if (explicit) {
+            const committed = await chrome.storage.local.get(['spaces','spaceTabSnapshot','spaceRankCheckpoint',EXPLICIT_TODAY_CHECKPOINT]);
+            const checkpoint = await readExplicitCheckpoint(committed);
+            if (!checkpoint || encode(checkpoint.history) !== encode(beforeQueue)
+                || ids.some(id => !ownsToday(committed.spaces, destinationSpaceId, id)
+                    || checkpoint.live.filter(r => r.tabId === id
+                        && r.currentOwnership?.transaction === explicit.transaction).length !== 1)) throw changed();
+            await validate(destinationSpaceId);
+            }
             batch.completed = [...ids]; batch.remaining = [];
             return batch;
         } catch (error) {
             if (staged && !writeAttempted) {
                 store.spaces = beforeSpaces; store.restoredRanks = beforeRanks; store.restoreQueue = beforeQueue;
+                store.explicitToday = beforeExplicit; store.explicitTodayEpoch = beforeEpoch; store.recoveryCandidates = beforeCandidates;
+                store.explicitTodayEpochs = beforeEpochs;
                 // persist can update its snapshot caches before its guarded write.
                 // Reload from authoritative storage on the next queued operation.
                 store.initialized = false;
@@ -136,7 +162,8 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
                 // membership and classify only exact live survivors as completed.
                 store.initialized = false;
                 try {
-                    const { spaces, spaceTabSnapshot, spaceRankCheckpoint } = await chrome.storage.local.get(['spaces', 'spaceTabSnapshot', 'spaceRankCheckpoint']);
+                    const data = await chrome.storage.local.get(['spaces', 'spaceTabSnapshot', 'spaceRankCheckpoint',EXPLICIT_TODAY_CHECKPOINT]);
+                    const { spaces, spaceTabSnapshot, spaceRankCheckpoint } = data;
                     if (!Array.isArray(spaces)) throw changed();
                     store.spaces = structuredClone(spaces);
                     const sources = spaces.filter(space => space.id === spaceId), targets = spaces.filter(space => space.id === destinationSpaceId);
@@ -145,6 +172,10 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
                     const selection = await chrome.storage.session.get(['activeSpaces', 'spaceSession']);
                     const checkpoint = selection.spaceSession && await readSpaceRankCheckpoint(spaceRankCheckpoint, spaceTabSnapshot);
                     const ranks = checkpoint ? new Map(checkpoint) : null;
+                    const explicitCheckpoint = await readExplicitCheckpoint(data);
+                    const explicitProof = !explicit || explicitCheckpoint && encode(explicitCheckpoint.history) === encode(beforeQueue)
+                        && encode(await explicitTodayEpoch(store)) === encode(explicit.epoch);
+                    if (!explicitProof && ids.some(id => ownsToday(spaces, destinationSpaceId, id))) batch.uncertain = true;
                     // Proven membership can coexist with an incomplete selection
                     // checkpoint. Report that uncertainty instead of declaring the
                     // whole operation complete or silently retrying persistence.
@@ -164,9 +195,9 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
                         const matches = tabs.filter(tab => tab.id === entry.tabId), tab = matches[0];
                         const atDestination = ownsToday(spaces, destinationSpaceId, entry.tabId);
                         const atSource = ownsToday(spaces, spaceId, entry.tabId);
-                        const records = (spaceTabSnapshot || []).filter(record => record.tabId === entry.tabId);
+                        const records = (explicit ? explicitCheckpoint?.live || [] : spaceTabSnapshot || []).filter(record => record.tabId === entry.tabId);
                         const record = records[0], canonicalIndex = persistedTarget.temporaryTabs.indexOf(entry.tabId);
-                        const snapshotProven = records.length === 1 && record.spaceId === destinationSpaceId &&
+                        const snapshotProven = explicitProof && records.length === 1 && (!explicit || record.currentOwnership?.transaction === explicit.transaction) && record.spaceId === destinationSpaceId &&
                             record.section === 'temporaryTabs' && record.url === entry.url && record.order === (expectedRanks.get(entry.tabId) ?? canonicalIndex) &&
                             record.windowKey === store.windowKeys.get(windowId);
                         if (atDestination && snapshotProven && matches.length === 1 && validLive(tab, entry, bindings) &&

@@ -31,6 +31,36 @@ async function showSpaceOptionsDropdown(page) {
   await delay(300);
 }
 
+async function waitForActiveSpace(page, name) {
+  try {
+    // Switching activates an owned native tab; do not depend on background RAF.
+    await page.waitForFunction(target => {
+      const active = [...document.querySelectorAll('.space-switcher button.active')];
+      const visible = [...document.querySelectorAll('.space')].filter(s => s.style.display !== 'none');
+      return active.length === 1 && active[0].querySelector('.space-switcher-name')?.textContent.trim() === target
+        && visible.length === 1 && visible[0].querySelector('.space-name')?.value.trim() === target;
+    }, { polling: 50, timeout: 10000 }, name);
+  } catch (error) {
+    const state = await page.evaluate(async () => ({
+      active: [...document.querySelectorAll('.space-switcher button.active')].map(b => b.textContent.trim()),
+      visible: [...document.querySelectorAll('.space')].filter(s => s.style.display !== 'none').map(s => s.querySelector('.space-name')?.value),
+      status: [...document.querySelectorAll('[role="status"]')].map(s => s.textContent),
+      persisted: await chrome.storage.session.get('activeSpaces'),
+    }));
+    throw new Error(`Space ${name} did not settle: ${JSON.stringify(state)}`, { cause: error });
+  }
+}
+
+async function clickSpaceOnce(page, name) {
+  const clicked = await page.evaluate(target => {
+    const buttons = [...document.querySelectorAll('.space-switcher button')].filter(b => b.querySelector('.space-switcher-name')?.textContent.trim() === target);
+    if (buttons.length !== 1) return false;
+    buttons[0].click(); return true;
+  }, name);
+  expect(clicked).toBe(true);
+  await waitForActiveSpace(page, name);
+}
+
 describe('Space Management', () => {
   let browser;
   let extensionId;
@@ -278,17 +308,8 @@ describe('Space Management', () => {
         expect(firstSpaceName).toBeDefined();
         logTestStep(`Will switch from 'Switch Target' to '${firstSpaceName}'`);
 
-        // Click the first space's switcher button to switch away
-        await sidebarPage.evaluate((targetName) => {
-          const buttons = document.querySelectorAll('.space-switcher button');
-          for (const btn of buttons) {
-            if (btn.querySelector('.space-switcher-name').textContent.trim() === targetName) {
-              btn.click();
-              break;
-            }
-          }
-        }, firstSpaceName);
-        await delay(1500);
+        await waitForActiveSpace(sidebarPage, 'Switch Target');
+        await clickSpaceOnce(sidebarPage, firstSpaceName);
 
         // Verify the active space changed: the visible space should match the target
         const visibleSpaceName = await sidebarPage.evaluate(() => {
@@ -305,17 +326,7 @@ describe('Space Management', () => {
         expect(visibleSpaceName).toBe(firstSpaceName);
         logTestStep(`✓ Successfully switched to '${visibleSpaceName}'`);
 
-        // Now switch back to 'Switch Target'
-        await sidebarPage.evaluate(() => {
-          const buttons = document.querySelectorAll('.space-switcher button');
-          for (const btn of buttons) {
-            if (btn.querySelector('.space-switcher-name').textContent.trim() === 'Switch Target') {
-              btn.click();
-              break;
-            }
-          }
-        });
-        await delay(1500);
+        await clickSpaceOnce(sidebarPage, 'Switch Target');
 
         const switchedBackName = await sidebarPage.evaluate(() => {
           const spaces = document.querySelectorAll('.space');

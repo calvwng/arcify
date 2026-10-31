@@ -31,9 +31,11 @@ const assertGlobal = (s, id) => {
     assert.equal(s.spaces.isGlobalTab(id), true);
     assert.equal(ownerOf(s.spaces.spaces, id), undefined);
     assert(!local.spaces.some(space => [...space.spaceBookmarks, ...space.temporaryTabs].includes(id)));
-    assert(!local.spaceTabSnapshot.some(record => record.tabId === id));
+    // Historical numeric IDs are not current Favorite ownership. Only the live prefix must exclude it.
+    const liveCount = local.spaceTabSnapshot.length - s.spaces.restoreQueue.length;
+    assert(!local.spaceTabSnapshot.slice(0, liveCount).some(record => record.tabId === id));
     assert(!s.spaces.snapshotByTab.has(id));
-    assert(!s.spaces.restoreQueue.some(record => record.tabId === id));
+
 };
 beforeEach(() => {
     local = { spaceModelVersion: 2, spaces: [space('a', [1]), space('b', [2])], [FAVORITES_KEY]: [saved('f')] };
@@ -618,3 +620,69 @@ for (const change of ['move', 'revoke']) test(`Space replay revalidates ${change
         assert.equal(local.pinnedTabStatesById[1], undefined);
     }
 });
+
+// Real installed event queues + continuity checkpoint, including the worker
+// restart that makes native onCreated receipts eligible for current authority.
+async function duplicateDuringObservedCompletion(change = 'clear') {
+    sync.invertTabOrder = true; sync.syncTabGroups = false; sync.todayNewTabsAtTop = true;
+    tabs[0].url = 'https://source.test/'; tabs[0].active = true; tabs[1].url = tabs[0].url;
+    local.spaces[0].temporaryTabs = [1, 2]; local.spaces[1].temporaryTabs = [];
+    let s = stores({ install: true, ownershipPersistence: continuity() });
+    await s.spaces.run(() => s.spaces.persist());
+    for (const api of [chrome.tabs, chrome.tabGroups, chrome.storage]) for (const value of Object.values(api)) {
+        if (value?.listeners) value.listeners.length = 0;
+    }
+    s = stores({ install: true, ownershipPersistence: continuity() });
+    await s.spaces.run(() => s.spaces.persist());
+    assert(s.spaces.explicitTodayEpoch);
+    let changed = false, receiptObserved = false;
+    chrome.tabs.duplicate = async id => {
+        const source = tab(id);
+        for (const current of tabs) if (current.windowId === source.windowId) {
+            current.active = false; if (current.index > source.index) current.index++;
+        }
+        const added = { ...clone(source), id: 100, index: source.index + 1, active: true,
+            incognito: false, pinned: false, ...(change === 'new-pending' ? {} : { pendingUrl: source.url }) };
+        tabs.push(added); let queries = 0;
+        hooks.query = () => {
+            if (++queries !== 3) return;
+            changed = true; delete added.pendingUrl;
+            if (change === 'url') added.url = 'https://different.test/';
+            if (change === 'pending-url') added.pendingUrl = 'https://different.test/';
+            if (change === 'new-pending') added.pendingUrl = added.url;
+            if (change === 'window') added.windowId = 2;
+            if (change === 'pin') added.pinned = true;
+            if (change === 'split') added.splitViewId = 77;
+            if (change === 'epoch') local[PAIRING_GENERATION_KEY] = crypto.randomUUID();
+            if (change === 'replace') { added.id = 101; chrome.tabs.onReplaced.emit(101, 100); }
+            else chrome.tabs.onUpdated.emit(100, { url: added.url, status: 'complete' }, added);
+        };
+        chrome.tabs.onCreated.emit(added); chrome.tabs.onActivated.emit({ tabId: 100, windowId: 1 });
+        receiptObserved = Boolean(s.spaces.layoutObservedCreations.get(100));
+        return clone(added);
+    };
+    const { runTabMenuAction } = await import('../../tab-menu-actions.js');
+    let result, error;
+    try { result = await runTabMenuAction(s.spaces, { action: 'duplicate', windowId: 1, spaceId: 'a', bookmarkFolderId: 'a', tabId: 1 }); }
+    catch (caught) { error = caught; }
+    await s.idle();
+    assert(changed, 'The native transition must occur during validation, not after the action.');
+    assert(receiptObserved, 'This regression must exercise an independently observed creation receipt.');
+    return { s, result, error };
+}
+
+test('observed duplicate preserves exact adjacent Today order when redundant pending URL completes during checkpoint', async () => {
+    const { s, result, error } = await duplicateDuringObservedCompletion();
+    assert.equal(error, undefined); assert.deepEqual(result, { tabId: 100 });
+    assert.deepEqual(s.spaces.spaces.find(space => space.id === 'a').temporaryTabs, [100, 1, 2]);
+    assert.deepEqual(local.spaces.find(space => space.id === 'a').temporaryTabs, [100, 1, 2]);
+    assert.equal(session.activeSpaces[1], 'a');
+    assert.equal(local.spaceTabSnapshot.find(record => record.tabId === 100)?.currentOwnership.spaceId, 'a');
+});
+for (const change of ['url', 'pending-url', 'new-pending', 'replace', 'window', 'pin', 'split', 'epoch']) {
+    test(`observed duplicate still refuses changed ${change} during authority checkpoint`, async () => {
+        const { result, error } = await duplicateDuringObservedCompletion(change);
+        assert.equal(result, undefined);
+        assert.match(error?.message || '', /duplicate was created.*(?:authority changed|creation changed|proof expired)/i);
+    });
+}

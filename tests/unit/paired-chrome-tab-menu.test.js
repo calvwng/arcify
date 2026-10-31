@@ -268,3 +268,72 @@ test('missing exact context target fails without a broader lookup or mouse input
     assert.deepEqual(h.counts(), { acquired: 0, dispatched: 0, disposed: 0, postconditions: 0 });
     assert.equal(h.calls.length, 1);
 });
+
+test('passive duplicate observer preserves refusal and success-then-refresh history and tears down all listeners', async () => {
+    const { installTabMenuDuplicateObservation, readTabMenuDuplicateObservation, stopTabMenuDuplicateObservation } = await import('../../scripts/paired-chrome-tab-menu.mjs');
+    const status = { textContent: '' }, notice = { hidden: true }, listeners = new Map(), native = () => ({ listeners: new Set(), addListener(fn) { this.listeners.add(fn); }, removeListener(fn) { this.listeners.delete(fn); } });
+    const created = native(), changed = native(); let observer;
+    const context = { structuredClone, performance: { now: () => 1 }, chrome: { tabs: { onCreated: created }, storage: { onChanged: changed } },
+        document: { getElementById: id => id === 'favoritesDropStatus' ? status : notice, addEventListener: (type, fn) => listeners.set(type, fn), removeEventListener: type => listeners.delete(type) },
+        MutationObserver: class { constructor(fn) { this.callback = fn; observer = this; } observe() {} disconnect() { this.disconnected = true; } takeRecords() { return []; } } };
+    const install = runInNewContext(`(${installTabMenuDuplicateObservation.toString()})`, context);
+    const read = runInNewContext(`(${readTabMenuDuplicateObservation.toString()})`, context);
+    const stop = runInNewContext(`(${stopTabMenuDuplicateObservation.toString()})`, context);
+    install(); const old = observer; install(); assert(old.disconnected); assert.equal(created.listeners.size, 1); assert.equal(changed.listeners.size, 1);
+    const mutations = [];
+    for (const text of ['The duplicate was created, but its Space assignment could not be confirmed.', 'Tab duplicated in this Space.', 'The sidebar could not refresh. Reload it before trying again.']) {
+        status.textContent = text; notice.hidden = false;
+        mutations.push({ type: 'childList', target: status, addedNodes: [{ textContent: text }] });
+    }
+    observer.callback(mutations); // Multiple writes in one delivery must not collapse to the final toast.
+    listeners.get('click')({ isTrusted: true, target: { closest: selector => selector === '#tab-context-menu [data-action="duplicate"]' ? {} : null } });
+    created.listeners.forEach(fn => fn({ id: 77 })); changed.listeners.forEach(fn => fn({ spaces: { oldValue: [], newValue: [{ id: 's' }] } }, 'local'));
+    const result = read(); assert.equal(result.events.filter(e => e.type === 'duplicate-click' && e.trusted).length, 1);
+    assert.deepEqual(Array.from(result.events.filter(e => e.type === 'status-write'), e => e.text), ['The duplicate was created, but its Space assignment could not be confirmed.', 'Tab duplicated in this Space.', 'The sidebar could not refresh. Reload it before trying again.']);
+    assert(result.events.some(e => e.type === 'tabs.onCreated')); assert(result.events.some(e => e.type === 'storage'));
+    stop(); stop(); assert(observer.disconnected); assert.equal(created.listeners.size, 0); assert.equal(changed.listeners.size, 0); assert.equal(listeners.size, 0);
+});
+
+test('duplicate diagnostics retain original oracle error without normalizing order', async () => {
+    const { observeTabMenuDuplicateAssertion } = await import('../../scripts/paired-chrome-tab-menu.mjs');
+    const result = observeTabMenuDuplicateAssertion({}, {}, {});
+    assert.equal(result.passed, false); assert(result.assertion.message); assert(result.assertion.stack);
+    assert(Object.hasOwn(result.assertion, 'expected')); assert(Object.hasOwn(result.assertion, 'actual'));
+});
+
+test('duplicate baseline precedes single click and diagnostics/teardown precede fixture cleanup', async () => {
+    const source = await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8');
+    assert(source.indexOf("checkpoint('duplicate-before-input'") < source.indexOf("await item('duplicate')"));
+    assert.equal((source.match(/await item\('duplicate'\)/g) || []).length, 1);
+    assert.match(source, /duplicateDiagnostic.last = \{ state: structuredClone\(value\), result \}/);
+    assert.match(source, /checkpoint\('duplicate-observed-before-cleanup'/);
+    assert.match(source, /evaluate\(stopTabMenuDuplicateObservation\)/);
+    assert.match(source, /\], primaryError, event => checkpoint\(event.phase, \{ errors: event.errors \}\)\)/);
+});
+
+test('duplicate observation failure and teardown failure preserve original error and prior checkpoints', async () => {
+    const { finishBookmarkFixture } = await import('../../scripts/paired-chrome-bookmark-selection.mjs');
+    const source = await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8');
+    const start = source.indexOf('            await finishBookmarkFixture([', source.indexOf('const duplicateDiagnostic'));
+    const end = source.indexOf('\n        }\n        await ui(sidebar.page', start);
+    assert(start > 0 && end > start);
+    for (const failure of ['read', 'stop']) {
+        const original = new Error('original order mismatch'), records = [{ phase: 'duplicate-before-input', before: { exact: true } }], calls = [];
+        const diagnostic = { error: { message: original.message }, last: { result: { passed: false, assertion: { expected: [1, 2], actual: [2, 1] } } } };
+        await runInNewContext(`(async () => { ${source.slice(start, end)} })()`, {
+            finishBookmarkFixture, duplicateError: original, duplicateDiagnostic: diagnostic,
+            readTabMenuDuplicateObservation: function readObservation() {}, stopTabMenuDuplicateObservation: function stopObservation() {},
+            sidebar: { page: { evaluate: async fn => { calls.push(fn.name); if ((failure === 'read' && fn.name === 'readObservation') || (failure === 'stop' && fn.name === 'stopObservation')) throw new Error(`${failure} failed`); return { events: [] }; } } },
+            checkpoint: async (phase, detail) => { records.push({ phase, ...structuredClone(detail) }); }
+        });
+        assert.deepEqual(calls, ['readObservation', 'stopObservation']);
+        assert.equal(original.message, 'original order mismatch'); assert.deepEqual(original.cleanupErrors, [`${failure} failed`]);
+        assert.equal(records[0].before.exact, true);
+        const retained = records.find(record => record.phase === 'duplicate-observed-before-cleanup');
+        assert.equal(retained.error.message, original.message);
+        assert.deepEqual(retained.last.result.assertion, { expected: [1, 2], actual: [2, 1] });
+        if (failure === 'read') assert.equal(retained.observationError.message, 'read failed');
+        assert.deepEqual(diagnostic.last.result.assertion, { expected: [1, 2], actual: [2, 1] });
+        assert.equal(records.at(-1).phase, 'duplicate-observer-cleanup-failed');
+    }
+});

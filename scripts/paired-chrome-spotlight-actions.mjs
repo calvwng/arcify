@@ -1,12 +1,13 @@
 /** Initial paired Space-action acceptance. Import-safe; the hosted harness owns Chrome. */
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { spotlightSurface } from './paired-chrome-keyboard.mjs';
 import { replaceInputText, clickFreshResult, selectResultWithKeyboard } from './paired-chrome-ui.mjs';
 import { readSpotlightRows, assertMatchedActionFirst, evaluateWithoutGesture } from './paired-chrome-sidebar.mjs';
 import { readNewTabReuseState } from './paired-chrome-newtab.mjs';
 import { canonicalSavedMoveBookmarks } from './paired-chrome-saved-move.mjs';
+import { encodeFavoriteContinuityState } from '../favorite-continuity.js';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 
 export const SPOTLIGHT_ACTION_CASE_NAME = 'Initial Spotlight actions preserve exact live and saved identities through overlay and browser New Tab input';
@@ -95,9 +96,9 @@ export function readSpotlightActionPage() {
 /** A passive listener, never a replacement transport, response, click, or success injector. */
 export function installSpotlightActionApiObservation() {
     globalThis.__spaceActionObservation?.stop();
-    const events = [], registrations = [];
+    const events = [], creationLifecycle = [], registrations = [];
     const listen = (event, type, transform = (...args) => args) => {
-        const listener = (...args) => { events.push({ type, data: transform(...args) }); };
+        const listener = (...args) => { const observation = { type, data: transform(...args) }; events.push(observation); if (type.startsWith('tabs.')) creationLifecycle.push(observation); };
         event.addListener(listener); registrations.push(() => event.removeListener(listener));
     };
     listen(chrome.runtime.onMessageExternal, 'external', (message, sender) => ({ message, sender: { id: sender.id, url: sender.url || null, origin: sender.origin || null } }));
@@ -109,7 +110,7 @@ export function installSpotlightActionApiObservation() {
     for (const name of ['onCreated', 'onRemoved', 'onFocusChanged']) listen(chrome.windows[name], `windows.${name}`);
     if (chrome.sidePanel?.onOpened) listen(chrome.sidePanel.onOpened, 'sidePanel.onOpened');
     listen(chrome.storage.onChanged, 'storage', (changes, area) => ({ area, changes }));
-    globalThis.__spaceActionObservation = { events, stop: () => registrations.forEach(remove => remove()) };
+    globalThis.__spaceActionObservation = { events, creationLifecycle, stop: () => registrations.forEach(remove => remove()) };
 }
 export function installSpotlightActionInputObservation({ retainInParent = false } = {}) {
     globalThis.__spaceActionInput?.stop();
@@ -281,12 +282,174 @@ function assertSnapshotMembership(state) {
     }
     for (const space of state.spaces) for (const id of [...space.spaceBookmarks, ...space.temporaryTabs]) assert.equal(state.spaces.flatMap(item => [...item.spaceBookmarks, ...item.temporaryTabs]).filter(value => value === id).length, 1, 'Never duplicate a native binding or membership.');
 }
-export function assertSpotlightActionCommitted(before, after, { command, context, resultId, title, events, request }) {
+export async function readSpotlightWorkerContext() {
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ['BACKGROUND'] });
+    if (contexts.length !== 1 || contexts[0].contextType !== 'BACKGROUND' || typeof contexts[0].contextId !== 'string' || !contexts[0].contextId)
+        throw new Error('One exact current Arcify worker context is required for ownership evidence.');
+    return { contextId: contexts[0].contextId };
+}
+function assertNativeIncarnationLifecycle(tab, events) {
+    for (const e of events) {
+        if (['tabs.onRemoved', 'tabs.onAttached', 'tabs.onDetached'].includes(e.type)) assert.notEqual(e.data[0], tab.id);
+        if (e.type === 'tabs.onReplaced') assert(!e.data.includes(tab.id));
+        if (e.type === 'tabs.onUpdated' && e.data.id === tab.id) {
+            for (const key of ['url', 'pendingUrl']) if (e.data.change[key]) assert.equal(e.data.change[key], tab.url);
+            if ('pinned' in e.data.change) assert.equal(e.data.change.pinned, false);
+            if ('splitViewId' in e.data.change) assert.equal(e.data.change.splitViewId, -1);
+            if ('windowId' in e.data.change) assert.equal(e.data.change.windowId, tab.windowId);
+            if ('groupId' in e.data.change) assert.equal(e.data.change.groupId, tab.groupId);
+        }
+    }
+}
+function assertLifecycleExtension(earlier, later) {
+    assert(Array.isArray(earlier) && Array.isArray(later));
+    assert.deepEqual(later.slice(0, earlier.length), earlier, 'Passive native lifecycle history must not reset or change.');
+}
+
+function assertCurrentEpochAuthority(state, epoch) {
+    const capturedEpoch = state.ownershipEpoch;
+    assert(capturedEpoch, 'Capture current epoch authority before action input.');
+    if (epoch.kind === 'browser') {
+        const { receipt, continuity, peerId } = capturedEpoch;
+        assert(receipt && continuity);
+        assert.equal(receipt.version, 1); assert.equal(receipt.schema, 'exact-global-favorites-v2');
+        assert(receipt.phase === undefined || receipt.phase === 'committed');
+        assert.equal(continuity.phase, 'committed');
+        for (const key of ['epoch', 'generation', 'revision', 'fingerprint', 'peerId']) assert.deepEqual(receipt[key], continuity[key]);
+        assert.equal(receipt.epoch, epoch.epoch); assert.equal(receipt.generation, epoch.generation);
+        assert.equal(receipt.generation, state.pairingGeneration); assert.equal(receipt.peerId, peerId);
+        assert(Number.isSafeInteger(receipt.revision) && receipt.revision >= 0);
+        assert.match(receipt.fingerprint, /^[a-f0-9]{64}$/);
+        assert.equal(createHash('sha256').update(encodeFavoriteContinuityState(state.favoriteSession)).digest('hex'), receipt.fingerprint);
+        assert.deepEqual(continuity.state, state.favoriteSession);
+    } else {
+        assert.equal(epoch.kind, 'session'); assert.equal(capturedEpoch.session, epoch.epoch);
+    }
+}
+
+// Establish eligibility before input from native creation/lifecycle evidence and
+// the exact saved binding. Random issuance tokens are never an identity source.
+export function captureFreshTodayCreationProof(before, priorPin, createdTabId, creationEvents, lifecycleEvents, creationWorker) {
+    assert(priorPin);
+    const sourceId = priorPin.request.context.sourceTabId;
+    assert.notEqual(createdTabId, sourceId);
+    assert(!priorPin.after.tabs.some(tab => tab.id === createdTabId), 'Linked creation must be a genuinely new native identity after the pin.');
+    const prior = priorPin.before.savedSnapshot.filter(r => r.tabId === sourceId);
+    assert.equal(prior.length, 1);
+    // No pre-action authority proof means no ownership exception at all.
+    if (!prior[0].currentOwnership) return null;
+    assert(creationWorker?.contextId && before.workerContext?.contextId);
+    assert.deepEqual(creationWorker, before.workerContext);
+    assert.deepEqual(priorPin.after.workerContext, before.workerContext);
+    assert.deepEqual(lifecycleEvents, before.nativeLifecycle);
+    const epoch = structuredClone(prior[0].currentOwnership.epoch);
+    assertCurrentEpochAuthority(before, epoch);
+    assert(before.savedSnapshot.some(r => r.currentOwnership && JSON.stringify(r.currentOwnership.epoch) === JSON.stringify(epoch)), 'Current pre-action persistence must independently confirm the epoch.');
+    const tab = exact(before.tabs, createdTabId), space = exact(before.spaces, priorPin.request.context.spaceId);
+    assert.equal(before.bindings[createdTabId]?.bookmarkId, priorPin.resultId);
+    assert.equal(before.bindings[createdTabId]?.pinnedUrl, tab.url);
+    assert(space.spaceBookmarks.includes(createdTabId));
+    assert.equal(before.spaces.filter(s => [...s.spaceBookmarks, ...s.temporaryTabs].includes(createdTabId)).length, 1);
+    const saved = before.savedSnapshot.filter(r => r.tabId === createdTabId);
+    assert.equal(saved.length, 1); assert.equal(saved[0].section, 'spaceBookmarks');
+    assert.equal(saved[0].spaceId, space.id); assert.equal(saved[0].url, tab.url);
+    assert.equal(saved[0].currentOwnership, undefined);
+    assert.equal(tab.pinned, false); assert.equal(tab.incognito, false); assert.equal(tab.splitViewId, -1);
+    assert(!tab.pendingUrl || tab.pendingUrl === tab.url);
+    const creations = creationEvents.filter(e => e.type === 'tabs.onCreated' && e.data[0]?.id === createdTabId);
+    assert.equal(creations.length, 1, 'Require one independently observed exact native creation.');
+    const created = creations[0].data[0];
+    assert.equal(created.windowId, tab.windowId); assert.equal(created.pendingUrl || created.url, tab.url);
+    assert.equal(lifecycleEvents.filter(e => e.type === 'tabs.onCreated' && e.data[0]?.id === createdTabId).length, 1);
+    assert(lifecycleEvents.some(e => JSON.stringify(e) === JSON.stringify(creations[0])));
+    assertNativeIncarnationLifecycle(tab, lifecycleEvents);
+    const observed = creationEvents.filter(e => e.type === 'storage' && e.data.area === 'local' && e.data.changes.spaceTabSnapshot)
+        .flatMap(e => e.data.changes.spaceTabSnapshot.newValue.filter(r => r.tabId === createdTabId && r.currentOwnership));
+    for (const record of observed) {
+        assert.equal(record.section, 'temporaryTabs'); assert.equal(record.spaceId, space.id); assert.equal(record.url, tab.url);
+        assert.equal(record.pinnedState, undefined);
+        assert.deepEqual(record.currentOwnership.epoch, epoch);
+        for (const [key, value] of Object.entries({ windowId: tab.windowId, spaceId: space.id, bookmarkFolderId: space.bookmarkFolderId })) assert.equal(record.currentOwnership[key], value);
+        assert.deepEqual(record.currentOwnership, observed[0].currentOwnership);
+    }
+    return structuredClone({ kind: observed.length ? 'dormant' : 'fresh', ...(observed.length ? { observedWitness: observed[0].currentOwnership } : {}),
+        tabId: createdTabId, windowId: tab.windowId, spaceId: space.id,
+        bookmarkFolderId: space.bookmarkFolderId, bookmarkId: priorPin.resultId, url: tab.url, epoch,
+        creationEvents, lifecycleEvents, creationWorker });
+}
+function assertFreshTodayWitness(record, expected, proof, before, priorPin, events, usedTokens) {
+    const verified = captureFreshTodayCreationProof(before, priorPin, proof.tabId, proof.creationEvents, proof.lifecycleEvents, proof.creationWorker);
+    assert.deepEqual(proof, verified);
+    assert.equal(expected.tabId, proof.tabId); assert.equal(expected.spaceId, proof.spaceId); assert.equal(expected.url, proof.url);
+    const witness = record.currentOwnership;
+    if (proof.kind === 'dormant') assert.deepEqual(witness, proof.observedWitness);
+    assert(witness && Object.getPrototypeOf(witness) === Object.prototype);
+    assert.deepEqual(Object.keys(witness).sort(), ['version', 'epoch', 'incarnation', 'transaction', 'windowId', 'spaceId', 'bookmarkFolderId'].sort());
+    assert.equal(witness.version, 1); assert.deepEqual(witness.epoch, proof.epoch);
+    for (const key of ['windowId', 'spaceId', 'bookmarkFolderId']) assert.equal(witness[key], proof[key]);
+    for (const key of ['incarnation', 'transaction']) {
+        assert.match(witness[key], /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+        assert(!usedTokens.has(witness[key]), 'Fresh identities cannot reuse source, historical or another fresh token.');
+        usedTokens.add(witness[key]);
+    }
+    const writes = events.filter(e => e.type === 'storage' && e.data.area === 'local' && e.data.changes.spaceTabSnapshot)
+        .map(e => e.data.changes.spaceTabSnapshot).filter(change => change.newValue.some(r => r.tabId === proof.tabId && r.currentOwnership));
+    assert(writes.length, 'Fresh witness requires independent native storage-event evidence.');
+    const old = writes[0].oldValue.filter(r => r.tabId === proof.tabId);
+    assert.equal(old.length, 1); assert.deepEqual(old[0], before.savedSnapshot.find(r => r.tabId === proof.tabId));
+    for (const write of writes) {
+        const rows = write.newValue.filter(r => r.tabId === proof.tabId); assert.equal(rows.length, 1);
+        assert.deepEqual(rows[0], record, 'Committed read-back and independent persistence events must agree.');
+    }
+    assert.deepEqual(Object.keys(record).sort(), [...Object.keys(expected), 'currentOwnership'].sort());
+    for (const key of Object.keys(expected)) assert.deepEqual(record[key], expected[key]);
+}
+
+export function assertSpotlightActionCommitted(before, after, { command, context, resultId, title, events, request, priorPin, freshTodayCreations = [] }) {
     assert(['pinCurrentTab', 'removeCurrentPin', 'createSpaceFolder'].includes(command)); stable(before, after);
     assert.deepEqual(quietEvents(events), [], 'Pin/removal/folder actions never mutate native pages or open a physical panel.');
     const expectedBookmarks = structuredClone(before.bookmarks), source = exact(before.spaces, context.spaceId), root = exact(flat(expectedBookmarks), context.bookmarkFolderId);
     const expectedSpaces = structuredClone(before.spaces), expectedSource = exact(expectedSpaces, source.id), bindings = structuredClone(before.bindings), aliases = structuredClone(before.aliases);
     const newNode = command === 'removeCurrentPin' ? null : exact(flat(after.bookmarks), resultId);
+    // A saved record deliberately omits its dormant Today witness. Only a
+    // separately validated earlier pin of this same live source can supply it
+    // again; newly linked same-URL copies never inherit the source witness.
+    let restoredTodayWitness;
+    if (priorPin) {
+        assert.equal(command, 'removeCurrentPin');
+        const priorContext = priorPin.request.context;
+        assert(priorPin.after.workerContext?.contextId);
+        assert.deepEqual(priorPin.before.workerContext, priorPin.after.workerContext);
+        assert.deepEqual(before.workerContext, priorPin.after.workerContext);
+        assert.deepEqual(after.workerContext, before.workerContext);
+        assertLifecycleExtension(priorPin.after.nativeLifecycle, before.nativeLifecycle);
+        assertLifecycleExtension(before.nativeLifecycle, after.nativeLifecycle);
+        const sourceNative = exact(before.tabs, context.sourceTabId);
+        const sincePin = after.nativeLifecycle.slice(priorPin.after.nativeLifecycle.length);
+        assert(!sincePin.some(e => e.type === 'tabs.onCreated' && e.data[0]?.id === context.sourceTabId));
+        assertNativeIncarnationLifecycle(sourceNative, sincePin);
+
+        assertSpotlightActionCommitted(priorPin.before, priorPin.after, { command: 'pinCurrentTab',
+            context: priorContext, resultId: priorPin.resultId, events: priorPin.trace.events, request: priorPin.request });
+        for (const key of ['sourceTabId', 'windowId', 'spaceId', 'bookmarkFolderId']) assert.equal(priorContext[key], context[key]);
+        assert.equal(priorPin.resultId, context.tab.bookmark.id);
+        assert.equal(before.bindings[context.sourceTabId]?.bookmarkId, priorPin.resultId);
+        const priorTab = exact(priorPin.after.tabs, context.sourceTabId), currentTab = exact(before.tabs, context.sourceTabId);
+        for (const key of ['id', 'windowId', 'url', 'pinned', 'incognito']) assert.equal(currentTab[key], priorTab[key]);
+        const priorRecords = priorPin.before.savedSnapshot.filter(record => record.tabId === context.sourceTabId);
+        assert.equal(priorRecords.length, 1);
+        assert.equal(priorRecords[0].section, 'temporaryTabs');
+        assert.equal(priorRecords[0].spaceId, context.spaceId);
+        assert.equal(priorRecords[0].url, currentTab.url);
+        restoredTodayWitness = priorRecords[0].currentOwnership;
+        if (restoredTodayWitness) {
+            assertCurrentEpochAuthority(before, restoredTodayWitness.epoch);
+            assertCurrentEpochAuthority(after, restoredTodayWitness.epoch);
+            assert.equal(restoredTodayWitness.windowId, context.windowId);
+            assert.equal(restoredTodayWitness.spaceId, context.spaceId);
+            assert.equal(restoredTodayWitness.bookmarkFolderId, context.bookmarkFolderId);
+        }
+    }
     let affected = [];
     if (command === 'removeCurrentPin') {
         assert.equal(resultId, context.tab.bookmark.id); const old = exact(flat(expectedBookmarks), resultId), parent = exact(flat(expectedBookmarks), old.parentId);
@@ -313,14 +476,39 @@ export function assertSpotlightActionCommitted(before, after, { command, context
         const expected = structuredClone(old);
         if (affected.includes(old.tabId)) {
             expected.section = command === 'pinCurrentTab' ? 'spaceBookmarks' : 'temporaryTabs';
-            if (command === 'pinCurrentTab') expected.pinnedState = bindings[old.tabId]; else { delete expected.pinnedState; delete expected.nameOverride; }
+            if (command === 'pinCurrentTab') {
+                assert.equal(old.tabId, context.sourceTabId);
+                assert.equal(old.section, 'temporaryTabs');
+                expected.pinnedState = bindings[old.tabId];
+                // This exact live tab is now saved, so its Today-only witness
+                // must retire. Unrelated live and historical witnesses survive.
+                delete expected.currentOwnership;
+            } else {
+                delete expected.pinnedState; delete expected.nameOverride;
+                if (old.tabId === context.sourceTabId && restoredTodayWitness) expected.currentOwnership = structuredClone(restoredTodayWitness);
+            }
         }
         if (command !== 'createSpaceFolder' && old.spaceId === source.id && before.tabs.some(tab => tab.id === old.tabId))
             expected.order = expectedSource[expected.section].indexOf(old.tabId);
         return expected;
     });
     const byId = records => [...records].sort((a, b) => a.tabId - b.tabId);
-    assert.deepEqual(byId(after.savedSnapshot), byId(expectedSaved), 'Persist every exact native identity, bookmark metadata and canonical section/order once, retaining unrelated records.');
+    assert(Array.isArray(freshTodayCreations));
+    assert.equal(new Set(freshTodayCreations.map(p => p.tabId)).size, freshTodayCreations.length);
+    for (const proof of freshTodayCreations) { assert.equal(command, 'removeCurrentPin'); assert(affected.includes(proof.tabId)); assert.notEqual(proof.tabId, context.sourceTabId); }
+    const actualRecords = byId(after.savedSnapshot), expectedRecords = byId(expectedSaved);
+    assert.equal(actualRecords.length, expectedRecords.length);
+    const usedTokens = new Set([...(priorPin?.before.savedSnapshot || []), ...before.savedSnapshot].flatMap(r => r.currentOwnership ? [r.currentOwnership.incarnation, r.currentOwnership.transaction] : []));
+    for (let index = 0; index < expectedRecords.length; index++) {
+        const expected = expectedRecords[index], actual = actualRecords[index], proof = freshTodayCreations.find(p => p.tabId === expected.tabId);
+        if (proof) {
+            assertLifecycleExtension(proof.lifecycleEvents, after.nativeLifecycle);
+            assertCurrentEpochAuthority(after, proof.epoch);
+            assertNativeIncarnationLifecycle(exact(before.tabs, proof.tabId), after.nativeLifecycle);
+            assertFreshTodayWitness(actual, expected, proof, before, priorPin, events, usedTokens);
+        }
+        else assert.deepEqual(actual, expected, 'Persist every exact native identity and preserve unrelated ownership records.');
+    }
     for (const id of affected) assert.equal(after.savedSnapshot.filter(item => item.tabId === id).length, 1);
     if (command === 'createSpaceFolder') assert.deepEqual(snapshots(after.snapshots), snapshots(before.snapshots), 'Empty-folder creation cannot change leaf search results or native ownership.');
     const receipt = after.journal.filter(item => item.fingerprint === JSON.stringify(request)); assert.equal(receipt.length, 1); assert.equal(receipt[0].response?.ok, true);
@@ -378,12 +566,16 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
         await settleStore();
         const currentSnapshots = { [windowId]: await snapshot(windowId), [fixture.windowB]: await snapshot(fixture.windowB) };
         const state = await apiPage.evaluate(async () => {
-            const local = await chrome.storage.local.get(['spaces', 'pinnedTabStatesById', 'tabNameOverridesById', 'persistentFavorites', 'spaceTabSnapshot', 'arcifyBridgePairingGeneration']);
-            const session = await chrome.storage.session.get(['activeSpaces', 'spaceGroupProjection', 'favoriteSession', 'spotlightBridgeRequests']);
-            return { tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, title, pinned, incognito, active, groupId, splitViewId }) => ({ id, windowId, index, url, pendingUrl: pendingUrl || null, title, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1 })).sort((a, b) => a.id - b.id),
+            const local = await chrome.storage.local.get(['spaces', 'pinnedTabStatesById', 'tabNameOverridesById', 'persistentFavorites', 'spaceTabSnapshot', 'arcifyBridgePairingGeneration', 'arcifyBridgePeerId', 'favoriteContinuity']);
+            const session = await chrome.storage.session.get(['activeSpaces', 'spaceGroupProjection', 'favoriteSession', 'spotlightBridgeRequests', 'favoriteContinuityReceipt', 'spaceExplicitTodayEpoch']);
+            const backgrounds = await chrome.runtime.getContexts({ contextTypes: ['BACKGROUND'] });
+            if (backgrounds.length !== 1 || backgrounds[0].contextType !== 'BACKGROUND' || !backgrounds[0].contextId) throw new Error('One exact Arcify worker context is required.');
+            return { workerContext: { contextId: backgrounds[0].contextId }, nativeLifecycle: globalThis.__spaceActionObservation.creationLifecycle,
+                tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, title, pinned, incognito, active, groupId, splitViewId }) => ({ id, windowId, index, url, pendingUrl: pendingUrl || null, title, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1 })).sort((a, b) => a.id - b.id),
                 windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, state }) => ({ id, type, incognito, focused, state })).sort((a, b) => a.id - b.id),
                 spaces: (local.spaces || []).map(({ id, name, color, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs }) => ({ id, name, color, icon, bookmarkFolderId, spaceBookmarks, temporaryTabs })), bookmarks: await chrome.bookmarks.getTree(),
                 bindings: local.pinnedTabStatesById || {}, aliases: local.tabNameOverridesById || {}, favorites: local.persistentFavorites || [], savedSnapshot: local.spaceTabSnapshot || [],
+                ownershipEpoch: { peerId: local.arcifyBridgePeerId ?? null, receipt: session.favoriteContinuityReceipt ?? null, continuity: local.favoriteContinuity ?? null, session: session.spaceExplicitTodayEpoch ?? null },
                 pairingGeneration: local.arcifyBridgePairingGeneration ?? null, activeSpaces: session.activeSpaces || {}, projection: session.spaceGroupProjection || {}, favoriteSession: session.favoriteSession || null,
                 journal: session.spotlightBridgeRequests || [], groups: (await chrome.tabGroups.query({})).sort((a, b) => a.id - b.id) };
         });
@@ -452,10 +644,13 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
             await checkpoint('prompt-cancelled-with-zero-writes', { command, method, before, after, rows, prompt, trace, screenshot });
         });
     };
-    const commit = async (page, command, sourceContext, { title, keyboard = false } = {}) => {
+    const commit = async (page, command, sourceContext, { title, keyboard = false, priorPin, freshCreation } = {}) => {
         const { surface, rows, inputOwner } = await ready(page, command); let outcome;
         await ui(page, `Perform ${command} using the visible Spotlight UI`, async () => {
-            const before = await read(); await reset(surface);
+            const before = await read();
+            const freshTodayCreations = freshCreation ? [captureFreshTodayCreationProof(before, priorPin, freshCreation.tabId, freshCreation.events,
+                before.nativeLifecycle, freshCreation.workerContext)].filter(Boolean) : [];
+            await reset(surface);
             if (keyboard) await pressAction(surface); else await clickAction(surface, command);
             let prompt;
             if (['createSpaceFolder', 'removeCurrentPin'].includes(command)) {
@@ -474,13 +669,13 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
             const trace = await observed(surface, inputOwner);
             // Persist raw observations before any oracle can throw. This checkpoint
             // records an unvalidated attempt, never a successful action.
-            await checkpoint('action-observed-before-validation', { command, sourceContext, before, after, rows, prompt, trace });
+            await checkpoint('action-observed-before-validation', { command, sourceContext, before, after, rows, prompt, trace, freshTodayCreations });
             const request = assertSpotlightActionRequest(trace.events, command, sourceContext, spotlightId, title ? { title } : command === 'removeCurrentPin' ? { confirmed: true } : {});
             assertSpotlightActionInput(trace.input, command, { confirmed: Boolean(prompt), ...(title ? { folderTitle: title } : {}) });
             const receipt = after.journal.find(entry => entry.fingerprint === JSON.stringify(request));
             const resultId = receipt.response[command === 'createSpaceFolder' ? 'folderId' : command === 'openSettings' ? 'tabId' : 'bookmarkId'];
             if (command === 'openSettings') { const created = assertSpotlightSettingsOpened(before, after, { context: sourceContext, arcifyId, events: trace.events }); assert.equal(created.id, resultId); owned.push(resultId); }
-            else assertSpotlightActionCommitted(before, after, { command, context: sourceContext, resultId, title, events: trace.events, request });
+            else assertSpotlightActionCommitted(before, after, { command, context: sourceContext, resultId, title, events: trace.events, request, priorPin, freshTodayCreations });
             if (['createSpaceFolder', 'pinCurrentTab'].includes(command)) roots.push(resultId);
             await checkpoint('action-committed-once', { command, before, after, rows, prompt, trace, request, resultId }); outcome = { resultId, before, after, trace, request };
         });
@@ -505,13 +700,16 @@ export async function exerciseSpotlightActions({ apiPage, spotlightOptions, newT
         const pin = await commit(sourcePage, 'pinCurrentTab', todayContext, { keyboard: true }); pinnedId = pin.resultId;
         assert.notEqual(pinnedId, decoy.id); await capture(sourcePage, 'pinned-current-overlay-keeps-page');
         await closeOverlay();
+        const linkedWorkerBefore = await apiPage.evaluate(readSpotlightWorkerContext);
         const linked = await openSavedPage({ windowId: fixture.windowB, spaceId: source.id, bookmarkId: pinnedId, url }); owned.push(linked.tab.id); pages.set(linked.tab.id, linked.page);
+        const linkedCreation = { tabId: linked.tab.id, events: await apiPage.evaluate(() => globalThis.__spaceActionObservation.events), workerContext: await apiPage.evaluate(readSpotlightWorkerContext) };
+        assert.deepEqual(linkedCreation.workerContext, linkedWorkerBefore);
         await linked.page.waitForSelector('#action-page-state'); await ui(linked.page, 'Keep distinct linked-copy input', () => linked.page.type('#action-page-state', `-${linked.tab.id}`));
         await bridge('activateSpace', { windowId: fixture.windowB, spaceId: counterpart.id });
         await openOverlay(sourceTab.id); const savedContext = await context(sourceTab.id, 'saved', pinnedId);
         await cancelPrompt(sourcePage, 'removeCurrentPin', savedContext, 'Escape');
         await cancelPrompt(sourcePage, 'removeCurrentPin', savedContext, 'Cancel');
-        const remove = await commit(sourcePage, 'removeCurrentPin', savedContext);
+        const remove = await commit(sourcePage, 'removeCurrentPin', savedContext, { priorPin: pin, freshCreation: linkedCreation });
         assert.deepEqual([sourceTab.id, linked.tab.id].sort((a, b) => a - b), remove.before.tabs.filter(tab => remove.before.bindings[tab.id]?.bookmarkId === pinnedId).map(tab => tab.id));
         assert.equal(remove.after.bindings[decoyLive.tab.id]?.bookmarkId, decoy.id);
         await capture(sourcePage, 'removed-exact-pin-keeps-linked-pages');

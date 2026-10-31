@@ -35,10 +35,11 @@ export async function detachGlobalTabs(tabIds, options = {}) {
 export async function syncSpaceGroups(spaces, activeSpaces = {}, globalTabIds = [], options = {}) {
     // Transient exclusion is independent of global Favorite ownership. Never
     // turn an excluded tab into a Favorite detachment request.
-    const { excluded, excludedWindow, query } = exclusionHooks(options);
     // Ownership promotion must eject only the exact Favorite, even when group
     // projection is disabled; otherwise a prior collapsed group hides it.
     await detachGlobalTabs(globalTabIds, options);
+    const { excluded, excludedWindow, query } = exclusionHooks({...options,
+        isExcludedWindow:id=>options.isExcludedWindow?.(id)||options.isProjectionDeferredWindow?.(id)});
     const globalIds = new Set(globalTabIds);
     const { syncTabGroups = false } = await chrome.storage.sync.get('syncTabGroups');
     if (!syncTabGroups) {
@@ -50,6 +51,13 @@ export async function syncSpaceGroups(spaces, activeSpaces = {}, globalTabIds = 
     const tabs = await query({});
     const byId = new Map(tabs.map(t => [t.id, t]));
     const next = {};
+    // Temporary layout deferral must not discard a live projection's identity.
+    // Private/transient exclusions keep their existing removal semantics.
+    for(const [key,id] of Object.entries(spaceGroupProjection)){
+        const group=groups.find(g=>g.id===id);
+        if(group && !options.isExcludedWindow?.(group.windowId) && options.isProjectionDeferredWindow?.(group.windowId)
+            && spaces.some(space=>key===`${space.id}:${group.windowId}`))next[key]=id;
+    }
     const deferred = new Map();
     const inspectPartition = async (windowId, ids, groupId) => {
         const current = (await query({ windowId })).filter(tab => tab.windowId === windowId);

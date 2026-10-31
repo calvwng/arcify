@@ -2,8 +2,8 @@ import { encodeFavoriteContinuityState as encode } from './favorite-continuity.j
 import { RECOVERY_OBSERVATION_TYPE, validateRecoveryReport } from './recovery-report-protocol.js';
 
 export { RECOVERY_OBSERVATION_TYPE } from './recovery-report-protocol.js';
-const LOCAL_KEYS = ['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'persistentFavorites', 'spaceSavedMoveJournal', 'archiveReopenClaims'];
-const SESSION_KEYS = ['spaceSession', 'spaceRestoreQueue', 'spaceRecoveryCandidates', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'favoriteSession'];
+const LOCAL_KEYS = ['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'persistentFavorites', 'spaceSavedMoveJournal', 'archiveReopenClaims', 'spaceDurableTodayLayout'];
+const SESSION_KEYS = ['spaceSession', 'activeSpaces', 'spaceRestoreQueue', 'spaceRecoveryCandidates', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'favoriteSession'];
 const clone = value => structuredClone(value);
 const array = value => Array.isArray(value) ? value : [];
 const unavailable = () => Object.assign(new Error('Recovery status is unavailable. No recovery action was requested.'), { code: 'RECOVERY_STATUS_UNAVAILABLE' });
@@ -21,26 +21,30 @@ export function createRecoveryObserver(store, api = chrome, { now = Date.now, mo
         if (event?.addListener) { event.addListener(changed); listeners.push(() => event.removeListener(changed)); }
     }
     function memory() {
-        return clone({ initialized: store.initialized === true, spaces: array(store.spaces),
+        return clone({ initialized: store.initialized === true, spaces: array(store.spaces), active: store.active || {},
             restoreQueue: array(store.restoreQueue), recoveryCandidates: [...(store.recoveryCandidates || [])],
             provisional: [...(store.provisional || [])], restoredRanks: [...(store.restoredRanks || [])],
             windowKeys: [...(store.windowKeys || [])], restoreWindowKeys: [...(store.restoreWindowKeys || [])],
             snapshotByTab: [...(store.snapshotByTab || [])],
             pendingCreations: [...(store.pendingCreations || [])], archivePending: [...(store.archiveStore?.pendingCreatedIds || [])],
+            durableLayout: store.durableLayout || null, layoutPending: [...(store.layoutPending || [])],
             favoriteInitialized: store.favoriteStore?.initialized === true,
             favoriteDirty: store.favoriteStore?.persistenceDirty === true,
             favorites: array(store.favoriteStore?.items), favoriteState: store.favoriteStore?.state ?? null,
             transient: store.transientWindows?.observationState?.() ?? null });
     }
     const reads = async () => {
-        const [local, session, tabs, windows] = await Promise.all([
+        const [local, session, tabs, windows, groupSyncSetting] = await Promise.all([
             api.storage.local.get(LOCAL_KEYS), api.storage.session.get(SESSION_KEYS),
-            api.tabs.query({}), api.windows.getAll({ populate: false })
+            api.tabs.query({}), api.windows.getAll({ populate: false }),
+            api.storage.sync?.get ? api.storage.sync.get('syncTabGroups') : Promise.resolve(null)
         ]);
         // Keep private-window data out of the policy input as well as the output.
         const eligibleWindows = array(windows).filter(w => w.type === 'normal' && w.incognito === false);
         const ids = new Set(eligibleWindows.map(w => w.id));
-        return { local, session, tabs: array(tabs).filter(t => t.incognito === false && ids.has(t.windowId))
+        return { local, session, groupSyncEnabled:groupSyncSetting===null?null:typeof groupSyncSetting.syncTabGroups==='boolean'
+            ?groupSyncSetting.syncTabGroups:groupSyncSetting.syncTabGroups===undefined?false:null,
+            tabs: array(tabs).filter(t => t.incognito === false && ids.has(t.windowId))
             .map(tab => ({ ...tab, knownTransient: store.transientWindows?.isKnownExcluded?.(tab) === true })),
             windows: eligibleWindows.map(({ id, type, incognito }) => ({ id, type, incognito })) };
     };
