@@ -471,6 +471,41 @@ test('individual close waking a cold worker preserves event-time intent and upda
     f.tabs.splice(f.tabs.findIndex(t=>t.id===101),1);await chrome.tabs.onRemoved.emit(101,{windowId:10,isWindowClosing:false});await cold.chain;
     const c=f.local[DURABLE_LAYOUT_KEY].cohorts.find(c=>c.binding?.windowId===10);assert(!c.binding.tabIds.includes(101));assert(!cold.layoutPending.has(c.id));
 });
+async function crossWindowReplay(){
+    const f=fixture();
+    for(const tab of f.tabs)tab.url=`https://cross-window.test/${tab.id}`;
+    f.local.pinnedTabStatesById={};f.local.tabNameOverridesById={};
+    f.store.spaces[0].spaceBookmarks=[];f.store.spaces[1].temporaryTabs=[];
+    const expected=[9,3,10,1,6,4,2,5];f.store.spaces[0].temporaryTabs=[...expected];f.store.restoredRanks.clear();
+    const identity={epoch:'same-browser-epoch-token',generation:'same-browser-writer-token'};
+    const favoriteStore={initialize:async()=>{},reconcile:async()=>{},ownsTab:()=>false,ownershipPersistence:{browserIdentity:async()=>identity}};
+    f.store.favoriteStore=favoriteStore;await f.store.persist();
+    // An extra tab invalidates the old exact binding, while every existing ID
+    // and its global Space order still have same-browser continuity proof.
+    f.tabs.push({id:9900,index:20,windowId:10,url:'https://extra.test/',pinned:false,incognito:false});
+    for(const key of Object.keys(f.session))delete f.session[key];
+    const s=new SpaceStore();s.favoriteStore=favoriteStore;s.discoverBookmarkSpaces=async()=>false;
+    return {f,s,identity,expected};
+}
+test('same-browser replay keeps cross-window canonical order around a partially restoring layout',async()=>{
+    const {s,expected}=await crossWindowReplay();await s.initialize();
+    assert.deepEqual(s.spaces[0].temporaryTabs.filter(id=>expected.includes(id)),expected);
+});
+
+for(const race of ['epoch','missing','conflicting','duplicate'])test(`same-epoch layout retention revalidates ${race} before committing`,async()=>{
+    const {f,s,identity}=await crossWindowReplay();const before=structuredClone(f.local[DURABLE_LAYOUT_KEY]);let fired=false;
+    f.hooks.query=()=>{
+        if(fired||!s.layoutPending?.size)return;fired=true;
+        if(race==='epoch')identity.epoch='different-browser-epoch-token';
+        else{
+            if(race!=='duplicate')s.spaces[0].temporaryTabs=s.spaces[0].temporaryTabs.filter(id=>id!==3);
+            if(race!=='missing')s.spaces[1].temporaryTabs.push(3);
+        }
+    };
+    await assert.rejects(s.initialize(),/Current ownership changed during layout retention/);assert(fired);
+    assert.deepEqual(f.local[DURABLE_LAYOUT_KEY],before);
+});
+
 test('exact saved pins sharing pending layout URLs retain snapshots while Today neighbours stay deferred',async()=>{
     const {f,s}=await changedPending();
     const url='https://layout.test/101';

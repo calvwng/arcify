@@ -220,7 +220,20 @@ export async function restoreDurableLayout(store,tabs) {
         plans.push({c,w,placed,mapped});
     }
     if(!plans.length)return;
-    const restoring=plans.flatMap(plan=>plan.placed).filter(({tab})=>!explicitTodayOwner(store,tab));
+    // A changed window context can make a cohort pending even though exact
+    // same-epoch members were replayed already. Do not remove/reinsert those
+    // members: their canonical order may interleave tabs from other windows.
+    const retained=[];
+    const uniquelyOwned=({p,tab})=>root(store,p)?.temporaryTabs.includes(tab.id)
+        &&store.spaces.filter(s=>s.temporaryTabs.includes(tab.id)||s.spaceBookmarks.includes(tab.id)).length===1
+        &&!store.spaces.some(s=>s.spaceBookmarks.includes(tab.id));
+    const restoring=plans.flatMap(plan=>plan.placed.filter(item=>{
+        if(explicitTodayOwner(store,item.tab))return false;
+        if(encode(plan.c.binding?.epoch)===encode(epoch)
+            &&plan.c.binding?.tabIds[plan.c.signature.findIndex(t=>t.index===item.p.index)]===item.tab.id
+            &&uniquelyOwned(item)){retained.push({plan,...item});return false;}
+        return true;
+    }));
     const first=restoring[0];
     const stage=first?await stageExplicitToday(store,restoring.map(x=>x.tab),{spaceId:first.p.spaceId,bookmarkFolderId:first.p.bookmarkFolderId}):null;
     const validate=async()=>{
@@ -243,6 +256,10 @@ export async function restoreDurableLayout(store,tabs) {
                 || plan.placed.some(({p,tab})=>!root(store,p)||metadata.pinnedTabStatesById?.[tab.id]?.bookmarkId
                     || !eligible(store,w.tabs.find(t=>t.id===tab.id))||w.tabs.find(t=>t.id===tab.id)?.splitViewId!==tab.splitViewId))throw new Error('Native layout changed during restoration. Saved layout was retained.');
         }
+        if(retained.length&&(encode(await explicitTodayEpoch(store))!==encode(epoch)
+            ||retained.some(item=>encode(item.plan.c.binding?.epoch)!==encode(epoch)
+                ||item.plan.c.binding?.tabIds[item.plan.c.signature.findIndex(t=>t.index===item.p.index)]!==item.tab.id
+                ||!uniquelyOwned(item))))throw new Error('Current ownership changed during layout retention.');
     };
     await validate();
     for(const {p,tab} of restoring){

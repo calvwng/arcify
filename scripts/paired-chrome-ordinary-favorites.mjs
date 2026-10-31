@@ -372,7 +372,7 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
         const projected = await get(), snap = await snapshot(windowId);
         const values = await apiPage.evaluate(async ({ sourceIds, includeWitness, includeSpacePins }) => {
             const local = await chrome.storage.local.get(['persistentFavorites', 'favoriteIconCache', 'favoriteContinuity', ...(includeWitness ? ['spaces'] : []),
-                ...(includeSpacePins ? ['pinnedTabStatesById', 'tabNameOverridesById', 'spaceTabSnapshot'] : [])]);
+                ...(includeSpacePins ? ['pinnedTabStatesById', 'tabNameOverridesById', 'spaceTabSnapshot', 'spaceDurableTodayLayout'] : [])]);
             const session = await chrome.storage.session.get(['favoriteSession', 'favoriteContinuityReceipt', ...(includeWitness ? ['activeSpaces'] : [])]);
             const sources = await Promise.all(sourceIds.map(async id => {
                 const [node] = await chrome.bookmarks.get(id);
@@ -381,7 +381,10 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
             return { durable: local.persistentFavorites, iconCache: local.favoriteIconCache ?? null, continuity: local.favoriteContinuity,
                 session: session.favoriteSession, receipt: session.favoriteContinuityReceipt, tabs: await chrome.tabs.query({}), sources,
                 ...(includeSpacePins ? { spacePinMetadata: { pinnedTabStatesById: local.pinnedTabStatesById || {},
-                    tabNameOverridesById: local.tabNameOverridesById || {}, spaceTabSnapshot: local.spaceTabSnapshot || [] } } : {}),
+                    tabNameOverridesById: local.tabNameOverridesById || {}, spaceTabSnapshot: local.spaceTabSnapshot || [] },
+                    // Synthetic disposable fixture only: distinguish preserved
+                    // pending layout evidence from a grouping regression.
+                    durableLayout: local.spaceDurableTodayLayout || null } : {}),
                 ...(includeWitness ? { groupState: { spaces: local.spaces, groups: await chrome.tabGroups.query({}), windows: await chrome.windows.getAll({}),
                     syncTabGroups: (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups ?? false, activeSpaces: session.activeSpaces || {} } } : {}) };
         }, { sourceIds: sources.map(source => source.id), includeWitness, includeSpacePins: includeWitness && Boolean(evidence.spacePinSetup) });
