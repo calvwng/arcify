@@ -1,0 +1,65 @@
+name: Little Arc URL diagnostic
+on:
+  push:
+    branches: ['diagnostics/little-arc-url-20261031']
+    paths:
+      - '.github/workflows/little-arc-url-diagnostic.yml'
+      - 'scripts/little-arc-url-diagnostic/**'
+permissions:
+  contents: read
+jobs:
+  browser-metadata:
+    if: github.repository == 'calvwng/arcify'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        spotlight:
+          - '76559fbeaacc055ff7f987c0adf5b8b630820ada'
+          - 'b8b193c1f803179f86ab2e2397e5f1169256f49d'
+    env:
+      CI: 'true'
+      SPOTLIGHT_SHA: ${{ matrix.spotlight }}
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify
+          ref: ${{ github.sha }}
+          path: arcify
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: ${{ matrix.spotlight }}
+          path: spotlight
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: arcify/scripts/paired-chrome-runtime/package-lock.json
+      - name: Verify exact source and install existing locked driver only
+        run: |
+          set -euo pipefail
+          test "$(git -C arcify rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C spotlight rev-parse HEAD)" = "$SPOTLIGHT_SHA"
+          test -z "$(git -C spotlight status --porcelain)"
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm test --prefix arcify/scripts/paired-chrome-runtime
+          node --test arcify/scripts/little-arc-url-diagnostic/contract.test.mjs
+      - name: Observe synthetic navigation and unchanged broker
+        working-directory: arcify
+        run: |
+          set -o pipefail
+          mkdir -p test-results/little-arc-url-diagnostic
+          xvfb-run --auto-servernum node scripts/little-arc-url-diagnostic/run.mjs ../spotlight 2>&1 | tee test-results/little-arc-url-diagnostic/runner.log
+      - name: Retain synthetic evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: little-arc-url-${{ matrix.spotlight }}
+          path: arcify/test-results/little-arc-url-diagnostic/
+          if-no-files-found: warn
+          retention-days: 7
