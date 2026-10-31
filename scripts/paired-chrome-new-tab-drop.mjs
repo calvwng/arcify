@@ -4,12 +4,15 @@ import { locateFreshDragGeometry } from './paired-chrome-ui.mjs';
 import { favoriteDragInputClient } from './paired-chrome-favorites-marker.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 
-export function readStickyNewTab() {
+export async function readStickyNewTab() {
+    const hosting={tab:await chrome.tabs.getCurrent()||null,windowId:(await chrome.windows.getCurrent()).id};
     const row=document.getElementById('newTabBtn'),space=row?.closest('.space.active'),port=space?.querySelector('.space-content');
     const box=node=>{if(!node)return null;const r=node.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom};};
     const style=row?getComputedStyle(row):null,canvas=document.createElement('canvas');canvas.width=canvas.height=1;
     const ctx=canvas.getContext('2d'),pixels=color=>{ctx.clearRect(0,0,1,1);ctx.fillStyle=color;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
-    return {row:box(row),port:box(port),header:box(space?.querySelector('.space-header')),favorites:box(document.getElementById('pinnedFavicons')),
+    return {hosting,activeSpaceId:space?.dataset.spaceId,activeSpaceIds:[...document.querySelectorAll('.space.active')].map(node=>node.dataset.spaceId),
+        renderedTodayIds:[...space?.querySelectorAll('[data-tab-type="temporary"] .tab[data-tab-id]')||[]].map(node=>Number(node.dataset.tabId)),
+        row:box(row),port:box(port),header:box(space?.querySelector('.space-header')),favorites:box(document.getElementById('pinnedFavicons')),
         divider:box(space?.querySelector('.temp-header')),position:style?.position,opacity:Number(style?.opacity),background:style?.backgroundColor,pixels:style?pixels(style.backgroundColor):null,
         scrollTop:port?.scrollTop,scrollHeight:port?.scrollHeight,clientHeight:port?.clientHeight,theme:document.documentElement.dataset.theme,
         label:row?.querySelector('[data-new-tab-label]')?.textContent,eligible:row?.dataset.windowDrag||null,hover:row?.classList.contains('new-tab-window-hover'),
@@ -29,6 +32,27 @@ export function assertStickyNewTab(state,{stuck=false,drag=false,hovered=drag,ba
     if(drag){assert.equal(state.eligible,'eligible');assert.equal(state.plus,'none');assert.notEqual(state.windowIcon,'none');}
     if(baseline){assert(Math.abs(state.row.height-baseline.row.height)<=.5);assert(Math.abs(state.row.width-baseline.row.width)<=.5,'Drag label/icon cannot shift row geometry.');}
     return state;
+}
+export function assertStickyFixtureReady(sample,{ids,spaceId,windowId}) {
+    const g=sample.geometry;
+    assert.equal(g.hosting.tab,null,'Sticky fixture must remain a native panel, not a tab.');
+    assert.equal(g.hosting.windowId,windowId);assert.deepEqual(g.activeSpaceIds,[spaceId]);assert.equal(g.activeSpaceId,spaceId);
+    assert.equal(new Set(ids).size,ids.length,'Fixture-owned IDs must be unique.');
+    const exact=values=>values.filter(id=>ids.includes(id)).sort((a,b)=>a-b),expected=[...ids].sort((a,b)=>a-b);
+    assert.deepEqual(exact(g.renderedTodayIds),expected,'Every exact owned Today row must render once.');
+    for(const id of ids){
+        const tabs=sample.raw.tabs.filter(tab=>tab.id===id);assert.equal(tabs.length,1);assert.equal(tabs[0].windowId,windowId);
+        const owners=sample.raw.spaces.filter(space=>[...space.spaceBookmarks,...space.temporaryTabs].includes(id));
+        assert.equal(owners.length,1);assert.equal(owners[0].id,spaceId);assert(!owners[0].spaceBookmarks.includes(id));
+        assert.equal(owners[0].temporaryTabs.filter(value=>value===id).length,1);
+    }
+    assert(g.scrollHeight-g.clientHeight>g.row.height*2,'Real fixture content must scroll without injected layout styles.');
+    return sample;
+}
+export async function waitForStickyFixtureReady({read,poll,request,observe}) {
+    return poll(async()=>{const sample=await read();observe(sample);return sample;},sample=>{
+        try{assertStickyFixtureReady(sample,request);return true;}catch{return false;}
+    },'exact fixture-owned Today rows and original sticky overflow readiness');
 }
 export function assertNoNewTabDropMutation(before,after) {
     const tabs=s=>s.tabs.map(({id,windowId,index,url,pinned,groupId})=>({id,windowId,index,url,pinned,groupId})).sort((a,b)=>a.id-b.id);
@@ -79,7 +103,7 @@ export async function cancelHeldNewTabDrag(page,client,tabId) {
 }
 
 export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll,sourceId,space,base,create,assign,pageForUrl,state,raw,assertMoved,checkpoint}) {
-    const page=panel.page,ids=[],originalTheme=await apiPage.$eval('#themeMode',node=>node.value);let primaryError;
+    const page=panel.page,ids=[],originalTheme=await apiPage.$eval('#themeMode',node=>node.value);let primaryError,lastReadiness;
     const row=id=>`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`;
     const geometry=()=>page.evaluate(readStickyNewTab);
     const capture=async label=>{const shot=await ui(page,`Capture ${label}`,()=>screenshot(page,label,true));assert(shot);return shot;};
@@ -161,7 +185,10 @@ export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll
         for(let i=0;i<36;i++){
             await fill(i);const g=await geometry();if(i>=11&&g.scrollHeight-g.clientHeight>g.row.height*3)break;
         }
-        assert((await geometry()).scrollHeight-(await geometry()).clientHeight>(await geometry()).row.height*2,'Real fixture content must scroll without injected layout styles.');
+        const readiness=await waitForStickyFixtureReady({read:async()=>({geometry:await geometry(),raw:await raw()}),poll,
+            request:{ids,spaceId:space.id,windowId:sourceId},observe:sample=>{lastReadiness=sample;}});
+        await checkpoint('sticky-fixture-ready-before-validation',{ids:[...ids],readiness});
+        assertStickyFixtureReady(readiness,{ids,spaceId:space.id,windowId:sourceId});
         for(const mode of ['light','dark']){
             await ui(apiPage,`Select real ${mode} appearance`,()=>apiPage.select('#themeMode',mode));
             await poll(geometry,g=>g.theme===mode,'theme reached native panel');await scroll(-100000);await poll(geometry,g=>g.scrollTop===0,'normal Today placement');
@@ -172,7 +199,13 @@ export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll
         let id=Number(await visibleSource());assert(ids.includes(id));await drag(id,{cancel:true});await drag(id,{cancel:true});await drag(id);
         id=Number(await visibleSource());assert(ids.includes(id));await drag(id);
         id=Number(await visibleSource());assert(ids.includes(id));await drag(id,{stale:true});
-    }catch(error){primaryError=error;throw error;}
+    }catch(error){
+        primaryError=error;const failure={error:{name:error.name,message:error.message,stack:error.stack},ids:[...ids],spaceId:space.id,windowId:sourceId,lastReadiness};
+        try{failure.geometry=await geometry();}catch(diagnostic){failure.geometryError=diagnostic.message;}
+        try{failure.raw=await raw();}catch(diagnostic){failure.stateError=diagnostic.message;}
+        try{await checkpoint('sticky-fixture-failed-before-cleanup',failure);}catch(diagnostic){error.stickyDiagnosticError=diagnostic.message;}
+        throw error;
+    }
     finally{
         const errors=[];
         for(const action of [()=>ui(apiPage,'Restore fixture appearance',()=>apiPage.select('#themeMode',originalTheme)),()=>apiPage.evaluate(async ids=>{const live=new Set((await chrome.tabs.query({})).map(t=>t.id));const present=ids.filter(id=>live.has(id));if(present.length)await chrome.tabs.remove(present);},ids)])try{await action();}catch(error){errors.push(error.message);}
