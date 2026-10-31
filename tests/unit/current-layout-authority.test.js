@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './today-recovery-fixture.js';
 import { stageCurrentLayoutAuthority, stageObservedLayoutCreation } from '../../current-layout-authority.js';
-import { explicitTodayEpochs } from '../../explicit-today-ownership.js';
+import { explicitTodayEpochs, stageExplicitToday } from '../../explicit-today-ownership.js';
 import { DURABLE_LAYOUT_KEY } from '../../durable-today-layout.js';
 import { SpaceStore } from '../../space-store.js';
 
@@ -28,6 +28,38 @@ test('valid session proof remains acceptable while browser issuance is preferred
     await f.store.persist();assert.deepEqual(f.local.spaces,before);
     assert.deepEqual(f.local.tabNameOverridesById[2],{name:'Named'});
     assert.deepEqual((await reload(f)).spaces,before);
+});
+
+test('same-browser replay preserves already-valid ownership witnesses byte-for-byte',async()=>{
+    const f=await setup();await stage(f);await f.store.persist();
+    const expected=structuredClone(f.local.spaceTabSnapshot);
+    for(let i=0;i<2;i++){
+        delete f.session.spaceSession;await reload(f);
+        const actual=f.local.spaceTabSnapshot;
+        for(const record of expected.filter(r=>r.currentOwnership)){
+            const next=actual.find(r=>r.tabId===record.tabId);
+            assert.deepEqual(next?.currentOwnership,record.currentOwnership,'Replay is not a new ownership transaction');
+            assert.deepEqual(next?.pinnedState,record.pinnedState);assert.deepEqual(next?.nameOverride,record.nameOverride);
+        }
+    }
+});
+
+test('mixed replay renews invalid, moved-window and session witnesses without rewriting valid neighbours',async()=>{
+    const f=await setup();await stage(f);
+    const before=structuredClone(f.store.explicitToday);
+    f.store.explicitToday.get(2).epoch=f.proof;
+    f.store.explicitToday.get(3).windowId=999;
+    f.store.explicitToday.get(9).transaction='';
+    await stage(f);
+    assert.deepEqual(f.store.explicitToday.get(1),before.get(1));
+    for(const id of [2,3,9]){
+        assert.notEqual(f.store.explicitToday.get(id).transaction,before.get(id).transaction);
+        assert.equal(f.store.explicitToday.get(id).epoch.kind,'browser');
+        assert.equal(f.store.explicitToday.get(id).windowId,f.tabs.find(t=>t.id===id).windowId);
+    }
+    const actualMove=await stageExplicitToday(f.store,[f.tabs.find(t=>t.id===1)],{spaceId:'target',bookmarkFolderId:'target-root'});
+    assert.notEqual(actualMove.bindings.get(1).transaction,before.get(1).transaction);
+    assert.equal(actualMove.bindings.get(1).spaceId,'target');
 });
 
 for(const kind of ['pin','queued-pin','private','native-pin','split','transient','global','pending-navigation','saved-pin'])test(`current proof cannot promote ${kind}`,async()=>{

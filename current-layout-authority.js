@@ -1,4 +1,4 @@
-import { explicitTodayEpoch, explicitTodayEpochs, stageExplicitToday } from './explicit-today-ownership.js';
+import { explicitTodayEpoch, explicitTodayEpochs, explicitTodayOwner, stageExplicitToday } from './explicit-today-ownership.js';
 import { encodeFavoriteContinuityState as encode } from './favorite-continuity.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
@@ -76,7 +76,13 @@ export async function stageCurrentLayoutAuthority(store, records, tabs, proofEpo
     };
     await validate();
     for (const {tab,space} of ready) {
-        const binding=stage.bindings.get(tab.id);binding.spaceId=space.id;binding.bookmarkFolderId=space.bookmarkFolderId;
+        const existing=store.explicitToday?.get(tab.id);
+        if(explicitTodayOwner(store,tab)&&existing.windowId===tab.windowId&&encode(existing.epoch)===encode(stage.epoch)){
+            // Replaying an unchanged, valid current witness is not a new move.
+            stage.bindings.set(tab.id,structuredClone(existing));
+        }else{
+            const binding=stage.bindings.get(tab.id);binding.spaceId=space.id;binding.bookmarkFolderId=space.bookmarkFolderId;
+        }
         store.recoveryCandidates.delete(tab.id);store.provisional.delete(tab.id);store.layoutProvisional?.delete(tab.id);
         store.restoredRanks.set(tab.id,space.temporaryTabs.indexOf(tab.id));
     }

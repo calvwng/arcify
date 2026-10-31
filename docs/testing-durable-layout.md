@@ -60,7 +60,8 @@ copies the current Arcify package and the supplied exact Spotlight package into
 a fresh temporary directory. Set `ARCIFY_DISPOSABLE_BROWSER` as above. It creates
 synthetic windows before pairing, uses the real options UIs and Move receiver,
 then reloads each extension after detaching its observed worker debugger.
-Assertions require complete cross-window order preservation and normal grouping
+Assertions require repeated same-browser ownership witness equality, complete
+cross-window order preservation and normal grouping
 of recreated ordinary companion pages. It also disconnects through the real
 options UI and requires ordinary New Tab creation into an empty Space from a
 stable foreground page. An optional second path selects a prior Arcify package
