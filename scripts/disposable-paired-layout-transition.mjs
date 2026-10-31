@@ -11,7 +11,7 @@ const spotlightDist=path.resolve(process.argv[2]);
 const executable=process.env.ARCIFY_DISPOSABLE_BROWSER||puppeteer.executablePath();
 const scratch=await mkdtemp(path.join(os.tmpdir(),'arcify-paired-transition-'));
 const arc=path.join(scratch,'arcify'),spot=path.join(scratch,'spotlight');
-await cp(path.join(root,'dist'),arc,{recursive:true});
+await cp(process.argv[3]?path.resolve(process.argv[3]):path.join(root,'dist'),arc,{recursive:true});
 await cp(spotlightDist,spot,{recursive:true});
 const server=http.createServer((req,res)=>{res.writeHead(200,{'content-type':'text/html'});res.end('<title>Synthetic '+req.url+'</title>');});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
@@ -45,4 +45,15 @@ try{
  await writeFile(path.join(scratch,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
  assert(result.orderPreserved,'Arcify reload must preserve the complete cross-window canonical order');
  assert.deepEqual(result.ungrouped,[],'Recreated ordinary companion pages must receive normal group projection');
+ const launchPage=await browser.newPage();await launchPage.goto(`chrome-extension://${ids.arcify}/sidebar.html`);
+ await launchPage.evaluate(async windowId=>{const tab=await chrome.tabs.getCurrent();await chrome.tabs.move(tab.id,{windowId,index:-1});},setup.a);
+ const emptyFolder=await ap.evaluate(async parent=>chrome.bookmarks.create({parentId:(await chrome.bookmarks.get(parent))[0].parentId,title:'Synthetic empty fallback'}),home.bookmarkFolderId);
+ const empty=(await request('get')).spaces.find(s=>s.bookmarkFolderId===emptyFolder.id);
+ await ap.bringToFront();await ap.click('#bridgeDisconnect');await ap.waitForSelector('#bridgeStatus[data-state="disabled"]');
+ const source=await (await browser.waitForTarget(t=>t.type()==='page'&&t.url()===base+'/a0')).page();await source.bringToFront();await sleep(500);
+ await request('activate',{windowId:setup.a,spaceId:empty.id});await sleep(500);
+ const fallback=await launchPage.evaluate(({windowId,spaceId})=>chrome.runtime.sendMessage({type:'spotlightBridgeLaunch',fallbackToNewTab:true,windowId,spaceId}),{windowId:setup.a,spaceId:empty.id});
+ console.log('Disconnected New Tab result',JSON.stringify(fallback));
+ await read('after-disconnected-new-tab');
+ assert(fallback.ok,'Disconnected New Tab must complete through the ordinary provider');
 }finally{if(browser){const proc=browser.process();await browser.close();console.log('Owned process disposal',JSON.stringify({pid:proc.pid,exitCode:proc.exitCode,signalCode:proc.signalCode}));}server.close();console.log('Evidence',scratch);}

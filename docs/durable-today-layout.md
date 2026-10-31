@@ -42,6 +42,10 @@ Fresh subset evidence includes proven survivors and creations observed in an
 initialized, bound window. It does not turn unobserved extra tabs into placements
 or required anchors. Historical identities and metadata remain separate. Normal
 new-tab placement still rebases pending ranks around their surviving anchors.
+Creation evidence is an exact event in the initialized worker, invalidated by
+removal, replacement, transfer or reinitialization. Its new witness uses the
+currently valid epoch, including session fallback after deliberate disconnection;
+this never makes an expired replay proof valid again.
 
 The local membership, snapshot, ranks and layout checkpoint are written together
 and read back before session acknowledgement or group projection. These writes

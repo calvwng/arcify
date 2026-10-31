@@ -1,7 +1,29 @@
-import { explicitTodayEpochs, stageExplicitToday } from './explicit-today-ownership.js';
+import { explicitTodayEpoch, explicitTodayEpochs, stageExplicitToday } from './explicit-today-ownership.js';
 import { encodeFavoriteContinuityState as encode } from './favorite-continuity.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
+
+// An event observed by this initialized worker proves a new incarnation even
+// if pairing changes before its queued work runs. The epoch scopes the newly
+// issued witness; it is not inherited from a previously bound layout.
+export async function stageObservedLayoutCreation(store, id, event, tabs) {
+    const current = () => store.initialized && event?.token && event.worker === store.currentLayoutWorker
+        && store.layoutObservedCreations?.get(id) === event;
+    const tab = tabs.find(tab=>tab.id===id);
+    const owners = store.spaces.filter(space=>space.temporaryTabs.includes(id));
+    if (!current() || !tab || tab.windowId!==event.windowId || owners.length!==1) return;
+    const epoch = await explicitTodayEpoch(store,true);
+    if (!current()) return;
+    const promoted = await stageCurrentLayoutAuthority(store,[{tabId:id,spaceId:owners[0].id,section:'temporaryTabs'}],tabs,epoch);
+    if (!promoted?.length) return;
+    const fence = store.currentLayoutFence;
+    store.currentLayoutFence = async () => {
+        await fence();
+        if (!current()) throw new Error('Observed creation changed before checkpoint.');
+    };
+    await store.currentLayoutFence();
+    return promoted;
+}
 
 // Proof is acquired from authenticated snapshot replay or an observed creation
 // in an already initialized browser epoch. Ordinary fallback membership is not

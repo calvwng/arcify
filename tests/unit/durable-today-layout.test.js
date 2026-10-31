@@ -518,11 +518,12 @@ test('replayed subset does not authorize an unproven same-URL neighbour through 
     }
 });
 
-for(const inverted of [false,true])for(const top of [false,true])test(`observed creation listener preserves placement and opener in bound window inverted=${inverted} top=${top}`,async()=>{
+for(const disconnect of [false,true])for(const inverted of [false,true])for(const top of [false,true])test(`observed creation listener preserves placement and opener in bound window disconnect=${disconnect} inverted=${inverted} top=${top}`,async()=>{
     const f=await setup(1,inverted),s=f.store;events();s.install();f.sync.todayNewTabsAtTop=top;await s.readTodayPlacement();
     const source=s.spaces.find(x=>x.id==='source'),target=s.spaces.find(x=>x.id==='target');
     const visible=space=>inverted?[...space.temporaryTabs].reverse():[...space.temporaryTabs];
     const before=visible(source),tab={id:9900,index:30,windowId:10,url:'https://created.test/new',pinned:false,incognito:false,splitViewId:-1};
+    if(disconnect){s.explicitTodayEpoch={kind:'browser',epoch:'expired-browser-token',generation:'expired-generation-token'};delete f.session.spaceExplicitTodayEpoch;}
     f.tabs.push(tab);await chrome.tabs.onCreated.emit(tab);await s.chain;
     assert.deepEqual(visible(source),top?[9900,...before]:[...before,9900]);assert(s.explicitToday.has(9900));
     const child={...tab,id:9901,index:31,url:'https://created.test/child',openerTabId:101};

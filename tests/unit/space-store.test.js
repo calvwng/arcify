@@ -764,11 +764,11 @@ for (const observed of [false, true]) for (const inverted of [false, true]) for 
     // The legacy Pinned-only option no longer changes Today representation.
     sync.invertTabOrder = !inverted;
     const standalone = { id: 3, windowId: 1, url: 'https://new.test/' };
-    if(observed) { session.spaceExplicitTodayEpoch='observed-test-epoch'; store.layoutObservedCreations.set(3,{windowId:1,epoch:{kind:'session',epoch:'observed-test-epoch'}}); }
+    if(observed) store.layoutObservedCreations.set(3,{windowId:1,worker:store.currentLayoutWorker,token:'observed-3'});
     tabs.push(standalone); chrome.tabs.onCreated.emit(standalone); await store.run(() => {});
     assert.deepEqual(visibleToday(store), top ? [3, ...oldVisible] : [...oldVisible, 3]);
     const child = { id: 4, windowId: 1, openerTabId: 1, url: 'https://child.test/' };
-    if(observed) store.layoutObservedCreations.set(4,{windowId:1,epoch:{kind:'session',epoch:'observed-test-epoch'}});
+    if(observed) store.layoutObservedCreations.set(4,{windowId:1,worker:store.currentLayoutWorker,token:'observed-4'});
     tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
     const visible = visibleToday(store); assert.equal(visible[visible.indexOf(1) + 1], 4);
     const before = [...store.spaces[0].temporaryTabs];

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture } from './today-recovery-fixture.js';
-import { stageCurrentLayoutAuthority } from '../../current-layout-authority.js';
+import { stageCurrentLayoutAuthority, stageObservedLayoutCreation } from '../../current-layout-authority.js';
 import { explicitTodayEpochs } from '../../explicit-today-ownership.js';
 import { DURABLE_LAYOUT_KEY } from '../../durable-today-layout.js';
 import { SpaceStore } from '../../space-store.js';
@@ -86,4 +86,29 @@ test('checkpoint readback validates membership as well as the ledger',async()=>{
     await assert.rejects(f.store.persist(),/Current layout checkpoint could not be verified/);
     assert.equal(f.store.initialized,false);
     assert(!f.effects.some(([area,value])=>area==='session'&&value.spaceSession));
+});
+
+async function creation(){
+    const f=await setup();await stage(f);await f.store.persist();
+    const tab={id:9900,windowId:10,index:20,url:'https://creation.test/',pinned:false,incognito:false,splitViewId:-1};
+    f.tabs.push(tab);f.store.spaces[0].temporaryTabs.push(tab.id);
+    f.store.currentLayoutWorker='worker-token';f.event={worker:'worker-token',token:'event-token',windowId:10};
+    f.store.layoutObservedCreations=new Map([[tab.id,f.event]]);return f;
+}
+test('creation event issues a fresh session witness after deliberate browser-proof disconnection',async()=>{
+    const f=await creation();f.identity=null;delete f.session.spaceExplicitTodayEpoch;
+    await stageObservedLayoutCreation(f.store,9900,f.event,f.tabs);await f.store.persist();
+    assert.equal(f.store.explicitToday.get(9900).epoch.kind,'session');
+    assert(f.local.spaces[0].temporaryTabs.includes(9900));
+    await assert.rejects(stageCurrentLayoutAuthority(f.store,f.records,f.tabs,{kind:'browser',epoch:'browser-epoch-token',generation:'writer-generation-token'}),/proof expired/);
+});
+for(const race of ['removed','replacement','transfer','worker','reinitialize','generation'])test(`creation-event fence rejects ${race} after staging`,async()=>{
+    const f=await creation();await stageObservedLayoutCreation(f.store,9900,f.event,f.tabs);
+    if(race==='removed')f.store.layoutObservedCreations.delete(9900);
+    if(race==='replacement')f.store.layoutObservedCreations.set(9900,{...f.event,token:'different-event'});
+    if(race==='transfer')f.tabs.find(t=>t.id===9900).windowId=20;
+    if(race==='worker')f.store.currentLayoutWorker='other-worker';
+    if(race==='reinitialize')f.store.initialized=false;
+    if(race==='generation')f.identity.generation='changed-generation-token';
+    await assert.rejects(f.store.currentLayoutFence());
 });

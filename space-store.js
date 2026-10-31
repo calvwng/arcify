@@ -21,7 +21,7 @@ import { SPACE_CONTINUITY_KEY, createSpaceContinuityStamp, readSpaceContinuitySn
 import { EXPLICIT_TODAY_CHECKPOINT, restoreExplicitToday, explicitTodayOwner, explicitSnapshotWitness, createExplicitCheckpoint } from './explicit-today-ownership.js';
 import { DURABLE_LAYOUT_KEY, initializeDurableLayout, restoreDurableLayout, captureDurableLayout, layoutCandidate, durableRestartQueue, layoutContainsCurrent, pendingLayoutWindowIds } from './durable-today-layout.js';
 import { encodeFavoriteContinuityState as encodeLayout } from './favorite-continuity.js';
-import { stageCurrentLayoutAuthority } from './current-layout-authority.js';
+import { stageCurrentLayoutAuthority, stageObservedLayoutCreation } from './current-layout-authority.js';
 
 const sections = ['spaceBookmarks', 'temporaryTabs'];
 export const tabIds = space => sections.flatMap(key => space?.[key] || []);
@@ -118,7 +118,7 @@ export class SpaceStore {
     }
     async initializeUnlocked() {
         if (this.initialized) return;
-        this.currentLayoutFence=null;this.currentLayoutTransition=false;this.layoutObservedCreations=new Map();
+        this.currentLayoutFence=null;this.currentLayoutTransition=false;this.layoutObservedCreations=new Map();this.currentLayoutWorker=crypto.randomUUID();
         await this.transientWindows?.initialize();
         await this.transientWindows?.flushObservedUnlocked();
         if (this.favoriteStore) await this.favoriteStore.initialize();
@@ -525,7 +525,7 @@ export class SpaceStore {
         for(const [id,creation] of this.layoutObservedCreations||[]){
             const tab=tabs.get(id),space=ownerOf(this.spaces,id);
             if(!tab||tab.windowId!==creation.windowId||!space?.temporaryTabs.includes(id))continue;
-            const promoted=await stageCurrentLayoutAuthority(this,[{tabId:id,spaceId:space.id,section:'temporaryTabs'}],[...tabs.values()],creation.epoch);
+            const promoted=await stageObservedLayoutCreation(this,id,creation,[...tabs.values()]);
             promotedCreations.push(...promoted||[]);
         }
         if (!preserveRecoveryQueue) await restoreDurableLayout(this,[...tabs.values()]);
@@ -868,7 +868,8 @@ export class SpaceStore {
             this.observeTab(tab);
             if(this.initialized&&!this.liveTabs?.has(tab.id)&&this.explicitTodayEpoch
                 &&this.durableLayout?.cohorts.some(c=>c.binding?.windowId===tab.windowId&&!this.layoutPending?.has(c.id)))
-                (this.layoutObservedCreations ||= new Map()).set(tab.id,{windowId:tab.windowId,epoch:clone(this.explicitTodayEpoch)});
+                (this.layoutObservedCreations ||= new Map()).set(tab.id,{windowId:tab.windowId,
+                    worker:this.currentLayoutWorker ||= crypto.randomUUID(),token:crypto.randomUUID()});
             this.pendingCreations.add(tab.id);
             this.explicitToday?.delete(tab.id);
             handle(() => trackCurrent(tab.id));
@@ -903,6 +904,7 @@ export class SpaceStore {
             });
         });
         chrome.tabs.onReplaced.addListener((added, removed) => {
+            this.layoutObservedCreations?.delete(removed);this.layoutObservedCreations?.delete(added);
             this.explicitToday?.delete(removed);
             this.explicitToday?.delete(added);
             this.transientWindows?.observeReplacement?.(added, removed);
@@ -945,6 +947,7 @@ export class SpaceStore {
         };
         chrome.tabs.onMoved.addListener(scheduleSync);
         chrome.tabs.onAttached?.addListener((tabId, info) => {
+            this.layoutObservedCreations?.delete(tabId);
             this.observeTab({ id: tabId, windowId: info?.newWindowId });
             return handle(async () => {
                 // Native attachment can race a Favorite release. Re-track the exact
@@ -953,6 +956,7 @@ export class SpaceStore {
             });
         });
         chrome.tabs.onDetached?.addListener((tabId, info) => {
+            this.layoutObservedCreations?.delete(tabId);
             this.transientWindows?.observeDetached?.(tabId, info?.oldWindowId);
             scheduleSync();
         });
