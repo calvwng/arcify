@@ -1,4 +1,5 @@
 import { ArchiveStore } from './archive-store.js';
+import { automaticLayoutRestoreEnabled } from './durable-layout-config.js';
 import { getTodayOrderInverted, getTodayInsertionIndex } from './today-order.js';
 import { mergeVisibleOrder } from './sidebar-tabs.js';
 import { normalizeSpaceIcon } from './space-icons.js';
@@ -17,6 +18,9 @@ import { checkpointSavedMove, recoverSavedMoveData, finishSavedMoveRecovery, rec
 import { withSavedMoveLock, SAVED_MOVE_JOURNAL_KEY } from './saved-move-lock.js';
 import { captureWindowTabs, matchRestoreRecord } from './space-restore.js';
 import { SPACE_CONTINUITY_KEY, createSpaceContinuityStamp, readSpaceContinuitySnapshot, createSpaceRankCheckpoint, readSpaceRankCheckpoint } from './space-continuity.js';
+import { EXPLICIT_TODAY_CHECKPOINT, restoreExplicitToday, explicitTodayOwner, explicitSnapshotWitness, createExplicitCheckpoint } from './explicit-today-ownership.js';
+import { DURABLE_LAYOUT_KEY, initializeDurableLayout, restoreDurableLayout, captureDurableLayout, layoutCandidate, durableRestartQueue, layoutContainsCurrent, pendingLayoutWindowIds } from './durable-today-layout.js';
+import { encodeFavoriteContinuityState as encodeLayout } from './favorite-continuity.js';
 
 const sections = ['spaceBookmarks', 'temporaryTabs'];
 export const tabIds = space => sections.flatMap(key => space?.[key] || []);
@@ -70,7 +74,7 @@ export function applySpacePatch(current, before, after) {
 }
 
 export class SpaceStore {
-    constructor() { this.chain = Promise.resolve(); this.initialized = false; this.pendingCreations = new Set(); this.archiveStore = new ArchiveStore(this); }
+    constructor({ automaticLayoutRestore = automaticLayoutRestoreEnabled } = {}) { this.automaticLayoutRestore = automaticLayoutRestore; this.chain = Promise.resolve(); this.initialized = false; this.pendingCreations = new Set(); this.archiveStore = new ArchiveStore(this); }
     run(operation) {
         const pending = this.chain.then(async () => {
             // Transient identity is loaded before either ownership system can
@@ -117,7 +121,7 @@ export class SpaceStore {
         await this.transientWindows?.flushObservedUnlocked();
         if (this.favoriteStore) await this.favoriteStore.initialize();
         await this.readTodayPlacement();
-        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', 'spaceRankCheckpoint', SPACE_CONTINUITY_KEY, SAVED_MOVE_JOURNAL_KEY]);
+        const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', 'spaceRankCheckpoint', SPACE_CONTINUITY_KEY, SAVED_MOVE_JOURNAL_KEY, EXPLICIT_TODAY_CHECKPOINT, DURABLE_LAYOUT_KEY]);
         const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'spaceRecoveryCandidates', 'spaceSavedMoveSession']);
         this.provisional = new Set();
         this.recoveryCandidates = new Set(session.spaceSession ? session.spaceRecoveryCandidates || [] : []);
@@ -177,7 +181,7 @@ export class SpaceStore {
             // written in that epoch. The pending suffix never supplies ID proof.
             const replay = await this.readSameSessionSnapshot(data);
             this.snapshotByTab.clear();
-            this.restoreQueue = replay ? replay.pending : data.spaceTabSnapshot || [];
+            this.restoreQueue = replay ? replay.pending : await durableRestartQueue(data);
             this.spaces.forEach(s => { s.spaceBookmarks = []; s.temporaryTabs = []; delete s.lastTab; });
             this.active = {};
             this.restoredRanks.clear();
@@ -217,6 +221,9 @@ export class SpaceStore {
         }
         const valid = new Set(live.map(t => t.id));
         for (const space of this.spaces) for (const key of sections) space[key] = (space[key] || []).filter(id => valid.has(id));
+        await restoreExplicitToday(this, data, live.filter(tab => !this.pendingCreations.has(tab.id)));
+        await initializeDurableLayout(this,data,live);
+        await restoreDurableLayout(this,live);
         // An onCreated event can wake a cold worker whose initial query already
         // contains that tab. Adopt/restore older tabs first, then consume the
         // exact creation intent once; real restoration still takes precedence.
@@ -331,7 +338,7 @@ export class SpaceStore {
         }
     }
     forgetTab(tabId) {
-        if (this.isGlobalTab(tabId) && (!this.initialized || ownerOf(this.spaces || [], tabId))) this.favoriteStore.noteSpaceExclusion?.(tabId);
+        if (this.isGlobalTab(tabId) && (!this.initialized || ownerOf(this.spaces || [], tabId))) this.favoriteStore?.noteSpaceExclusion?.(tabId);
         for (const space of this.spaces || []) {
             for (const section of sections) space[section] = (space[section] || []).filter(id => id !== tabId);
             if (space.lastTab === tabId) delete space.lastTab;
@@ -340,8 +347,10 @@ export class SpaceStore {
         this.provisional?.delete(tabId);
         this.recoveryCandidates?.delete(tabId);
         this.restoredRanks?.delete(tabId);
+        this.explicitToday?.delete(tabId);
         this.restoredMetadata = (this.restoredMetadata || []).filter(record => record.tabId !== tabId);
-        this.restoreQueue = (this.restoreQueue || []).filter(record => record.tabId !== tabId);
+        // Pending records belong to historical incarnations. A live numeric ID
+        // collision is not authority to erase one (including transient cleanup).
     }
     async readTodayPlacement({ getOrder = getTodayOrderInverted } = {}) {
         this.todayOrderInverted = await getOrder();
@@ -453,6 +462,11 @@ export class SpaceStore {
         // operation confirms assignment; worker restart cannot adopt it by URL.
         if (this.archiveStore.pendingCreatedIds.has(tab.id) && !ownerOf(this.spaces, tab.id)) return;
         const existing = ownerOf(this.spaces, tab.id);
+        if (layoutCandidate(this,tab)) (this.layoutProvisional ||= new Set()).add(tab.id);
+        if (explicitTodayOwner(this, tab)) {
+            this.recoveryCandidates.delete(tab.id);
+            return;
+        }
         if (existing) {
             if ((!this.provisional.has(tab.id) && !this.recoveryCandidates.has(tab.id)) || !url) return;
             this.provisional.delete(tab.id);
@@ -461,7 +475,7 @@ export class SpaceStore {
         const validQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId));
         this.restoreQueue = validQueue;
         const restoreKeys = new Set([...validQueue.map(t => t.windowKey), ...this.restoreWindowKeys.values()]);
-        const restoredIndex = matchRestoreRecord(tab, validQueue, this.savedWindows.filter(w => restoreKeys.has(w.key)), this.restoreWindowKeys, [...this.liveTabs.values()].filter(tab => !this.isGlobalTab(tab) && !this.isTransientTab(tab)));
+        const restoredIndex = this.layoutProvisional?.has(tab.id) ? -1 : matchRestoreRecord(tab, validQueue, this.savedWindows.filter(w => restoreKeys.has(w.key)), this.restoreWindowKeys, [...this.liveTabs.values()].filter(tab => !this.isGlobalTab(tab) && !this.isTransientTab(tab)));
         for (const [id, key] of this.restoreWindowKeys) this.windowKeys.set(id, key);
         const restored = restoredIndex >= 0 ? this.restoreQueue.splice(restoredIndex, 1)[0] : null;
         if (restored) this.recoveryCandidates.delete(tab.id);
@@ -485,7 +499,7 @@ export class SpaceStore {
             this.restoredRanks.set(tab.id, restored.order);
             const insertAt = space[key].findIndex(id => (this.restoredRanks.get(id) ?? Infinity) > restored.order);
             space[key].splice(insertAt < 0 ? space[key].length : insertAt, 0, tab.id);
-        } else if (created) {
+        } else if (created && !this.layoutProvisional?.has(tab.id)) {
             this.insertCreatedToday(space, tab, { nativeTabs: nativeTabs || [], openerTabId: isNewTabPage ? null : tab.openerTabId });
         } else {
             // Initialization, attachment, Favorite release and URL updates adopt
@@ -494,20 +508,29 @@ export class SpaceStore {
         }
     }
 
-    async persist({ skipGroupSync = false, beforeWrite = null, savedMove = null } = {}) {
+    async persist({ skipGroupSync = false, beforeWrite = null, savedMove = null, preserveRecoveryQueue = false } = {}) {
+        try { return await this.persistCore({skipGroupSync,beforeWrite,savedMove,preserveRecoveryQueue}); }
+        catch(error) { if(this.durableLayout || this.layoutWriteFence)this.initialized=false; this.layoutWriteFence=null; throw error; }
+    }
+    async persistCore({ skipGroupSync = false, beforeWrite = null, savedMove = null, preserveRecoveryQueue = false } = {}) {
         const tabs = new Map((await this.queryTabs({})).map(t => [t.id, t]));
         this.liveTabs = tabs;
+        if (!preserveRecoveryQueue) await restoreDurableLayout(this,[...tabs.values()]);
         const excludedAtRead = new Set([...tabs.values()].filter(tab => this.isTransientTab(tab)).map(tab => tab.id));
         const transientChanged = () => [...tabs.values()].some(tab => this.isTransientTab(tab) && !excludedAtRead.has(tab.id));
-        const retry = () => this.persist({ skipGroupSync, beforeWrite, savedMove });
+        const retry = () => this.persist({ skipGroupSync, beforeWrite, savedMove, preserveRecoveryQueue });
         const liveWindows = new Set([...tabs.values()].filter(tab => !this.isTransientTab(tab) && !this.isTransientWindow(tab.windowId)).map(t => t.windowId));
         for (const windowId of Object.keys(this.active)) if (this.isTransientWindow(Number(windowId)) || this.privateWindowIds?.has(Number(windowId))) delete this.active[windowId];
         for (const keys of [this.windowKeys, this.restoreWindowKeys]) {
             for (const id of keys.keys()) if (!liveWindows.has(id)) keys.delete(id);
         }
         for (const tab of tabs.values()) if (tab.pinned || this.isGlobalTab(tab) || this.isTransientTab(tab)) this.forgetTab(tab.id);
-        for (const id of this.recoveryCandidates) if (tabs.has(id)) this.track(tabs.get(id));
-        this.restoreQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId) && !isStartupLauncherUrl(t.url) && !this.isTransientTab(t.tabId));
+        if (!preserveRecoveryQueue) {
+            for (const id of this.recoveryCandidates) if (tabs.has(id)) this.track(tabs.get(id));
+            this.restoreQueue = this.restoreQueue.filter(t => this.spaces.some(s => s.id === t.spaceId) && !isStartupLauncherUrl(t.url));
+        }
+        if (preserveRecoveryQueue && this.restoredMetadata.length) throw new Error('Recovery metadata changed before the move. Nothing was committed.');
+        for (const tab of tabs.values()) if (explicitTodayOwner(this, tab)) this.recoveryCandidates.delete(tab.id);
         // A later candidate can consume the final record for an earlier one's
         // URL in this pass. Recheck after all matching/filtering, so the earlier
         // tab is not persisted as unresolved once no applicable record remains.
@@ -543,7 +566,7 @@ export class SpaceStore {
             space[section].forEach((id, order) => {
                 // An unresolved recovery tab has only a provisional space owner.
                 // Keep its original record instead of persisting that guess.
-                if (this.recoveryCandidates.has(id)) {
+                if (this.recoveryCandidates.has(id) || this.layoutProvisional?.has(id) && !explicitTodayOwner(this,tabs.get(id))) {
                     this.snapshotByTab.delete(id);
                     return;
                 }
@@ -551,6 +574,7 @@ export class SpaceStore {
                 if (!this.windowKeys.has(tab.windowId)) this.windowKeys.set(tab.windowId, crypto.randomUUID());
                 const record = { tabId: id, spaceId: space.id, section, order: this.restoredRanks.get(id) ?? order, url: tab.url || tab.pendingUrl || '',
                     windowKey: this.windowKeys.get(tab.windowId), tabIndex: tab.index,
+                    ...explicitSnapshotWitness(this, tab),
                     ...(pinnedStates[id] ? { pinnedState: pinnedStates[id] } : {}),
                     ...(overrides[id] ? { nameOverride: overrides[id] } : {}) };
                 snapshot.push(record);
@@ -573,10 +597,16 @@ export class SpaceStore {
         const spaceTabSnapshot = [...snapshot, ...this.restoreQueue];
         const spaceRankCheckpoint = await createSpaceRankCheckpoint([...this.restoredRanks], spaceTabSnapshot);
         const checkpoint = { spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot, spaceRankCheckpoint, spaceWindowSnapshot: windowSnapshot, [SPACE_CONTINUITY_KEY]: stamp };
+        checkpoint[EXPLICIT_TODAY_CHECKPOINT] = this.explicitToday?.size ? await createExplicitCheckpoint(snapshot.length, spaceRankCheckpoint.fingerprint) : null;
+        checkpoint[DURABLE_LAYOUT_KEY] = await captureDurableLayout(this,[...tabs.values()],snapshot,spaceRankCheckpoint.fingerprint,{allowFreshExplicit:preserveRecoveryQueue});
         if (savedMove) checkpoint[SAVED_MOVE_JOURNAL_KEY] = await checkpointSavedMove(savedMove, checkpoint, snapshot.length);
         if (beforeWrite) await beforeWrite();
+        if (this.layoutWriteFence) await this.layoutWriteFence();
         if (transientChanged()) return retry();
         await chrome.storage.local.set(checkpoint);
+        const layoutReadback=await chrome.storage.local.get(DURABLE_LAYOUT_KEY);
+        if(encodeLayout(layoutReadback[DURABLE_LAYOUT_KEY])!==encodeLayout(checkpoint[DURABLE_LAYOUT_KEY]))throw new Error('Layout checkpoint could not be verified. Nothing was retried.');
+        this.durableLayout=checkpoint[DURABLE_LAYOUT_KEY];this.layoutWriteFence=null;
         if (transientChanged()) return retry();
         const spaceSessionUpdate = { spaceSession: true, activeSpaces: this.active, spaceRestoreQueue: this.restoreQueue, restoredTabRanks: [...this.restoredRanks], spaceWindowKeys: [...this.windowKeys], spaceRestoreWindowKeys: [...this.restoreWindowKeys], spaceRecoveryCandidates: [...new Set([...this.recoveryCandidates, ...this.provisional])] };
         const favorites = this.favoriteStore;
@@ -595,8 +625,10 @@ export class SpaceStore {
             await chrome.storage.session.set(spaceSessionUpdate);
         }
         if (transientChanged()) return retry();
+        const pendingLayoutWindows=pendingLayoutWindowIds(this,[...tabs.values()]);
         try { if (!skipGroupSync) await syncSpaceGroups(this.spaces, this.active, [...tabs.values()].filter(tab => this.isGlobalTab(tab)).map(tab => tab.id), {
             isExcludedTab: tab => this.isTransientTab(tab), isExcludedWindow: id => this.isTransientWindow(id),
+            isProjectionDeferredWindow: id => pendingLayoutWindows.has(id),
             observeTab: tab => this.observeTab(tab), flushObserved: () => this.transientWindows?.flushObservedUnlocked()
         }); }
         catch (error) { console.warn('Tab group sync deferred:', error); }
@@ -815,6 +847,7 @@ export class SpaceStore {
             // Event-time quarantine must precede any older queued persistence.
             this.observeTab(tab);
             this.pendingCreations.add(tab.id);
+            this.explicitToday?.delete(tab.id);
             handle(() => trackCurrent(tab.id));
         });
         chrome.tabs.onUpdated.addListener((id, change, tab) => {
@@ -822,6 +855,7 @@ export class SpaceStore {
             if (change.url || change.pinned !== undefined) handle(() => trackCurrent(id));
         });
         chrome.tabs.onRemoved.addListener((id, info) => {
+            if (!info?.isWindowClosing) (this.layoutRemovedIds ||= new Set()).add(id);
             // Public exclusion deliberately fails closed before registry loading.
             // Capture only positive identity evidence here; the queued handler
             // rechecks authoritative exclusion after initialization.
@@ -832,10 +866,11 @@ export class SpaceStore {
             this.pendingCreations.delete(id);
             return handle(() => {
                 const record = this.snapshotByTab.get(id);
-                if (!this.privateTabIds?.has(id) && !this.privateWindowIds?.has(info?.windowId) && !wasTransient && !this.isTransientTab(id) && !this.isTransientWindow(info?.windowId) && info?.isWindowClosing && record && this.spaces.some(s => s.id === record.spaceId)) this.restoreQueue.push(record);
+                if (!this.privateTabIds?.has(id) && !this.privateWindowIds?.has(info?.windowId) && !wasTransient && !this.isTransientTab(id) && !this.isTransientWindow(info?.windowId) && info?.isWindowClosing && record && !layoutContainsCurrent(this,record) && this.spaces.some(s => s.id === record.spaceId)) this.restoreQueue.push(record);
                 this.snapshotByTab.delete(id);
                 this.provisional.delete(id);
                 this.recoveryCandidates.delete(id);
+                this.explicitToday?.delete(id);
                 this.liveTabs.delete(id);
                 for (const space of this.spaces) {
                     for (const key of sections) space[key] = space[key].filter(t => t !== id);
@@ -844,6 +879,8 @@ export class SpaceStore {
             });
         });
         chrome.tabs.onReplaced.addListener((added, removed) => {
+            this.explicitToday?.delete(removed);
+            this.explicitToday?.delete(added);
             this.transientWindows?.observeReplacement?.(added, removed);
             // Native replacement is an adoption, not a new creation gesture.
             this.pendingCreations.delete(removed);

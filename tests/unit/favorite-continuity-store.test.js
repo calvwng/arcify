@@ -31,9 +31,11 @@ const assertGlobal = (s, id) => {
     assert.equal(s.spaces.isGlobalTab(id), true);
     assert.equal(ownerOf(s.spaces.spaces, id), undefined);
     assert(!local.spaces.some(space => [...space.spaceBookmarks, ...space.temporaryTabs].includes(id)));
-    assert(!local.spaceTabSnapshot.some(record => record.tabId === id));
+    // Historical numeric IDs are not current Favorite ownership. Only the live prefix must exclude it.
+    const liveCount = local.spaceTabSnapshot.length - s.spaces.restoreQueue.length;
+    assert(!local.spaceTabSnapshot.slice(0, liveCount).some(record => record.tabId === id));
     assert(!s.spaces.snapshotByTab.has(id));
-    assert(!s.spaces.restoreQueue.some(record => record.tabId === id));
+
 };
 beforeEach(() => {
     local = { spaceModelVersion: 2, spaces: [space('a', [1]), space('b', [2])], [FAVORITES_KEY]: [saved('f')] };

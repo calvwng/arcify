@@ -354,9 +354,8 @@ for (const cold of [false, true]) {
         f.tabs.splice(0, 1);
         chrome.tabs.onRemoved.emit(1, { windowId: 10, isWindowClosing: true });
         await f.store.run(() => {});
-        assert.equal(f.store.restoreQueue.length, 1);
-        assert.equal(f.store.restoreQueue[0].tabId, 1);
-        assert.equal(f.local.spaceTabSnapshot.some(record => record.tabId === 1), true);
+        if(cold){assert.equal(f.store.restoreQueue.length,1);assert.equal(f.store.restoreQueue[0].tabId,1);}
+        else {assert.equal(f.store.restoreQueue.length,0);assert(f.local.spaceDurableTodayLayout.cohorts.some(c=>c.signature.some(t=>t.url==='https://ordinary-close.test/')&&c.placements.length));}
     });
 }
 

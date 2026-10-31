@@ -1,6 +1,8 @@
 import { registerSelectedTabClose } from './selected-tab-close.js';
 import { registerPeek } from './peek.js';
 import { registerRecoveryObservation } from './recovery-observation.js';
+import { registerSelectedRecoveryDiagnostics } from './selected-recovery-diagnostics.js';
+import { selectedRecoveryDiagnosticsEnabled } from './recovery-diagnostics-config.js';
 import { summarizeRecoveryObservation } from './recovery-report-adapter.js';
 import { registerLittleArcLinkMenu } from './little-arc-link-menu.js';
 import { registerLittleArcHeader } from './little-arc-header.js';
@@ -76,6 +78,7 @@ registerFavoriteMessages(favoriteStore);
 registerMoveTabWindowMessages(spaceStore, favoriteStore);
 const spotlightInvalidation = registerSpotlightBridge(spaceStore);
 registerRecoveryObservation(spaceStore, chrome, summarizeRecoveryObservation);
+if (selectedRecoveryDiagnosticsEnabled) registerSelectedRecoveryDiagnostics(spaceStore, chrome);
 registerBookmarkListeners(() => spotlightInvalidation.invalidateAll());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'spaceStore') return;

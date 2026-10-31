@@ -30,6 +30,18 @@ jobs:
       - name: Build extension (production)
         run: npm run build
 
+      - name: Verify diagnostic and compatible fallback packaging
+        run: |
+          node scripts/check-recovery-diagnostics-package.mjs dist enabled
+          VITE_ARCIFY_AUTOMATIC_LAYOUT_RESTORE=false npm run build
+          node scripts/check-layout-mode-package.mjs dist fallback
+          VITE_ARCIFY_AUTOMATIC_LAYOUT_RESTORE=true npm run build
+          node scripts/check-layout-mode-package.mjs dist forward
+          VITE_ARCIFY_RECOVERY_DIAGNOSTICS=false npm run build
+          node scripts/check-recovery-diagnostics-package.mjs dist disabled
+          npm run build
+          node scripts/check-recovery-diagnostics-package.mjs dist enabled
+
       - name: Unit regression tests
         run: npm run test:unit
 

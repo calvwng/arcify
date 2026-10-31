@@ -21,12 +21,13 @@ beforeEach(() => {
     const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, removeListener(fn) { this.listeners = this.listeners.filter(listener => listener !== fn); }, emit(...args) { this.listeners.forEach(fn => fn(...args)); } });
     globalThis.chrome = {
         runtime: { getURL: path => `chrome-extension://arcify/${path}` },
+        windows: { get: async id => ({id,type:'normal',incognito:false}) },
         storage: { local: area(local), session: area(session), sync: area(sync), onChanged: event() },
         tabs: { onCreated: event(), onUpdated: event(), onRemoved: event(), onReplaced: event(), onActivated: event(), onMoved: event(), query: async query => structuredClone(tabs.filter(t => query.groupId === undefined || query.groupId === t.groupId)),
             group: async args => { mutations.push(['group', args]); const id = args.groupId ?? 100 + groups.length; if (!groups.some(g => g.id === id)) groups.push({ id, windowId: 1 }); tabs.filter(t => args.tabIds.includes(t.id)).forEach(t => t.groupId = id); return id; },
             move: async (...args) => mutations.push(['move', ...args]) },
         tabGroups: { move: async (...args) => mutations.push(['groupMove', ...args]), onRemoved: event(), onUpdated: event(), query: async () => groups, update: async (id, attrs) => { mutations.push(['update', id, attrs]); Object.assign(groups.find(g => g.id === id), attrs); } },
-        bookmarks: { onMoved: event(), onRemoved: event(), onChanged: event(), search: async () => [{ id: 'root' }], getChildren: async () => [], create: async ({ title }) => ({ id: title, title }) }
+        bookmarks: { onMoved: event(), onRemoved: event(), onChanged: event(), search: async () => [{ id: 'root' }], get: async id => [{id,parentId:'root',title:id}], getChildren: async () => [], create: async ({ title }) => ({ id: title, title }) }
     };
 });
 test('independent default ignores group identity and order and retains empty spaces', async () => {

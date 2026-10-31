@@ -6,6 +6,7 @@ import { SpaceStore, ownerOf } from '../../space-store.js';
 import { createTransientWindowStore, TRANSIENT_WINDOW_SESSION_KEY } from '../../transient-window-store.js';
 import { createTransientControlHandler, createTransientOwnershipCommit } from '../../transient-window-actions.js';
 import { getBridgeSnapshot } from '../../spotlight-bridge.js';
+import { moveTodayTabsToSpace } from '../../today-move-store.js';
 
 const copy = value => structuredClone(value);
 const event = () => ({ listeners: new Set(), addListener(fn) { this.listeners.add(fn); }, removeListener(fn) { this.listeners.delete(fn); },
@@ -166,7 +167,9 @@ for (const boundary of ['closed-controller', 'navigated-controller', 'page-in-ot
         assert.equal(store.isTransientWindow(restored.windowId), false);
         assert(owner, 'The unmarked restored page follows ordinary Space adoption without a startup hold.');
         assert(owner.temporaryTabs.includes(restoredId));
-        assert(f.local.spaceTabSnapshot.some(record => record.tabId === restoredId && record.spaceId === owner.id));
+        assert(store.layoutProvisional.has(restoredId),'Competing same-URL windows defer durable identity, not ordinary current ownership.');
+        assert(!f.local.spaceTabSnapshot.some(record => record.tabId === restoredId));
+        const preserved=copy(store.durableLayout.cohorts);
         assert((await getBridgeSnapshot(store, restored.windowId)).tabs.some(tab => tab.id === restoredId));
         assert.equal(f.tabs.get(1).url, restored.url, 'The ordinary same-URL source remains a separate exact tab.');
         assert.equal(ownerOf(store.spaces, 1)?.id, 'a');
@@ -179,6 +182,12 @@ for (const boundary of ['closed-controller', 'navigated-controller', 'page-in-ot
             assert.equal(records[0].memberTabIds.includes(restoredId), false, 'A controller cannot reclaim a same-URL page in another window.');
             assert.equal(store.isTransientTab(created.controllerTabId), true);
         } else assert.deepEqual(records, []);
+        const destination=store.spaces.find(space=>space.id!==owner.id);store.active[restored.windowId]=owner.id;
+        await moveTodayTabsToSpace(store,{windowId:restored.windowId,spaceId:owner.id,bookmarkFolderId:owner.bookmarkFolderId,
+            destinationSpaceId:destination.id,destinationBookmarkFolderId:destination.bookmarkFolderId,inverted:store.todayOrderInverted,entries:[{tabId:restoredId,url:restored.url}]});
+        assert(f.local.spaceTabSnapshot.some(record=>record.tabId===restoredId&&record.spaceId===destination.id&&record.currentOwnership));
+        for(const c of preserved)assert(store.durableLayout.cohorts.some(n=>n.id===c.id));
+        assert.equal(store.isTransientTab(restoredId),false);assert.equal(f.mutations.length,mutationCount);
     });
 
 test('cold bridge snapshot rejects a transient source after queue hydration', async t => {
