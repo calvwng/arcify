@@ -26,3 +26,13 @@ Regression coverage includes actual sidebar Space switching with a held native
 activation, first event delivery after fresh selection, ordinary row activation,
 external activation, held reads overtaken by another Space, no-ops, failure,
 blur, menu capture, rerenders, and two-tab round trips through an empty Space.
+
+Hosted qualification also exposed a selected-Space checkpoint retry defect.
+Recovery evidence was consumed on read before Space initialization finished its
+checkpoint. A failure in that interval made a retry lose recovered selections.
+Evidence now remains available for fresh exact-anchor validation until a
+successful selection checkpoint acknowledges it. Newer authoritative own-session
+selection, including an explicitly empty selection, still wins. This does not
+change matching policy, storage format, or recovery authority. Fault injection
+reproduces the defect; the first hosted failure did not capture the intermediate
+worker error, so that run alone cannot establish this precise causal path.
