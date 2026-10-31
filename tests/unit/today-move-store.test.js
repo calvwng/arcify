@@ -495,3 +495,28 @@ for (const state of ['closed', 'foreign-window']) test(`a ${state} recovery cand
         error.batch.completed.length===0&&!error.batch.uncertain);
     assert.deepEqual(f.store.spaces,before);assert.equal(writes(f).length,0);
 });
+
+for(const inverted of [false,true])for(const syncGroups of [false,true])for(const recovered of [false,true])
+test(`return probe empties two-tab interim Space inverted=${inverted} sync=${syncGroups} recovered=${recovered}`,async()=>{
+ const f=fixture({inverted,syncGroups});f.store.spaces[1].temporaryTabs=[];
+ if(recovered)f.store.recoveryCandidates.add(1);
+ const ids=f.request.entries.map(e=>e.tabId);
+ assert.deepEqual((await f.move()).completed,ids);
+ assert.equal(f.store.spaces[1].temporaryTabs.length,2);
+ f.store.active[10]='target';f.session.activeSpaces[10]='target';
+ Object.assign(f.request,{spaceId:'target',bookmarkFolderId:'target-root',destinationSpaceId:'source',destinationBookmarkFolderId:'source-root'});
+ const result=await f.move();assert.deepEqual(result.completed,ids);assert.deepEqual(result.remaining,[]);
+ assert.equal(result.uncertain,false);assert.deepEqual(f.local.spaces.find(s=>s.id==='target').temporaryTabs,[]);
+ for(const id of ids)assert.equal(owner(f.local.spaces,id).id,'source');
+ assert.equal(writes(f).length,2,'One complete membership write per direction');
+});
+for(const blocker of ['provisional','recoveryCandidates'])test(`return probe one ${blocker} cannot silently trim the batch`,async()=>{
+ const f=fixture();f.store.spaces[1].temporaryTabs=[];await f.move();
+ f.store.active[10]='target';f.session.activeSpaces[10]='target';
+ Object.assign(f.request,{spaceId:'target',bookmarkFolderId:'target-root',destinationSpaceId:'source',destinationBookmarkFolderId:'source-root'});
+ f.store[blocker].add(3);
+ if(blocker==='provisional'){
+  await assert.rejects(f.move(),e=>{assert.deepEqual(e.batch.completed,[]);assert.deepEqual(e.batch.remaining,[1,3]);return true;});
+  assert.deepEqual(f.store.spaces[1].temporaryTabs,[1,3]);assert.equal(writes(f).length,1);
+ }else{assert.deepEqual((await f.move()).completed,[1,3]);assert.deepEqual(f.local.spaces[1].temporaryTabs,[]);}
+});

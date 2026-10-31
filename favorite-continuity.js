@@ -179,11 +179,13 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
             && current && same(current, await config())) {
             if (beforeWrite) await beforeWrite();
             await api.storage.session.set(spaceSessionUpdate);
+            recoveredSelection = null;
             return;
         }
         selectionDirty = true;
         await save({ state, items, spaceSessionUpdate, selectedContext: nextSelection, beforeWrite });
         selectionDirty = false;
+        recoveredSelection = null;
     }
     const selectionAnchor = tab => tab && !excluded(tab) && !tab.incognito && !isStartupLauncherTab(tab, api)
         && ![tab.url, tab.pendingUrl].some(url => /^(chrome|moz)-extension:/.test(url || ''));
@@ -197,7 +199,8 @@ export function createFavoriteContinuity({ api = chrome, sendRequest = sendWitne
             const window = await api.windows.get(entry.windowId);
             if (window?.id === entry.windowId && window.type === 'normal' && !window.incognito && selectionAnchor(tab)) active[entry.windowId] = entry.spaceId;
         }
-        recoveredSelection = null;
+        // Reading is not an acknowledgement: Space initialization can fail
+        // before its checkpoint. Retain exact evidence for a validated retry.
         return active;
     }
     async function load({ session, items }) {

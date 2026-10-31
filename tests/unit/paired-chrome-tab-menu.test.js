@@ -172,7 +172,7 @@ for (const [name, mutate] of Object.entries({
 })) test(`Remove Pin proof rejects ${name}`, () => { const f = removeSample(); mutate(f); assert.throws(() => check(assertTabMenuPinRemoved, f)); });
 
 test('fixture uses real UI transport, required screenshots, existing cleanup, no product message bypass or launch', async () => {
-    const source = await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8');
+    const source = (await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
     assert.match(source, /assertTabMenuFixtureEnvironment\(\);/); assert.match(source, /finishBookmarkFixture\(/);
     assert.match(source, /screenshot\(sidebar\.page, label, true\)/); assert.match(source, /captureVisibleFailurePage/);
     assert.match(source, /element\.click\(\{ button: 'right' \}\)/); assert.match(source, /openFreshTabMenu\(\{ page: sidebar\.page, selector, menuSelector: '#tab-context-menu'/); assert.match(source, /openFreshTabMenu\(\{ page: sidebar\.page, selector, menuSelector,/); assert.match(source, /replaceInputText/); assert.match(source, /input\.press\('KeyV'\)/);
@@ -302,7 +302,7 @@ test('duplicate diagnostics retain original oracle error without normalizing ord
 });
 
 test('duplicate baseline precedes single click and diagnostics/teardown precede fixture cleanup', async () => {
-    const source = await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8');
+    const source = (await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
     assert(source.indexOf("checkpoint('duplicate-before-input'") < source.indexOf("await item('duplicate')"));
     assert.equal((source.match(/await item\('duplicate'\)/g) || []).length, 1);
     assert.match(source, /duplicateDiagnostic.last = \{ state: structuredClone\(value\), result \}/);
@@ -313,7 +313,7 @@ test('duplicate baseline precedes single click and diagnostics/teardown precede 
 
 test('duplicate observation failure and teardown failure preserve original error and prior checkpoints', async () => {
     const { finishBookmarkFixture } = await import('../../scripts/paired-chrome-bookmark-selection.mjs');
-    const source = await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8');
+    const source = (await readFile(new URL('../../scripts/paired-chrome-tab-menu.mjs', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
     const start = source.indexOf('            await finishBookmarkFixture([', source.indexOf('const duplicateDiagnostic'));
     const end = source.indexOf('\n        }\n        await ui(sidebar.page', start);
     assert(start > 0 && end > start);

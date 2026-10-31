@@ -178,6 +178,24 @@ const clear = () => event(document.body, 'keydown', { key: 'Escape' });
 async function context(id) { event(live(id), 'contextmenu', { pageX: 30, pageY: 60 }); await wait(30); }
 function dialog() { event(document.getElementById('saveTodayTabsInNewFolder'), 'click'); }
 
+const returnProbeInitial=structuredClone({tabs,storedSpaces,bookmarks,folders,local,session,settings});
+test.beforeEach(async t=>{
+ if(!t.name.startsWith('return '))return;
+ clear();beforeTodayMoveRequest=null;beforeGetTab=null;
+ tabs.splice(0,tabs.length,...structuredClone(returnProbeInitial.tabs));
+ storedSpaces=structuredClone(returnProbeInitial.storedSpaces);
+ bookmarks.splice(0,bookmarks.length,...structuredClone(returnProbeInitial.bookmarks));
+ folders.splice(0,folders.length,...structuredClone(returnProbeInitial.folders));
+ for(const [target,source]of [[local,returnProbeInitial.local],[session,returnProbeInitial.session],[settings,returnProbeInitial.settings]]){
+  for(const key of Object.keys(target))delete target[key];Object.assign(target,structuredClone(source));
+ }
+ storedSpaces.push({id:'probe-other',name:'Probe other',color:'green',bookmarkFolderId:'probe-other-root',temporaryTabs:[],spaceBookmarks:[]});
+ folders.push({id:'probe-other-root',parentId:'root',title:'Probe other'});
+ store.spaces=storedSpaces;store.active=session.activeSpaces;
+ await publishSpaces();await refresh();
+ event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'),'click');await wait(100);await refresh();
+});
+
 test('built-in diagnostic captures plain-click batch through real sidebar menu without recovery writes',async()=>{
  const original=chrome.runtime.sendMessage,requests=[];let respond;
  chrome.runtime.sendMessage=message=>{
@@ -1119,3 +1137,83 @@ test('Today destination click exposes recovery, stale-row and transport failures
         folders.splice(folders.findIndex(f=>f.id==='explicit-root'),1);await publishSpaces();await refresh();
     }
  });
+test('return probe real sidebar sends both tabs back from an otherwise empty interim Space',async()=>{
+ const ids=[3,4],destination={id:'return-probe',name:'Return probe',color:'green',bookmarkFolderId:'return-root',temporaryTabs:[],spaceBookmarks:[]};
+ storedSpaces.push(destination);folders.push({id:'return-root',parentId:'root',title:'Return probe'});await publishSpaces();await refresh();
+ beforeTodayMoveRequest=async message=>{
+  const source=storedSpaces.find(s=>s.id===message.spaceId),target=storedSpaces.find(s=>s.id===message.destinationSpaceId),moved=message.entries.map(e=>e.tabId);
+  source.temporaryTabs=source.temporaryTabs.filter(id=>!moved.includes(id));target.temporaryTabs.push(...moved);
+  await publishSpaces();
+  return {success:true,batch:{total:moved.length,completed:moved,remaining:[],uncertain:false,destinationSpaceId:target.id}};
+ };
+ try{
+  for(const modifier of ['ctrlKey','shiftKey'])for(const [from,to]of [['alpha','return-probe'],['return-probe','alpha']]){
+   event(document.querySelector(`#spaceSwitcher button[data-space-id="${from}"]`),'click');await wait(300);await refresh();
+   if(from==='return-probe')assert.deepEqual(storedSpaces.find(s=>s.id===from).temporaryTabs,ids);
+   event(live(ids[0]),'click');await activate(ids[0]);event(live(ids[1]),'click',{[modifier]:true});await refresh();
+   assert.deepEqual(selected(),ids);await context(ids[1]);event(menuItem('moveTodayTabsToSpace'),'click');
+   assert.match(document.querySelector('.today-move-hint').textContent,/Move 2 tabs/);
+   const prior=todayMoveRequests.length,choice=document.querySelector(`[data-action="moveTodayToDestination"][data-space-id="${to}"]`);
+   for(const type of ['pointerdown','mousedown','mouseup','click'])event(choice,type);await wait(300);
+   assert.equal(todayMoveRequests.length,prior+1);assert.deepEqual(todayMoveRequests.at(-1).entries.map(e=>e.tabId),ids);
+   assert.match(document.getElementById('favoritesDropStatus').textContent,/Moved 2 tabs/);
+   if(from==='return-probe')assert.deepEqual(storedSpaces.find(s=>s.id===from).temporaryTabs,[]);
+  }
+ }finally{beforeTodayMoveRequest=null;clear();}
+});
+
+test('return probe focus loss before opening menu reduces a prior batch to the context row',async()=>{
+ clear();event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'),'click');await wait(300);await refresh();event(live(3),'click');await activate(3);event(live(4),'click',{ctrlKey:true});assert.deepEqual(selected(),[3,4]);
+ window.dispatchEvent(new window.Event('blur'));assert.deepEqual(selected(),[]);
+ await context(4);event(menuItem('moveTodayTabsToSpace'),'click');assert.match(document.querySelector('.today-move-hint').textContent,/Move 1 tab/);clear();
+});
+
+test('return lifecycle owned late native activation preserves the two-row menu',async()=>{
+ if(storedSpaces.length===1){storedSpaces.push({id:'late-target',name:'Late target',color:'green',bookmarkFolderId:'late-root',temporaryTabs:[],spaceBookmarks:[]});folders.push({id:'late-root',parentId:'root',title:'Late target'});await publishSpaces();}
+ clear();event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'),'click');await wait(300);await refresh();
+ event(live(3),'click');event(live(4),'click',{ctrlKey:true});assert.deepEqual(selected(),[3,4]);
+ await wait(30);await activate(3);assert.deepEqual(selected(),[3,4]);
+ await context(4);event(menuItem('moveTodayTabsToSpace'),'click');assert.match(document.querySelector('.today-move-hint').textContent,/Move 2 tabs/);clear();
+});
+
+test('return activation Space switch preserves fresh Ctrl selection when its native event first arrives late',async()=>{
+ const savedSpaces=structuredClone(storedSpaces),originalUpdate=chrome.tabs.update;
+ const target={id:'activation-target',name:'Activation target',color:'green',bookmarkFolderId:'activation-root',temporaryTabs:[3,4],spaceBookmarks:[]};
+ for(const s of storedSpaces)s.temporaryTabs=s.temporaryTabs.filter(id=>![3,4].includes(id));
+ storedSpaces.push(target);folders.push({id:'activation-root',parentId:'root',title:'Activation target'});await publishSpaces();await refresh();
+ let release,deliver;
+ chrome.tabs.update=async(id,props)=>{
+  const result=await originalUpdate.call(chrome.tabs,id,props);
+  if(props.active&&[3,4].includes(id))await new Promise(resolve=>{release=resolve;deliver=()=>activate(id);});
+  return result;
+ };
+ try{
+  clear();event(document.querySelector('#spaceSwitcher button[data-space-id="activation-target"]'),'click');
+  for(let i=0;i<50&&!deliver;i++)await wait(5);assert(deliver,'Native activation request must be pending');
+  assert(live(3)&&live(4));event(live(3),'click',{ctrlKey:true});event(live(4),'click',{ctrlKey:true});assert.deepEqual(selected(),[3,4]);
+  await deliver();release();await wait(30);assert.deepEqual(selected(),[3,4]);
+  await context(4);event(menuItem('moveTodayTabsToSpace'),'click');assert.match(document.querySelector('.today-move-hint').textContent,/Move 2 tabs/);clear();
+  event(live(3),'click',{ctrlKey:true});event(live(4),'click',{ctrlKey:true});await activate(5);assert.deepEqual(selected(),[],'Unrelated native activation still clears selection');
+ }finally{
+  release?.();chrome.tabs.update=originalUpdate;storedSpaces=savedSpaces;folders.splice(folders.findIndex(f=>f.id==='activation-root'),1);await publishSpaces();await refresh();clear();
+ }
+});
+
+test('return activation held read from Space A cannot activate after switching to B',async()=>{
+ const savedSpaces=structuredClone(storedSpaces),added=[];let release,held=false;
+ for(const [id,tabId] of [['race-a',3],['race-b',4]]){
+  for(const s of storedSpaces)s.temporaryTabs=s.temporaryTabs.filter(x=>x!==tabId);
+  storedSpaces.push({id,name:id,color:'green',bookmarkFolderId:id+'-root',temporaryTabs:[tabId],spaceBookmarks:[]});folders.push({id:id+'-root',parentId:'root',title:id});added.push(id+'-root');
+ }
+ await publishSpaces();await refresh();const start=mutations.length;
+ beforeGetTab=async id=>{if(id===3&&!held){held=true;await new Promise(r=>{release=r;});}};
+ try{
+  event(document.querySelector('#spaceSwitcher button[data-space-id="race-a"]'),'click');
+  for(let i=0;i<80&&!held;i++)await wait(5);assert(held);
+  event(document.querySelector('#spaceSwitcher button[data-space-id="race-b"]'),'click');
+  for(let i=0;i<80&&!mutations.slice(start).some(m=>m[0]==='tab-update'&&m[1]===4&&m[2].active);i++)await wait(5);
+  assert(mutations.slice(start).some(m=>m[0]==='tab-update'&&m[1]===4&&m[2].active));
+  release();await wait(100);assert(!mutations.slice(start).some(m=>m[0]==='tab-update'&&m[1]===3&&m[2].active));
+  assert.equal(document.querySelector('.space.active').dataset.spaceId,'race-b');
+ }finally{release?.();beforeGetTab=null;storedSpaces=savedSpaces;for(const id of added)folders.splice(folders.findIndex(f=>f.id===id),1);await publishSpaces();await refresh();clear();}
+});

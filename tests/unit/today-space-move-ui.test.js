@@ -185,3 +185,12 @@ test('malformed error receipts retain diagnostic text and never report success o
         assert(result.includes(response.error));assert.match(result,/result is unknown/);assert.doesNotMatch(result,/Nothing was moved|Moved 1 tab/);
     }
 });
+
+test('return message cannot report Moved 1 tab for a two-entry request',()=>{
+ const destination={id:'dest',name:'Destination'},entries=[{tabId:1},{tabId:2}];
+ for(const success of [true,false])for(const uncertain of [true,false]){
+  const response={success,error:'synthetic',batch:{total:2,completed:[1],remaining:[2],uncertain,destinationSpaceId:'dest'}};
+  const text=describeTodayMoveOutcome(response,entries,destination);assert.doesNotMatch(text,/^Moved 1 tab/);
+ }
+ assert.match(describeTodayMoveOutcome({success:true,batch:{total:1,completed:[1],remaining:[],uncertain:false,destinationSpaceId:'dest'}},[{tabId:1}],destination),/^Moved 1 tab/);
+});

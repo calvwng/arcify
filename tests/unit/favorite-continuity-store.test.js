@@ -686,3 +686,34 @@ for (const change of ['url', 'pending-url', 'new-pending', 'replace', 'window', 
         assert.match(error?.message || '', /duplicate was created.*(?:authority changed|creation changed|proof expired)/i);
     });
 }
+
+test('recovered selection survives initialization retry before checkpoint', async () => {
+    tabs.push({ id: 3, windowId: 2, title: 'Other', url: 'https://other.test/', pinned: false, groupId: -1, index: 0 });
+    local.spaces[1].temporaryTabs.push(3);
+    const first = pairedStores();
+    await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    await first.spaces.dispatch({ action: 'activate', windowId: 2, spaceId: 'a' });
+    clearSession(); const second = pairedStores();
+    const persist = second.spaces.persist.bind(second.spaces);
+    let fail = true;
+    second.spaces.persist = async (...args) => { if (fail) { fail = false; throw new Error('injected before selection checkpoint'); } return persist(...args); };
+    await assert.rejects(second.spaces.dispatch({ action: 'get' }), /injected/);
+    await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(session.activeSpaces, { 1: 'b', 2: 'a' });
+});
+
+for (const newer of [{}, { 1: 'a' }]) test(`retained recovery cannot override newer own-session selection ${JSON.stringify(newer)}`, async () => {
+    const first = pairedStores();
+    await first.spaces.dispatch({ action: 'activate', windowId: 1, spaceId: 'b' });
+    clearSession(); const second = pairedStores();
+    const persist = second.spaces.persist.bind(second.spaces); let fail = true;
+    second.spaces.persist = async (...args) => { if (fail) { fail = false; throw new Error('before acknowledgement'); } return persist(...args); };
+    await assert.rejects(second.spaces.dispatch({ action: 'get' }), /before acknowledgement/);
+    session.spaceSession = true; session.activeSpaces = clone(newer);
+    await second.spaces.dispatch({ action: 'get' });
+    assert.deepEqual(session.activeSpaces, newer);
+    assert.deepEqual(local[CONTINUITY_LOCAL_KEY].selection.windows.map(({ windowId, spaceId }) => [windowId, spaceId]),
+        Object.entries(newer).map(([id, spaceId]) => [Number(id), spaceId]));
+    assert.deepEqual(await second.favorites.ownershipPersistence.recoverSelection(second.spaces.spaces), {},
+        'Successful checkpoint retires the old recovery candidate');
+});
