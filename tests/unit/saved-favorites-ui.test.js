@@ -13,11 +13,12 @@ function fixture() {
         { id: 'two', title: 'Saved Two', url: 'https://two.test/', sourceBookmarkId: 'b2', tabId: null }];
     const nativeTabs = [{ id: 20, title: 'Native', url: 'https://native.test/', pinned: true, windowId: 1, index: 1 }];
     const tabs = [{ id: 10, title: 'Navigated', url: 'https://one.test/deep', pinned: true, active: true, windowId: 1 }, ...nativeTabs];
-    let windowId = 1, beforeGet;
+    let windowId = 1, beforeGet, attachmentReply;
     const calls = [], statuses = [];
     const api = {
         runtime: { getURL: path => `chrome-extension://fixture/${path}`, async sendMessage(message) {
             calls.push(structuredClone(message));
+            if (['attachmentCandidates', 'attachExisting'].includes(message.action) && attachmentReply) return attachmentReply(message);
             if (message.action === 'get') { const result = structuredClone({ success: true, favorites, nativeTabs }); await beforeGet?.(); return result; }
             if (message.action === 'closeTab') {
                 const favorite = favorites.find(item => item.id === message.favoriteId && item.tabId === message.tabId);
@@ -40,7 +41,7 @@ function fixture() {
     const row = id => [...container.querySelectorAll('.saved-favorite')].find(node => node.dataset.favoriteId === id);
     const menu = (node, text) => { event(node, 'contextmenu'); const item = [...document.querySelectorAll('[role="menuitem"]')].find(node => node.textContent === text); assert(item, text); event(item, 'click'); };
     return { document, window, container, favorites, nativeTabs, tabs, calls, statuses, ui, row, event, menu, drag, context,
-        setWindow(id) { windowId = id; context.windowId = id; }, setBeforeGet(value) { beforeGet = value; } };
+        setWindow(id) { windowId = id; context.windowId = id; }, setBeforeGet(value) { beforeGet = value; }, setAttachmentReply(value) { attachmentReply = value; } };
 }
 
 test('real renderer keeps stable saved IDs, visible closed state and native distinction without migration hint', async () => {
@@ -192,4 +193,134 @@ test('Move to New Window dispatches exact saved/native identities and is absent 
  assert.deepEqual(f.calls.filter(m => m.type === 'moveTabToNewWindow').at(-1), { type: 'moveTabToNewWindow', windowId: 1, tabId: 20 });
  f.event(f.row('two'), 'contextmenu');
  assert(![...f.document.querySelectorAll('[role="menuitem"]')].some(n => n.textContent === 'Move to New Window'));
+});
+
+const attachmentCandidates = () => ({ success: true, favorite: { id: 'two', title: 'Saved Two', url: 'https://two.test/' }, candidates: [
+    { tabId: 30, position: 1, title: 'Video', url: 'https://two.test/watch?v=current', pinned: false, suggested: true, token: 'ticket-30' },
+    { tabId: 31, position: 2, title: 'Video', url: 'https://two.test/watch?v=current', pinned: true, token: 'ticket-31' },
+    { tabId: 32, position: 3, title: 'Saved homepage', url: 'https://two.test/', pinned: false, suggested: true, token: 'ticket-32' }
+] });
+const attachmentButton = (f, text) => [...f.document.querySelectorAll('dialog button')].find(button => button.textContent === text);
+const chooseAttachment = (f, index = 0) => {
+    const radio = [...f.document.querySelectorAll('dialog input')][index]; radio.checked = true; f.event(radio, 'change');
+};
+
+test('attachment picker refreshes candidates, labels duplicate pages, and requires selection plus confirmation', async () => {
+    const f = fixture(); f.setAttachmentReply(message => message.action === 'attachmentCandidates' ? attachmentCandidates() : { success: true });
+    await f.ui.refresh();
+    assert.match(f.row('two').title, /attach an existing tab/);
+    f.menu(f.row('two'), 'Attach existing tab…'); await tick();
+    assert.deepEqual(f.calls.find(call => call.action === 'attachmentCandidates'), { type: 'favoriteStore', action: 'attachmentCandidates', favoriteId: 'two', windowId: 1 });
+    const dialog = f.document.querySelector('dialog'); assert(dialog.hasAttribute('open'));
+    assert.equal(dialog.getAttribute('aria-labelledby'), 'favorite-attachment-title');
+    const radios = [...dialog.querySelectorAll('input')]; assert.equal(radios.length, 3); assert(radios.every(radio => !radio.checked));
+    assert.match(dialog.textContent, /Tab 1 in this window - Ordinary tab/); assert.match(dialog.textContent, /Tab 2 in this window - Browser pin/);
+    assert.match(dialog.textContent, /Same site as saved shortcut/);
+    const confirm = attachmentButton(f, 'Attach to this Favorite'); assert(confirm.disabled);
+    chooseAttachment(f, 1); assert.equal(confirm.disabled, false);
+    f.event(confirm, 'click'); f.event(confirm, 'click'); await tick();
+    assert.deepEqual(f.calls.filter(call => call.action === 'attachExisting'), [{ type: 'favoriteStore', action: 'attachExisting', favoriteId: 'two', windowId: 1, tabId: 31, token: 'ticket-31' }]);
+    assert(!f.calls.some(call => call.action === 'open' || call.close || call.update));
+    assert.equal(f.favorites[1].url, 'https://two.test/');
+    assert.match(f.statuses.at(-1), /current page and your saved shortcut were kept/);
+    assert.equal(f.document.querySelector('dialog'), null);
+});
+
+test('attachment cancellation and stale picker/window responses never attach or revive a dismissed dialog', async () => {
+    for (const exit of ['cancel', 'Escape', 'pagehide', 'window', 'dispose', 'new-menu']) {
+        const f = fixture(); let release;
+        f.setAttachmentReply(() => new Promise(resolve => { release = resolve; }));
+        await f.ui.refresh(); f.menu(f.row('two'), 'Attach existing tab…');
+        if (exit === 'cancel') f.event(attachmentButton(f, 'Cancel'), 'click');
+        else if (exit === 'Escape') f.event(f.document, 'keydown', { key: 'Escape' });
+        else if (exit === 'pagehide') f.event(f.window, 'pagehide');
+        else if (exit === 'window') { f.setWindow(2); await f.ui.refresh(); }
+        else if (exit === 'dispose') f.ui.dispose();
+        else f.event(f.row('one'), 'contextmenu');
+        release(attachmentCandidates()); await tick();
+        assert.equal(f.document.querySelector('dialog'), null, exit);
+        assert(!f.calls.some(call => call.action === 'attachExisting'), exit);
+        f.ui.dispose();
+    }
+});
+
+test('attachment cancellation after selection leaves pages and Favorite untouched', async () => {
+    const f = fixture(); f.setAttachmentReply(() => attachmentCandidates()); await f.ui.refresh();
+    f.menu(f.row('two'), 'Attach existing tab…'); await tick(); chooseAttachment(f);
+    f.event(attachmentButton(f, 'Cancel'), 'click');
+    assert.equal(f.document.querySelector('dialog'), null);
+    assert(!f.calls.some(call => call.action === 'attachExisting' || call.action === 'open' || call.close || call.update));
+});
+
+test('attachment closes on refreshed Favorite removal or new binding and refuses changed window at confirmation', async () => {
+    for (const change of ['remove', 'bind', 'window']) {
+        const f = fixture(); f.setAttachmentReply(() => attachmentCandidates()); await f.ui.refresh();
+        f.menu(f.row('two'), 'Attach existing tab…'); await tick(); chooseAttachment(f);
+        const confirm = attachmentButton(f, 'Attach to this Favorite');
+        if (change === 'remove') { f.favorites.splice(1, 1); await f.ui.refresh(); }
+        if (change === 'bind') { f.favorites[1].tabId = 30; await f.ui.refresh(); }
+        if (change === 'window') f.setWindow(2);
+        f.event(confirm, 'click'); await tick();
+        assert(!f.calls.some(call => call.action === 'attachExisting'), change);
+        assert.equal(f.document.querySelector('dialog'), null, change);
+    }
+});
+
+test('worker stale-ticket errors close the picker and never retry or open another tab', async () => {
+    const f = fixture(); f.setAttachmentReply(message => message.action === 'attachmentCandidates' ? attachmentCandidates()
+        : { success: false, code: 'STALE_TAB', error: 'The tab changed. Choose it again.' });
+    await f.ui.refresh(); f.menu(f.row('two'), 'Attach existing tab…'); await tick(); chooseAttachment(f);
+    f.event(attachmentButton(f, 'Attach to this Favorite'), 'click'); await tick();
+    assert.equal(f.document.querySelector('dialog'), null); assert.match(f.statuses.at(-1), /tab changed/);
+    assert.equal(f.calls.filter(call => call.action === 'attachExisting').length, 1);
+    assert(!f.calls.some(call => call.action === 'open'));
+});
+
+test('attachment dialog traps keyboard focus and Escape returns focus to the Favorite', async () => {
+    const f = fixture(); let focused = f.document.body;
+    Object.defineProperty(f.document, 'activeElement', { get: () => focused });
+    const oldFocus = f.window.HTMLElement.prototype.focus;
+    f.window.HTMLElement.prototype.focus = function () { focused = this; };
+    try {
+        f.setAttachmentReply(() => attachmentCandidates()); await f.ui.refresh();
+        f.event(f.row('two'), 'keydown', { key: 'ContextMenu' });
+        const menuItem = [...f.document.querySelectorAll('[role="menuitem"]')].find(node => node.textContent === 'Attach existing tab…');
+        f.event(menuItem, 'click'); await tick();
+        const cancel = attachmentButton(f, 'Cancel'); assert.equal(f.document.activeElement, cancel);
+        f.event(f.document, 'keydown', { key: 'Tab' }); assert.equal(f.document.activeElement, f.document.querySelector('dialog input'));
+        f.event(f.document, 'keydown', { key: 'Tab', shiftKey: true }); assert.equal(f.document.activeElement, cancel);
+        f.event(f.document, 'keydown', { key: 'Escape' }); assert.equal(f.document.activeElement, f.row('two'));
+    } finally { f.ui.dispose(); f.window.HTMLElement.prototype.focus = oldFocus; }
+});
+
+test('attachment text is bounded plain text, and empty results cannot confirm', async () => {
+    const f = fixture(); const response = attachmentCandidates();
+    response.favorite.title = '<img src=x>\u202e'; response.candidates[0].title = '<script>x</script>' + 'x'.repeat(1000); response.candidates[0].url = 'https://example.test/' + 'x'.repeat(3000);
+    f.setAttachmentReply(() => response); await f.ui.refresh(); f.menu(f.row('two'), 'Attach existing tab…'); await tick();
+    const dialog = f.document.querySelector('dialog'); assert.equal(dialog.querySelector('img,script'), null);
+    assert.equal(dialog.querySelector('strong').textContent.length, 200); assert(!dialog.textContent.includes('\u202e'));
+    f.event(attachmentButton(f, 'Cancel'), 'click');
+    response.candidates = []; f.menu(f.row('two'), 'Attach existing tab…'); await tick();
+    assert(attachmentButton(f, 'Attach to this Favorite').disabled); assert.match(f.document.querySelector('dialog').textContent, /No available tabs/);
+    f.ui.dispose();
+});
+
+test('attachment completion after leaving the surface never presents status or refreshes another context', async () => {
+    for (const outcome of ['success', 'error']) for (const exit of ['pagehide', 'dispose', 'window', 'new-menu']) {
+        const f = fixture(); let release;
+        f.setAttachmentReply(message => message.action === 'attachmentCandidates' ? attachmentCandidates()
+            : new Promise(resolve => { release = resolve; }));
+        await f.ui.refresh(); f.menu(f.row('two'), 'Attach existing tab…'); await tick(); chooseAttachment(f);
+        f.event(attachmentButton(f, 'Attach to this Favorite'), 'click');
+        if (exit === 'pagehide') f.event(f.window, 'pagehide');
+        if (exit === 'dispose') f.ui.dispose();
+        if (exit === 'window') f.setWindow(2);
+        if (exit === 'new-menu') f.event(f.row('one'), 'contextmenu');
+        const reads = f.calls.filter(call => call.action === 'get').length;
+        release(outcome === 'success' ? { success: true } : { success: false, error: 'Stale tab.' }); await tick();
+        assert.equal(f.statuses.length, 0, `${outcome}: ${exit}`);
+        assert.equal(f.calls.filter(call => call.action === 'get').length, reads, `${outcome}: ${exit}`);
+        assert.equal(f.document.querySelector('dialog'), null);
+        f.ui.dispose();
+    }
 });

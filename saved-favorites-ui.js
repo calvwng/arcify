@@ -2,6 +2,7 @@ import { createContextMenuSession } from './context-menu-session.js';
 import { Utils } from './utils.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { favoriteIconCacheUrl, isFavoriteIcon } from './favorite-icons.js';
+import { createFavoriteAttachmentUI } from './favorite-attachment-ui.js';
 
 // The background worker is the sole durable Favorites writer. Never send a
 // cached record/URL or whole-array order back from a sidebar.
@@ -30,8 +31,10 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
     const pending = new Map();
     let disposeMenu = () => {};
     const request = (action, payload = {}) => favoriteRequest(action, { windowId: getWindowId(), ...payload }, api);
+    const attachment = createFavoriteAttachmentUI({ document, getWindowId, request, onStatus, onAttached: () => refresh() });
 
     async function refresh() {
+        attachment.validate();
         const token = ++generation, windowId = getWindowId();
         if (!Number.isInteger(windowId)) return;
         try {
@@ -40,6 +43,7 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
             if (token !== generation || windowId !== getWindowId()) return;
             snapshot = next;
             render(next, active?.id);
+            attachment.validate();
         } catch (error) {
             if (token === generation) onStatus(error.message);
         }
@@ -73,6 +77,7 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
     function menu(node, event) {
         event.preventDefault(); event.stopPropagation();
         disposeMenu();
+        attachment.close();
         const session = createContextMenuSession(document, { onEscape: () => { if (node.isConnected) node.focus(); } });
         disposeMenu = session.close;
         document.getElementById('tab-context-menu')?.remove();
@@ -89,6 +94,7 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
             menu.appendChild(button);
         };
         item(favoriteId && !tabId ? 'Open Favorite' : 'Go to Tab', () => activate(node));
+        if (favoriteId && !tabId) item('Attach existing tab…', () => attachment.open(node, favoriteId, windowId));
         if (tabId) item('Move to New Window', () => run(`move-window:${tabId}`, async () => {
             if (getWindowId() !== windowId) throw new Error('This window changed. Reopen the menu.');
             const result = await api.runtime.sendMessage({ type: 'moveTabToNewWindow', windowId, tabId, ...(favoriteId ? { favoriteId } : {}) });
@@ -148,7 +154,8 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
             if (row.saved) node.dataset.favoriteId = row.id;
             if (row.tabId) node.dataset.tabId = String(row.tabId); else delete node.dataset.tabId;
             const state = row.saved ? (row.tabId ? 'Open in this window' : 'Closed · click to open') : 'Browser pin · not saved';
-            node.title = `${row.title || row.url}\n${state}`; node.setAttribute('aria-label', `${row.title || row.url}. ${state}`);
+            const recovery = row.saved && !row.tabId ? '. Right-click or press Shift+F10 to attach an existing tab' : '';
+            node.title = `${row.title || row.url}\n${state}${recovery}`; node.setAttribute('aria-label', `${row.title || row.url}. ${state}${recovery}`);
             node.classList.toggle('favorite-closed', Boolean(row.saved && !row.tabId));
             node.classList.toggle('active', Boolean(row.tabId && row.tabId === activeTabId));
             node.querySelector('.favorite-state').textContent = row.saved ? (row.tabId ? 'Open' : 'Closed') : 'Pin';
@@ -176,5 +183,5 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
         if (placeholder) placeholder.style.display = rows.length ? 'none' : 'block';
     }
 
-    return { refresh, request, getSnapshot: () => snapshot, dispose() { ++generation; disposeMenu(); } };
+    return { refresh, request, getSnapshot: () => snapshot, dispose() { ++generation; disposeMenu(); attachment.dispose(); } };
 }

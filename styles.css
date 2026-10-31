@@ -2487,6 +2487,35 @@ select:focus-visible,
 .shared-today-remote:hover, .shared-today-remote:focus-visible { background:rgba(127,127,127,.18); }
 
 
+/* Explicit saved-Favorite reattachment keeps existing pages in place. */
+.favorite-attachment-dialog {
+    box-sizing: border-box;
+    width: min(440px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    border: 1px solid var(--sidebar-border-color, #777);
+    border-radius: 12px;
+    padding: 18px;
+    background: var(--theme-panel-bg, #f6f7fb);
+    color: var(--theme-panel-text, #24262d);
+    font: inherit;
+}
+.favorite-attachment-dialog::backdrop { background: rgb(0 0 0 / 45%); }
+.favorite-attachment-dialog h2 { margin: 0 0 12px; font-size: 16px; overflow-wrap: anywhere; }
+.favorite-attachment-dialog p { font-size: 12px; line-height: 1.5; }
+.favorite-attachment-list { border: 0; padding: 0; margin: 12px 0; min-width: 0; }
+.favorite-attachment-list legend { font-weight: 600; font-size: 12px; margin-bottom: 8px; }
+.favorite-attachment-candidate { display: flex; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--sidebar-border-color, #777); cursor: pointer; }
+.favorite-attachment-candidate > span { display: flex; flex-direction: column; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.favorite-attachment-candidate strong { font-size: 13px; }
+.favorite-attachment-candidate span, .favorite-attachment-candidate small { font-size: 11px; }
+.favorite-attachment-candidate input { flex: 0 0 auto; align-self: start; margin-top: 3px; }
+.favorite-attachment-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.favorite-attachment-actions button { font: inherit; font-size: 12px; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--theme-panel-muted, #555); background: var(--theme-input-bg, #fff); color: var(--theme-panel-text, #24262d); cursor: pointer; }
+.favorite-attachment-dialog :focus-visible { outline: 2px solid var(--theme-panel-text, #24262d); outline-offset: 3px; }
+.favorite-attachment-dialog button:disabled { opacity: .55; cursor: default; }
+
+
 /* Bottom Space switcher: every chip owns its tint; the strip and + keep theirs. */
 :root[data-theme] #spaceSwitcher.space-switcher button[data-space-id] {
     background: var(--space-chip-bg, var(--sidebar-secondary-bg));

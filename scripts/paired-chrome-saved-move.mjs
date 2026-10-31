@@ -420,7 +420,9 @@ export async function exerciseSavedMove({ apiPage, nativeSidebar, newTabPage, op
         await poll(() => apiPage.evaluate(id => chrome.tabs.get(id), globalFavorite.tabId), tab => tab.status === 'complete' && tab.url === pins.active.url, 'separate global Favorite fully loaded before saved Move identity baseline');
         // Keep the B copy active while A's exact saved row activates in its native panel.
         await apiPage.evaluate(id => chrome.tabs.update(id, { active: true }), copies.active[1]);
-        await input('Activate exact saved A copy without changing the B page', () => native.page.click(savedRow(pins.active.id)));
+        await input('Activate exact saved A copy without changing the B page', () => clickBookmarkFixtureRow(native.page,
+            `.space.active[data-space-id="${source.id}"] .tab[data-bookmark-id="${pins.active.id}"][data-tab-id="${copies.active[0]}"]`, [],
+            observation => checkpoint('saved-activation-click', { observation })));
         await poll(read, state => state.tabs.find(tab => tab.id === copies.active[0])?.active && state.tabs.find(tab => tab.id === copies.active[1])?.active && state.activeSpaceId === source.id, 'both exact saved linked copies active in their own windows');
         const beforeCancel = await read(); await picker(pins.closed.id);
         await input('Back from saved destination chooser', () => native.page.click(`${savedMoveMenu(false)} [data-action="backToTabMenu"]`));

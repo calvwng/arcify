@@ -658,6 +658,9 @@ export class SpaceStore {
     }
     // Internal only: callers already holding run() may compose the existing operations.
     async applyAction(message) {
+        // A newer explicit Space operation supersedes pending attachment consent,
+        // even if a later operation moves the page back to the same placement.
+        if (message.action !== 'get') this.favoriteStore?.attachment?.invalidate();
         switch (message.action) {
             case 'get':
                 if (await this.discoverBookmarkSpaces()) await this.persist();
