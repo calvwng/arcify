@@ -141,3 +141,72 @@ test('a single correctly placed ID cannot hide navigation to an unintended desti
     const s = sample(); s.request.expectedUrl = s.after.tabs.at(-1).url; assertTodayCreated(s.before, s.after, s.request);
     s.after.tabs.at(-1).url = 'http://unexpected'; assert.throws(() => assertTodayCreated(s.before, s.after, s.request));
 });
+
+function reloadDiagnosticsSample() {
+    const before = sample().before, ids = { arcifyId: 'arcify', spotlightId: 'spotlight' };
+    before.windows = [7, 8, 9].map(id => ({ id, type: 'normal', incognito: false }));
+    before.activeSpaces[9] = 'control';
+    before.spaces.push({ id: 'control', spaceBookmarks: [], temporaryTabs: [902] });
+    const pages = Object.values(ids).map((extensionId, index) => {
+        const tab = { id: 901 + index, windowId: 9, url: `chrome-extension://${extensionId}/options.html`, pinned: false, incognito: false };
+        before.tabs.push({ ...tab, pendingUrl: null, splitViewId: -1 });
+        return { extensionId, documentUrl: tab.url, tab };
+    });
+    before.groupState = { spaces: before.spaces, windows: before.windows, activeSpaces: before.activeSpaces };
+    before.fixturePages = { controlWindowId: 9, pages };
+    before.selectionRecovery = { continuity: { selection: { anchors: ['independent-before'] } }, receipt: { selectionFingerprint: 'before-digest' } };
+    return { before, after: structuredClone(before), ids };
+}
+
+test('reload diagnostics leave all original assertions strict and identify the exact failing stage', async () => {
+    const { observeTodayReloadAssertions } = await import('../../scripts/paired-chrome-today-order.mjs');
+    const valid = reloadDiagnosticsSample();
+    assert.equal(observeTodayReloadAssertions(valid.before, valid.after, valid.ids).passed, true);
+    const cases = [
+        ['fixture-provenance', state => { state.fixturePages.pages[0].documentUrl += '?wrong'; }],
+        ['logical-state', state => { state.spaces[0].temporaryTabs.reverse(); }],
+        ['window-selection', state => { delete state.groupState.activeSpaces[7]; }],
+        ['native-identities', state => { state.tabs[0].url = 'http://unexpected'; }]
+    ];
+    for (const [stage, mutate] of cases) {
+        const { before, after, ids } = reloadDiagnosticsSample(); mutate(after);
+        const result = observeTodayReloadAssertions(before, after, ids);
+        assert.equal(result.passed, false); assert.equal(result.stage, stage);
+        assert.equal(result.assertion.name, 'AssertionError');
+        assert(result.assertion.message); assert(result.assertion.stack); assert(result.assertion.operator);
+        assert(Object.hasOwn(result.assertion, 'expected')); assert(Object.hasOwn(result.assertion, 'actual'));
+        assert.deepEqual(before.selectionRecovery, valid.before.selectionRecovery, 'Observation must not mutate original recovery evidence');
+    }
+});
+
+test('cleanup diagnostics append without erasing baseline, final assertion, or original failure', async () => {
+    const { appendTodayOrderEvidence } = await import('../../scripts/paired-chrome-today-order.mjs');
+    const { finishBookmarkFixture } = await import('../../scripts/paired-chrome-bookmark-selection.mjs');
+    const evidence = { checkpoints: [] }, writes = [], record = async value => { writes.push(value); };
+    const baseline = reloadDiagnosticsSample().before, original = new Error('original reload timeout');
+    await appendTodayOrderEvidence(evidence, 'witnessed-reload-baseline', { before: baseline }, record);
+    await appendTodayOrderEvidence(evidence, 'today-order-failed', { error: { message: original.message }, reloadDiagnostic: { before: baseline, last: { stage: 'window-selection', assertion: { message: 'exact original mismatch' }, state: { activeSpaces: {} } } } }, record);
+    await finishBookmarkFixture([async () => { throw new Error('cleanup failed'); }], original,
+        event => appendTodayOrderEvidence(evidence, event.phase, { errors: event.errors }, record));
+    assert.deepEqual(writes.at(-1).checkpoints.map(item => item.phase), ['witnessed-reload-baseline', 'today-order-failed', 'cleanup-failed']);
+    assert.deepEqual(writes.at(-1).checkpoints[0].before, baseline);
+    assert.equal(writes.at(-1).checkpoints[1].error.message, original.message);
+    assert.equal(writes.at(-1).checkpoints[1].reloadDiagnostic.last.assertion.message, 'exact original mismatch');
+    assert.deepEqual(original.cleanupErrors, ['cleanup failed']);
+    assert.equal(writes[0].checkpoints.length, 1, 'Previously emitted evidence is frozen');
+    await assert.rejects(finishBookmarkFixture([async () => { throw new Error('cleanup-only failure'); }], null,
+        event => appendTodayOrderEvidence(evidence, event.phase, { errors: event.errors }, record)), AggregateError);
+    assert.equal(writes.at(-1).checkpoints.length, 4);
+});
+
+test('reload diagnostics capture before reload, retain final failed poll and append cleanup evidence', () => {
+    const source = readSourceText(new URL('../../scripts/paired-chrome-today-order.mjs', import.meta.url));
+    assert(source.indexOf("await checkpoint('witnessed-reload-baseline'") < source.indexOf('await reloadArcify()'));
+    assert.match(source, /favoriteContinuity.*\]/);
+    assert.match(source, /favoriteContinuityReceipt/);
+    assert.match(source, /selectionRecovery: \{ continuity: local.favoriteContinuity/);
+    assert.match(source, /reloadDiagnostic.last = \{ state: structuredClone\(state\), proof: structuredClone\(proof\)/);
+    assert.match(source, /stage: result.stage, assertion: result.assertion/);
+    assert.match(source, /'today-order-failed'.*reloadDiagnostic/);
+    assert.match(source, /event => checkpoint\(event.phase, \{ errors: event.errors \}\)/);
+});
