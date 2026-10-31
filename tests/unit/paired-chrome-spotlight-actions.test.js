@@ -33,7 +33,7 @@ function sample(command = 'pinCurrentTab') {
         bookmarks: [folder('root', '0', 0, [folder('root-work', 'root', 0, [leaf('decoy', 'root-work', 0), folder('nested', 'root-work', 1, [leaf('nested-pin', 'nested', 0)])]), folder('root-home', 'root', 1, [leaf('counterpart', 'root-home', 0)])])],
         bindings: { 102: { bookmarkId: 'decoy', pinnedUrl: URL }, 201: { bookmarkId: 'decoy', pinnedUrl: URL }, 202: { bookmarkId: 'counterpart', pinnedUrl: URL } }, aliases: {},
         favorites: [{ id: 'favorite', url: URL }], favoriteSession: { bindings: [{ favoriteId: 'favorite', tabId: 301, windowId: 7 }] },
-        pageStates: Object.fromEntries(tabs.map(tab => [tab.id, { documentId: `doc-${tab.id}`, url: URL, timeOrigin: tab.id, value: `typed-${tab.id}` }])), activeSpaces: { 7: 'work', 8: 'home' }, pairingGeneration: 'arcify-generation', journal: [] });
+        pageStates: Object.fromEntries(tabs.map(tab => [tab.id, { documentId: `doc-${tab.id}`, url: URL, timeOrigin: tab.id, value: `typed-${tab.id}` }])), activeSpaces: { 7: 'work', 8: 'home' }, pairingGeneration: 'arcify-generation', workerContext: { contextId: 'worker-1' }, ownershipEpoch: { session: 'current-epoch' }, nativeLifecycle: [], journal: [] });
     if (command === 'removeCurrentPin') {
         before.bookmarks[0].children[0].children.push(leaf('pin', 'root-work', 2, 'Native 101'));
         before.spaces[0].temporaryTabs = []; before.spaces[0].spaceBookmarks.push(101); before.bindings[101] = { bookmarkId: 'pin', pinnedUrl: URL };
@@ -442,7 +442,7 @@ for (const stage of ['request', 'input', 'native']) test(`failed ${stage} valida
     if (stage === 'input') evidence.trace.input[0].trusted = false;
     if (stage === 'native') evidence.trace.events.push({ type: 'windows.onFocusChanged', data: [77] });
     const run = new vm.Script(`(async () => { ${source.slice(start, end)} })()`).runInNewContext({
-        ...evidence, sourceContext: evidence.context, command: 'openSettings', surface: {}, inputOwner: {}, rows: [], prompt: undefined, title: undefined,
+        ...evidence, sourceContext: evidence.context, command: 'openSettings', surface: {}, inputOwner: {}, rows: [], prompt: undefined, title: undefined, freshTodayCreations: [], priorPin: undefined,
         spotlightId: PEER, arcifyId: OWN, owned, roots, assert,
         observed: async () => clone(evidence.trace), checkpoint: async (phase, data) => records.push({ phase, ...clone(data) }),
         assertSpotlightActionRequest, assertSpotlightActionInput, assertSpotlightSettingsOpened, assertSpotlightActionCommitted
@@ -524,5 +524,176 @@ test('folder creation keeps even the current source Today witness unchanged', ()
     const s = sampleWithTodayWitnesses('createSpaceFolder');
     assertSpotlightActionCommitted(s.before, s.after, s.options);
     delete s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership;
+    assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});
+
+function samplePinRemovalRoundtrip() {
+    const pin = sampleWithTodayWitnesses(), remove = sample('removeCurrentPin');
+    const priorPin = { before: pin.before, after: pin.after, resultId: pin.options.resultId,
+        request: pin.options.request, trace: { events: pin.options.events } };
+    remove.options.priorPin = priorPin;
+    for (const state of [remove.before, remove.after]) {
+        state.tabs.push({ ...clone(state.tabs[0]), id: 103, index: 10, active: false });
+        state.spaces[0].temporaryTabs.unshift(103);
+        state.pageStates[103] = { ...clone(state.pageStates[101]), documentId: 'doc-103' };
+        project(state);
+        state.savedSnapshot.find(r => r.tabId === 103).currentOwnership = clone(pin.before.savedSnapshot.find(r => r.tabId === 103).currentOwnership);
+        state.savedSnapshot.push(clone(pin.before.savedSnapshot.find(r => r.tabId === 999)));
+    }
+    remove.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership = clone(pin.before.savedSnapshot.find(r => r.tabId === 101).currentOwnership);
+    return remove;
+}
+test('remove proof restores only the exact original Today witness from a validated prior pin', () => {
+    const s = samplePinRemovalRoundtrip(); assertSpotlightActionCommitted(s.before, s.after, s.options);
+});
+for (const [name, mutate] of Object.entries({
+    changedIncarnation: s => s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership.incarnation = 'changed',
+    changedTransaction: s => s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership.transaction = 'changed',
+    changedEpoch: s => s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership.epoch.epoch = 'changed',
+    wrongTarget: s => s.options.priorPin.request.context.sourceTabId = 103,
+    linkedCopyInheritance: s => s.after.savedSnapshot.find(r => r.tabId === 201).currentOwnership = clone(s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership),
+    missingEvidence: s => delete s.options.priorPin,
+    droppedUnrelatedCurrent: s => delete s.after.savedSnapshot.find(r => r.tabId === 103).currentOwnership,
+    droppedHistorical: s => delete s.after.savedSnapshot.find(r => r.tabId === 999).currentOwnership,
+    changedUnrelatedCurrent: s => s.after.savedSnapshot.find(r => r.tabId === 103).currentOwnership.transaction = 'changed',
+    changedHistorical: s => s.after.savedSnapshot.find(r => r.tabId === 999).currentOwnership.epoch.epoch = 'changed',
+    wrongWindow: s => s.options.priorPin.request.context.windowId = 8,
+    wrongSpace: s => s.options.priorPin.request.context.spaceId = 'home',
+    wrongSavedPin: s => s.options.priorPin.resultId = 'decoy',
+    missingRestoredWitness: s => delete s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership,
+})) test(`remove witness proof rejects ${name}`, () => {
+    const s = samplePinRemovalRoundtrip(); mutate(s); assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});
+
+import { captureFreshTodayCreationProof } from '../../scripts/paired-chrome-spotlight-actions.mjs';
+function sampleFreshLinkedWitness() {
+    const s = samplePinRemovalRoundtrip();
+    // This linked copy was created after the original pin, unlike prior fixtures.
+    for (const key of ['before', 'after']) s[key] = JSON.parse(JSON.stringify(s[key]).replaceAll('201', '401'));
+    const original = s.options.priorPin.before.savedSnapshot.find(r => r.tabId === 101).currentOwnership;
+    original.incarnation = '43c3c333-3333-4333-8333-333333333333';
+    original.transaction = '44d4d444-4444-4444-8444-444444444444';
+    s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership = clone(original);
+    const tab = s.before.tabs.find(t => t.id === 401);
+    const creationEvents = [{ type: 'tabs.onCreated', data: [clone(tab)] }];
+    s.before.ownershipEpoch = { session: 'current-epoch' };
+    s.before.nativeLifecycle = clone(creationEvents); s.after.nativeLifecycle = clone(creationEvents);
+    const proof = captureFreshTodayCreationProof(s.before, s.options.priorPin, 401, creationEvents, clone(creationEvents), clone(s.before.workerContext));
+    s.options.freshTodayCreations = [proof];
+    s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership = {
+        version: 1, epoch: clone(proof.epoch), windowId: proof.windowId, spaceId: proof.spaceId, bookmarkFolderId: proof.bookmarkFolderId,
+        incarnation: '41a1a111-1111-4111-8111-111111111111', transaction: '42b2b222-2222-4222-8222-222222222222'
+    };
+    s.options.events.push({ type: 'storage', data: { area: 'local', changes: { spaceTabSnapshot: {
+        oldValue: clone(s.before.savedSnapshot), newValue: clone(s.after.savedSnapshot)
+    } } } });
+    return s;
+}
+test('fresh linked Today witness requires independent creation proof and exact persistence-event agreement', () => {
+    const s = sampleFreshLinkedWitness(); assertSpotlightActionCommitted(s.before, s.after, s.options);
+});
+for (const [name, mutate] of Object.entries({
+    absentCreation: s => s.options.freshTodayCreations[0].creationEvents = [],
+    replacedTab: s => s.options.freshTodayCreations[0].lifecycleEvents.push({ type: 'tabs.onReplaced', data: [999, 401] }),
+    removedTab: s => s.options.freshTodayCreations[0].lifecycleEvents.push({ type: 'tabs.onRemoved', data: [401, {}] }),
+    rewindowedTab: s => s.options.freshTodayCreations[0].lifecycleEvents.push({ type: 'tabs.onAttached', data: [401, { newWindowId: 8 }] }),
+    navigatedFixture: s => s.options.freshTodayCreations[0].lifecycleEvents.push({ type: 'tabs.onUpdated', data: { id: 401, change: { url: 'https://changed.test/' } } }),
+    staleEpoch: s => s.options.freshTodayCreations[0].epoch.epoch = 'stale',
+    sourceTokenReuse: s => s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership.incarnation = s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership.incarnation,
+    duplicateTokens: s => s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership.transaction = s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership.incarnation,
+    wrongBinding: s => s.before.bindings[401].bookmarkId = 'decoy',
+    noPersistenceEvent: s => s.options.events = s.options.events.filter(e => e.type !== 'storage'),
+    eventDisagreement: s => s.options.events.find(e => e.type === 'storage').data.changes.spaceTabSnapshot.newValue.find(r => r.tabId === 401).currentOwnership.transaction = 'changed',
+    priorWitnessUnexpected: s => s.before.savedSnapshot.find(r => r.tabId === 401).currentOwnership = clone(s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership),
+    wrongWindow: s => s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership.windowId = 7,
+    wrongSpace: s => s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership.spaceId = 'home',
+    extraField: s => s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership.guess = true,
+    droppedUnrelated: s => delete s.after.savedSnapshot.find(r => r.tabId === 103).currentOwnership,
+    droppedHistory: s => delete s.after.savedSnapshot.find(r => r.tabId === 999).currentOwnership,
+})) test(`fresh linked witness rejects ${name}`, () => {
+    const s = sampleFreshLinkedWitness(); mutate(s); assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});
+
+test('focused no-authority pin/remove retains exact legacy snapshots without a fresh witness allowance', () => {
+    const s = sampleFreshLinkedWitness();
+    delete s.options.priorPin.before.savedSnapshot.find(r => r.tabId === 101).currentOwnership;
+    delete s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership;
+    delete s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership;
+    const proof = captureFreshTodayCreationProof(s.before, s.options.priorPin, 401, [], [], s.before.workerContext);
+    assert.equal(proof, null); s.options.freshTodayCreations = [];
+    assertSpotlightActionCommitted(s.before, s.after, s.options);
+    s.after.savedSnapshot.find(r => r.tabId === 401).currentOwnership = { version: 1 };
+    assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});
+test('a linked own witness observed before saving must replay exactly, never masquerade as fresh issuance', () => {
+    const s = sampleFreshLinkedWitness(), fresh = s.options.freshTodayCreations[0];
+    const observed = clone(s.after.savedSnapshot.find(r => r.tabId === 401));
+    const events = [...fresh.creationEvents, { type: 'storage', data: { area: 'local', changes: { spaceTabSnapshot: { oldValue: [], newValue: [observed] } } } }];
+    s.options.freshTodayCreations = [captureFreshTodayCreationProof(s.before, s.options.priorPin, 401, events, fresh.lifecycleEvents, fresh.creationWorker)];
+    assert.equal(s.options.freshTodayCreations[0].kind, 'dormant');
+    assertSpotlightActionCommitted(s.before, s.after, s.options);
+    for (const records of [s.after.savedSnapshot, s.options.events.find(e => e.type === 'storage').data.changes.spaceTabSnapshot.newValue]) records.find(r => r.tabId === 401).currentOwnership.transaction = '45e5e555-5555-4555-8555-555555555555';
+    assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});
+for (const [name, mutate] of Object.entries({
+    changedWorkerAfterCreation: s => s.before.workerContext.contextId = 'new-worker',
+    changedWorkerDuringAction: s => s.after.workerContext.contextId = 'new-worker',
+    sourceReplaced: s => s.after.nativeLifecycle.push({ type: 'tabs.onReplaced', data: [999, 101] }),
+    sourceNavigateAwayAndBack: s => s.after.nativeLifecycle.push({ type: 'tabs.onUpdated', data: { id: 101, change: { url: 'https://away.test/' } } }, { type: 'tabs.onUpdated', data: { id: 101, change: { url: URL } } }),
+    linkedReplacedAfterCapture: s => s.after.nativeLifecycle.push({ type: 'tabs.onReplaced', data: [999, 401] }),
+    linkedPinnedAfterCapture: s => s.after.nativeLifecycle.push({ type: 'tabs.onUpdated', data: { id: 401, change: { pinned: true } } }),
+    linkedSplitAfterCapture: s => s.after.nativeLifecycle.push({ type: 'tabs.onUpdated', data: { id: 401, change: { splitViewId: 0 } } }),
+    resetLifetimeEvidence: s => s.after.nativeLifecycle = [],
+    staleSessionEpoch: s => s.before.ownershipEpoch.session = 'stale',
+})) test(`creation provenance rejects ${name}`, () => {
+    const s = sampleFreshLinkedWitness(); mutate(s); assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});
+
+import { createHash } from 'node:crypto';
+import { encodeFavoriteContinuityState } from '../../favorite-continuity.js';
+import { readSpotlightWorkerContext } from '../../scripts/paired-chrome-spotlight-actions.mjs';
+function sampleBrowserEpochWitness() {
+    const s = sampleFreshLinkedWitness(), oldProof = s.options.freshTodayCreations[0];
+    const epoch = { kind: 'browser', epoch: 'browser-epoch', generation: 'arcify-generation' };
+    const favoriteSession = { version: 1, bindings: [], attempts: [] };
+    for (const state of [s.before, s.after, s.options.priorPin.before, s.options.priorPin.after]) {
+        state.favoriteSession = clone(favoriteSession);
+        for (const record of state.savedSnapshot) if (record.currentOwnership) record.currentOwnership.epoch = clone(epoch);
+    }
+    const receipt = { version: 1, schema: 'exact-global-favorites-v2', epoch: epoch.epoch, generation: epoch.generation,
+        peerId: PEER, revision: 2, fingerprint: createHash('sha256').update(encodeFavoriteContinuityState(favoriteSession)).digest('hex') };
+    s.before.ownershipEpoch = { peerId: PEER, receipt, continuity: { ...clone(receipt), phase: 'committed', state: clone(favoriteSession) } };
+    s.after.ownershipEpoch = clone(s.before.ownershipEpoch);
+    s.options.freshTodayCreations = [captureFreshTodayCreationProof(s.before, s.options.priorPin, 401, oldProof.creationEvents, oldProof.lifecycleEvents, oldProof.creationWorker)];
+    s.options.events.find(e => e.type === 'storage').data.changes.spaceTabSnapshot = { oldValue: clone(s.before.savedSnapshot), newValue: clone(s.after.savedSnapshot) };
+    return s;
+}
+test('fresh browser witness epoch is independently bound to pre-action receipt, committed journal and Favorite state digest', () => {
+    const s = sampleBrowserEpochWitness(); assertSpotlightActionCommitted(s.before, s.after, s.options);
+});
+for (const [name, mutate] of Object.entries({
+    missingReceipt: s => delete s.before.ownershipEpoch.receipt,
+    staleReceipt: s => s.before.ownershipEpoch.receipt.epoch = 'old',
+    uncommittedJournal: s => s.before.ownershipEpoch.continuity.phase = 'invalid',
+    wrongCurrentPeer: s => s.before.ownershipEpoch.peerId = OWN,
+    corruptFingerprint: s => s.before.ownershipEpoch.receipt.fingerprint = 'f'.repeat(64),
+    staleFavoriteState: s => s.before.favoriteSession.attempts.push({ id: 'unrelated' }),
+})) test(`browser epoch proof rejects ${name}`, () => {
+    const s = sampleBrowserEpochWitness(); mutate(s); assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});
+test('worker context observation is a passive exact BACKGROUND query and rejects missing or ambiguous contexts', async () => {
+    const previous = globalThis.chrome;
+    try {
+        for (const contexts of [[], [{ contextType: 'BACKGROUND', contextId: 'a' }, { contextType: 'BACKGROUND', contextId: 'b' }], [{ contextType: 'TAB', contextId: 'a' }]]) {
+            globalThis.chrome = { runtime: { getContexts: async filter => { assert.deepEqual(filter, { contextTypes: ['BACKGROUND'] }); return contexts; } } };
+            await assert.rejects(readSpotlightWorkerContext());
+        }
+        globalThis.chrome = { runtime: { getContexts: async () => [{ contextType: 'BACKGROUND', contextId: 'one-running-worker' }] } };
+        assert.deepEqual(await readSpotlightWorkerContext(), { contextId: 'one-running-worker' });
+    } finally { globalThis.chrome = previous; }
+});
+
+for (const endpoint of ['before', 'after']) test(`source-only dormant restoration rejects stale ${endpoint} epoch without relying on linked proof`, () => {
+    const s = samplePinRemovalRoundtrip(); s[endpoint].ownershipEpoch.session = 'different-epoch';
     assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
 });

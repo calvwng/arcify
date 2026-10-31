@@ -75,7 +75,7 @@ test('shared settling helper requires exactly one active name node and matching 
     let predicate;
     const waitForActiveSpace = runInNewContext(`${settleHelperSource}; waitForActiveSpace`, { document });
     await waitForActiveSpace({ waitForFunction: async (callback, options, name) => {
-        assert.equal(options.timeout, 10000); assert.equal(name, 'Switch Target'); predicate = () => callback(name);
+        assert.equal(options.polling, 50); assert.equal(options.timeout, 10000); assert.equal(name, 'Switch Target'); predicate = () => callback(name);
     } }, 'Switch Target');
     assert.equal(predicate(), true);
     const buttons = [...document.querySelectorAll('.space-switcher button')];

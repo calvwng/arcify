@@ -33,12 +33,13 @@ async function showSpaceOptionsDropdown(page) {
 
 async function waitForActiveSpace(page, name) {
   try {
+    // Switching activates an owned native tab; do not depend on background RAF.
     await page.waitForFunction(target => {
       const active = [...document.querySelectorAll('.space-switcher button.active')];
       const visible = [...document.querySelectorAll('.space')].filter(s => s.style.display !== 'none');
       return active.length === 1 && active[0].querySelector('.space-switcher-name')?.textContent.trim() === target
         && visible.length === 1 && visible[0].querySelector('.space-name')?.value.trim() === target;
-    }, { timeout: 10000 }, name);
+    }, { polling: 50, timeout: 10000 }, name);
   } catch (error) {
     const state = await page.evaluate(async () => ({
       active: [...document.querySelectorAll('.space-switcher button.active')].map(b => b.textContent.trim()),
