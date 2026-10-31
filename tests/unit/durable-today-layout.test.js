@@ -471,7 +471,7 @@ test('individual close waking a cold worker preserves event-time intent and upda
     f.tabs.splice(f.tabs.findIndex(t=>t.id===101),1);await chrome.tabs.onRemoved.emit(101,{windowId:10,isWindowClosing:false});await cold.chain;
     const c=f.local[DURABLE_LAYOUT_KEY].cohorts.find(c=>c.binding?.windowId===10);assert(!c.binding.tabIds.includes(101));assert(!cold.layoutPending.has(c.id));
 });
-async function crossWindowReplay(){
+async function crossWindowReplay(pairedLate=false){
     const f=fixture();
     for(const tab of f.tabs)tab.url=`https://cross-window.test/${tab.id}`;
     f.local.pinnedTabStatesById={};f.local.tabNameOverridesById={};
@@ -479,6 +479,7 @@ async function crossWindowReplay(){
     const expected=[9,3,10,1,6,4,2,5];f.store.spaces[0].temporaryTabs=[...expected];f.store.restoredRanks.clear();
     const identity={epoch:'same-browser-epoch-token',generation:'same-browser-writer-token'};
     const favoriteStore={initialize:async()=>{},reconcile:async()=>{},ownsTab:()=>false,ownershipPersistence:{browserIdentity:async()=>identity}};
+    if(pairedLate)await f.store.persist();
     f.store.favoriteStore=favoriteStore;await f.store.persist();
     // An extra tab invalidates the old exact binding, while every existing ID
     // and its global Space order still have same-browser continuity proof.
@@ -487,9 +488,50 @@ async function crossWindowReplay(){
     const s=new SpaceStore();s.favoriteStore=favoriteStore;s.discoverBookmarkSpaces=async()=>false;
     return {f,s,identity,expected};
 }
-test('same-browser replay keeps cross-window canonical order around a partially restoring layout',async()=>{
-    const {s,expected}=await crossWindowReplay();await s.initialize();
+for(const pairedLate of [false,true])test(`same-browser replay keeps cross-window canonical order around a partially restoring layout (late pairing=${pairedLate})`,async()=>{
+    const {f,s,expected}=await crossWindowReplay(pairedLate);const history=structuredClone(f.local[DURABLE_LAYOUT_KEY].cohorts);await s.initialize();
     assert.deepEqual(s.spaces[0].temporaryTabs.filter(id=>expected.includes(id)),expected);
+    assert.deepEqual(f.local.spaceTabSnapshot.filter(r=>expected.includes(r.tabId)).map(r=>r.tabId),expected);
+    assert(!s.explicitToday.has(9900),'An unobserved extra is not current authority');
+    assert(s.durableLayout.cohorts.some(c=>c.contextSubset));
+    for(const old of history)assert(s.durableLayout.cohorts.some(c=>c.id===old.id));
+    const warm=new SpaceStore();warm.favoriteStore=s.favoriteStore;warm.discoverBookmarkSpaces=async()=>false;await warm.initialize();
+    assert.deepEqual(warm.spaces[0].temporaryTabs.filter(id=>expected.includes(id)),expected);
+});
+
+test('replayed subset does not authorize an unproven same-URL neighbour through fallback and reload',async()=>{
+    const {f,s,expected}=await crossWindowReplay(true);
+    const extra=f.tabs.find(t=>t.id===9900);extra.url=f.tabs.find(t=>t.id===3).url;
+    const historical={tabId:5000,url:extra.url,spaceId:'target',section:'temporaryTabs',windowKey:'ambiguous-old',tabIndex:0,order:0,nameOverride:{name:'Historical'}};
+    // Add an independently preserved history suffix without altering the live proof.
+    f.local.spaceTabSnapshot.push(historical);
+    await s.initialize();
+    for(const mode of [null,false,true]){
+        const next=mode===null?s:new SpaceStore({automaticLayoutRestore:mode});
+        if(mode!==null){next.favoriteStore=s.favoriteStore;next.discoverBookmarkSpaces=async()=>false;await next.initialize();}
+        await next.persist();
+        assert(!next.explicitToday.has(9900));
+        assert(!next.spaces.find(x=>x.id==='target').temporaryTabs.includes(9900));
+        assert(next.restoreQueue.some(r=>r.tabId===5000));
+        assert(!f.local.tabNameOverridesById[9900]);
+        assert.deepEqual(next.spaces[0].temporaryTabs.filter(id=>expected.includes(id)),expected);
+    }
+});
+
+for(const inverted of [false,true])for(const top of [false,true])test(`observed creation listener preserves placement and opener in bound window inverted=${inverted} top=${top}`,async()=>{
+    const f=await setup(1,inverted),s=f.store;events();s.install();f.sync.todayNewTabsAtTop=top;await s.readTodayPlacement();
+    const source=s.spaces.find(x=>x.id==='source'),target=s.spaces.find(x=>x.id==='target');
+    const visible=space=>inverted?[...space.temporaryTabs].reverse():[...space.temporaryTabs];
+    const before=visible(source),tab={id:9900,index:30,windowId:10,url:'https://created.test/new',pinned:false,incognito:false,splitViewId:-1};
+    f.tabs.push(tab);await chrome.tabs.onCreated.emit(tab);await s.chain;
+    assert.deepEqual(visible(source),top?[9900,...before]:[...before,9900]);assert(s.explicitToday.has(9900));
+    const child={...tab,id:9901,index:31,url:'https://created.test/child',openerTabId:101};
+    f.tabs.push(child);await chrome.tabs.onCreated.emit(child);await s.chain;
+    const order=visible(target);assert.equal(order[order.indexOf(101)+1],9901);assert(s.explicitToday.has(9901));
+    // Ordinary insertion rebases pending ranks around surviving anchors. It must
+    // retain every historical identity, metadata field and relative sequence.
+    const withoutRank=({order,...record})=>record;
+    assert.deepEqual(s.restoreQueue.map(withoutRank),f.history.map(withoutRank));
 });
 
 for(const race of ['epoch','missing','conflicting','duplicate'])test(`same-epoch layout retention revalidates ${race} before committing`,async()=>{
@@ -502,7 +544,7 @@ for(const race of ['epoch','missing','conflicting','duplicate'])test(`same-epoch
             if(race!=='missing')s.spaces[1].temporaryTabs.push(3);
         }
     };
-    await assert.rejects(s.initialize(),/Current ownership changed during layout retention/);assert(fired);
+    await assert.rejects(s.initialize(),/Current ownership changed during layout retention|Current layout authority changed before checkpoint/);assert(fired);
     assert.deepEqual(f.local[DURABLE_LAYOUT_KEY],before);
 });
 

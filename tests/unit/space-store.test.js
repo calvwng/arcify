@@ -755,7 +755,7 @@ const visibleToday = (store, id = 'a') => {
     const ids = [...store.spaces.find(space => space.id === id).temporaryTabs];
     return store.todayOrderInverted ? ids.reverse() : ids;
 };
-for (const inverted of [false, true]) for (const top of [false, true]) test(`new Today insertion is prospective and visible-order aware inverted=${inverted} top=${top}`, async () => {
+for (const observed of [false, true]) for (const inverted of [false, true]) for (const top of [false, true]) test(`new Today insertion is prospective and visible-order aware observed=${observed} inverted=${inverted} top=${top}`, async () => {
     sync.invertTabOrder = inverted; sync.todayNewTabsAtTop = top;
     local.spaces = [space('a', [1, 2])];
     const store = new SpaceStore(); store.install(); await store.run(() => {});
@@ -764,9 +764,11 @@ for (const inverted of [false, true]) for (const top of [false, true]) test(`new
     // The legacy Pinned-only option no longer changes Today representation.
     sync.invertTabOrder = !inverted;
     const standalone = { id: 3, windowId: 1, url: 'https://new.test/' };
+    if(observed) { session.spaceExplicitTodayEpoch='observed-test-epoch'; store.layoutObservedCreations.set(3,{windowId:1,epoch:{kind:'session',epoch:'observed-test-epoch'}}); }
     tabs.push(standalone); chrome.tabs.onCreated.emit(standalone); await store.run(() => {});
     assert.deepEqual(visibleToday(store), top ? [3, ...oldVisible] : [...oldVisible, 3]);
     const child = { id: 4, windowId: 1, openerTabId: 1, url: 'https://child.test/' };
+    if(observed) store.layoutObservedCreations.set(4,{windowId:1,epoch:{kind:'session',epoch:'observed-test-epoch'}});
     tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
     const visible = visibleToday(store); assert.equal(visible[visible.indexOf(1) + 1], 4);
     const before = [...store.spaces[0].temporaryTabs];

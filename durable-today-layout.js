@@ -1,6 +1,6 @@
 import { encodeFavoriteContinuityState as encode } from './favorite-continuity.js';
 import { readSpaceRankCheckpoint } from './space-continuity.js';
-import { readExplicitCheckpoint, explicitTodayEpoch, explicitTodayOwner, stageExplicitToday } from './explicit-today-ownership.js';
+import { readExplicitCheckpoint, explicitTodayEpoch, explicitTodayEpochs, explicitTodayOwner, stageExplicitToday } from './explicit-today-ownership.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 
@@ -105,10 +105,11 @@ export async function initializeDurableLayout(store,data,tabs) {
     if(projected.every(validCohort) && encode(projected)!==encode(store.durableLayout.cohorts))
         store.durableLayout=await sealed(store.durableLayout.revision+1,projected,store.durableLayout.snapshotProof);
     store.layoutPending=new Set();store.layoutProvisional=new Set();store.layoutRemovedIds ||= new Set();store.layoutRestored=new Set();
-    const epoch=await explicitTodayEpoch(store), live=windows(store,tabs);
+    const epochs=await explicitTodayEpochs(store), live=windows(store,tabs);
+    const accepted=c=>epochs.some(epoch=>encode(c.binding?.epoch)===encode(epoch));
     for(const cohort of store.durableLayout.cohorts){
         const w=live.find(w=>w.id===cohort.binding?.windowId);
-        if(w&&encode(cohort.binding.epoch)===encode(epoch)&&cohort.binding.tabIds.some(id=>store.layoutRemovedIds.has(id))
+        if(w&&accepted(cohort)&&cohort.binding.tabIds.some(id=>store.layoutRemovedIds.has(id))
             && cohort.binding.tabIds.filter(id=>!store.layoutRemovedIds.has(id)).every(id=>w.tabs.some(t=>t.id===id))){
             const oldIds=cohort.binding.tabIds,oldSignature=cohort.signature;
             cohort.placements=cohort.placements.flatMap(p=>{
@@ -119,7 +120,7 @@ export async function initializeDurableLayout(store,data,tabs) {
             cohort.signature=signature(retained);cohort.binding.tabIds=retained.map(t=>t.id);
         }
         const bound=w?.tabs.filter(t=>cohort.binding?.tabIds.includes(t.id));
-        const exact=w&&encode(cohort.binding.epoch)===encode(epoch)&&encode(cohort.binding.tabIds)===encode(bound.map(t=>t.id))
+        const exact=w&&accepted(cohort)&&encode(cohort.binding.tabIds)===encode(bound.map(t=>t.id))
             && (cohort.contextSubset||bound.length===w.tabs.length)
             && cohort.placements.every(p=>root(store,p)?.temporaryTabs.includes(bound[cohort.signature.findIndex(t=>t.index===p.index)]?.id));
         if(!exact)store.layoutPending.add(cohort.id);
@@ -280,7 +281,7 @@ export async function restoreDurableLayout(store,tabs) {
     store.layoutProvisional=new Set(tabs.filter(tab=>layoutCandidate(store,tab)).map(t=>t.id));
     store.layoutWriteFence=validate;
 }
-export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{allowFreshExplicit=false}={}) {
+export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{allowFreshExplicit=false,provenContextOnly=false}={}) {
     if(!store.durableLayout)store.durableLayout=await sealed(0,[]);
     store.layoutPending ||= new Set();store.layoutRemovedIds ||= new Set();
     const cohorts=clone(store.durableLayout.cohorts),live=windows(store,tabs);
@@ -303,7 +304,8 @@ export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{
         // shutdown or incomplete native restoration. Preserve the full baseline.
         if(existing?.binding.tabIds.some(id=>!w.tabs.some(t=>t.id===id)&&!store.layoutRemovedIds.has(id)
             &&!tabs.some(t=>t.id===id&&(t.windowId!==w.id||t.pinned||store.isGlobalTab?.(t)||store.isGlobalTab?.(t.id)))))continue;
-        const captureTabs=existing?.contextSubset?w.tabs.filter(t=>existing.binding.tabIds.includes(t.id)||fresh&&explicitTodayOwner(store,t)):w.tabs;
+        const captureTabs=provenContextOnly&&fresh?w.tabs.filter(t=>explicitTodayOwner(store,t))
+            :existing?.contextSubset?w.tabs.filter(t=>existing.binding.tabIds.includes(t.id)||fresh&&explicitTodayOwner(store,t)):w.tabs;
         const ownedIds=new Set(existing?.placements.map(p=>existing.binding.tabIds[existing.signature.findIndex(t=>t.index===p.index)])||[]);
         const placements=snapshot.filter(r=>r.section==='temporaryTabs'&&!r.pinnedState&&!r.nameOverride&&captureTabs.some(t=>t.id===r.tabId)
             &&(!existing?.contextSubset||fresh||ownedIds.has(r.tabId)||explicitTodayOwner(store,w.tabs.find(t=>t.id===r.tabId)))
@@ -312,7 +314,7 @@ export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{
         if(!placements.length&&!existing)continue;
         epoch ||= await explicitTodayEpoch(store,true);
         const c={...(!fresh?existing:{}),id:!fresh&&existing?.id||crypto.randomUUID(),signature:signature(captureTabs),placements,binding:{epoch,windowId:w.id,tabIds:captureTabs.map(t=>t.id)},overrides:[],
-            ...(explicitExtra?{contextSubset:true}:{}),
+            ...(explicitExtra||provenContextOnly&&fresh?{contextSubset:true}:{}),
             ...(fresh?{choiceRevision:store.durableLayout.revision+1,explicitOnly:true}: {})};
         if(!validCohort(c))continue;
         if(fresh){

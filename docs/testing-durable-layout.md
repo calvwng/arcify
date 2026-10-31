@@ -52,3 +52,17 @@ It uses the same browser override and fresh OS-temporary-profile boundary.
 
 Neither fixture establishes behavior for a particular user's history, Helium, or
 real Spotlight integration. Preserve those limitations when reporting results.
+
+## Paired extension reload transition
+
+`node scripts/disposable-paired-layout-transition.mjs /path/to/spotlight/dist`
+copies the current Arcify package and the supplied exact Spotlight package into
+a fresh temporary directory. Set `ARCIFY_DISPOSABLE_BROWSER` as above. It creates
+synthetic windows before pairing, uses the real options UIs and Move receiver,
+then reloads each extension after detaching its observed worker debugger.
+Assertions require complete cross-window order preservation and normal grouping
+of recreated ordinary companion pages. Outputs contain only synthetic fixture
+state and must not be committed. Its owned browser closes in `finally`, reporting
+exit status. It never attaches to an existing browser or uses a user profile.
+This causal reproduction complements, but does not replace, the complete hosted
+paired Chrome acceptance matrix or manual Helium verification.

@@ -16,8 +16,9 @@ async function epochs(store, create = false) {
         await chrome.storage.session.set({ [SESSION_EPOCH]: epoch });
         if ((await chrome.storage.session.get(SESSION_EPOCH))[SESSION_EPOCH] !== epoch) throw new Error('Current tab identity could not be verified. Nothing was moved.');
     }
-    return [...(token(epoch) ? [{ kind: 'session', epoch }] : []), ...(browser ? [browser] : [])];
+    return [...(browser ? [browser] : []), ...(token(epoch) ? [{ kind: 'session', epoch }] : [])];
 }
+export const explicitTodayEpochs = store => epochs(store);
 export async function explicitTodayEpoch(store, create = false) {
     return (await epochs(store,create))[0] || null;
 }
