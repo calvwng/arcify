@@ -5,6 +5,7 @@ import { SpaceStore, ownerOf } from '../../space-store.js';
 import { runTabMenuAction } from '../../tab-menu-actions.js';
 import { getBridgeSnapshot } from '../../spotlight-bridge.js';
 import { isProtectedFavorite } from '../../favorite-safety.js';
+import { ATTACHMENT_PENDING_KEY } from '../../favorite-attachment.js';
 
 // Real shared worker queue, both stores and group projector. Only browser APIs
 // are mocked. These tests do not claim native keyboard or browser acceptance.
@@ -34,6 +35,185 @@ const assertGlobal = (s, id) => {
     assert(!s.spaces.snapshotByTab.has(id));
 
 };
+
+async function attachmentOffer(s, tabId = 1, favoriteId = 'f', windowId = 1) {
+    const result = await s.favorites.dispatch(req('attachmentCandidates', { favoriteId, windowId }));
+    const offer = result.candidates.find(candidate => candidate.tabId === tabId);
+    assert(offer, 'expected eligible exact tab');
+    return req('attachExisting', { favoriteId, windowId, tabId, token: offer.token });
+}
+
+for (const pinned of [false, true]) test(`explicit attachment preserves navigated page and actual pin state (${pinned})`, async () => {
+    local[FAVORITES_KEY][0].url = 'https://www.youtube.com/';
+    Object.assign(tab(1), { url: 'https://www.youtube.com/watch?v=current', pinned });
+    sync.ordinaryFavoriteTabs = pinned; // opposite preference must not convert this page
+    const s = stores({ install: true }), savedBefore = clone(local[FAVORITES_KEY]);
+    const offer = await attachmentOffer(s);
+    assert.equal(s.favorites.ownsTab(1), false);
+    effects.length = 0;
+    await s.favorites.dispatch(offer);
+    assertGlobal(s, 1);
+    assert.equal(tab(1).url, 'https://www.youtube.com/watch?v=current');
+    assert.equal(tab(1).pinned, pinned);
+    assert.deepEqual(local[FAVORITES_KEY], savedBefore);
+    assert.equal(s.favorites.state.bindings[0].mode, pinned ? undefined : 'ordinary');
+    assert(!effects.some(([kind]) => ['create', 'remove', 'update', 'focus'].includes(kind)));
+    await assert.rejects(s.favorites.dispatch(offer), { code: 'STALE_ATTACHMENT' });
+    assert.equal(s.favorites.state.bindings.length, 1);
+});
+
+test('attachment lists duplicate pages separately and only in the requested window; no implicit selection', async () => {
+    local[FAVORITES_KEY].push(saved('duplicate'));
+    tabs.push({ ...tab(2), id: 3, index: 2 }, { ...tab(2), id: 4, windowId: 2 });
+    const s = stores();
+    const result = await s.favorites.dispatch(req('attachmentCandidates', { favoriteId: 'f' }));
+    assert.deepEqual(result.candidates.filter(c => c.suggested).map(c => c.tabId), [2, 3]);
+    assert.equal(new Set(result.candidates.map(c => c.token)).size, result.candidates.length);
+    assert(!result.candidates.some(c => c.tabId === 4));
+    const offer = result.candidates.find(c => c.tabId === 3);
+    await assert.rejects(s.favorites.dispatch(req('attachExisting', { favoriteId: 'duplicate', tabId: 3, token: offer.token })), { code: 'STALE_ATTACHMENT' });
+    await s.favorites.dispatch(req('attachExisting', { favoriteId: 'f', tabId: 3, token: offer.token }));
+    assert.equal(s.favorites.state.bindings[0].tabId, 3);
+    assert.equal(s.favorites.ownsTab(2), false);
+    assert.equal(s.favorites.ownsTab(4), false);
+});
+
+for (const change of ['url', 'pending', 'pin', 'window', 'closed', 'removed', 'reload', 'replacement', 'expired', 'space', 'favorite', 'bookmark', 'split']) {
+    test(`attachment refuses stale ${change} without claiming the page`, async () => {
+        const s = stores({ install: true }), offer = await attachmentOffer(s);
+        if (change === 'url') tab(1).url = 'https://new.test/';
+        if (change === 'pending') tab(1).pendingUrl = 'https://new.test/';
+        if (change === 'pin') tab(1).pinned = true;
+        if (change === 'window') tab(1).windowId = 2;
+        if (change === 'closed') tabs = tabs.filter(t => t.id !== 1);
+        if (change === 'removed') s.favorites.items = [];
+        if (change === 'reload') { chrome.tabs.onUpdated.emit(1, { status: 'loading' }, tab(1)); chrome.tabs.onUpdated.emit(1, { status: 'complete' }, tab(1)); }
+        if (change === 'replacement') chrome.tabs.onReplaced.emit(99, 1);
+        if (change === 'expired') s.favorites.now = () => Date.now() + 180000;
+        if (change === 'space') s.spaces.spaces.find(space => space.id === 'a').temporaryTabs = [];
+        if (change === 'favorite') s.favorites.state.attempts.push({ favoriteId: 'f', windowId: 1, tabId: null, url: saved('f').url });
+        if (change === 'bookmark') local.pinnedTabStatesById = { 1: { bookmarkId: 'bookmark' } };
+        if (change === 'split') tab(1).splitViewId = 7;
+        await assert.rejects(s.favorites.dispatch(offer));
+        assert.equal(s.favorites.state.bindings.some(b => b.tabId === 1), false);
+        assert(!effects.some(([kind]) => ['create', 'remove'].includes(kind)));
+    });
+}
+
+test('attachment rechecks navigation during ownership persistence and rolls back before Today changes', async () => {
+    const s = stores({ install: true }), offer = await attachmentOffer(s);
+    const previous = clone(s.spaces.spaces);
+    let changed = false;
+    hooks.sessionSet = value => {
+        if (!changed && value[FAVORITE_SESSION_KEY]?.bindings.some(b => b.tabId === 1)) {
+            changed = true; tab(1).url = 'https://later.test/';
+            chrome.tabs.onUpdated.emit(1, { url: tab(1).url }, tab(1));
+        }
+    };
+    await assert.rejects(s.favorites.dispatch(offer), { code: 'STALE_ATTACHMENT' });
+    assert.equal(s.favorites.ownsTab(1), false);
+    assert.deepEqual(s.spaces.spaces, previous);
+    assert.deepEqual(session[FAVORITE_SESSION_KEY].bindings, []);
+});
+
+test('attachment confirmation is invalid after worker restart; merely listing leaves Today unchanged', async () => {
+    const s = stores(), offer = await attachmentOffer(s);
+    const before = clone(local.spaces);
+    const restarted = stores();
+    await assert.rejects(restarted.favorites.dispatch(offer), { code: 'STALE_ATTACHMENT' });
+    assert.deepEqual(local.spaces, before);
+    assert.equal(restarted.favorites.ownsTab(1), false);
+});
+
+test('candidate preparation refuses a same-URL document reload during its asynchronous reads', async () => {
+    const s = stores({ install: true });
+    await s.favorites.dispatch(req('get'));
+    hooks.localGet = key => { if (key === 'pinnedTabStatesById') chrome.tabs.onUpdated.emit(1, { status: 'loading' }, tab(1)); };
+    await assert.rejects(s.favorites.dispatch(req('attachmentCandidates', { favoriteId: 'f' })), { code: 'STALE_ATTACHMENT' });
+});
+
+for (const source of ['session', 'witness']) test(`interrupted attachment is rejected before Space adoption from ${source} ownership`, async () => {
+    const interrupted = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
+    local[ATTACHMENT_PENDING_KEY] = { version: 1, favoriteId: 'f', windowId: 1, tabId: 1 };
+    session[FAVORITE_SESSION_KEY] = clone(interrupted);
+    let mirrored = clone(interrupted);
+    const s = stores(source === 'witness' ? { ownershipPersistence: {
+        async load() { return clone(mirrored); },
+        async save({ state }) { mirrored = clone(state); session[FAVORITE_SESSION_KEY] = clone(state); }
+    } } : {});
+    await s.favorites.dispatch(req('get'));
+    assert.equal(s.favorites.ownsTab(1), false);
+    assert(ownerOf(s.spaces.spaces, 1));
+    assert.deepEqual(session[FAVORITE_SESSION_KEY].bindings, []);
+    if (source === 'witness') assert.deepEqual(mirrored.bindings, []);
+    assert.equal(local[ATTACHMENT_PENDING_KEY], null);
+});
+
+test('failed rollback keeps the durable refusal marker until the next worker repairs ownership', async () => {
+    const s = stores({ install: true }), offer = await attachmentOffer(s);
+    hooks.sessionSet = value => {
+        if (!value[FAVORITE_SESSION_KEY]) return;
+        if (value[FAVORITE_SESSION_KEY].bindings.length) {
+            // Simulate a storage write whose successful result is lost.
+            session[FAVORITE_SESSION_KEY] = clone(value[FAVORITE_SESSION_KEY]);
+        }
+        throw new Error('storage acknowledgement lost');
+    };
+    await assert.rejects(s.favorites.dispatch(offer), /rollback could not be persisted/);
+    assert(local[ATTACHMENT_PENDING_KEY]);
+    assert.equal(session[FAVORITE_SESSION_KEY].bindings.length, 1);
+    hooks.sessionSet = undefined;
+    const restarted = stores();
+    await restarted.favorites.dispatch(req('get'));
+    assert.equal(restarted.favorites.ownsTab(1), false);
+    assert.deepEqual(session[FAVORITE_SESSION_KEY].bindings, []);
+    assert.equal(local[ATTACHMENT_PENDING_KEY], null);
+});
+
+test('attachment candidates exclude pending, private, split, Space bookmark and other Favorite owners', async () => {
+    const s = stores();
+    await s.favorites.dispatch(req('get'));
+    tabs.push({ ...tab(1), id: 3, pendingUrl: 'https://next.test/' }, { ...tab(1), id: 4, incognito: true },
+        { ...tab(1), id: 5, splitViewId: 1 }, { ...tab(1), id: 6, pinned: true });
+    s.favorites.items.push(saved('other'));
+    s.favorites.state.bindings.push({ favoriteId: 'other', windowId: 1, tabId: 2, mode: 'ordinary' });
+    local.pinnedTabStatesById = { 6: { bookmarkId: 'bookmark' } };
+    const result = await s.favorites.dispatch(req('attachmentCandidates', { favoriteId: 'f' }));
+    assert.deepEqual(result.candidates.map(c => c.tabId), [1]);
+});
+
+test('the same saved Favorite can explicitly attach separate exact tabs in two windows', async () => {
+    tabs.push({ ...tab(1), id: 3, windowId: 2 });
+    const s = stores();
+    await s.favorites.dispatch(await attachmentOffer(s));
+    await s.favorites.dispatch(await attachmentOffer(s, 3, 'f', 2));
+    assert.deepEqual(s.favorites.state.bindings.map(b => [b.windowId, b.tabId]), [[1, 1], [2, 3]]);
+});
+
+for (const boundary of ['initial-marker', 'rollback']) test(`same worker repairs uncertain ${boundary} before a newer attachment`, async () => {
+    const s = stores(), offer = await attachmentOffer(s);
+    if (boundary === 'initial-marker') hooks.localSet = value => {
+        if (value[ATTACHMENT_PENDING_KEY]) {
+            local[ATTACHMENT_PENDING_KEY] = clone(value[ATTACHMENT_PENDING_KEY]);
+            throw new Error('marker acknowledgement lost');
+        }
+    };
+    else hooks.sessionSet = value => {
+        if (value[FAVORITE_SESSION_KEY]) {
+            if (value[FAVORITE_SESSION_KEY].bindings.length) session[FAVORITE_SESSION_KEY] = clone(value[FAVORITE_SESSION_KEY]);
+            throw new Error('ownership acknowledgement lost');
+        }
+    };
+    await assert.rejects(s.favorites.dispatch(offer));
+    assert.equal(s.favorites.initialized, false);
+    hooks.localSet = undefined; hooks.sessionSet = undefined;
+    const next = await attachmentOffer(s);
+    assert.equal(local[ATTACHMENT_PENDING_KEY], null);
+    await s.favorites.dispatch(next);
+    const restarted = stores();
+    await restarted.favorites.dispatch(req('get'));
+    assert.equal(restarted.favorites.ownsTab(1), true);
+});
 beforeEach(() => {
     local = { spaceModelVersion: 2, spaces: [space('a', [1]), space('b', [2])], [FAVORITES_KEY]: [saved('f')] };
     session = { spaceSession: true, activeSpaces: { 1: 'a', 2: 'b' } }; sync = { ordinaryFavoriteTabs: true }; effects = []; hooks = {}; groups = []; nextId = 100;
