@@ -10,6 +10,7 @@ import puppeteer from '../paired-chrome-runtime/index.mjs';
 import {CHROME_EXECUTABLE,inspectInstalledChromeRuntime,inspectChromeProcessRuntime,validateChromeLaunchArguments,validateNamespaceLaunchEnvironment,validateChromeNamespaceSandboxStatus} from '../paired-chrome-sandbox.mjs';
 const HERE=dirname(fileURLToPath(import.meta.url)),ROOT=resolve(HERE,'../..'),SPOT=resolve(process.argv[2]||'');
 const EXPECTED=new Set(['76559fbeaacc055ff7f987c0adf5b8b630820ada','b8b193c1f803179f86ab2e2397e5f1169256f49d']);
+const MODE=process.env.DIAGNOSTIC_MODE||'baseline';assert(['baseline','candidate'].includes(MODE));
 assert.equal(process.env.GITHUB_ACTIONS,'true');assert.equal(process.env.CI,'true');
 assert.equal(process.env.GITHUB_REPOSITORY,'calvwng/arcify');assert.equal(process.env.GITHUB_REF,'refs/heads/diagnostics/little-arc-url-20261031');
 assert(EXPECTED.has(process.env.SPOTLIGHT_SHA));assert(process.argv[2]);
@@ -23,9 +24,19 @@ const save=()=>writeFile(join(OUTPUT,'report.json'),JSON.stringify(report,null,2
 const hash=async p=>createHash('sha256').update(await readFile(p)).digest('hex');
 async function inventory(dir,prefix=''){const result={};for(const e of await readdir(dir,{withFileTypes:true})){const key=prefix+e.name;if(e.isDirectory())Object.assign(result,await inventory(join(dir,e.name),key+'/'));else if(e.isFile())result[key]=await hash(join(dir,e.name));else throw Error('Unexpected non-regular source entry')}return result}
 const original=await inventory(join(SPOT,'shared'));report.provenance.sharedHashes=original;
+report.mode=MODE;
+report.scope=`Synthetic browser metadata and ${MODE==='candidate'?'reviewed candidate':'unchanged Spotlight'} broker hello only; not the user's Helium/YouTube session or a full product launch.`;
 const scratch=await mkdtemp(join(process.env.RUNNER_TEMP||tmpdir(),'little-arc-url-'));
 const probe=join(scratch,'probe'),peer=join(scratch,'peer');await mkdir(probe);await mkdir(peer);
 await cp(join(SPOT,'shared'),join(probe,'shared'),{recursive:true});assert.deepEqual(await inventory(join(probe,'shared')),original);
+const effective={...original};
+if(MODE==='candidate'){
+ assert.equal(git(SPOT,'rev-parse','HEAD:shared/peek-broker.js'),'49006af99699d959bbbe1235d68583d89bca5bc1');
+ await cp(join(HERE,'candidate/peek-broker.js'),join(probe,'shared/peek-broker.js'));
+ effective['peek-broker.js']=await hash(join(HERE,'candidate/peek-broker.js'));
+ report.provenance.candidateBrokerSha256=effective['peek-broker.js'];
+}
+assert.deepEqual(await inventory(join(probe,'shared')),effective);
 for(const file of ['worker.js','content.js'])await cp(join(HERE,file),join(probe,file));
 await cp(join(HERE,'companion.js'),join(peer,'worker.js'));
 const manifest={manifest_version:3,version:'1.0',permissions:['storage','tabs','webNavigation'],host_permissions:['http://127.0.0.1/*'],background:{service_worker:'worker.js',type:'module'}};
@@ -70,6 +81,7 @@ try{
   assert.equal(row.tab.url,row.contentUrl);assert.equal(row.frame.url,row.contentUrl);
   assert.deepEqual(port.messages,[{kind:'hello'}]);
   assert(['ready','error','disconnect'].includes(row.outcome.kind),JSON.stringify(row.outcome));
+  if(MODE==='candidate'){assert.equal(row.outcome.kind,'ready');assert.equal(row.peerRequests.length,1);}
   assert(row.peerRequests.every(r=>r.type==='arcify-peek-v1'&&r.action==='capability'));
   row.classification=port.sender.url===row.tab.url?'current-sender-url':'stale-sender-url';
   console.log(JSON.stringify({label,classification:row.classification,senderUrl:port.sender.url,currentUrl:row.tab.url,documentId:port.sender.documentId,outcome:row.outcome.kind,capabilityRequests:row.peerRequests.length}));
@@ -86,8 +98,15 @@ try{
  }
  await page.reload({waitUntil:'domcontentloaded'});const refreshed=await run('refresh');
  assert.notEqual(refreshed.frame.documentId,initial.frame.documentId);assert.equal(refreshed.outcome.kind,'ready');
+ report.documentRouteChecks=await control.evaluate(async ({tabId,oldDocument,newDocument})=>{
+  const route=async target=>{try{return{resolved:true,value:await chrome.tabs.sendMessage(tabId,{type:'arcifyPeekLiveProbe'},target)}}catch(error){return{resolved:false,error:String(error)}}};
+  return{oldDocument:await route({documentId:oldDocument,frameId:0}),wrongFrame:await route({documentId:newDocument,frameId:42}),currentDocument:await route({documentId:newDocument,frameId:0})};
+ },{tabId:refreshed.tab.id,oldDocument:initial.frame.documentId,newDocument:refreshed.frame.documentId});
+ assert.equal(report.documentRouteChecks.oldDocument.resolved,false);assert.equal(report.documentRouteChecks.wrongFrame.resolved,false);assert.equal(report.documentRouteChecks.currentDocument.resolved,true);
+ assert.equal(report.documentRouteChecks.currentDocument.value.url,refreshed.contentUrl);
+ console.log(JSON.stringify({documentRouteChecks:report.documentRouteChecks}));
  const calls=await requests();assert(calls.every(r=>r.action==='capability'));report.peerRequestCount=calls.length;
- assert.deepEqual(await inventory(join(SPOT,'shared')),original);assert.deepEqual(await inventory(join(probe,'shared')),original);
+ assert.deepEqual(await inventory(join(SPOT,'shared')),original);assert.deepEqual(await inventory(join(probe,'shared')),effective);
  report.status='complete';
 }catch(error){report.status='failed';report.error={message:String(error),stack:error.stack};process.exitCode=1;}
 finally{

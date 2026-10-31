@@ -29,3 +29,19 @@ No screenshots, cookies, user data, browser profiles or credentials are uploaded
 Artifacts contain synthetic observations, source hashes and test logs only.
 The existing installed-Chrome sandbox checks remain mandatory; no weakening
 flags, browser downloads, OS changes, or launch fallbacks are used.
+
+## Candidate comparison
+
+The candidate mode overlays only candidate/peek-broker.js into the disposable
+probe extension, retaining and recording the original and candidate hashes.
+The Spotlight checkout remains unchanged in browser-metadata jobs. The synthetic
+content receiver uses the same isolated read-only URL response as production;
+Chrome routes the request using both documentId and frameId. Every candidate
+handshake must reach ready, including stale sender metadata after SPA navigation.
+Old-document and wrong-frame routes must reject after refresh.
+
+A separate disposable candidate-validation checkout applies the reviewed broker
+and regression test, runs the full unit/integration suite and production build,
+and confirms the packaged manifest is unchanged. This publishes a candidate only
+inside the diagnostic branch for testing; no product branch, merge or installation
+is performed.

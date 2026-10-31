@@ -1,5 +1,11 @@
 // Synthetic fixture controls, deliberately separate from product content scripts.
 let previous=null,busy=false;
+// Same isolated read-only response as production peek-content.js. The browser,
+// not a page message, chooses the receiver through documentId AND frameId.
+chrome.runtime.onMessage.addListener((message,sender,respond)=>{
+ if(message?.type==='arcifyPeekLiveProbe'&&sender.id===chrome.runtime.id&&!sender.tab)
+  respond({url:location.href,live:false,safe:false,action:null,selected:null});
+});
 document.addEventListener('diagnostic-connect',async()=>{
  if(busy)return;busy=true;
  const label=document.documentElement.dataset.diagnosticLabel;

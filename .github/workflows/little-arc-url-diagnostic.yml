@@ -15,12 +15,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        mode: ['baseline', 'candidate']
         spotlight:
           - '76559fbeaacc055ff7f987c0adf5b8b630820ada'
           - 'b8b193c1f803179f86ab2e2397e5f1169256f49d'
     env:
       CI: 'true'
       SPOTLIGHT_SHA: ${{ matrix.spotlight }}
+      DIAGNOSTIC_MODE: ${{ matrix.mode }}
       PUPPETEER_SKIP_DOWNLOAD: 'true'
     steps:
       - uses: actions/checkout@v4
@@ -49,7 +51,7 @@ jobs:
           npm ci --prefix arcify/scripts/paired-chrome-runtime
           npm test --prefix arcify/scripts/paired-chrome-runtime
           node --test arcify/scripts/little-arc-url-diagnostic/contract.test.mjs
-      - name: Observe synthetic navigation and unchanged broker
+      - name: Observe synthetic navigation with selected broker mode
         working-directory: arcify
         run: |
           set -o pipefail
@@ -59,7 +61,57 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: little-arc-url-${{ matrix.spotlight }}
+          name: little-arc-url-${{ matrix.mode }}-${{ matrix.spotlight }}
           path: arcify/test-results/little-arc-url-diagnostic/
           if-no-files-found: warn
+          retention-days: 7
+  candidate-validation:
+    if: github.repository == 'calvwng/arcify'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify
+          ref: ${{ github.sha }}
+          path: arcify
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: '76559fbeaacc055ff7f987c0adf5b8b630820ada'
+          path: spotlight
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply only reviewed candidate files in disposable checkout
+        run: |
+          set -euo pipefail
+          test "$(git -C spotlight rev-parse HEAD)" = '76559fbeaacc055ff7f987c0adf5b8b630820ada'
+          test "$(git -C spotlight rev-parse HEAD:shared/peek-broker.js)" = '49006af99699d959bbbe1235d68583d89bca5bc1'
+          cp arcify/scripts/little-arc-url-diagnostic/candidate/peek-broker.js spotlight/shared/peek-broker.js
+          cp arcify/scripts/little-arc-url-diagnostic/candidate/peek.test.js spotlight/test/unit/peek.test.js
+          mkdir -p evidence
+          sha256sum spotlight/shared/peek-broker.js spotlight/test/unit/peek.test.js spotlight/manifest.json > evidence/candidate-sha256.txt
+          npm ci --prefix spotlight
+      - name: Full unit and integration suite
+        working-directory: spotlight
+        run: |
+          set -o pipefail
+          npm test -- --reporter=default 2>&1 | tee ../evidence/tests.log
+      - name: Production build
+        working-directory: spotlight
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee ../evidence/build.log
+          cmp manifest.json dist/manifest.json
+      - name: Retain candidate validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: little-arc-candidate-validation
+          path: evidence/
           retention-days: 7
