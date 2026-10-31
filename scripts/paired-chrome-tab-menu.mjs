@@ -105,6 +105,51 @@ export function assertTabMenuDuplicated(before, after, { sourceId, windowId, spa
     return duplicate.id;
 }
 
+// Passive, action-scoped evidence only. Never intercept a request or response.
+export function installTabMenuDuplicateObservation() {
+    globalThis.__tabMenuDuplicateObservation?.stop();
+    const events = [], status = document.getElementById('favoritesDropStatus'), notice = document.getElementById('favoritesDropNotice');
+    const add = value => events.push({ sequence: events.length, at: performance.now(), ...structuredClone(value) });
+    const sample = () => ({ text: status?.textContent || '', hidden: notice?.hidden ?? null });
+    const mutations = records => {
+        for (const record of records) if (record.type === 'childList' && record.target === status)
+            add({ type: 'status-write', text: [...record.addedNodes].map(node => node.textContent).join('') });
+        if (records.length) add({ type: 'status-observed', ...sample() });
+    };
+    const observer = new MutationObserver(mutations);
+    const click = event => { if (event.target.closest?.('#tab-context-menu [data-action="duplicate"]')) add({ type: 'duplicate-click', trusted: event.isTrusted }); };
+    const created = tab => add({ type: 'tabs.onCreated', tab });
+    const changed = (changes, area) => {
+        if (area !== 'local') return;
+        const relevant = Object.fromEntries(Object.entries(changes).filter(([key]) => ['spaces', 'spaceTabSnapshot'].includes(key)));
+        if (Object.keys(relevant).length) add({ type: 'storage', area, changes: relevant });
+    };
+    let stopped = false;
+    const stop = () => {
+        if (stopped) return; stopped = true;
+        mutations(observer.takeRecords()); observer.disconnect();
+        document.removeEventListener('click', click, true); chrome.tabs.onCreated.removeListener(created); chrome.storage.onChanged.removeListener(changed);
+    };
+    add({ type: 'status-initial', ...sample() });
+    globalThis.__tabMenuDuplicateObservation = { events, stop, read: () => { mutations(observer.takeRecords()); return { events: structuredClone(events), finalStatus: sample() }; } };
+    if (status) observer.observe(status, { childList: true, subtree: true, characterData: true });
+    if (notice) observer.observe(notice, { attributes: true, attributeFilter: ['hidden'] });
+    document.addEventListener('click', click, true); chrome.tabs.onCreated.addListener(created); chrome.storage.onChanged.addListener(changed);
+}
+export function readTabMenuDuplicateObservation({ stop = false } = {}) {
+    if (!globalThis.__tabMenuDuplicateObservation) throw new Error('Duplicate passive observation is missing.');
+    if (stop) globalThis.__tabMenuDuplicateObservation.stop();
+    return globalThis.__tabMenuDuplicateObservation.read();
+}
+export function stopTabMenuDuplicateObservation() {
+    globalThis.__tabMenuDuplicateObservation?.stop(); delete globalThis.__tabMenuDuplicateObservation;
+}
+export function observeTabMenuDuplicateAssertion(before, after, request) {
+    try { return { passed: true, duplicateId: assertTabMenuDuplicated(before, after, request) }; }
+    catch (error) { return { passed: false, assertion: { name: error.name, message: error.message, stack: error.stack,
+        operator: error.operator, expected: error.expected, actual: error.actual } }; }
+}
+
 export function assertTabMenuPinRemoved(before, after, { bookmarkId, tabId, spaceId }) {
     same(before, after, ['tabs', 'favorites', 'activeSpaceId', 'pageStates']);
     const removed = findBookmark(before, bookmarkId); assert.equal(after.bookmarks.some(node => node.id === bookmarkId), false);
@@ -390,15 +435,40 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             await capture(`tab-menu-${muted ? 'muted' : 'unmuted'}-ordinary-tab`); await checkpoint(muted ? 'muted' : 'unmuted', { before: beforeMute, after: afterMute });
         }
 
-        await menu(row(ordinary.id)); const beforeDuplicate = await read(); await item('duplicate');
-        const afterDuplicate = await poll(async () => {
-            const value = await read();
-            for (const tab of value.tabs.filter(tab => !beforeDuplicate.tabs.some(old => old.id === tab.id))) {
-                if (tab.url === `${base}/ordinary` && tab.windowId === windowId) ownedTabs.add(tab.id);
-            }
-            return value;
-        }, value => { try { assertTabMenuDuplicated(beforeDuplicate, value, { sourceId: ordinary.id, windowId, spaceId: space.id, inverted: representation.inverted }); return true; } catch { return false; } }, 'one unbound duplicate in the current Today order');
-        const duplicateId = assertTabMenuDuplicated(beforeDuplicate, afterDuplicate, { sourceId: ordinary.id, windowId, spaceId: space.id, inverted: representation.inverted }); ownedTabs.add(duplicateId);
+        await menu(row(ordinary.id)); const beforeDuplicate = await read();
+        const duplicateRequest = { sourceId: ordinary.id, windowId, spaceId: space.id, inverted: representation.inverted };
+        const duplicateDiagnostic = { before: beforeDuplicate, request: duplicateRequest };
+        let afterDuplicate, duplicateId, duplicateError;
+        try {
+            await sidebar.page.evaluate(installTabMenuDuplicateObservation);
+            await checkpoint('duplicate-before-input', duplicateDiagnostic);
+            await item('duplicate');
+            afterDuplicate = await poll(async () => {
+                const value = await read();
+                for (const tab of value.tabs.filter(tab => !beforeDuplicate.tabs.some(old => old.id === tab.id))) {
+                    if (tab.url === `${base}/ordinary` && tab.windowId === windowId) ownedTabs.add(tab.id);
+                }
+                return value;
+            }, value => {
+                const result = observeTabMenuDuplicateAssertion(beforeDuplicate, value, duplicateRequest);
+                duplicateDiagnostic.last = { state: structuredClone(value), result };
+                return result.passed;
+            }, 'one unbound duplicate in the current Today order');
+            duplicateId = assertTabMenuDuplicated(beforeDuplicate, afterDuplicate, duplicateRequest); ownedTabs.add(duplicateId);
+        } catch (error) {
+            duplicateError = error; duplicateDiagnostic.error = { name: error.name, message: error.message, stack: error.stack }; throw error;
+        } finally {
+            await finishBookmarkFixture([
+                async () => {
+                    let observationError;
+                    try { duplicateDiagnostic.observation = await sidebar.page.evaluate(readTabMenuDuplicateObservation, { stop: true }); }
+                    catch (error) { observationError = error; duplicateDiagnostic.observationError = { name: error.name, message: error.message, stack: error.stack }; }
+                    await checkpoint('duplicate-observed-before-cleanup', duplicateDiagnostic);
+                    if (observationError) throw observationError;
+                },
+                () => sidebar.page.evaluate(stopTabMenuDuplicateObservation)
+            ], duplicateError, event => checkpoint('duplicate-observer-cleanup-failed', { errors: event.errors }));
+        }
         await ui(sidebar.page, 'Confirm exact duplicate is a Today row', () => sidebar.page.waitForSelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${duplicateId}"]`, { visible: true }));
         await capture('tab-menu-duplicate-ordinary-identity'); await checkpoint('duplicate', { before: beforeDuplicate, after: afterDuplicate, duplicateId });
 
@@ -446,6 +516,6 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             async () => { if (staleBookmarkId) await apiPage.evaluate(async id => { const exists = await chrome.bookmarks.get(id).catch(() => []); if (exists.length) await chrome.bookmarks.remove(id); }, staleBookmarkId); },
             () => setOption('invertTabOrder', settings.invertTabOrder !== false),
             () => setOption('syncTabGroups', Boolean(settings.syncTabGroups))
-        ], primaryError, record);
+        ], primaryError, event => checkpoint(event.phase, { errors: event.errors }));
     }
 }

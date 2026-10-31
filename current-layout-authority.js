@@ -65,7 +65,11 @@ export async function stageCurrentLayoutAuthority(store, records, tabs, proofEpo
             || encode(order())!==canonical
             || ready.some(({tab,space,name})=>{
                 const matches=latest.filter(now=>now.id===tab.id),now=matches[0],owner=owners(tab.id);
-                return matches.length!==1 || now.windowId!==tab.windowId || now.url!==tab.url || now.pendingUrl!==tab.pendingUrl
+                // Chrome may finish loading this exact committed URL while we
+                // await checkpoint reads. Only clearing its redundant pending
+                // URL is benign; newly pending navigation still invalidates.
+                return matches.length!==1 || now.windowId!==tab.windowId || now.url!==tab.url
+                    || now.pendingUrl!==tab.pendingUrl && !(tab.pendingUrl===tab.url && now.pendingUrl===undefined)
                     || now.pinned || now.incognito || now.splitViewId!==tab.splitViewId || store.isGlobalTab?.(now) || store.isTransientTab?.(now)
                     || owner.length!==1 || owner[0].space!==space || owner[0].section!=='temporaryTabs'
                     || currentMetadata.pinnedTabStatesById?.[tab.id]
