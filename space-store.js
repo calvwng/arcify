@@ -18,7 +18,7 @@ import { checkpointSavedMove, recoverSavedMoveData, finishSavedMoveRecovery, rec
 import { withSavedMoveLock, SAVED_MOVE_JOURNAL_KEY } from './saved-move-lock.js';
 import { captureWindowTabs, matchRestoreRecord } from './space-restore.js';
 import { SPACE_CONTINUITY_KEY, createSpaceContinuityStamp, readSpaceContinuitySnapshot, createSpaceRankCheckpoint, readSpaceRankCheckpoint } from './space-continuity.js';
-import { EXPLICIT_TODAY_CHECKPOINT, restoreExplicitToday, explicitTodayOwner, explicitSnapshotWitness, createExplicitCheckpoint } from './explicit-today-ownership.js';
+import { EXPLICIT_TODAY_CHECKPOINT, restoreExplicitToday, explicitTodayEpochs, explicitTodayOwner, explicitSnapshotWitness, createExplicitCheckpoint } from './explicit-today-ownership.js';
 import { DURABLE_LAYOUT_KEY, initializeDurableLayout, restoreDurableLayout, captureDurableLayout, layoutCandidate, durableRestartQueue, layoutContainsCurrent, pendingLayoutWindowIds } from './durable-today-layout.js';
 import { encodeFavoriteContinuityState as encodeLayout } from './favorite-continuity.js';
 import { stageCurrentLayoutAuthority, stageObservedLayoutCreation } from './current-layout-authority.js';
@@ -645,7 +645,7 @@ export class SpaceStore {
             await chrome.storage.session.set(spaceSessionUpdate);
         }
         if (transientChanged()) return retry();
-        const pendingLayoutWindows=pendingLayoutWindowIds(this,[...tabs.values()]);
+        const pendingLayoutWindows=pendingLayoutWindowIds(this,[...tabs.values()],await explicitTodayEpochs(this));
         try { if (!skipGroupSync) await syncSpaceGroups(this.spaces, this.active, [...tabs.values()].filter(tab => this.isGlobalTab(tab)).map(tab => tab.id), {
             isExcludedTab: tab => this.isTransientTab(tab), isExcludedWindow: id => this.isTransientWindow(id),
             isProjectionDeferredWindow: id => pendingLayoutWindows.has(id),

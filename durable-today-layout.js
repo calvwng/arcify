@@ -141,9 +141,26 @@ export function needsExplicitSubsetChoice(store,tab) {
 }
 // Reserve possible restoring windows from cosmetic native projection. This is
 // only a deferral, never evidence authorizing membership or historical identity.
-export function pendingLayoutWindowIds(store,tabs) {
+export function pendingLayoutWindowIds(store,tabs,epochs=[]) {
     const urls=new Set((store.durableLayout?.cohorts||[]).filter(c=>store.layoutPending?.has(c.id)).flatMap(c=>c.signature.map(t=>t.url)));
     const current=new Set((store.durableLayout?.cohorts||[]).filter(c=>c.explicitOnly&&c.binding&&!store.layoutPending?.has(c.id)).map(c=>c.binding.windowId));
+    // Ordinary full-window captures are current authority too. Release only an
+    // exact live binding, never a window-ID or URL-only historical match. A
+    // subset cannot authorize projection of its unproven neighbours.
+    const live=windows(store,tabs);
+    for(const c of store.durableLayout?.cohorts||[]){
+        if(c.explicitOnly||c.contextSubset||!c.binding||store.layoutPending?.has(c.id))continue;
+        const w=live.find(w=>w.id===c.binding.windowId);
+        if(w&&!w.tabs.some(tab=>store.provisional?.has(tab.id)||store.recoveryCandidates?.has(tab.id)
+                ||store.layoutProvisional?.has(tab.id)&&!explicitTodayOwner(store,tab))
+            &&epochs.some(epoch=>epoch&&encode(epoch)===encode(c.binding.epoch))
+            &&encode(c.binding.tabIds)===encode(w.tabs.map(t=>t.id))&&encode(c.signature)===encode(w.signature)
+            &&c.placements.length&&c.placements.every(p=>{
+                const tab=w.tabs[c.signature.findIndex(t=>t.index===p.index)],space=root(store,p);
+                return tab&&space?.temporaryTabs.includes(tab.id)
+                    &&store.spaces.filter(s=>s.temporaryTabs.includes(tab.id)||s.spaceBookmarks.includes(tab.id)).length===1;
+            }))current.add(w.id);
+    }
     return new Set(tabs.filter(t=>eligible(store,t)&&urls.has(t.url)&&!current.has(t.windowId)).map(t=>t.windowId));
 }
 function partial(w,c) {
