@@ -486,3 +486,43 @@ test('helper action oracle retains the exact legacy set and allows only the expl
     }
     for (const helperNavigation of [null, 'true', 1, []]) assert.throws(() => assertSpotlightHelperActionRows(extended, { helperNavigation }));
 });
+
+function sampleWithTodayWitnesses(command = 'pinCurrentTab') {
+    const s = sample(command);
+    const witness = id => ({ version: 1, epoch: { kind: 'session', epoch: 'current-epoch' },
+        incarnation: `incarnation-${id}`, transaction: `transaction-${id}`, windowId: 7,
+        spaceId: 'work', bookmarkFolderId: 'root-work' });
+    for (const state of [s.before, s.after]) {
+        state.tabs.push({ ...clone(state.tabs[0]), id: 103, index: 10, active: false });
+        state.spaces[0].temporaryTabs.push(103);
+        state.pageStates[103] = { ...clone(state.pageStates[101]), documentId: 'doc-103' };
+        project(state);
+        for (const id of [101, 103]) state.savedSnapshot.find(record => record.tabId === id).currentOwnership = witness(id);
+        // Same-URL historical evidence is unrelated to the exact live pin target.
+        state.savedSnapshot.push({ ...clone(state.savedSnapshot.find(record => record.tabId === 103)),
+            tabId: 999, order: 7, windowKey: 'historical-window', currentOwnership: witness(999) });
+    }
+    if (command === 'pinCurrentTab') delete s.after.savedSnapshot.find(record => record.tabId === 101).currentOwnership;
+    return s;
+}
+
+test('pin proof retires only the exact target Today witness and retains unrelated current and historical witnesses', () => {
+    const s = sampleWithTodayWitnesses();
+    assertSpotlightActionCommitted(s.before, s.after, s.options);
+});
+for (const [name, mutate] of Object.entries({
+    retainedTarget: s => s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership = clone(s.before.savedSnapshot.find(r => r.tabId === 101).currentOwnership),
+    lostUnrelatedCurrent: s => delete s.after.savedSnapshot.find(r => r.tabId === 103).currentOwnership,
+    changedUnrelatedCurrent: s => s.after.savedSnapshot.find(r => r.tabId === 103).currentOwnership.transaction = 'changed',
+    lostHistorical: s => delete s.after.savedSnapshot.find(r => r.tabId === 999).currentOwnership,
+    changedHistorical: s => s.after.savedSnapshot.find(r => r.tabId === 999).currentOwnership.incarnation = 'changed',
+})) test(`pin witness proof rejects ${name}`, () => {
+    const s = sampleWithTodayWitnesses(); mutate(s);
+    assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});
+test('folder creation keeps even the current source Today witness unchanged', () => {
+    const s = sampleWithTodayWitnesses('createSpaceFolder');
+    assertSpotlightActionCommitted(s.before, s.after, s.options);
+    delete s.after.savedSnapshot.find(r => r.tabId === 101).currentOwnership;
+    assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
+});

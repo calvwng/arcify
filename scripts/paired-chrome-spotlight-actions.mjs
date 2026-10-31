@@ -313,7 +313,14 @@ export function assertSpotlightActionCommitted(before, after, { command, context
         const expected = structuredClone(old);
         if (affected.includes(old.tabId)) {
             expected.section = command === 'pinCurrentTab' ? 'spaceBookmarks' : 'temporaryTabs';
-            if (command === 'pinCurrentTab') expected.pinnedState = bindings[old.tabId]; else { delete expected.pinnedState; delete expected.nameOverride; }
+            if (command === 'pinCurrentTab') {
+                assert.equal(old.tabId, context.sourceTabId);
+                assert.equal(old.section, 'temporaryTabs');
+                expected.pinnedState = bindings[old.tabId];
+                // This exact live tab is now saved, so its Today-only witness
+                // must retire. Unrelated live and historical witnesses survive.
+                delete expected.currentOwnership;
+            } else { delete expected.pinnedState; delete expected.nameOverride; }
         }
         if (command !== 'createSpaceFolder' && old.spaceId === source.id && before.tabs.some(tab => tab.id === old.tabId))
             expected.order = expectedSource[expected.section].indexOf(old.tabId);
