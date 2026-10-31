@@ -127,6 +127,9 @@ export async function initializeDurableLayout(store,data,tabs) {
 }
 export function layoutCandidate(store,tab) {
     if(!eligible(store,tab)||explicitTodayOwner(store,tab))return false;
+    // Exact saved-pin ownership is independent of ordinary Today recovery.
+    // Keep pins in window signatures, but never defer their saved snapshots.
+    if(store.spaces.some(space=>space.spaceBookmarks.includes(tab.id)))return false;
     if((store.durableLayout?.cohorts||[]).some(c=>c.binding?.windowId===tab.windowId&&!store.layoutPending?.has(c.id)))return false;
     return (store.durableLayout?.cohorts||[]).some(c=>store.layoutPending?.has(c.id)
         && c.signature.some(t=>t.url===tab.url));

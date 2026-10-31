@@ -471,6 +471,32 @@ test('individual close waking a cold worker preserves event-time intent and upda
     f.tabs.splice(f.tabs.findIndex(t=>t.id===101),1);await chrome.tabs.onRemoved.emit(101,{windowId:10,isWindowClosing:false});await cold.chain;
     const c=f.local[DURABLE_LAYOUT_KEY].cohorts.find(c=>c.binding?.windowId===10);assert(!c.binding.tabIds.includes(101));assert(!cold.layoutPending.has(c.id));
 });
+test('exact saved pins sharing pending layout URLs retain snapshots while Today neighbours stay deferred',async()=>{
+    const {f,s}=await changedPending();
+    const url='https://layout.test/101';
+    for(const [order,id] of [9901,9902].entries()){
+        f.tabs.push({id,index:30+order,windowId:10,url,pinned:false,incognito:false,splitViewId:-1});
+        s.spaces.find(space=>space.id==='source').spaceBookmarks.push(id);
+        f.local.pinnedTabStatesById[id]={bookmarkId:`exact-${id}`,pinnedUrl:url};
+        f.local.tabNameOverridesById[id]={name:`Alias ${id}`,originalDomain:'layout.test'};
+        s.layoutProvisional.add(id); // stale flag from before the exact pin operation
+    }
+    const check=()=>{
+        for(const id of [9901,9902]){
+            const records=f.local.spaceTabSnapshot.filter(r=>r.tabId===id);
+            assert.equal(records.length,1,'Each exact saved pin needs one committed snapshot');
+            assert.equal(records[0].section,'spaceBookmarks');
+            assert.equal(records[0].spaceId,'source');
+            assert.deepEqual(records[0].pinnedState,f.local.pinnedTabStatesById[id]);
+            assert.deepEqual(records[0].nameOverride,f.local.tabNameOverridesById[id]);
+        }
+        assert.equal(f.local.spaceTabSnapshot.find(r=>r.tabId===9902).order-f.local.spaceTabSnapshot.find(r=>r.tabId===9901).order,1);
+        assert(!f.local.spaceTabSnapshot.some(r=>r.tabId===1101));
+    };
+    await s.persist();check();await s.persist();check();
+    const warm=await load(f);await warm.persist();check();historyPreserved(f,warm);
+});
+
 test('named and pin-metadata records remain historical rather than entering plain layout restoration',async()=>{
     const f=await setup();f.local.tabNameOverridesById[101]={name:'Keep historical alias'};f.local.pinnedTabStatesById[102]={name:'Saved metadata'};await f.store.persist();
     const old=f.local.spaceTabSnapshot.filter(r=>[101,102].includes(r.tabId)&&r.currentOwnership);
