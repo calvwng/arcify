@@ -1,5 +1,7 @@
 /** Import-safe, source-only Little Arc acceptance. The hosted paired runner owns Chrome. */
 import assert from 'node:assert/strict';
+import {exerciseLittleArcSizingUx} from './paired-chrome-little-arc-sizing-ux.mjs';
+import {exerciseSourceDimming as exerciseLittleArcDimmingUx} from './paired-chrome-little-arc-dimming-ux.mjs';
 import { readingBounds, fallbackBounds, readSizePreference } from '../little-arc-window-geometry.js';
 import { randomBytes } from 'node:crypto';
 import { spotlightSurface } from './paired-chrome-keyboard.mjs';
@@ -34,7 +36,7 @@ export function serveLittleArcFixture(request, response) {
     if (!match) return false;
     const title = `Little Arc ${match[2]} ${match[1]}`;
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-src 'none'; form-action 'none'" });
-    response.end(`<!doctype html><html><head><title>${title}</title><link rel="icon" href="data:,"></head><body data-document-id="${randomBytes(16).toString('hex')}"><h1>${title}</h1><form><label>Unsaved title <input id="little-arc-draft" value="initial"></label><label>Unsaved notes <textarea id="little-arc-notes">initial notes</textarea></label><label>Keep checked <input id="little-arc-check" type="checkbox"></label></form></body></html>`);
+    response.end(`<!doctype html><html><head><title>${title}</title><link rel="icon" href="data:,"></head><body data-document-id="${randomBytes(16).toString('hex')}"><h1>${title}</h1><form><label>Unsaved title <input id="little-arc-draft" value="initial"></label><label>Unsaved notes <textarea id="little-arc-notes">initial notes</textarea></label><label>Keep checked <input id="little-arc-check" type="checkbox"></label></form><a id="little-arc-ux-link" href="/little-arc/${match[1]}/ux-target">Open fixture in Little Arc</a></body></html>`);
     return true;
 }
 /** Store only passive reference witnesses, never manufacture input or page state. */
@@ -339,7 +341,7 @@ export async function readLittleArcRawState() {
 }
 
 /** No positive transport adapter: open, recover and promote originate only in genuine visible UI. */
-export async function exerciseLittleArc({ browser, observePage, apiPage, spotlightOptions, ui, screenshot, snapshot, external, poll, fixture, arcifyId, spotlightId, search, reloadArcify, record = async () => {} }) {
+export async function exerciseLittleArc({ browser, observePage, apiPage, spotlightOptions, ui, screenshot, snapshot, external, poll, fixture, arcifyId, spotlightId, search, reloadArcify, ux=false, record = async () => {} }) {
     assertLittleArcEnvironment();
     for (const adapter of [observePage, ui, screenshot, snapshot, external, poll, search, reloadArcify, record]) assert.equal(typeof adapter, 'function');
     const nonce = randomBytes(16).toString('hex'), originWindowId = fixture.windowA, targetWindowId = fixture.windowB;
@@ -497,6 +499,10 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
         await checkpoint('spotlight-cancel-no-launch', { before: cancelBefore, after: cancelled, events: cancelEvents, input: cancelInput });
 
         const first = await launch(false, 'click'); await refreshController(first.controller);
+        if(ux){
+            await exerciseLittleArcSizingUx({apiPage,ui,poll,first,selectExact,checkpoint});
+            await exerciseLittleArcDimmingUx({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint,selectExact});
+        }
         const target = exact((await read()).spaces, fixture.spaces.work);
         const initialControls = await first.controller.evaluate(readLittleArcControls);
         assert.equal(initialControls.window.value, String(originWindowId)); assert.equal(initialControls.space.value, ''); assert.equal(initialControls.promoteDisabled, true);

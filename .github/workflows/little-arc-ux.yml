@@ -1,0 +1,114 @@
+name: Little Arc UX acceptance
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  little-arc-ux:
+    runs-on: ubuntu-24.04
+    if: github.repository == 'calvwng/arcify' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feature/little-arc-size-preview' && github.event.pull_request.base.ref == 'main'
+    timeout-minutes: 20
+    env:
+      ARCIFY_LITTLE_ARC_UX: '1'
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: little-arc
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha }}
+      ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+      ARCIFY_SPOTLIGHT_HEAD: 1ec956febfb0ce83f02ff5daf904e060d4e35948
+    steps:
+      - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out exact Little Arc Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: 1ec956febfb0ce83f02ff5daf904e060d4e35948
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Record and verify exact source provenance before installation
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/arcify/test-results/paired-chrome-little-arc"
+          mkdir -p "$evidence"
+          {
+            printf 'workflow-ref=%s\nworkflow-sha=%s\nrun-id=%s\nrun-attempt=%s\n' "$GITHUB_WORKFLOW_REF" "$GITHUB_WORKFLOW_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'event-name=%s\nevent-ref=%s\nevent-sha=%s\n' "$GITHUB_EVENT_NAME" "$GITHUB_REF" "$GITHUB_SHA"
+            printf 'expected-arcify=%s\nactual-arcify=%s\n' "$ARCIFY_TEST_HEAD" "$(git -C arcify rev-parse HEAD)"
+            printf 'expected-spotlight=%s\nactual-spotlight=%s\n' "$ARCIFY_SPOTLIGHT_HEAD" "$(git -C arcify-spotlight rev-parse HEAD)"
+          } | tee "$evidence/source-provenance.txt"
+          [[ "$ARCIFY_TEST_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C arcify rev-parse HEAD)" = "$ARCIFY_TEST_HEAD"
+          test "$(git -C arcify-spotlight rev-parse HEAD)" = "$ARCIFY_SPOTLIGHT_HEAD"
+          for repo in arcify arcify-spotlight; do
+            test -z "$(git -C "$repo" status --porcelain)"
+            git -C "$repo" ls-tree -r --full-tree HEAD > "$evidence/$repo-source-tree.txt"
+            (cd "$repo" && git ls-files -z | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/$repo-source-sha256.txt"
+          done
+          node --input-type=module <<'NODE' | tee "$evidence/event-provenance.json"
+          import { execFileSync } from 'node:child_process';
+          import { readLittleArcUxContext } from './arcify/scripts/paired-chrome-little-arc-ux-context.mjs';
+          const head = execFileSync('git', ['-C', 'arcify', 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          console.log(JSON.stringify(readLittleArcUxContext(process.env, head), null, 2));
+          NODE
+          node arcify/scripts/paired-chrome-little-arc-provenance.mjs record arcify-spotlight "$evidence"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Build the exact pair and retain production hashes
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/arcify/test-results/paired-chrome-little-arc"
+          npm run build --prefix arcify 2>&1 | tee "$evidence/arcify-build.log"
+          npm run build --prefix arcify-spotlight 2>&1 | tee "$evidence/arcify-spotlight-build.log"
+          for repo in arcify arcify-spotlight; do
+            git -C "$repo" status --porcelain=v1 -z --untracked-files=all > "$evidence/$repo-post-build-git-status.z"
+            git -C "$repo" status --porcelain=v1 --untracked-files=all > "$evidence/$repo-post-build-git-status.txt"
+          done
+          for repo in arcify arcify-spotlight; do
+            if [ "$repo" = arcify ]; then
+              test -z "$(git -C "$repo" status --porcelain)"
+              (cd "$repo" && sha256sum --check "$evidence/$repo-source-sha256.txt") > "$evidence/$repo-source-verification.txt"
+            else
+              node arcify/scripts/paired-chrome-little-arc-provenance.mjs verify "$repo" "$evidence" > "$evidence/$repo-source-verification.txt"
+            fi
+            test -f "$repo/dist/manifest.json"
+            (cd "$repo" && find dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/$repo-build-sha256.txt"
+          done
+      - name: Exercise only Little Arc with installed Chrome's namespace sandbox
+        working-directory: arcify
+        # Keep the ordinary non-root runner, installed Chrome, isolated locked driver,
+        # fresh disposable profile and real Namespace/PID/network/seccomp evidence.
+        # Never update the browser, repair helpers, change policy or weaken security.
+        # A browser launch denial remains a failed run with the original error.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/paired-chrome-little-arc
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-little-arc/runner.log
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-little-arc-ux-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-little-arc/
+          if-no-files-found: warn
+          retention-days: 14
