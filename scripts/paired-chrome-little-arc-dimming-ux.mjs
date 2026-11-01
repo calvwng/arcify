@@ -2,6 +2,13 @@
 import assert from 'node:assert/strict';
 import { attachLittleArcControllerTargets, readLittleArcRawState } from './paired-chrome-little-arc.mjs';
 
+export function observeSourceInput() {
+    globalThis.__dimInputObserver?.stop();
+    const events=[];const listener=event=>{if(event.target.closest?.('#little-arc-ux-link'))events.push({trusted:event.isTrusted,shift:event.shiftKey,button:event.button});};
+    // Observe before the production document capture handler consumes the click.
+    window.addEventListener('click',listener,true);globalThis.__dimInputObserver={events,stop:()=>window.removeEventListener('click',listener,true)};
+}
+
 export function readSourceDim() {
     const hosts = [...document.body.children].filter(node => node.getAttribute('aria-hidden') === 'true'
         && node.style.position === 'fixed' && node.style.pointerEvents === 'none'
@@ -30,11 +37,7 @@ export async function exerciseSourceDimming({browser,observePage,apiPage,spotlig
         await ui(source.page,'Focus source and Shift-click its real fixture link',async()=>{
             await source.page.waitForSelector('#little-arc-ux-link');
             assert.equal(await source.page.$eval('#little-arc-ux-link',node=>node.href),targetUrl);
-            await source.page.evaluate(()=>{
-                globalThis.__dimInputObserver?.stop();
-                const events=[];const listener=event=>{if(event.target.closest?.('#little-arc-ux-link'))events.push({trusted:event.isTrusted,shift:event.shiftKey,button:event.button});};
-                document.addEventListener('click',listener,true);globalThis.__dimInputObserver={events,stop:()=>document.removeEventListener('click',listener,true)};
-            });
+            await source.page.evaluate(observeSourceInput);
             await source.page.hover('#little-arc-ux-link');
             await poll(trace,events=>events.some(event=>event.type==='external' && event.data.sender.id===spotlightId && event.data.message.type==='arcify-peek-v1' && event.data.message.action==='capability' && event.data.message.source?.tabId===source.tab.id), 'real source Peek capability request');
             await source.page.keyboard.down('Shift');
