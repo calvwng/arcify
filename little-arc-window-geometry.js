@@ -130,7 +130,8 @@ export function createLittleArcWindowGeometry({api=chrome,readRecord,waitMs=900,
         if(value)quarantine=value; // Uncertain journal writes must still suppress size memory.
         await api.storage.session.set({[PREVIEW_KEY]:value});
         const actual=(await api.storage.session.get(PREVIEW_KEY))[PREVIEW_KEY];
-        if(JSON.stringify(actual)!==JSON.stringify(value))fail('Size preview state was not confirmed. Reopen controls.');
+        const keys=['token','windowId','controllerTabId'];
+        if(value===null?actual!==null:!own(actual,keys)||keys.some(key=>actual[key]!==value[key]))fail('Size preview state was not confirmed. Reopen controls.');
         quarantine=value;
     }
     const previewState=()=>trial?{id:trial.id,active:true,conflict:trial.conflict,expires:trial.expires}:quarantine?{active:false,interrupted:true}:null;

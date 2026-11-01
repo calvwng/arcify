@@ -10,11 +10,12 @@ export function assertUnsavedPreview(before,after,events){
 }
 export async function exerciseLittleArcSizingUx({apiPage,ui,poll,first,selectExact,checkpoint}){
     const controller=first.controller,id=first.record.windowId;
-    const read=()=>apiPage.evaluate(async({id,key,preview})=>({window:await chrome.windows.get(id),preference:(await chrome.storage.local.get(key))[key],marker:(await chrome.storage.session.get(preview))[preview]}),{id,key:SIZE_KEY,preview:PREVIEW_KEY});
+    const read=async()=>({...await apiPage.evaluate(async({id,key,preview})=>({window:await chrome.windows.get(id),preference:(await chrome.storage.local.get(key))[key],marker:(await chrome.storage.session.get(preview))[preview]}),{id,key:SIZE_KEY,preview:PREVIEW_KEY}),controls:await controller.evaluate(()=>({status:document.getElementById('window-size-status').textContent,resolved:document.getElementById('size-preview').textContent,mode:document.getElementById('size-mode').value,width:document.getElementById('size-width').value,height:document.getElementById('size-height').value,previewDisabled:document.getElementById('preview-size').disabled,saveDisabled:document.getElementById('save-size').disabled,cancelDisabled:document.getElementById('cancel-size').disabled}))});
     const settled=()=>controller.waitForFunction(()=>!document.getElementById('save-size').disabled&&!document.getElementById('preview-size').disabled,{polling:50});
     const edit=async(width,height)=>{
         await selectExact(controller,'#size-mode','fixed');
         for(const[selector,value]of [['#size-width',width],['#size-height',height]]){const input=await controller.$(selector);assert(input);try{await replaceInputText(controller,input,String(value));}finally{await input.dispose();}}
+        assert.deepEqual(await controller.evaluate(()=>({mode:document.getElementById('size-mode').value,width:document.getElementById('size-width').value,height:document.getElementById('size-height').value})),{mode:'fixed',width:String(width),height:String(height)},'Actual draft inputs must match the requested native-size oracle.');
     };
     await apiPage.evaluate(key=>{const events=[];const listener=(changes,area)=>{if(area==='local'&&Object.hasOwn(changes,key))events.push(changes[key]);};chrome.storage.onChanged.addListener(listener);globalThis.__sizeUxObservation={events,stop:()=>chrome.storage.onChanged.removeListener(listener)};},SIZE_KEY);
     try{
