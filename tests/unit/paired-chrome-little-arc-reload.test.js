@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
+import {createSpaceContinuityStamp} from '../../space-continuity.js';
+import {createHash} from 'node:crypto';
+import {encodeFavoriteContinuityState as encode} from '../../favorite-continuity.js';
+import {assertReloadSavedOwners} from '../../scripts/paired-chrome-little-arc-reload.mjs';
 import { LITTLE_ARC_NATIVE_UNVERIFIED, installLittleArcReloadObservation, readLittleArcReloadObservation, stopLittleArcReloadObservation,
     assertLittleArcReloadObservation, readLittleArcReloadDocument, assertLittleArcReloadDocument, claimLittleArcReloadOnboarding,
     assertLittleArcReloadOnboardingUnchanged, assertLittleArcMissingControllerReload } from '../../scripts/paired-chrome-little-arc-reload.mjs';
@@ -147,4 +151,40 @@ test('raw authority preserves key presence and malformed falsy values instead of
         assert.deepEqual(result.journal,Object.hasOwn(session,'spotlightBridgeRequests')?session.spotlightBridgeRequests:[]);
     }
     const absent=fixture();absent.after.sessionPresence={registry:false,journal:false};verify(absent);
+});
+
+async function ownershipReplay(){
+ const f=fixture(),epoch='10000000-0000-4000-8000-000000000001',generation='20000000-0000-4000-8000-000000000001';
+ f.before.savedSnapshot=[101,102].map(tabId=>({tabId,spaceId:'work',section:'temporaryTabs',url:URL}));
+ const receipt={version:1,schema:'exact-global-favorites-v2',peerId:PEER,epoch,generation,revision:4,fingerprint:createHash('sha256').update(encode(f.before.favoriteSession)).digest('hex')};
+ f.before.continuityReceipt=copy(receipt);f.after.continuityReceipt=copy(receipt);
+ f.before.continuityStamp=await createSpaceContinuityStamp({epoch,generation},f.before.savedSnapshot);
+ f.after.savedSnapshot=f.before.savedSnapshot.map(row=>({...copy(row),currentOwnership:{version:1,epoch:{kind:'browser',epoch,generation},incarnation:`30000000-0000-4000-8000-${String(row.tabId).padStart(12,'0')}`,transaction:'40000000-0000-4000-8000-000000000001',windowId:f.before.tabs.find(t=>t.id===row.tabId).windowId,spaceId:'work',bookmarkFolderId:'folder'}}));
+ return f;
+}
+test('authenticated replay can add exact current authority to unchanged native Today owners',async()=>{
+ const f=await ownershipReplay();assertReloadSavedOwners(f.before,f.after,[],PEER);
+ const integrated=await ownershipReplay();integrated.after.savedSnapshot.push(...fixture().after.savedSnapshot);integrated.options.spotlightId=PEER;verify(integrated);
+ f.before.savedSnapshot[0].currentOwnership=copy(f.after.savedSnapshot[0].currentOwnership);
+ f.before.savedSnapshot[0].currentOwnership.transaction='60000000-0000-4000-8000-000000000001';f.after.savedSnapshot[0].currentOwnership=copy(f.before.savedSnapshot[0].currentOwnership);
+ f.before.continuityStamp=await createSpaceContinuityStamp(f.before.continuityReceipt,f.before.savedSnapshot);
+ assertReloadSavedOwners(f.before,f.after,[],PEER);
+ f.after.savedSnapshot[0].currentOwnership.transaction='50000000-0000-4000-8000-000000000001';assert.throws(()=>assertReloadSavedOwners(f.before,f.after,[],PEER));
+});
+test('reload authority rejects unproven identity, changed ownership, history and malformed witnesses',async()=>{
+ const history=await ownershipReplay();history.before.continuityStamp=await createSpaceContinuityStamp(history.before.continuityReceipt,history.before.savedSnapshot.slice(0,1));assert.throws(()=>assertReloadSavedOwners(history.before,history.after,[],PEER),/Historical suffix/);
+ for(const mutate of [
+ f=>delete f.before.continuityStamp,f=>delete f.before.continuityReceipt,f=>delete f.after.continuityReceipt,
+ f=>f.before.continuityStamp.fingerprint='0'.repeat(64),f=>f.before.continuityStamp.liveCount=0,f=>f.after.continuityReceipt.fingerprint='0'.repeat(64),
+ f=>f.after.continuityReceipt.epoch='90000000-0000-4000-8000-000000000001',f=>f.after.continuityReceipt.phase='recovering',f=>{f.before.continuityReceipt.peerId=ARCIFY;f.after.continuityReceipt.peerId=ARCIFY;},f=>f.after.continuityReceipt.peerId=ARCIFY,
+ f=>f.after.savedSnapshot[0].currentOwnership.extra=true,f=>delete f.after.savedSnapshot[0].currentOwnership.incarnation,
+ f=>f.after.savedSnapshot[0].currentOwnership.epoch.kind='session',f=>f.after.savedSnapshot[0].currentOwnership.windowId=8,
+ f=>f.after.savedSnapshot[0].currentOwnership.spaceId='other',f=>f.after.savedSnapshot[0].currentOwnership.bookmarkFolderId='other',
+ f=>f.after.savedSnapshot[1].currentOwnership.incarnation=f.after.savedSnapshot[0].currentOwnership.incarnation,
+ f=>f.after.savedSnapshot[0].currentOwnership.transaction=f.after.savedSnapshot[0].currentOwnership.incarnation,
+ f=>f.after.savedSnapshot[0].url='https://changed.test/',f=>f.after.tabs[0].windowId=8,f=>f.before.tabs[0].pinned=true,
+ f=>f.after.spaces[0].temporaryTabs=f.after.spaces[0].temporaryTabs.filter(id=>id!==101),
+ f=>f.after.bindings[101]={bookmarkId:'pin'},f=>f.before.favoriteSession.bindings.push({tabId:101}),
+ f=>f.before.registry.records[0].memberTabIds.push(101),f=>f.after.spaces.push({id:'other',bookmarkFolderId:'folder',temporaryTabs:[],spaceBookmarks:[]})
+ ]){const f=await ownershipReplay();mutate(f);assert.throws(()=>assertReloadSavedOwners(f.before,f.after,[],PEER),mutate.toString());}
 });

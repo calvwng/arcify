@@ -330,10 +330,11 @@ export async function attachLittleArcControllerTargets({ targets, controllerTabI
 }
 
 export async function readLittleArcRawState() {
-        const local = await chrome.storage.local.get(['spaces', 'spaceTabSnapshot', 'pinnedTabStatesById', 'persistentFavorites', 'archivedTabs', 'littleArcWindowSizeV1']);
-        const session = await chrome.storage.session.get(['activeSpaces', 'favoriteSession', 'transientWindowSession', 'spotlightBridgeRequests']);
+        const local = await chrome.storage.local.get(['spaces', 'spaceTabSnapshot', 'pinnedTabStatesById', 'persistentFavorites', 'archivedTabs', 'littleArcWindowSizeV1', 'spaceContinuityStamp']);
+        const session = await chrome.storage.session.get(['activeSpaces', 'favoriteSession', 'transientWindowSession', 'spotlightBridgeRequests', 'favoriteContinuityReceipt']);
         return { tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, pinned, incognito, active, groupId, splitViewId }) => ({ id, windowId, index, url, pendingUrl: pendingUrl || null, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1 })).sort((a,b) => a.id-b.id),
             sizePreference: local.littleArcWindowSizeV1,
+            continuityStamp: local.spaceContinuityStamp, continuityReceipt: session.favoriteContinuityReceipt,
             windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, left, top, width, height, state }) => ({ id, type, incognito, focused, left, top, width, height, state })).sort((a,b) => a.id-b.id),
             groups: (await chrome.tabGroups.query({})).sort((a,b) => a.id-b.id), spaces: local.spaces || [], savedSnapshot: local.spaceTabSnapshot || [], bindings: local.pinnedTabStatesById || {}, favorites: local.persistentFavorites || [], archivedTabs: local.archivedTabs || [],
             sessionPresence: { registry: Object.hasOwn(session, 'transientWindowSession'), journal: Object.hasOwn(session, 'spotlightBridgeRequests') },
@@ -574,7 +575,7 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
         const finalEvents = assertLittleArcReloadObservation(reloadObserverBefore, finalObserver, spotlightId);
         Object.assign(evidence.reloadBoundary, { after: afterReload, observerAfter: finalObserver, nativeEvents: finalEvents });
         const result = assertLittleArcMissingControllerReload(beforeReload, afterReload, { record: reloadFlow.record, twinId: twin.tab.id,
-            oldApiTabId: oldReloadApiTab.id, newApiTabId: newApiTab.id, onboardingId, arcifyId, windowB: targetWindowId, events: finalEvents });
+            oldApiTabId: oldReloadApiTab.id, newApiTabId: newApiTab.id, onboardingId, arcifyId, spotlightId, windowB: targetWindowId, events: finalEvents });
         assertLittleArcSavedUnchanged(beforeReload, afterReload, finalEvents);
         await checkpoint('real-reload-missing-controller-ordinary-survivors', { before: beforeReload, after: afterReload, result,
             observerBefore: reloadObserverBefore, observerAfter: finalObserver, nativeEvents: finalEvents, reload: reloaded.evidence,
