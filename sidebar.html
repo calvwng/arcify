@@ -9,6 +9,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Varela+Round&display=swap" rel="stylesheet">
     <style>
+        body[data-sidebar-pending] { display: none; }
         .varela-round-regular {
             font-family: "Varela Round", sans-serif;
             font-weight: 400;
@@ -22,9 +23,10 @@
     </style>
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="sidebar-tour.css">
+    <link rel="stylesheet" href="private-sidebar.css">
 </head>
 
-<body>
+<body data-sidebar-pending>
     <div id="sidebar-container" class="sidebar-container">
         <div class="pinned-favicons" id="pinnedFavicons">
             <!-- Saved Favorites and unmanaged browser pins are displayed here -->
@@ -199,7 +201,7 @@
             <button class="tab-close" title="Close Tab" aria-label="Close Tab">×</button>
         </div>
     </template>
-    <script type="module" src="sidebar.js"></script>
+    <script type="module" src="sidebar-entry.js"></script>
 </body>
 
 </html>

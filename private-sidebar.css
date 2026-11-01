@@ -1,0 +1,8 @@
+.private-sidebar { padding: 16px; font-family: system-ui, sans-serif; height: 100%; box-sizing: border-box; overflow-y: auto; }
+.private-sidebar h1 { font: 600 18px system-ui, sans-serif; }
+.private-sidebar p { font-size: 12px; line-height: 1.5; }
+.private-sidebar button { color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 8px; padding: 8px; cursor: pointer; }
+.private-tab { display: flex; gap: 6px; margin-top: 8px; }
+.private-tab button:first-child { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.private-tab [aria-pressed="true"] { font-weight: bold; background: #80808030; }
+.private-sidebar button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
