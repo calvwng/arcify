@@ -23,6 +23,7 @@ import { exerciseSpotlightTabCommands, serveSpotlightTabFixture, SPOTLIGHT_TAB_C
 import { exerciseSpotlightArchiveOpen, exerciseSpotlightArchiveReopen, serveSpotlightArchiveFixture, SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME } from './paired-chrome-spotlight-archive.mjs';
 import { exerciseLittleArc, serveLittleArcFixture, LITTLE_ARC_CASE_NAME } from './paired-chrome-little-arc.mjs';
 import { readLittleArcAcceptanceContext } from './paired-chrome-little-arc-context.mjs';
+import {readLittleArcUxContext,UX_SPOTLIGHT_HEAD} from './paired-chrome-little-arc-ux-context.mjs';
 import { randomBytes } from 'node:crypto';
 import { exerciseSpaceTheme } from './paired-chrome-space-theme.mjs';
 import { exerciseSpotlightOptionsAppearance } from './paired-chrome-spotlight-appearance.mjs';
@@ -839,10 +840,10 @@ await mkdir(OUTPUT, { recursive: true });
 try {
     report.environment.arcifyHead = head(ROOT);
     report.environment.spotlightHead = head(COMPANION);
-    report.environment.expectedSpotlightHead = report.runMode === 'little-arc' ? PINNED_LITTLE_ARC_SPOTLIGHT : PINNED_SPOTLIGHT;
+    report.environment.expectedSpotlightHead = report.runMode === 'little-arc' ? (process.env.ARCIFY_LITTLE_ARC_UX === '1' ? UX_SPOTLIGHT_HEAD : PINNED_LITTLE_ARC_SPOTLIGHT) : PINNED_SPOTLIGHT;
     if ('little-arc' === report.runMode) {
-        report.environment.acceptanceContext = readLittleArcAcceptanceContext(process.env, report.environment.arcifyHead);
-        assert.equal(process.env.ARCIFY_SPOTLIGHT_HEAD, PINNED_LITTLE_ARC_SPOTLIGHT, 'Little Arc job must declare the reviewed companion pin.');
+        report.environment.acceptanceContext = process.env.ARCIFY_LITTLE_ARC_UX === '1' ? readLittleArcUxContext(process.env,report.environment.arcifyHead) : readLittleArcAcceptanceContext(process.env, report.environment.arcifyHead);
+        assert.equal(process.env.ARCIFY_SPOTLIGHT_HEAD, report.environment.expectedSpotlightHead, 'Little Arc job must declare the reviewed companion pin.');
     }
     assert.equal(report.environment.spotlightHead, report.environment.expectedSpotlightHead, 'Companion must match the reviewed pinned commit for this run mode.');
     if (process.env.ARCIFY_TEST_HEAD) assert.equal(report.environment.arcifyHead, process.env.ARCIFY_TEST_HEAD);
@@ -2427,6 +2428,7 @@ try {
     if (report.runMode === 'little-arc') {
     await step(stepNames[55], () => exerciseLittleArc({ browser, observePage, apiPage:arcifyOptions, spotlightOptions, ui, screenshot,
         snapshot, external, poll, fixture, arcifyId, spotlightId, search,
+        ux: report.environment?.acceptanceContext?.scope === 'little-arc-ux',
         reloadArcify:async () => {
             const reloaded = await reloadPairedExtension('arcify');
             return { apiPage:reloaded.arcifyOptions, evidence:reloaded.evidence };

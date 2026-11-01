@@ -1,5 +1,68 @@
 /** Import-safe native reload-boundary assertions. No runtime or browser-launch changes. */
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {encodeFavoriteContinuityState as encode} from '../favorite-continuity.js';
+
+/** Snapshot replay may issue current authority, but cannot change its saved owner. */
+export function assertReloadSavedOwners(before, after, excluded=[], spotlightId) {
+    const rows=state=>state.savedSnapshot.filter(row=>!excluded.includes(row.tabId));
+    const prior=rows(before),next=rows(after);
+    assert.equal(next.length,prior.length);
+    const uuid=value=>assert.match(value,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    const existingTokens=new Set(before.savedSnapshot.flatMap(row=>row.currentOwnership?[row.currentOwnership.incarnation,row.currentOwnership.transaction]:[]));
+    const newIncarnations=new Set(),newTransactions=new Set();
+    let live;
+    const replayProof=()=>{
+        if(live)return live;
+        const stamp=before.continuityStamp,receipt=before.continuityReceipt,afterReceipt=after.continuityReceipt;
+        assert(stamp&&receipt&&afterReceipt,'New ownership requires independently captured replay evidence.');
+        assert.deepEqual(Object.keys(stamp).sort(),['version','epoch','generation','liveCount','fingerprint'].sort());
+        assert.equal(stamp.version,1);assert(Number.isSafeInteger(stamp.liveCount)&&stamp.liveCount>=0&&stamp.liveCount<=before.savedSnapshot.length);
+        for(const state of [before,after]){
+            const value=state.continuityReceipt;
+            assert.equal(value.version,1);assert.equal(value.schema,'exact-global-favorites-v2');assert(value.phase===undefined||value.phase==='committed');
+            assert.equal(value.epoch,stamp.epoch);assert.equal(value.generation,stamp.generation);uuid(value.epoch);uuid(value.generation);
+            assert(Number.isSafeInteger(value.revision)&&value.revision>=0);assert.match(value.fingerprint,/^[a-f0-9]{64}$/);
+            assert.equal(value.fingerprint,createHash('sha256').update(encode(state.favoriteSession)).digest('hex'),'Browser receipt must bind its independently read session state.');
+        }
+        assert.equal(afterReceipt.peerId,receipt.peerId);assert.match(receipt.peerId,/^[a-p]{32}$/);
+        assert.equal(receipt.peerId,spotlightId,'Replay must belong to the exact paired Spotlight build.');
+        live=before.savedSnapshot.slice(0,stamp.liveCount);
+        assert.equal(new Set(live.map(row=>row.tabId)).size,live.length);
+        assert.equal(stamp.fingerprint,createHash('sha256').update(encode({epoch:stamp.epoch,generation:stamp.generation,liveCount:stamp.liveCount,live})).digest('hex'));
+        return live;
+    };
+    for(let index=0;index<prior.length;index++){
+        const old=prior[index],row=next[index];
+        const stable=({order,tabIndex,windowKey,currentOwnership,...value})=>value;
+        assert.deepEqual(stable(row),stable(old),'Reload cannot change stable saved owner fields.');
+        if(Object.hasOwn(old,'currentOwnership')){assert.deepEqual(row.currentOwnership,old.currentOwnership);continue;}
+        if(!Object.hasOwn(row,'currentOwnership'))continue;
+        assert(replayProof().some(value=>value===old),'Historical suffix is not current replay authority.');
+        const witness=row.currentOwnership;
+        assert(witness&&Object.getPrototypeOf(witness)===Object.prototype);
+        assert.deepEqual(Object.keys(witness).sort(),['version','epoch','incarnation','transaction','windowId','spaceId','bookmarkFolderId'].sort());
+        assert.equal(witness.version,1);assert.deepEqual(witness.epoch,{kind:'browser',epoch:before.continuityStamp.epoch,generation:before.continuityStamp.generation});
+        const native=exact(before.tabs,row.tabId),kept=exact(after.tabs,row.tabId);
+        for(const key of ['id','windowId','url','pendingUrl','pinned','incognito','splitViewId','groupId'])assert.deepEqual(kept[key],native[key]);
+        assert.equal(native.url,row.url);assert(!native.pendingUrl&&!native.pinned&&!native.incognito);assert.equal(native.splitViewId??-1,-1);
+        for(const state of [before,after]){
+            assert.deepEqual(owners(state,row.tabId),[{spaceId:row.spaceId,section:'temporaryTabs'}]);
+            assert(!state.registry.records.some(record=>record.memberTabIds?.includes(row.tabId)||record.tabId===row.tabId||record.controllerTabId===row.tabId));
+            assert(!Object.hasOwn(state.bindings,String(row.tabId)));
+            assert(![...(state.favoriteSession?.bindings||[]),...(state.favoriteSession?.attempts||[])].some(value=>value.tabId===row.tabId));
+            const space=exact(state.spaces,row.spaceId),window=exact(state.windows,native.windowId);
+            assert.equal(state.spaces.filter(s=>s.bookmarkFolderId===space.bookmarkFolderId).length,1);
+            assert.equal(window.type,'normal');assert(!window.incognito);
+            assert.equal(witness.spaceId,space.id);assert.equal(witness.bookmarkFolderId,space.bookmarkFolderId);
+        }
+        assert.equal(row.section,'temporaryTabs');assert(!row.pinnedState);assert.equal(witness.windowId,native.windowId);
+        uuid(witness.incarnation);uuid(witness.transaction);
+        assert(!existingTokens.has(witness.incarnation)&&!existingTokens.has(witness.transaction));
+        assert(!newIncarnations.has(witness.incarnation)&&!newTransactions.has(witness.incarnation)&&!newIncarnations.has(witness.transaction)&&witness.incarnation!==witness.transaction);
+        newIncarnations.add(witness.incarnation);newTransactions.add(witness.transaction); // One replay batch legitimately shares a transaction.
+    }
+}
 
 export const LITTLE_ARC_NATIVE_UNVERIFIED = Object.freeze([
     'intact-controller same-window orphan recovery',
@@ -97,7 +160,7 @@ export function assertLittleArcReloadOnboardingUnchanged(witness, receipt) {
     assert.equal(witness.timeOrigin, receipt.timeOrigin); assert.deepEqual(witness.documentIds, receipt.documentIds);
 }
 
-export function assertLittleArcMissingControllerReload(before, after, { record, twinId, oldApiTabId, newApiTabId, onboardingId, arcifyId, windowB, events }) {
+export function assertLittleArcMissingControllerReload(before, after, { record, twinId, oldApiTabId, newApiTabId, onboardingId, arcifyId, spotlightId, windowB, events }) {
     const pair = [record.tabId, twinId], removed = [record.controllerTabId, oldApiTabId], created = [newApiTabId, ...(onboardingId === null ? [] : [onboardingId])];
     assert.equal(new Set([...pair, ...removed, ...created]).size, pair.length + removed.length + created.length);
     const originalController = exact(before.tabs, record.controllerTabId), oldOptions = exact(before.tabs, oldApiTabId);
@@ -152,8 +215,7 @@ export function assertLittleArcMissingControllerReload(before, after, { record, 
     const shape = state => state.spaces.map(({ lastTab, temporaryTabs, ...space }) => ({ ...space, temporaryTabs: temporaryTabs.filter(id => !pair.includes(id)) }));
     assert.deepEqual(shape(after), shape(before), 'Only the two ordinary Today admissions may change Space ownership.');
     // Native strip indices/session window keys can change on reload, but saved live ownership cannot.
-    const savedOwners = state => state.savedSnapshot.filter(value => !pair.includes(value.tabId)).map(({ order, tabIndex, windowKey, ...value }) => value);
-    assert.deepEqual(savedOwners(after), savedOwners(before));
+    assertReloadSavedOwners(before,after,pair,spotlightId);
     assert.deepEqual(exact(after.windows, windowB), exact(before.windows, windowB));
     assert.deepEqual(after.tabs.filter(tab => tab.windowId === windowB), before.tabs.filter(tab => tab.windowId === windowB));
     const snapshot = value => { const { capturedAt, ...rest } = value; return rest; };
