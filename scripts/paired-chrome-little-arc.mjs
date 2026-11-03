@@ -504,7 +504,7 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
         if(ux){
             await exerciseLittleArcSizingUx({apiPage,ui,poll,first,selectExact,checkpoint});
             await exerciseLittleArcDimmingUx({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint,selectExact});
-            await exerciseExpiredHeaderSettings({apiPage,ui,poll,first,spotlightId,checkpoint});
+            await exerciseExpiredHeaderSettings({apiPage,ui,poll,first,spotlightId,checkpoint,screenshot});
         }
         const target = exact((await read()).spaces, fixture.spaces.work);
         const initialControls = await first.controller.evaluate(readLittleArcControls);
