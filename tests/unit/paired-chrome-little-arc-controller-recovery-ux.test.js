@@ -18,7 +18,7 @@ test('hosted recovery uses visible input and exact owned close, never manufactur
  assert(source.includes('cycle<=3'));assert(source.includes('first.controller.close({runBeforeUnload:true})'));assert(source.includes("frame.click('#size-settings',cycle===2?{count:2}:{}"));assert(source.includes('nativeController.tab.windowId,oldRecord.windowId'));assert(source.includes('encodeURIComponent(oldRecord.token)'));assert(source.includes('first.record=record;first.controller=controller'));
  assert.doesNotMatch(source,/frame\.click\(['"]#refresh|runtime\.sendMessage|storage\.[\w]+\.set|tabs\.(?:create|remove|update)|windows\.(?:create|remove|update)|dispatchEvent/);
  const main=readFileSync(new URL('../../scripts/paired-chrome-little-arc.mjs',import.meta.url),'utf8');assert(main.includes('await exerciseControllerRecovery('));
- const workflow=readFileSync(new URL('../../.github/workflows/little-arc-ux.yml',import.meta.url),'utf8');assert(workflow.includes('0093ce5962e0b975597e7c10909a8a48b4005479'));assert(workflow.includes('tests/integration/little-arc-controller-recovery-pair.test.mjs'));
+ const workflow=readFileSync(new URL('../../.github/workflows/little-arc-ux.yml',import.meta.url),'utf8');assert(workflow.includes('51af4bf19061670fcadcde98593c7b9aebbba780'));assert(workflow.includes('tests/integration/little-arc-controller-recovery-pair.test.mjs'));
 });
 
 test('recovered Settings readiness requires loaded current source, preferences and geometry',()=>{

@@ -27,8 +27,8 @@ const event=()=>{const handlers=new Set();return {addListener:f=>handlers.add(f)
 import {createTransientWindowStore,TRANSIENT_WINDOW_SESSION_KEY as KEY} from '../../transient-window-store.js';
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 async function settle(predicate){for(let i=0;i<100;i++){if(predicate())return;await tick();}assert.fail('Synthetic operation did not settle');}
-async function paired(t,{lostCreateAck=false,lostRecoveryReply=false,createRace=null,afterCommitAuthorization=null}={}){
- const f=fixture(),requests=[],callbacks=[],notices=[],probes=[],created=[];let nextId=100,registry;
+async function paired(t,{lostCreateAck=false,lostRecoveryReply=false,lostSettingsReply=false,createRace=null,afterCommitAuthorization=null,afterInspect=null}={}){
+ const f=fixture(),requests=[],callbacks=[],notices=[],probes=[],created=[],notifications=[];let nextId=100,registry;
  let session={[KEY]:{version:1,records:[{...f.record,memberTabIds:[2,3],recovered:undefined}]}};
  delete session[KEY].records[0].recovered; for(const tab of f.tabs){tab.pinned=false;tab.splitViewId=-1;tab.status="complete";}
  for(const name of ['onCreated','onRemoved','onUpdated','onAttached','onDetached','onReplaced','onActivated'])f.api.tabs[name]=event();
@@ -43,15 +43,16 @@ async function paired(t,{lostCreateAck=false,lostRecoveryReply=false,createRace=
  let queue=Promise.resolve();f.store.run=fn=>{const result=queue.then(fn);queue=result.catch(()=>{});return result;};
  registerLittleArcHeader(f.store,f.api);
  const local={arcifyBridgePeerId:SELF,arcifyBridgePairingGeneration:'g'},spotSession={};let challenge;
- const api={runtime:{id:PEER,getURL:p=>`chrome-extension://${PEER}/${p}`,onConnect:event(),onMessage:event(),onMessageExternal:event(),sendMessage:async(peer,request)=>{assert.equal(peer,SELF);requests.push(structuredClone(request));const result=await new Promise(resolve=>f.api.listener(request,{id:PEER,url:`chrome-extension://${PEER}/background.js`},resolve));if(lostRecoveryReply&&request.action==='recoverControls')throw Error('Synthetic lost recovery reply');return result;}},storage:{local:{get:async()=>structuredClone(local)},session:{get:async()=>structuredClone(spotSession),set:async patch=>Object.assign(spotSession,structuredClone(patch))},onChanged:event()},tabs:{...f.api.tabs,sendMessage:async(id,message,target)=>{probes.push({id,message,target});return {challenge,url:f.tabs.find(tab=>tab.id===3)?.url,safe:true};}},windows:f.api.windows};
- f.api.runtime.sendMessage=async(first,message)=>{if(typeof first!=='string'){notices.push(first);return;}assert.equal(first,PEER);callbacks.push(message);const response=await new Promise(resolve=>{void api.runtime.onMessageExternal.emit(message,{id:SELF,url:`chrome-extension://${SELF}/background.js`},resolve);});if(message.stage==='commit'&&afterCommitAuthorization)await afterCommitAuthorization(f,response);return response;};
+ const api={runtime:{id:PEER,getURL:p=>`chrome-extension://${PEER}/${p}`,onConnect:event(),onMessage:event(),onMessageExternal:event(),sendMessage:async(peer,request)=>{assert.equal(peer,SELF);requests.push(structuredClone(request));const result=await new Promise(resolve=>f.api.listener(request,{id:PEER,url:`chrome-extension://${PEER}/background.js`},resolve));if(request.action==='inspect'&&afterInspect)await afterInspect(result);if(lostRecoveryReply&&request.action==='recoverControls'||lostSettingsReply&&request.action==='settings')throw Error('Synthetic lost settings/recovery reply');return result;}},storage:{local:{get:async()=>structuredClone(local)},session:{get:async()=>structuredClone(spotSession),set:async patch=>Object.assign(spotSession,structuredClone(patch))},onChanged:event()},tabs:{...f.api.tabs,sendMessage:async(id,message,target)=>{probes.push({id,message,target});return {challenge,url:f.tabs.find(tab=>tab.id===3)?.url,safe:true};}},windows:f.api.windows};
+ const deliverNotice=(message,sender={id:SELF,url:`chrome-extension://${SELF}/background.js`})=>new Promise(resolve=>{void api.runtime.onMessageExternal.emit(message,sender,resolve);});
+ f.api.runtime.sendMessage=async(first,message)=>{if(typeof first!=='string'){notices.push(first);return;}assert.equal(first,PEER);(message.type==='littleArcControlsClosed'?notifications:callbacks).push(message);const response=await deliverNotice(message);if(message.stage==='commit'&&afterCommitAuthorization)await afterCommitAuthorization(f,response);return response;};
  const broker=installLittleArcHeaderBroker(api);t.after(()=>{broker.dispose();delete globalThis.chrome;});
  const port=(name,frameId,url)=>{let closed=false;const p={name,sender:{id:PEER,frameId,documentId:'synthetic-source-document',url,origin:frameId?`chrome-extension://${PEER}`:'https://page.test',tab:structuredClone(f.tabs.find(tab=>tab.id===3))},messages:[],onMessage:event(),onDisconnect:event(),postMessage:m=>p.messages.push(m),disconnect:()=>{if(!closed){closed=true;void p.onDisconnect.emit();}}};return p;};
  const top=port(HEADER_TOP_PORT,0,f.source.url);await api.runtime.onConnect.emit(top);await top.onMessage.emit({kind:'hello'});challenge=top.messages.find(m=>m.kind==='mount').challenge;
  const frame=port(HEADER_FRAME_PORT,4,api.runtime.getURL(HEADER_PAGE));await api.runtime.onConnect.emit(frame);await frame.onMessage.emit({kind:'bind',challenge});
  const activate=async()=>{for(const tab of f.tabs)if(tab.windowId===20)tab.active=tab.id===3;await api.tabs.onActivated.emit({tabId:3,windowId:20});await tick();await settle(()=>!broker.sessions.get(3)?.inFlight);};
  const closeController=async()=>{const record=(await registry.listUnlocked())[0];const index=f.tabs.findIndex(tab=>tab.id===record.controllerTabId);assert(index>=0);f.tabs.splice(index,1);await f.api.tabs.onRemoved.emit(record.controllerTabId,{windowId:20,isWindowClosing:false});await activate();};
- return {...f,api,requests,callbacks,notices,probes,created,frame,broker,restart,closeController,activate,get registry(){return registry;},settings:()=>frame.onMessage.emit({kind:'sizeSettings'})};
+ return {...f,api,requests,callbacks,notices,probes,created,notifications,deliverNotice,frame,broker,restart,closeController,activate,get registry(){return registry;},settings:()=>frame.onMessage.emit({kind:'sizeSettings'})};
 }
 test('actual paired recovery repeats close and source activation without manual Refresh or duplicate creation',async t=>{
  const f=await paired(t),before=structuredClone(f.store.spaces);await f.settings();assert.equal(f.created.length,0);
@@ -78,4 +79,35 @@ test('duplicate marker after actual commit authorization prevents binding and fo
  await f.closeController();await f.settings();const record=(await f.registry.listUnlocked())[0];
  assert.equal(f.created.length,1);assert.equal(record.controllerTabId,2);assert.equal(record.phase,'uncertain');assert.equal(f.mutations.length,0);
  await f.activate();await f.settings();assert.equal(f.created.length,1);assert.deepEqual(f.callbacks.map(m=>m.stage),['prepare','commit']);
+});
+
+for(const order of ['activation-first','proof-first'])test(`actual closure notification refreshes ${order} without automatic recovery`,async t=>{
+ const f=await paired(t);await f.settings();f.tabs.splice(f.tabs.findIndex(tab=>tab.id===2),1);
+ if(order==='activation-first'){await f.activate();assert.equal(f.frame.messages.at(-1).kind,'error');assert.equal(f.broker.sessions.get(3).settingsUsed,true);}
+ await f.api.tabs.onRemoved.emit(2,{windowId:20,isWindowClosing:false});
+ if(order==='proof-first')await f.activate();
+ await settle(()=>f.frame.messages.at(-1)?.context?.controlsMissing===true&&!f.broker.sessions.get(3)?.inFlight);
+ assert.equal(f.notifications.length,1);assert.deepEqual(f.notifications[0],{type:'littleArcControlsClosed',version:1,generation:'g',source:f.source});
+ assert.equal(f.created.length,0);assert.equal(f.requests.filter(r=>r.action==='recoverControls').length,0);
+ await f.settings();assert.equal(f.created.length,1);assert.equal(f.requests.filter(r=>r.action==='recoverControls').length,1);
+});
+test('actual closure proof arriving during a failed return inspect is coalesced after that inspect',async t=>{
+ let release,entered=false;const gate=new Promise(resolve=>release=resolve);let hold=false;t.after(()=>release());
+ const f=await paired(t,{afterInspect:async result=>{if(hold&&result.success===false){hold=false;entered=true;await gate;}}});
+ await f.settings();f.tabs.splice(f.tabs.findIndex(tab=>tab.id===2),1);hold=true;const activation=f.activate();activation.catch(()=>{});await settle(()=>entered);
+ await f.api.tabs.onRemoved.emit(2,{windowId:20,isWindowClosing:false});await settle(()=>f.notifications.length===1&&f.broker.sessions.get(3)?.returnRequested===true);
+ assert.equal(f.created.length,0);release();await activation;await settle(()=>f.frame.messages.at(-1)?.context?.controlsMissing===true&&!f.broker.sessions.get(3)?.inFlight);
+ assert.equal(f.created.length,0);await f.settings();assert.equal(f.created.length,1);
+});
+test('closure notifications cannot clear a lost Settings acknowledgment or replay its dispatch',async t=>{
+ const f=await paired(t,{lostSettingsReply:true});await f.settings();assert.equal(f.broker.sessions.get(3).settingsDispatched,true);
+ f.tabs.splice(f.tabs.findIndex(tab=>tab.id===2),1);await f.activate();await f.api.tabs.onRemoved.emit(2,{windowId:20,isWindowClosing:false});await settle(()=>f.notifications.length===1);await tick();
+ assert.equal(f.broker.sessions.get(3).settingsDispatched,true);assert.equal(f.created.length,0);await f.settings();assert.equal(f.created.length,0);assert.equal(f.requests.filter(r=>r.action==='settings').length,1);assert.equal(f.requests.filter(r=>r.action==='recoverControls').length,0);
+});
+test('unknown or forged closure hints cannot create proof or enable recovery',async t=>{
+ const f=await paired(t);await f.settings();f.tabs.splice(f.tabs.findIndex(tab=>tab.id===2),1);await f.activate();
+ const message={type:'littleArcControlsClosed',version:1,generation:'g',source:f.source};const sender={id:SELF,url:`chrome-extension://${SELF}/background.js`};const before=f.requests.length;
+ for(const [payload,author] of [[{...message,generation:'other'},sender],[{...message,source:{...f.source,tabId:99}},sender],[{...message,unexpected:true},sender],[message,{...sender,id:'c'.repeat(32)}],[message,{...sender,tab:{id:2}}]])assert.deepEqual(await f.deliverNotice(payload,author),{accepted:false});
+ assert.equal(f.requests.length,before);await f.api.tabs.onRemoved.emit(999,{windowId:20,isWindowClosing:false});await tick();assert.equal(f.notifications.length,0);
+ await f.deliverNotice(message,sender);assert.equal(f.frame.messages.at(-1).kind,'error','Even paired hint needs the actual native closure proof');await f.settings();assert.equal(f.created.length,0);assert.equal(await f.registry.controllerRecoveryStatusUnlocked(f.source),null);
 });

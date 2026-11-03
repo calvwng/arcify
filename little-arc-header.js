@@ -53,6 +53,36 @@ export function createLittleArcHeaderService(store, api = chrome) {
         if (window.type !== 'normal' || window.incognito || store.isTransientWindow(window.id)) fail('STALE_TARGET','Choose a normal destination window.');
     }
     const direct=createLittleArcDirectService(store,api,{sourceRecord,destination});
+    const closedControllerNotice=async(controllerTabId,windowId)=>{
+        const pairing=await api.storage.local.get([PEER_KEY,PAIRING_GENERATION_KEY]);
+        const peerId=pairing[PEER_KEY],generation=pairing[PAIRING_GENERATION_KEY]??null;
+        if(typeof peerId!=='string'||!/^[a-p]{32}$/.test(peerId))return false;
+        const records=await store.transientWindows.listUnlocked();
+        const record=records.find(value=>value.controllerTabId===controllerTabId&&value.windowId===windowId&&value.phase==='ready');
+        if(!record)return false;
+        let changed=false;const removers=[];const listen=(event,fn)=>{event?.addListener(fn);if(event)removers.push(()=>event.removeListener(fn));};
+        for(const name of ['onRemoved','onDetached','onAttached'])listen(api.tabs[name],id=>{if(id===record.tabId)changed=true;});
+        listen(api.tabs.onReplaced,(added,removed)=>{if(added===record.tabId||removed===record.tabId)changed=true;});
+        listen(api.tabs.onUpdated,(id,update)=>{if(id===record.tabId&&(['url','pendingUrl','pinned','splitViewId'].some(key=>Object.hasOwn(update,key))||update.status==='loading'))changed=true;});
+        listen(api.windows.onRemoved,id=>{if(id===windowId)changed=true;});
+        try{
+            const tab=await api.tabs.get(record.tabId),source={tabId:record.tabId,windowId,url:tab.url};
+            const current=await sourceRecord(source,true);
+            if(!current?.controlsMissing||current.token!==record.token||current.controllerTabId!==controllerTabId)return false;
+            const latest=await api.storage.local.get([PEER_KEY,PAIRING_GENERATION_KEY]);
+            if(changed||latest[PEER_KEY]!==peerId||(latest[PAIRING_GENERATION_KEY]??null)!==generation)return false;
+            return {peerId,request:{type:'littleArcControlsClosed',version:1,generation,source}};
+        }finally{removers.forEach(remove=>remove());}
+    };
+    const deliverClosedControllerNotice=async notice=>{
+        if(!notice)return;
+        const {peerId,request}=notice,{source}=request;
+        const [pairing,tab,window]=await Promise.all([api.storage.local.get([PEER_KEY,PAIRING_GENERATION_KEY]),api.tabs.get(source.tabId),api.windows.get(source.windowId)]);
+        if(pairing[PEER_KEY]!==peerId||(pairing[PAIRING_GENERATION_KEY]??null)!==request.generation||tab.id!==source.tabId||tab.windowId!==source.windowId||tab.url!==source.url||tab.pendingUrl&&tab.pendingUrl!==source.url||tab.incognito||window.id!==source.windowId||window.type!=='normal'||window.incognito)return;
+        // The queue has been released. The peer's read-only inspect can safely
+        // re-enter it; no transport failure grants a retry or controller create.
+        let timer;try{await Promise.race([api.runtime.sendMessage(peerId,request),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Closure notification timed out.')),3000);})]);}finally{clearTimeout(timer);}
+    };
     const inspect = async (source, peerId, generation) => {
         const record=await sourceRecord(source,true); if(!record) return null;
         const list=await choices();
@@ -130,10 +160,17 @@ export function createLittleArcHeaderService(store, api = chrome) {
         try { const current=await sourceRecord(draft.source);if(draft.expires<Date.now() || !current||current.controllerTabId!==draft.controllerTabId||record.controllerTabId!==draft.controllerTabId)throw Error('stale');await destination(draft.target);return {...structuredClone(draft.target),draftId:draft.draftId}; }
         catch {drafts.delete(record.token);return null;}
     };
-    return {remember,inspect,review,recoverControls,getDraft,direct,clearDraft:token=>drafts.delete(token)};
+    return {remember,inspect,review,recoverControls,closedControllerNotice,deliverClosedControllerNotice,getDraft,direct,clearDraft:token=>drafts.delete(token)};
 }
 export function registerLittleArcHeader(store, api=chrome) {
     const service=createLittleArcHeaderService(store,api);store.littleArcHeader=service;
+    api.tabs.onRemoved?.addListener((id,info)=>{
+        if(!positive(id)||!positive(info?.windowId)||info.isWindowClosing!==false)return;
+        // This is the native removal event itself, not an inferred read failure.
+        // Record it synchronously so listener registration order cannot race it.
+        store.transientWindows.observeRemoved?.(id);
+        store.run(()=>service.closedControllerNotice(id,info.windowId)).then(service.deliverClosedControllerNotice).catch(()=>{});
+    });
     api.runtime.onMessageExternal.addListener((request,sender,respond)=>{
         if(request?.type!==HEADER_TYPE)return;
         const work=async()=>{

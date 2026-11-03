@@ -50,3 +50,19 @@ test('same-token controller replacement invalidates old views and placement draf
  assert.equal(await f.service.getDraft(f.record),null);await assert.rejects(f.service.review(f.source,oldView.viewId,f.target,PEER,'g',async()=>{}));assert.equal(f.mutations.length,offset);
  const fresh=await f.service.inspect(f.source,PEER,'g');await f.service.review(f.source,fresh.viewId,f.target,PEER,'g',async()=>{});assert.equal(f.mutations.at(-2)[1],9);
 });
+
+test('controller closure notification contains only scoped read-only source metadata',async()=>{
+ const f=fixture();f.tabs.splice(1,1);f.store.transientWindows.controllerRecoveryStatusUnlocked=async()=>structuredClone(f.record);
+ const notice=await f.service.closedControllerNotice(2,20);assert.deepEqual(notice,{peerId:PEER,request:{type:'littleArcControlsClosed',version:1,generation:'g',source:f.source}});
+ const sent=[];f.api.runtime.sendMessage=async(...args)=>sent.push(args);await f.service.deliverClosedControllerNotice(notice);assert.deepEqual(sent,[[PEER,notice.request]]);assert.equal(f.mutations.length,0);
+});
+test('closure notification refuses missing proof, unrelated removal, uncertain record and pairing changes',async()=>{
+ const f=fixture();assert.equal(await f.service.closedControllerNotice(99,20),false);f.record.phase='uncertain';assert.equal(await f.service.closedControllerNotice(2,20),false);f.record.phase='ready';f.tabs.splice(1,1);f.store.transientWindows.controllerRecoveryStatusUnlocked=async()=>null;await assert.rejects(f.service.closedControllerNotice(2,20));
+ f.store.transientWindows.controllerRecoveryStatusUnlocked=async()=>structuredClone(f.record);const notice=await f.service.closedControllerNotice(2,20);f.local.arcifyBridgePairingGeneration='new';let sent=false;f.api.runtime.sendMessage=async()=>{sent=true;};await f.service.deliverClosedControllerNotice(notice);assert.equal(sent,false);assert.equal(f.mutations.length,0);
+});
+test('closure notification never holds the serialized store queue during peer inspect',async()=>{
+ const f=fixture();let proof=false,busy=false,tail=Promise.resolve();const listeners=new Set();f.api.tabs.onRemoved={addListener:fn=>listeners.add(fn),removeListener:fn=>listeners.delete(fn)};f.store.transientWindows.observeRemoved=id=>{if(id===2)proof=true;};f.store.transientWindows.controllerRecoveryStatusUnlocked=async()=>proof?structuredClone(f.record):null;
+ f.store.run=fn=>{const result=tail.then(async()=>{busy=true;try{return await fn();}finally{busy=false;}});tail=result.catch(()=>{});return result;};
+ let resolve;const delivered=new Promise(r=>resolve=r);f.api.runtime.sendMessage=async(peer,request)=>{assert.equal(busy,false);assert.equal(peer,PEER);assert.equal(request.type,'littleArcControlsClosed');const context=await f.store.run(()=>f.store.littleArcHeader.inspect(f.source,PEER,'g'));assert.equal(context.controlsMissing,true);resolve();};
+ registerLittleArcHeader(f.store,f.api);f.tabs.splice(1,1);for(const listener of [...listeners])listener(2,{windowId:20,isWindowClosing:false});await delivered;assert.equal(f.mutations.length,0);
+});

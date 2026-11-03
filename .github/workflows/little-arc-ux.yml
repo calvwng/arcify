@@ -15,7 +15,7 @@ jobs:
       ARCIFY_PAIRED_RUN_MODE: little-arc
       ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha }}
       ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-      ARCIFY_SPOTLIGHT_HEAD: 0093ce5962e0b975597e7c10909a8a48b4005479
+      ARCIFY_SPOTLIGHT_HEAD: 51af4bf19061670fcadcde98593c7b9aebbba780
     steps:
       - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
         uses: actions/checkout@v4
@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 0093ce5962e0b975597e7c10909a8a48b4005479
+          ref: 51af4bf19061670fcadcde98593c7b9aebbba780
           persist-credentials: false
           path: arcify-spotlight
       - name: Record and verify exact source provenance before installation
