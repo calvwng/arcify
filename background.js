@@ -41,12 +41,14 @@ import { registerMoveTabWindowMessages } from './move-tab-new-window.js';
 import { registerTodaySplitMessages } from './today-split-action.js';
 import { createNativeSplitWriteGuard } from './native-split-safety.js';
 import { createLittleArcWindowGeometry } from './little-arc-window-geometry.js';
+import {registerDimmingPreferences} from './little-arc-dimming-preferences.js';
 import { createTransientWindowStore } from './transient-window-store.js';
 import { registerTransientControlMessages } from './transient-window-actions.js';
 
 const spaceStore = new SpaceStore();
 const windowGeometry = createLittleArcWindowGeometry({readRecord: token => spaceStore.transientWindows?.geometryRecord(token)});
 spaceStore.transientWindows = createTransientWindowStore({geometry:windowGeometry});
+registerDimmingPreferences(spaceStore);
 registerSharedToday(spaceStore);
 registerLittleArcHeader(spaceStore);
 registerPeek(spaceStore);
