@@ -1,6 +1,26 @@
 /** Real cached-view expiry; never changes page clocks or sends product requests. */
 import assert from 'node:assert/strict';
 import {readLittleArcRawState} from './paired-chrome-little-arc.mjs';
+// Undo the runner's fixed desktop emulation only for this already-owned popup.
+// Do not enlarge the native window or reload the document to make input fit.
+export async function useNativeHeaderViewport({first,raw,poll,checkpoint}){
+ const before=await raw(),tab=before.tabs.find(tab=>tab.id===first.record.tabId),nativeWindow=before.windows.find(window=>window.id===first.record.windowId);
+ assert(tab&&nativeWindow&&tab.windowId===nativeWindow.id&&tab.url===first.page.url(),'Exact owned native page must match before clearing fixture emulation.');
+ const viewport=first.page.viewport();
+ assert(!viewport?.isMobile&&!viewport?.hasTouch,'Clearing mobile/touch emulation could reload the document.');
+ const read=()=>first.page.evaluate(()=>({documentId:performance.timeOrigin,url:location.href,width:innerWidth,height:innerHeight}));
+ const documentBefore=await read();
+ await first.page.setViewport(null);
+ assert.equal(first.page.viewport(),null);
+ const documentAfter=await poll(read,value=>{
+  assert.equal(value.documentId,documentBefore.documentId,'Viewport preparation must not reload the page.');assert.equal(value.url,documentBefore.url);
+  return value.width>0&&value.height>0&&value.width<=nativeWindow.width&&value.height<=nativeWindow.height;
+ },'actual popup viewport within its unchanged native window');
+ const after=await raw();
+ assert.deepEqual(after.tabs.find(value=>value.id===tab.id),tab,'Viewport preparation must not change native tab identity or state.');
+ assert.deepEqual(after.windows.find(value=>value.id===nativeWindow.id),nativeWindow,'Viewport preparation must not resize or move the native window.');
+ await checkpoint('native-header-viewport',{emulatedViewport:viewport,documentBefore,documentAfter,nativeWindow});
+}
 // Passive geometry only: never reveal controls, scroll, or manufacture input.
 export function readSettingsGeometry(selector='#size-settings'){
  const rect=node=>{const r=node.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};
@@ -25,6 +45,7 @@ export function embeddedControlReady(value){
 export async function exerciseExpiredHeaderSettings({apiPage,ui,poll,first,spotlightId,checkpoint,screenshot}){
  const trace=()=>apiPage.evaluate(()=>globalThis.__spaceActionObservation.events);
  const raw=()=>apiPage.evaluate(readLittleArcRawState);
+ await useNativeHeaderViewport({first,raw,poll,checkpoint});
  const url=`chrome-extension://${spotlightId}/little-arc-header.html`;
  const frame=await poll(()=>first.page.frames().filter(frame=>frame.url()===url),frames=>frames.length===1,'one exact Little Arc header frame').then(frames=>frames[0]);
  const geometry=async(selector='#size-settings')=>{

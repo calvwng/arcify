@@ -1,4 +1,13 @@
-import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';import {assertSettingsRefreshTrace,settingsGeometryReady,embeddedControlReady} from '../../scripts/paired-chrome-little-arc-settings-refresh.mjs';
+import test from 'node:test';import assert from 'node:assert/strict';import {readFileSync} from 'node:fs';import {assertSettingsRefreshTrace,settingsGeometryReady,embeddedControlReady,useNativeHeaderViewport} from '../../scripts/paired-chrome-little-arc-settings-refresh.mjs';
+test('native header preparation clears only desktop emulation and rejects document/window changes',async()=>{
+ const fixture=(change={})=>{
+  const state={tabs:[{id:1,windowId:2,url:'https://fixture.test/'}],windows:[{id:2,width:680,height:500,left:20,top:30}]};let viewport={width:1280,height:900,...change.viewport},cleared=false;const calls=[];
+  const first={record:{tabId:1,windowId:2},page:{url:()=>state.tabs[0].url,viewport:()=>viewport,setViewport:async value=>{calls.push(value);viewport=value;cleared=true;},evaluate:async()=>({documentId:cleared&&change.reload?2:1,url:state.tabs[0].url,width:cleared?680:1280,height:cleared?400:900})}};
+  return {calls,args:{first,raw:async()=>{const copy=structuredClone(state);if(cleared&&change.resize)copy.windows[0].width=800;if(change.wrongTab)copy.tabs[0].windowId=9;return copy;},poll:async(read,predicate)=>{const value=await read();assert(predicate(value));return value;},checkpoint:async()=>{}}};
+ };
+ const good=fixture();await useNativeHeaderViewport(good.args);assert.deepEqual(good.calls,[null]);
+ for(const change of [{reload:true},{resize:true},{wrongTab:true},{viewport:{isMobile:true}},{viewport:{hasTouch:true}}]){const f=fixture(change);await assert.rejects(useNativeHeaderViewport(f.args));if(change.wrongTab||change.viewport)assert.deepEqual(f.calls,[]);else assert.deepEqual(f.calls,[null]);}
+});
 test('enabled settings alone cannot admit hidden, clipped or covered header controls',()=>{
  const good={expandedHidden:false,advancedHidden:false,moreExpanded:'true',disabled:false,rect:{x:5,y:50,width:120,height:30},rectCount:1,display:'block',visibility:'visible',opacity:'1',viewport:{width:600,height:200},hit:true};
  assert.equal(settingsGeometryReady(good),true);
