@@ -65,7 +65,7 @@ export async function exerciseSourceDimming({browser,observePage,apiPage,spotlig
     const original = await spotlightOptions.evaluate(() => chrome.storage.local.get(['peekEnabled','peekIframeEnabled','littleArcDimSource','littleArcDimStrength']));
     const originalDim={enabled:original.littleArcDimSource===true,strength:original.littleArcDimStrength??55};
     const beforeRaw=Object.fromEntries(Object.entries(original).filter(([key])=>['littleArcDimSource','littleArcDimStrength'].includes(key)));
-    assert(Number.isInteger(originalDim.strength)&&originalDim.strength>=15&&originalDim.strength<=90,'Synthetic fixture begins with valid effective preferences.');
+    assert(Number.isInteger(originalDim.strength)&&originalDim.strength>=15&&originalDim.strength<=100,'Synthetic fixture begins with valid effective preferences.');
     const readPreferences=()=>spotlightOptions.evaluate(()=>chrome.storage.local.get(['littleArcDimSource','littleArcDimStrength']));
     const dimEvents=()=>spotlightOptions.evaluate(()=>globalThis.__dimPreferenceObservation.events);
     const readControls=()=>controller.evaluate(readDimControls);
@@ -77,11 +77,11 @@ export async function exerciseSourceDimming({browser,observePage,apiPage,spotlig
     const editDim=async preference=>{
         await openSettings();
         if(await controller.$eval('#source-dim-enabled',node=>node.checked)!==preference.enabled)await controller.click('#source-dim-enabled');
-        assert.deepEqual(await controller.$eval('#source-dim-strength',node=>({min:node.min,max:node.max,step:node.step})),{min:'15',max:'90',step:'1'});
+        assert.deepEqual(await controller.$eval('#source-dim-strength',node=>({min:node.min,max:node.max,step:node.step})),{min:'15',max:'100',step:'1'});
         await controller.focus('#source-dim-strength');
-        const fromMinimum=preference.strength-15<=90-preference.strength;
+        const fromMinimum=preference.strength-15<=100-preference.strength;
         await controller.keyboard.press(fromMinimum?'Home':'End');
-        for(let i=0;i<(fromMinimum?preference.strength-15:90-preference.strength);i++)await controller.keyboard.press(fromMinimum?'ArrowRight':'ArrowLeft');
+        for(let i=0;i<(fromMinimum?preference.strength-15:100-preference.strength);i++)await controller.keyboard.press(fromMinimum?'ArrowRight':'ArrowLeft');
         const controls=await poll(readControls,state=>state.sampleOpacity===(preference.enabled?preference.strength/100:0),'illustrative draft sample follows real controls');
         assert.equal(controls.enabled,preference.enabled);assert.equal(controls.strength,preference.strength);
         assert.equal(controls.output,`${preference.strength}%`);assert.equal(controls.sampleOpacity,preference.enabled?preference.strength/100:0);
@@ -183,13 +183,13 @@ export async function exerciseSourceDimming({browser,observePage,apiPage,spotlig
     try {
         await setOption('#peek-enabled','peekEnabled',true);
         await setOption('#peek-iframe-enabled','peekIframeEnabled',false);
-        await ui(controller,'Preview a local dimming draft without saving',async()=>{await openSettings();await editDim({enabled:!originalDim.enabled,strength:originalDim.strength===90?55:90});});
+        await ui(controller,'Preview a local dimming draft without saving',async()=>{await openSettings();await editDim({enabled:!originalDim.enabled,strength:originalDim.strength===100?55:100});});
         const draft=await readControls();assertUnsavedDimDraft(beforeRaw,await readPreferences(),await dimEvents());
         await ui(controller,'Cancel the illustrative dimming draft',()=>controller.click('#cancel-source-dim'));
         const canceled=await settled();assert.equal(canceled.enabled,originalDim.enabled);assert.equal(canceled.strength,originalDim.strength);
         assertUnsavedDimDraft(beforeRaw,await readPreferences(),await dimEvents());
         await checkpoint('source-dimming-draft-cancel',{original:originalDim,draft,canceled,storageEvents:await dimEvents()});
-        for(const preference of [{enabled:true,strength:55},{enabled:true,strength:90},{enabled:false,strength:90}]){
+        for(const preference of [{enabled:true,strength:55},{enabled:true,strength:100},{enabled:false,strength:100}]){
             const saved=await saveDim(preference);await checkpoint('source-dimming-saved',{preference,saved});await launch(preference);
         }
     } finally {

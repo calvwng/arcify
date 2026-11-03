@@ -87,6 +87,7 @@ export function createTransientWindowStore({ api = chrome, geometry = null } = {
     const admissions = new Map(), early = new Map(), extraIds = new Set(), extraWindows = new Set(), unsettled = new Set();
     const replacements = [], removedTabs = new Set(), removedWindows = new Set();
     const pendingRemovedTabs = new Set(), pendingRemovedWindows = new Set();
+    const controllerRecoveries = new Map();
     const changed = () => { revision++; };
     const block = cause => { failure ||= cause; return cause; };
     const assertHealthy = () => { if (failure) throw failure; };
@@ -158,6 +159,11 @@ export function createTransientWindowStore({ api = chrome, geometry = null } = {
                 // Retain the original exact controller/window IDs as history.
             } else if (entry.windowId === null && entry.controllerTabId === null) {
                 entry.windowId = tab.windowId; entry.controllerTabId = tab.id; include(entry, tab.id); changed();
+            } else if (controllerRecoveries.has(token) && entry.windowId === tab.windowId && entry.phase === 'uncertain') {
+                // A pending native create may emit before its promise returns.
+                // Quarantine observations; only the exact returned ID can bind.
+                const recovery=controllerRecoveries.get(token);recovery.observed.add(tab.id);
+                if(recovery.expectedId!==undefined&&tab.id!==recovery.expectedId)recovery.conflict=true;
             } else if (entry.windowId !== tab.windowId || entry.controllerTabId !== tab.id) {
                 // A copied/restored marker is not permission to rebind an exact ID.
                 block(error('UNCERTAIN_RESULT', 'Conflicting transient controller identities were found. Tab adoption is paused.'));
@@ -569,5 +575,57 @@ export function createTransientWindowStore({ api = chrome, geometry = null } = {
     // No capability, controller token, URL or record identity leaves this seam.
     const observationState = () => ({ initialized, provenanceReady, healthy: !failure, revision, savedRevision });
     async function listUnlocked() { await flushObservedUnlocked(); return copy(records); }
-    return { observationState, geometryRecord: token => !failure ? copy(records.find(entry => entry.token === token)) : null, initialize, isExcluded, isKnownExcluded, isTransientWindow, isKnownTransientWindow, observe, observeReplacement, observeDetached, observeRemoved, observeWindowRemoved, openUnlocked, recoverUnlocked, promoteUnlocked, listUnlocked, withAdmission, flushObservedUnlocked };
+    async function controllerRecoveryStatusUnlocked(source) {
+        await flushObservedUnlocked(); assertHealthy();
+        const entry=records.find(value=>value.tabId===source.tabId&&value.windowId===source.windowId&&value.phase==='ready');
+        if(!entry||!removedTabs.has(entry.controllerTabId)||removedWindows.has(entry.windowId))return null;
+        const page=await getPage(entry);await getWindow(entry.windowId);
+        if(page.url!==source.url||page.pendingUrl&&page.pendingUrl!==source.url)throw stale();
+        const tabs=await api.tabs.query({});
+        if(!Array.isArray(tabs)||tabs.some(tab=>tab.id===entry.controllerTabId||markerToken(tab)===entry.token))throw stale();
+        return copy(entry);
+    }
+    async function recoverControllerUnlocked(source,{beforeCreate,beforeCommit}={}) {
+        if(typeof beforeCreate!=='function'||typeof beforeCommit!=='function')throw stale();
+        const snapshot=await controllerRecoveryStatusUnlocked(source);
+        if(!snapshot||controllerRecoveries.has(snapshot.token))throw stale();
+        const entry=records.find(value=>value.token===snapshot.token);
+        const guard=fence([entry.tabId,entry.controllerTabId],[entry.windowId],null,entry.tabId);
+        const attempt={observed:new Set()};controllerRecoveries.set(entry.token,attempt);
+        let startup;
+        const validate=async()=>{
+            await getWindow(entry.windowId);const page=await getPage(entry);
+            if(page.url!==source.url||page.pendingUrl&&page.pendingUrl!==source.url)throw stale();
+            guard.assert();assertHealthy();
+            if(controllerRecoveries.get(entry.token)!==attempt||removedWindows.has(entry.windowId)||attempt.conflict)throw stale();
+        };
+        try {
+            await validate();
+            if(entry.phase!=='ready'||entry.controllerTabId!==snapshot.controllerTabId||!removedTabs.has(entry.controllerTabId))throw stale();
+            entry.phase='uncertain';changed();await save();
+            await validate();
+            const existing=await api.tabs.query({});
+            if(!Array.isArray(existing)||existing.some(tab=>tab.id===snapshot.controllerTabId||markerToken(tab)===entry.token))throw stale();
+            await beforeCreate();guard.assert();assertHealthy();
+            const controller=await api.tabs.create({windowId:entry.windowId,url:marker(entry.token),active:false,pinned:false});
+            if(!nativeId(controller?.id)||controller.id===snapshot.controllerTabId||controller.windowId!==entry.windowId||markerToken(controller)!==entry.token)throw uncertain();
+            attempt.expectedId=controller.id;
+            if([...attempt.observed].some(id=>id!==controller.id))throw uncertain();
+            include(entry,controller.id);extraIds.add(controller.id);
+            startup=observeInitialTransientController({api,controller,windowId:entry.windowId,originWindowId:entry.windowId,marker:marker(entry.token)});
+            await startup.wait();await validate();
+            const markers=(await api.tabs.query({})).filter(tab=>markerToken(tab)===entry.token);
+            if(markers.length!==1||markers[0].id!==controller.id||[...attempt.observed].some(id=>id!==controller.id))throw uncertain();
+            await beforeCommit();startup.assert();guard.assert();assertHealthy();
+            if(attempt.conflict||[...attempt.observed].some(id=>id!==controller.id))throw uncertain();
+            if(entry.phase!=='uncertain')throw uncertain();
+            entry.controllerTabId=controller.id;entry.memberTabIds=entry.memberTabIds.filter(id=>id!==snapshot.controllerTabId);changed();await save();
+            await validate();await getController(entry);startup.assert();guard.assert();assertHealthy();if(attempt.conflict)throw stale();
+            entry.phase='ready';changed();await save();
+            await validate();await getController(entry);startup.assert();guard.assert();assertHealthy();if(attempt.conflict)throw stale();
+            return copy(entry);
+        }catch(cause){return quarantine(entry,cause.code?cause:uncertain());}
+        finally{startup?.stop();guard.stop();controllerRecoveries.delete(entry.token);}
+    }
+    return { observationState, geometryRecord: token => !failure ? copy(records.find(entry => entry.token === token)) : null, initialize, isExcluded, isKnownExcluded, isTransientWindow, isKnownTransientWindow, observe, observeReplacement, observeDetached, observeRemoved, observeWindowRemoved, openUnlocked, recoverUnlocked, recoverControllerUnlocked, controllerRecoveryStatusUnlocked, promoteUnlocked, listUnlocked, withAdmission, flushObservedUnlocked };
 }

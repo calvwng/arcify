@@ -1100,3 +1100,68 @@ test('an event at strict-fence installation cannot escape the overlapping startu
     await assert.rejects(f.open(), { code: 'UNCERTAIN_RESULT' });
     assert.equal(installations, 3); c.assertNoWeb();
 });
+
+async function recoveryFixture() {
+ const f=fixture();const record=await f.open();
+ f.tabs.delete(record.controllerTabId);f.api.tabs.onRemoved.emit(record.controllerTabId);
+ const create=f.api.tabs.create;
+ f.api.tabs.create=async options=>{const tab=await create(options);tab.status='complete';f.tabs.set(tab.id,clone(tab));return tab;};
+ const source={tabId:record.tabId,windowId:record.windowId,url};
+ const recover=(hooks={})=>f.run(()=>f.store.recoverControllerUnlocked(source,{beforeCreate:async()=>{},beforeCommit:async()=>{},...hooks}));
+ return Object.assign(f,{record,source,recover});
+}
+test('proven controller closure recovers exactly one inactive controller without recreating the page',async()=>{
+ const f=await recoveryFixture();const before=clone(f.tabs.get(f.record.tabId)),offset=f.calls.length;
+ assert.equal((await f.store.controllerRecoveryStatusUnlocked(f.source)).token,f.record.token);
+ const recovered=await f.recover();assert.equal(recovered.phase,'ready');assert.notEqual(recovered.controllerTabId,f.record.controllerTabId);
+ assert.deepEqual(f.tabs.get(f.record.tabId),before);assert.deepEqual(f.calls.slice(offset).filter(c=>['tabCreate','windowCreate','move','update','tabRemove','windowRemove'].includes(c[0])).map(c=>c[0]),['tabCreate']);
+ assert.equal(f.calls.slice(offset).find(c=>c[0]==='tabCreate')[1].active,false);
+ assert.equal(await f.store.controllerRecoveryStatusUnlocked(f.source),null);
+ await assert.rejects(f.recover());assert.equal(f.calls.slice(offset).filter(c=>c[0]==='tabCreate').length,1);
+ f.tabs.delete(recovered.controllerTabId);f.api.tabs.onRemoved.emit(recovered.controllerTabId);
+ const second=await f.recover();assert.equal(second.phase,'ready');assert.notEqual(second.controllerTabId,recovered.controllerTabId);
+});
+test('absence without a native removal event grants no controller recovery',async()=>{
+ const f=fixture(),record=await f.open();f.tabs.delete(record.controllerTabId);
+ assert.equal(await f.store.controllerRecoveryStatusUnlocked({tabId:record.tabId,windowId:record.windowId,url}),null);
+});
+test('lost controller create result leaves an uncertain journal and is never retried',async()=>{
+ const f=await recoveryFixture(),create=f.api.tabs.create;f.api.tabs.create=async options=>{await create(options);throw Error('lost response');};const offset=f.calls.length;
+ await assert.rejects(f.recover());assert.equal(registry(f).records[0].phase,'uncertain');await assert.rejects(f.recover());assert.equal(f.calls.slice(offset).filter(c=>c[0]==='tabCreate').length,1);
+});
+test('source navigation during recovery authority validation prevents native create',async()=>{
+ const f=await recoveryFixture(),offset=f.calls.length;
+ await assert.rejects(f.recover({beforeCreate:async()=>f.api.tabs.onUpdated.emit(f.record.tabId,{status:'loading'})}));
+ assert.equal(f.calls.slice(offset).filter(c=>c[0]==='tabCreate').length,0);assert.equal(registry(f).records[0].phase,'uncertain');
+});
+test('worker restart cannot invent closure proof or retry recovery',async()=>{
+ const f=await recoveryFixture();await f.store.flushObservedUnlocked();const restarted=f.makeStore();await restarted.initialize();
+ assert.equal(await restarted.controllerRecoveryStatusUnlocked(f.source),null);assert.equal((await restarted.listUnlocked())[0].phase,'uncertain');
+});
+
+test('pending controller marker commit becomes ready without a second create',async()=>{
+ const f=await recoveryFixture(),create=f.api.tabs.create;f.api.tabs.create=async options=>{const tab=await create(options);tab.url='about:blank';tab.pendingUrl=options.url;tab.status='loading';f.tabs.set(tab.id,clone(tab));setImmediate(()=>{const live=f.tabs.get(tab.id);live.url=options.url;delete live.pendingUrl;live.status='complete';f.api.tabs.onUpdated.emit(tab.id,{url:options.url,status:'complete'},clone(live));});return tab;};
+ assert.equal((await f.recover()).phase,'ready');
+});
+test('closed replacement during readiness stays uncertain with no cleanup or retry',async()=>{
+ const f=await recoveryFixture(),create=f.api.tabs.create,offset=f.calls.length;f.api.tabs.create=async options=>{const tab=await create(options);tab.status='loading';f.tabs.set(tab.id,clone(tab));setImmediate(()=>{f.tabs.delete(tab.id);f.api.tabs.onRemoved.emit(tab.id);});return tab;};
+ await assert.rejects(f.recover());await assert.rejects(f.recover());assert.equal(registry(f).records[0].phase,'uncertain');assert.equal(f.calls.slice(offset).filter(c=>c[0]==='tabCreate').length,1);assert(!f.calls.slice(offset).some(c=>['tabRemove','windowRemove','move'].includes(c[0])));
+});
+test('replacement readiness timeout is bounded and never retries',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const f=await recoveryFixture(),create=f.api.tabs.create;f.api.tabs.create=async options=>{const tab=await create(options);tab.status='loading';f.tabs.set(tab.id,clone(tab));return tab;};
+ const result=assert.rejects(f.recover());await new Promise(resolve=>setImmediate(resolve));t.mock.timers.tick(5001);await result;assert.equal(registry(f).records[0].phase,'uncertain');await assert.rejects(f.recover());
+});
+test('concurrent queued recovery requests cannot duplicate a controller',async()=>{
+ const f=await recoveryFixture(),offset=f.calls.length;const results=await Promise.allSettled([f.recover(),f.recover()]);assert.deepEqual(results.map(value=>value.status),['fulfilled','rejected']);assert.equal(f.calls.slice(offset).filter(c=>c[0]==='tabCreate').length,1);
+});
+for(const stage of ['commit-callback','controller-journal','ready-journal'])test('duplicate marker during '+stage+' cannot admit recovered authority',async()=>{
+ const f=await recoveryFixture();let injected=false;
+ const duplicate=()=>{if(injected)return;injected=true;const tab={id:999,windowId:f.record.windowId,url:marker(f.record.token),status:'complete',pinned:false,incognito:false,splitViewId:-1};f.tabs.set(tab.id,tab);f.api.tabs.onCreated.emit(clone(tab));};
+ const set=f.api.storage.session.set;f.api.storage.session.set=async patch=>{await set(patch);const r=patch[KEY].records[0];if(stage==='controller-journal'&&r.phase==='uncertain'&&r.controllerTabId!==f.record.controllerTabId||stage==='ready-journal'&&r.phase==='ready'&&r.controllerTabId!==f.record.controllerTabId)duplicate();};
+ await assert.rejects(f.recover({beforeCommit:async()=>{if(stage==='commit-callback')duplicate();}}));assert(injected);await assert.rejects(f.recover());assert(!f.calls.some(c=>['move','tabRemove','windowRemove'].includes(c[0])));
+});
+for(const duplicate of [false,true])test('final controller read cannot return ready after '+(duplicate?'duplicate marker':'source navigation'),async()=>{
+ const f=await recoveryFixture(),get=f.api.tabs.get;let injected=false;
+ f.api.tabs.get=async id=>{const tab=await get(id);const row=registry(f).records[0];if(!injected&&id!==f.record.controllerTabId&&id!==f.record.tabId&&row.phase==='ready'){injected=true;if(duplicate){const copy={...tab,id:998};f.tabs.set(copy.id,copy);f.api.tabs.onCreated.emit(clone(copy));}else f.api.tabs.onUpdated.emit(f.record.tabId,{status:'loading'});}return tab;};
+ await assert.rejects(f.recover());assert(injected);await assert.rejects(f.recover());
+});

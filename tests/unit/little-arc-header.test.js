@@ -44,3 +44,9 @@ for(const [color,customTint,override,expected] of [
  assert.equal(c.spaces[0].color,expected);assert.equal(c.themeMode,'dark');assert.equal(f.mutations.length,0);
 });
 test('missing appearance falls back to System and invalid tint cannot become CSS',async()=>{const f=fixture();f.local.sidebarAppearance={themeMode:'url(evil)'};assert.equal((await f.service.inspect(f.source,PEER,'g')).themeMode,'system');});
+test('same-token controller replacement invalidates old views and placement drafts',async()=>{
+ const f=fixture(),draftView=await f.service.inspect(f.source,PEER,'g');await f.service.review(f.source,draftView.viewId,f.target,PEER,'g',async()=>{});
+ const oldView=await f.service.inspect(f.source,PEER,'g');f.record.controllerTabId=9;f.tabs[1].id=9;const offset=f.mutations.length;
+ assert.equal(await f.service.getDraft(f.record),null);await assert.rejects(f.service.review(f.source,oldView.viewId,f.target,PEER,'g',async()=>{}));assert.equal(f.mutations.length,offset);
+ const fresh=await f.service.inspect(f.source,PEER,'g');await f.service.review(f.source,fresh.viewId,f.target,PEER,'g',async()=>{});assert.equal(f.mutations.at(-2)[1],9);
+});

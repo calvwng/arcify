@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {exerciseLittleArcSizingUx} from './paired-chrome-little-arc-sizing-ux.mjs';
 import {exerciseSourceDimming as exerciseLittleArcDimmingUx} from './paired-chrome-little-arc-dimming-ux.mjs';
+import {exerciseControllerRecovery} from './paired-chrome-little-arc-controller-recovery-ux.mjs';
 import {exerciseExpiredHeaderSettings} from './paired-chrome-little-arc-settings-refresh.mjs';
 import { readingBounds, fallbackBounds, readSizePreference } from '../little-arc-window-geometry.js';
 import { randomBytes } from 'node:crypto';
@@ -505,6 +506,7 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
             await exerciseLittleArcSizingUx({apiPage,ui,poll,first,selectExact,checkpoint});
             await exerciseLittleArcDimmingUx({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint,selectExact});
             await exerciseExpiredHeaderSettings({apiPage,ui,poll,first,spotlightId,checkpoint,screenshot});
+            await exerciseControllerRecovery({browser,observePage,apiPage,spotlightOptions,ui,poll,first,spotlightId,ownedTabs,checkpoint});
         }
         const target = exact((await read()).spaces, fixture.spaces.work);
         const initialControls = await first.controller.evaluate(readLittleArcControls);

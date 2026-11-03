@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-export const UX_SPOTLIGHT_HEAD='7822fb0901b69f2e875f135b9bf26948a7fa0b1c';
+export const UX_SPOTLIGHT_HEAD='0093ce5962e0b975597e7c10909a8a48b4005479';
 export function validateLittleArcUxContext(env,event,head){
  const repo='calvwng/arcify',branch='feature/little-arc-dim-strength',pr=event?.pull_request;
  assert.equal(env.ARCIFY_LITTLE_ARC_UX,'1');assert.equal(env.ARCIFY_PAIRED_RUN_MODE,'little-arc');
