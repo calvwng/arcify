@@ -15,7 +15,7 @@ jobs:
       ARCIFY_PAIRED_RUN_MODE: little-arc
       ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha }}
       ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-      ARCIFY_SPOTLIGHT_HEAD: 40c08274d310f20e8f38c23d8323832378270874
+      ARCIFY_SPOTLIGHT_HEAD: 7822fb0901b69f2e875f135b9bf26948a7fa0b1c
     steps:
       - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
         uses: actions/checkout@v4
@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 40c08274d310f20e8f38c23d8323832378270874
+          ref: 7822fb0901b69f2e875f135b9bf26948a7fa0b1c
           persist-credentials: false
           path: arcify-spotlight
       - name: Record and verify exact source provenance before installation
@@ -80,7 +80,7 @@ jobs:
           ARCIFY_DIMMING_SPOTLIGHT_ROOT: ${{ github.workspace }}/arcify-spotlight
         run: |
           set -euo pipefail
-          node --test tests/integration/little-arc-dimming-pair.test.mjs 2>&1 | tee test-results/paired-chrome-little-arc/dimming-pair-integration.log
+          node --test tests/integration/little-arc-dimming-pair.test.mjs tests/integration/little-arc-header-settings-pair.test.mjs 2>&1 | tee test-results/paired-chrome-little-arc/dimming-pair-integration.log
       - name: Build the exact pair and retain production hashes
         run: |
           set -euo pipefail

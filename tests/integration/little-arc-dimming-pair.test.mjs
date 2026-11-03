@@ -35,18 +35,18 @@ function fixture(t){
  return{adapter,arcApi,spotApi,arcState,spotState,controller,contexts,record,wire,writes,authorizations,onWire,request,get,set,deliver,expire:()=>{clock=2000;}};
 }
 
-test('actual adapter and endpoint get defaults without writes, then CAS-save 55, 70 and off',async t=>{
+test('actual adapter and endpoint get defaults without writes, then CAS-save 55, 70, 75, 90 and off',async t=>{
  const f=fixture(t);assert.deepEqual((await f.get()).preference,{enabled:false,strength:55});assert.equal(f.writes.length,0);
  let expected={enabled:false,strength:55};
- for(const preference of [{enabled:true,strength:55},{enabled:true,strength:70},{enabled:false,strength:70}]){assert.deepEqual((await f.set(expected,preference)).preference,preference);assert.deepEqual(f.writes.at(-1),{littleArcDimSource:preference.enabled,littleArcDimStrength:preference.strength});expected=preference;}
- assert.equal(f.writes.length,3);assert.equal(f.authorizations.length,4);assert(f.wire.every(message=>!Object.hasOwn(message,'token')));
+ for(const preference of [{enabled:true,strength:55},{enabled:true,strength:70},{enabled:true,strength:75},{enabled:true,strength:90},{enabled:false,strength:90}]){assert.deepEqual((await f.set(expected,preference)).preference,preference);assert.deepEqual(f.writes.at(-1),{littleArcDimSource:preference.enabled,littleArcDimStrength:preference.strength});expected=preference;}
+ assert.equal(f.writes.length,5);assert.equal(f.authorizations.length,6);assert(f.wire.every(message=>!Object.hasOwn(message,'token')));
  const proof=f.authorizations.at(-1);assert.equal((await f.adapter.authorize(proof,background(SPOT))).authorized,false,'Completed authority cannot be replayed');
 });
 
 test('stale expected value, malformed strength and forged request have no authoritative write',async t=>{
  const f=fixture(t);await f.set({enabled:false,strength:55},{enabled:true,strength:56});const count=f.writes.length;
  await assert.rejects(f.set({enabled:false,strength:55},{enabled:true,strength:70}),/changed elsewhere/);
- await assert.rejects(f.set({enabled:true,strength:56},{enabled:true,strength:76}),/Invalid/);
+ await assert.rejects(f.set({enabled:true,strength:56},{enabled:true,strength:91}),/Invalid/);
  const {token,...wire}=f.request('set',{expected:{enabled:true,strength:56},preference:{enabled:true,strength:70}});
  const forged=await f.deliver(wire);assert.equal(forged.success,false);assert.equal(forged.error.code,'UNAUTHORIZED');assert.equal(f.writes.length,count);
 });
@@ -100,6 +100,12 @@ test('saved strength crosses the actual cosmetic broker and renderer; changed/of
  await f.set({enabled:true,strength:55},{enabled:true,strength:70});assert.equal(children.length,0,'Preference change clears the existing lease');
  old.client.onMessage.emit({...oldLease,strength:70});assert.equal(children.length,0,'Late old renewal cannot restore a cleared overlay');
  nextLease=deferred();await start();await nextLease.promise;assert.equal(leases.at(-1).strength,70);assert.equal(children[0].properties.background.value,'rgba(0,0,0,0.7)');
- await f.set({enabled:true,strength:70},{enabled:false,strength:70});assert.equal(children.length,0);const previousOffers=offers;await start();assert.equal(offers,previousOffers,'Disabled preference produces no cosmetic offer');assert.equal(children.length,0);
+ let strength=70;
+ for(const next of [75,90]){
+  await f.set({enabled:true,strength},{enabled:true,strength:next});assert.equal(children.length,0);
+  nextLease=deferred();await start();await nextLease.promise;assert.equal(leases.at(-1).strength,next);assert.equal(children[0].properties.background.value,`rgba(0,0,0,${next/100})`);strength=next;
+ }
+ await assert.rejects(f.set({enabled:true,strength:90},{enabled:true,strength:91}),/Invalid/);assert.equal(children[0].properties.background.value,'rgba(0,0,0,0.9)','Rejected strength must not disturb the valid lease');
+ await f.set({enabled:true,strength:90},{enabled:false,strength:90});assert.equal(children.length,0);const previousOffers=offers;await start();assert.equal(offers,previousOffers,'Disabled preference produces no cosmetic offer');assert.equal(children.length,0);
  assert(f.wire.every(message=>message.type===TYPE),'Settings transaction never sends an opening request');
 });

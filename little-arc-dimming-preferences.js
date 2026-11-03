@@ -2,7 +2,7 @@ import {PEER_KEY,PAIRING_GENERATION_KEY} from './spotlight-bridge-protocol.js';
 export const DIM_PREFERENCES_TYPE='arcifyLittleArcDimmingPreferences';
 export const DIM_AUTHORIZATION_TYPE='arcifyLittleArcDimmingAuthorization';
 export const exact=(value,keys)=>!!value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key));
-export const validDimPreference=value=>exact(value,['enabled','strength'])&&typeof value.enabled==='boolean'&&Number.isInteger(value.strength)&&value.strength>=15&&value.strength<=75;
+export const validDimPreference=value=>exact(value,['enabled','strength'])&&typeof value.enabled==='boolean'&&Number.isInteger(value.strength)&&value.strength>=15&&value.strength<=90;
 const uuid=value=>typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 const fail=message=>{throw Error(message);};
 

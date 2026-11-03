@@ -9,7 +9,7 @@ function observe({alpha='0.55',opacity='1',pointerEvents='none',count=1}={}){
  const context={document:{body:{children:nodes,dataset:{documentId:'synthetic-document'}},hasFocus:()=>false,URL:'https://fixture.test/source',getElementById:()=>null,querySelector:()=>({checked:false})},getComputedStyle:node=>node.computed};
  return JSON.parse(JSON.stringify(runInNewContext(`(${readSourceDim.toString()})()`,context)));
 }
-for(const strength of [15,55,70,75])test(`source overlay oracle measures ${strength}% without filtering mismatches away`,()=>{
+for(const strength of [15,55,70,75,90])test(`source overlay oracle measures ${strength}% without filtering mismatches away`,()=>{
  const actual=observe({alpha:String(strength/100)});assert.equal(actual.count,1);assert.equal(actual.alpha,strength/100);assertSourceDim(actual,{enabled:true,strength});
 });
 test('source dim oracle rejects old 28%, hidden overlay, input interception and duplicate overlay',()=>{
@@ -42,7 +42,7 @@ test('native acceptance uses controller edits and preserves evidence and cleanup
  for(const selector of ['#source-dim-enabled','#source-dim-strength','#save-source-dim','#cancel-source-dim','#refresh-source-dim'])assert(source.includes(selector));
  assert(source.includes("controller.keyboard.press(fromMinimum?'Home':'End')"));
  assert(source.includes('await saveDim(originalDim)'));assert(source.includes('await launch(preference)'));
- assert(source.includes("{enabled:true,strength:55},{enabled:true,strength:70},{enabled:false,strength:70}"));
+ assert(source.includes("{enabled:true,strength:55},{enabled:true,strength:90},{enabled:false,strength:90}"));
  assert(source.includes('chrome.storage.onChanged.addListener(listener)'));assert(source.includes("item.phase==='completed'"));
  assert(source.includes('Owned fixture window changed before cleanup'));assert(source.includes('assertSourceDim(dim,{enabled,strength})'));
  assert(source.includes('value.elapsedMs>=4500'));assert(source.includes('assertDisabledDimObservation(observation)'));

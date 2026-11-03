@@ -1,6 +1,6 @@
 # Little Arc source dimming settings
 
-The trusted Little Arc control tab includes Source page dimming under Little Arc settings. The checkbox and 15–75% slider are drafts. The decorative sample previews only these controls; it never changes an originating page. Save commits the draft for future launches. Cancel and Refresh read the current saved settings, including changes made in another controller.
+The trusted Little Arc control tab includes Source page dimming under Little Arc settings. The checkbox and 15–90% slider are drafts. The decorative sample previews only these controls; it never changes an originating page. Save commits the draft for future launches. Cancel and Refresh read the current saved settings, including changes made in another controller.
 
 Spotlight remains the sole preference owner: `littleArcDimSource` and `littleArcDimStrength`. An absent strength defaults to 55%; an absent enabled preference remains false. Opening settings never enables dimming. Unsupported, unpaired or older companions disable editing with an update/pairing message. An unconfirmed Save is never retried automatically; editing remains disabled until an explicit read resolves the current preference.
 
