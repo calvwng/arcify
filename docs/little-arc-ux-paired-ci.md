@@ -1,6 +1,6 @@
 # Little Arc sizing and source dimming acceptance
 
-`.github/workflows/little-arc-ux.yml` adds a separate hosted job for the same-fork `feature/little-arc-dim-strength` pull request into `main`. It checks out the actual PR head, not GitHub's synthetic merge, and pins Spotlight to `51af4bf19061670fcadcde98593c7b9aebbba780`. A separate context validator checks the real event file, repository, head/base branches, PR identity, full commit IDs and explicit UX flag. Existing paired jobs, pins, scope selection and acceptance guards remain unchanged.
+`.github/workflows/little-arc-ux.yml` adds a separate hosted job for the same-fork `feature/little-arc-dim-strength` pull request into `main`. It checks out the actual PR head, not GitHub's synthetic merge, and pins Spotlight to `3049c6757ba74dfd20e5383537bb2511fd70bd19`. A separate context validator checks the real event file, repository, head/base branches, PR identity, full commit IDs and explicit UX flag. Existing paired jobs, pins, scope selection and acceptance guards remain unchanged.
 
 The job uses the existing locked driver, installed Chrome, ordinary non-root runner, fresh disposable profile, Xvfb and namespace/PID/network/seccomp sandbox verification. It neither repairs browser policy nor retries a failed browser launch. Source and build hashes are retained before launch; evidence uploads run after success or failure.
 

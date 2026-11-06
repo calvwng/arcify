@@ -1,6 +1,7 @@
 /** Real hosted fixture input only; all page/API evaluations below are observations. */
 import assert from 'node:assert/strict';
 import { attachLittleArcControllerTargets, readLittleArcRawState } from './paired-chrome-little-arc.mjs';
+import {exerciseDimFocusLifecycle} from './paired-chrome-little-arc-dim-focus-lifecycle.mjs';
 
 export function observeSourceInput() {
     globalThis.__dimInputObserver?.stop();
@@ -160,19 +161,21 @@ export async function exerciseSourceDimming({browser,observePage,apiPage,spotlig
         assertSourceDim(dim,{enabled,strength});assert.equal(dim.documentId,sourceBefore.documentId);assert.equal((await first.page.evaluate(readSourceDim)).count,0,'Unrelated existing Little Arc page is never dimmed');if(enabled){assert.equal(dim.focus,false);assert.equal(await apiPage.evaluate(id=>chrome.windows.get(id).then(w=>w.focused),claimed.windowId),true,'Dim belongs to the actually focused destination window');}
         const input=await source.page.evaluate(()=>globalThis.__dimInputObserver.events);
         assert.deepEqual(input,[{trusted:true,shift:true,button:0}]);
+        const lifecycle=enabled?await exerciseDimFocusLifecycle({browser,observePage,apiPage,ui,poll,source,first,target,claimed,fixture,nonce,strength,ownedTabs,checkpoint}):null;
+        if(enabled&&!lifecycle.targetClosed)assertSourceDim(await source.page.evaluate(readSourceDim),{enabled:true,strength});
         const beforeChecked=dim.checked;
         await ui(source.page,'Return to source and click underlying checkbox',()=>source.page.click('#little-arc-check'));
         const cleared=await poll(()=>source.page.evaluate(readSourceDim),value=>value.count===0 && value.checked!==beforeChecked,'source focus clears dim and underlying click is delivered');
         assert.equal(cleared.url,source.page.url());assert.equal(cleared.documentId,sourceBefore.documentId);
-        await checkpoint('source-dimming',{enabled,strength,sourceTabId:source.tab.id,record:claimed,dim,disabledObservation,cleared,input,receiptObserved:true,createdTabs:state.tabs.filter(tab=>[claimed.tabId,claimed.controllerTabId].includes(tab.id))});
+        await checkpoint('source-dimming',{enabled,strength,sourceTabId:source.tab.id,record:claimed,dim,disabledObservation,lifecycle,cleared,input,receiptObserved:true,createdTabs:state.tabs.filter(tab=>[claimed.tabId,claimed.controllerTabId].includes(tab.id))});
         await ui(source.page,'Restore source checkbox after click-through proof',()=>source.page.click('#little-arc-check'));
         assert.equal((await source.page.evaluate(readSourceDim)).checked,beforeChecked);
         // Remove only the exact window claimed from the paired receipt above.
-        await apiPage.evaluate(async({id,controller,page})=>{
+        await apiPage.evaluate(async({id,controller,page,targetClosed})=>{
             const tabs=await chrome.tabs.query({windowId:id});
-            if(tabs.length!==2||!tabs.some(tab=>tab.id===controller)||!tabs.some(tab=>tab.id===page))throw Error('Owned fixture window changed before cleanup');
+            if(tabs.length!==(targetClosed?1:2)||!tabs.some(tab=>tab.id===controller)||(targetClosed?tabs.some(tab=>tab.id===page):!tabs.some(tab=>tab.id===page)))throw Error('Owned fixture window changed before cleanup');
             await chrome.windows.remove(id);
-        },{id:claimed.windowId,controller:claimed.controllerTabId,page:claimed.tabId});
+        },{id:claimed.windowId,controller:claimed.controllerTabId,page:claimed.tabId,targetClosed:lifecycle?.targetClosed===true});
         await poll(raw,state=>!state.windows.some(window=>window.id===claimed.windowId)&&!state.registry.records.some(record=>record.token===claimed.token),'owned dimming fixture window and registry cleanup completed');
         ownedWindows.delete(claimed.windowId);ownedTabs.delete(claimed.controllerTabId);ownedTabs.delete(claimed.tabId);
     };
