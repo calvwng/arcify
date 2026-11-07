@@ -87,6 +87,7 @@ export class SpaceStore {
             if (this.favoriteStore) await this.favoriteStore.initialize();
             if (this.initialized) await recoverSavedMove(this);
             await this.initialize();
+            await this.favoriteStore?.recovery?.activate();
             this.forgetTransientOwnership();
             if (this.favoriteStore) await this.favoriteStore.reconcile({ updateSpaces: true });
             this.forgetTransientOwnership();
@@ -245,6 +246,9 @@ export class SpaceStore {
         try {
             if (savedMoveRecovery) await finishSavedMoveRecovery(this, savedMoveRecovery);
             else await this.persist();
+            await this.favoriteStore?.recovery?.activate();
+            if (this.favoriteStore?.recovery?.entries.length) await this.persist();
+            await this.favoriteStore?.recovery?.finishUndo();
             for (const id of initializedCreations) this.pendingCreations.delete(id);
         } catch (error) { this.initialized = false; throw error; }
     }
@@ -647,7 +651,7 @@ export class SpaceStore {
         if (transientChanged()) return retry();
         const pendingLayoutWindows=pendingLayoutWindowIds(this,[...tabs.values()],await explicitTodayEpochs(this));
         try { if (!skipGroupSync) await syncSpaceGroups(this.spaces, this.active, [...tabs.values()].filter(tab => this.isGlobalTab(tab)).map(tab => tab.id), {
-            isExcludedTab: tab => this.isTransientTab(tab), isExcludedWindow: id => this.isTransientWindow(id),
+            isExcludedTab: tab => this.isTransientTab(tab) || Boolean(this.favoriteStore?.recovery?.entry(tab)), isExcludedWindow: id => this.isTransientWindow(id),
             isProjectionDeferredWindow: id => pendingLayoutWindows.has(id),
             observeTab: tab => this.observeTab(tab), flushObserved: () => this.transientWindows?.flushObservedUnlocked()
         }); }

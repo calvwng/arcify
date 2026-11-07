@@ -378,12 +378,13 @@ test('transient window reads block reconciliation without releasing ordinary own
     assert.deepEqual(session[FAVORITE_SESSION_KEY], before); assert(!effects.some(e => e[0] === 'remove'));
 });
 
-test('adapter recovery runs before Space adoption; no witness means saved-closed and no URL restoration', async () => {
+test('adapter recovery runs before Space adoption; no witness or restart hints means saved-closed', async () => {
     const recovered = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
     let loaded = false;
     const s = stores({ ownershipPersistence: { async load() { assert.equal(local.spaces[0].temporaryTabs[0], 1); loaded = true; return recovered; }, async save({ state }) { session[FAVORITE_SESSION_KEY] = clone(state); } } });
     await s.spaces.dispatch({ action: 'get' }); assert(loaded); assertGlobal(s, 1);
     delete session[FAVORITE_SESSION_KEY]; delete session.spaceSession;
+    delete local.favoriteRestartHints; // A prior build never captured restart inference evidence.
     const restarted = stores({ ownershipPersistence: { async load() { return { version: 1, bindings: [], attempts: [] }; }, async save({ state }) { session[FAVORITE_SESSION_KEY] = clone(state); } } });
     const result = await restarted.favorites.dispatch(req('get'));
     assert.equal(result.favorites[0].tabId, null); assert(ownerOf(restarted.spaces.spaces, 1)); assert.equal(tab(1).pinned, false);
@@ -784,4 +785,279 @@ test('late-split release rollback never overwrites a newer exact-tab Favorite ow
     };
     await assert.rejects(s.favorites.dispatch(req('releaseTab', { favoriteId, tabId: 1 })), /End Split View/);
     assert.deepEqual(s.favorites.state.bindings, [newer]); assert.deepEqual(s.favorites.state.attempts, []); assert.deepEqual(effects, []);
+});
+
+// Conservative full-restart inference is separate from proven session ownership.
+async function restartFixture(change = () => {}, { install = false } = {}) {
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
+    const before = stores(); before.favorites.recovery.wait = async () => {};
+    await before.favorites.dispatch(req('get'));
+    assert.equal(local.favoriteRestartHints.entries.length, 1);
+    for (const key of Object.keys(session)) delete session[key];
+    tabs.forEach(tab => { tab.id += 100; tab.windowId += 10; });
+    await change(); effects.length = 0;
+    const after = stores({ install }); after.favorites.recovery.wait = async () => {};
+    const result = await after.favorites.dispatch(req('get', { windowId: 11 }));
+    return { ...after, result, review(action, token = result.favorites[0].recovery?.token) {
+        return after.favorites.dispatch(req(action, { windowId: 11, favoriteId: 'f', tabId: 101, token }));
+    } };
+}
+
+test('restart recovers unique actual page without opening, pinning, focusing or changing saved link', async () => {
+    const original = clone(local[FAVORITES_KEY]);
+    const s = await restartFixture();
+    assert.equal(s.result.favorites[0].tabId, 101); assert(s.result.favorites[0].recovery.token);
+    assert.deepEqual(s.favorites.state.bindings, []); assert.deepEqual(s.favorites.state.attempts, []);
+    assert.deepEqual(local[FAVORITES_KEY], original); assertGlobal(s, 101);
+    assert.deepEqual(effects, []); assert.equal(tab(101).url, 'https://one.test/');
+    const snapshot = await getBridgeSnapshot(s.spaces, 11);
+    assert.equal(snapshot.favorites[0].tabId, null, 'V3 never represents an inferred association as exact');
+    assert.deepEqual(Object.keys(snapshot.favorites[0]).sort(), ['id', 'sourceBookmarkId', 'tabId', 'title', 'url']);
+    await s.favorites.dispatch(req('open', { windowId: 11, favoriteId: 'f' }));
+    assert(!effects.some(([kind]) => ['create', 'remove'].includes(kind)));
+    assert.equal(effects.find(([kind]) => kind === 'update')[1], 101);
+});
+
+for (const scenario of ['duplicate-page', 'duplicate-favorite', 'duplicate-hint', 'changed-title', 'changed-url', 'changed-pin', 'changed-window', 'partial-window', 'pending', 'loading', 'split', 'group', 'private', 'bookmark', 'expired', 'invalid']) {
+    test(`restart ambiguity ${scenario} remains manual and does not claim a tab`, async () => {
+        const s = await restartFixture(() => {
+            if (scenario === 'duplicate-page') tabs.push({ ...tab(101), id: 103 });
+            if (scenario === 'duplicate-favorite') local[FAVORITES_KEY].push(saved('twin-favorite'));
+            if (scenario === 'duplicate-hint') local.favoriteRestartHints.entries.push(clone(local.favoriteRestartHints.entries[0]));
+            if (scenario === 'changed-title') tab(101).title = 'Changed';
+            if (scenario === 'changed-url') tab(101).url += '?changed';
+            if (scenario === 'changed-pin') tab(101).pinned = true;
+            if (scenario === 'changed-window') tab(102).windowId = 12;
+            if (scenario === 'partial-window') tabs = tabs.filter(tab => tab.id !== 102);
+            if (scenario === 'pending') tab(101).pendingUrl = 'https://pending.test/';
+            if (scenario === 'loading') tab(101).status = 'loading';
+            if (scenario === 'split') tab(101).splitViewId = 8;
+            if (scenario === 'group') tab(101).groupId = 42;
+            if (scenario === 'private') tab(101).incognito = true;
+            if (scenario === 'bookmark') local.pinnedTabStatesById = { 101: { bookmarkId: 'bookmark' } };
+            if (scenario === 'expired') local.favoriteRestartHints.capturedAt = 0;
+            if (scenario === 'invalid') local.favoriteRestartHints.phase = 'invalid';
+        });
+        assert.equal(s.result.favorites[0].tabId, null); assert.equal(s.favorites.ownsTab(101), false);
+        assert(!effects.some(([kind]) => ['create', 'remove'].includes(kind)));
+    });
+}
+
+test('Undo releases only inferred ownership, keeps the page and survives worker/full restart', async () => {
+    const s = await restartFixture(); const before = clone(tab(101));
+    await s.review('undoRecovery');
+    assert.equal(s.favorites.ownsTab(101), false); assert(ownerOf(s.spaces.spaces, 101));
+    assert.deepEqual(tab(101), before); assert.equal(local[FAVORITES_KEY].length, 1);
+    assert.deepEqual(local.favoriteRestartHints.entries, []);
+    const worker = stores(); worker.favorites.recovery.wait = async () => {};
+    assert.equal((await worker.favorites.dispatch(req('get', { windowId: 11 }))).favorites[0].tabId, null);
+    for (const key of Object.keys(session)) delete session[key];
+    const restarted = stores(); restarted.favorites.recovery.wait = async () => {};
+    assert.equal((await restarted.favorites.dispatch(req('get', { windowId: 11 }))).favorites[0].tabId, null);
+    assert(!effects.some(([kind]) => ['create', 'remove', 'update', 'focus'].includes(kind)));
+});
+
+test('confirmed recovery uses explicit attachment and only then permits close', async () => {
+    const s = await restartFixture();
+    await s.review('confirmRecovery');
+    assert.equal(s.favorites.recovery.entries.length, 0);
+    assert.deepEqual(s.favorites.state.bindings, [{ favoriteId: 'f', tabId: 101, windowId: 11, mode: 'ordinary' }]);
+    assertGlobal(s, 101); assert.deepEqual(effects, []);
+    await s.favorites.dispatch(req('closeTab', { favoriteId: 'f', tabId: 101, windowId: 11 }));
+    assert(effects.some(([kind, id]) => kind === 'remove' && id === 101));
+});
+
+for (const action of ['closeTab', 'releaseTab', 'remove', 'addTab', 'attachExisting']) test(`inferred ${action} is blocked before native mutation`, async () => {
+    const s = await restartFixture();
+    const payload = { windowId: 11, ...(action !== 'addTab' ? { favoriteId: 'f' } : {}),
+        ...(['closeTab', 'releaseTab', 'addTab', 'attachExisting'].includes(action) ? { tabId: 101 } : {}),
+        ...(action === 'attachExisting' ? { token: 'not-an-offer' } : {}) };
+    await assert.rejects(s.favorites.dispatch(req(action, payload)), { code: 'RECOVERY_REVIEW_REQUIRED' });
+    assert.deepEqual(effects, []); assert(s.favorites.ownsTab(101)); assert.equal(local[FAVORITES_KEY].length, 1);
+});
+
+test('inferred page is protected from cleanup and group projection', async () => {
+    const s = await restartFixture();
+    tab(101).groupId = tab(102).groupId = 42; groups = [{ id: 42, windowId: 11, title: 'Restored' }];
+    sync.syncTabGroups = true;
+    assert(isProtectedFavorite(tab(101), new Set(), {}, new Set(), s.favorites));
+    await s.spaces.persist();
+    assert.equal(tab(101).groupId, 42);
+    assert(!effects.some(([kind, ids]) => ['ungroup', 'remove'].includes(kind) && [].concat(ids).includes(101)));
+});
+
+test('inferred recovery survives worker restart without becoming exact ownership', async () => {
+    const s = await restartFixture();
+    const worker = stores(); worker.favorites.recovery.wait = async () => {};
+    const result = await worker.favorites.dispatch(req('get', { windowId: 11 }));
+    assert.equal(result.favorites[0].tabId, 101); assert(result.favorites[0].recovery);
+    assert.deepEqual(worker.favorites.state.bindings, []);
+    await assert.rejects(worker.favorites.dispatch(req('closeTab', { favoriteId: 'f', tabId: 101, windowId: 11 })), { code: 'RECOVERY_REVIEW_REQUIRED' });
+    assert.deepEqual(effects, []);
+});
+
+test('observed navigation invalidates old review token while protecting the page', async () => {
+    const s = await restartFixture(() => {}, { install: true });
+    tab(101).url = 'https://one.test/new'; chrome.tabs.onUpdated.emit(101, { url: tab(101).url }, tab(101));
+    await assert.rejects(s.review('confirmRecovery'), { code: 'STALE_RECOVERY' });
+    assert(s.favorites.ownsTab(101)); assert.deepEqual(s.favorites.state.bindings, []);
+    assert(!effects.some(([kind]) => ['create', 'remove', 'update'].includes(kind)));
+});
+
+test('Undo persistence rejection keeps the association guarded and never closes the page', async () => {
+    const s = await restartFixture();
+    hooks.localSet = value => { if (value.favoriteRestartHints?.entries?.length === 0) throw new Error('storage offline'); };
+    await assert.rejects(s.review('undoRecovery'), /storage offline/);
+    assert(s.favorites.ownsTab(101)); assert.deepEqual(effects, []);
+});
+
+test('malformed recovery session blocks initialization instead of rematching stale hints', async () => {
+    await restartFixture(); session.favoriteRestartRecovery = { version: 1, entries: [{ tabId: 101 }] };
+    const worker = stores(); worker.favorites.recovery.wait = async () => {};
+    await assert.rejects(worker.favorites.dispatch(req('get', { windowId: 11 })), /recovery tracking could not be read/);
+    assert.deepEqual(effects, []);
+});
+
+test('Undo restores prior Space and relative order rather than the active Space', async () => {
+    const s = await restartFixture(() => {
+        session.spaceSession = true; session.activeSpaces = { 11: 'a' };
+        local.spaces = [space('a'), space('b', [102, 101])];
+    });
+    assert.equal(s.favorites.recovery.entries[0].source.spaceId, 'b');
+    const expected = [...s.favorites.recovery.entries[0].source.ids];
+    await s.review('undoRecovery');
+    assert.deepEqual(s.spaces.spaces.find(space => space.id === 'b').temporaryTabs, expected);
+    assert.equal(ownerOf(s.spaces.spaces, 101).id, 'b');
+    assert.deepEqual(effects, []);
+});
+
+test('interrupted Undo replays the original Space placement before dropping its journal', async () => {
+    const s = await restartFixture(() => {
+        session.spaceSession = true; session.activeSpaces = { 11: 'a' };
+        local.spaces = [space('a'), space('b', [102, 101])];
+    });
+    const expected = [...s.favorites.recovery.entries[0].source.ids];
+    hooks.localSet = value => { if (value.spaces && session.favoriteRestartRecovery.entries.some(e => e.phase === 'undoing')) throw new Error('Space write failed'); };
+    await assert.rejects(s.review('undoRecovery'), /Space write failed/);
+    assert.equal(session.favoriteRestartRecovery.entries[0].phase, 'undoing');
+    hooks.localSet = undefined;
+    const worker = stores(); worker.favorites.recovery.wait = async () => {};
+    const result = await worker.favorites.dispatch(req('get', { windowId: 11 }));
+    assert.equal(result.favorites[0].tabId, null);
+    assert.deepEqual(worker.spaces.spaces.find(space => space.id === 'b').temporaryTabs, expected);
+    assert.deepEqual(session.favoriteRestartRecovery.entries, []);
+    assert(!effects.some(([kind]) => ['remove', 'create'].includes(kind)));
+});
+
+test('recognized Space bookmark wins over restart inference even without pinned metadata', async () => {
+    const s = await restartFixture(() => {
+        session.spaceSession = true; session.activeSpaces = { 11: 'a' };
+        local.spaces = [{ ...space('a'), spaceBookmarks: [101] }, space('b', [102])];
+    });
+    assert.equal(s.result.favorites[0].tabId, null);
+    assert.equal(s.favorites.recovery.entries.length, 0);
+    assert.equal(s.favorites.ownsTab(101), false);
+});
+
+test('Confirm rejects navigation during fresh candidate generation', async () => {
+    const s = await restartFixture(() => {}, { install: true });
+    const candidates = s.favorites.attachment.candidates.bind(s.favorites.attachment);
+    s.favorites.attachment.candidates = async (...args) => {
+        tab(101).url = 'https://changed.test/';
+        chrome.tabs.onUpdated.emit(101, { url: tab(101).url }, tab(101));
+        return candidates(...args);
+    };
+    await assert.rejects(s.review('confirmRecovery'), { code: 'STALE_RECOVERY' });
+    assert.deepEqual(s.favorites.state.bindings, []); assert(s.favorites.ownsTab(101));
+    assert(!effects.some(([kind]) => ['remove', 'create', 'update'].includes(kind)));
+});
+
+test('Undo preserves stable source Space and neighbor order after a second full restart', async () => {
+    const s = await restartFixture(() => {
+        session.spaceSession = true; session.activeSpaces = { 11: 'a' };
+        local.spaces = [space('a'), space('b', [102, 101])];
+    });
+    const expected = s.favorites.recovery.entries[0].source.ids.map(id => id + 100);
+    assert.equal(local.favoriteRestartHints.entries[0].placement.spaceId, 'b');
+    for (const key of Object.keys(session)) delete session[key];
+    tabs.forEach(tab => { tab.id += 100; tab.windowId += 10; });
+    const next = stores(); next.favorites.recovery.wait = async () => {};
+    const result = await next.favorites.dispatch(req('get', { windowId: 21 }));
+    assert.equal(result.favorites[0].tabId, 201);
+    await next.favorites.dispatch(req('undoRecovery', { windowId: 21, favoriteId: 'f', tabId: 201, token: result.favorites[0].recovery.token }));
+    assert.deepEqual(next.spaces.spaces.find(space => space.id === 'b').temporaryTabs, expected);
+    assert.equal(ownerOf(next.spaces.spaces, 201).id, 'b');
+    assert(!effects.some(([kind]) => ['remove', 'create', 'update'].includes(kind)));
+});
+
+for (const phase of ['undoing', 'finished']) test(`Undo recovers after ${phase} session acknowledgement failure`, async () => {
+    const s = await restartFixture(() => {
+        session.spaceSession = true; session.activeSpaces = { 11: 'a' };
+        local.spaces = [space('a'), space('b', [102, 101])];
+    });
+    const expected = [...s.favorites.recovery.entries[0].source.ids];
+    hooks.sessionSet = value => {
+        const entries = value.favoriteRestartRecovery?.entries;
+        if (entries && (phase === 'undoing' ? entries.some(e => e.phase === 'undoing')
+            : entries.length === 0 && session.favoriteRestartRecovery.entries.some(e => e.phase === 'undoing'))) throw new Error('Undo session write failed');
+    };
+    await assert.rejects(s.review('undoRecovery'), /Undo session write failed/);
+    hooks.sessionSet = undefined;
+    const worker = stores(); worker.favorites.recovery.wait = async () => {};
+    const result = await worker.favorites.dispatch(req('get', { windowId: 11 }));
+    if (phase === 'undoing') {
+        assert(result.favorites[0].recovery, 'failed Undo remains explicitly guarded');
+        await worker.favorites.dispatch(req('undoRecovery', { windowId: 11, favoriteId: 'f', tabId: 101, token: result.favorites[0].recovery.token }));
+    } else assert.equal(result.favorites[0].tabId, null);
+    assert.deepEqual(worker.spaces.spaces.find(space => space.id === 'b').temporaryTabs, expected);
+    assert.deepEqual(session.favoriteRestartRecovery.entries, []);
+    assert(!effects.some(([kind]) => ['remove', 'create'].includes(kind)));
+});
+
+test('mixed exact and inferred Favorites retain both hints through worker then full restart', async () => {
+    local[FAVORITES_KEY][0].url = 'https://home-favorite.test/';
+    const s = await restartFixture(() => {
+        session.spaceSession = true; session.activeSpaces = { 11: 'a' };
+        local.spaces = [space('a', [101]), space('b', [102])];
+    });
+    const added = await s.favorites.dispatch(req('addTab', { windowId: 11, tabId: 102 }));
+    const other = added.favorites.find(f => f.id !== 'f').id;
+    const worker = stores(); worker.favorites.recovery.wait = async () => {};
+    await worker.favorites.dispatch(req('get', { windowId: 11 }));
+    assert.deepEqual(new Set(local.favoriteRestartHints.entries.map(h => h.favoriteId)), new Set(['f', other]));
+    for (const key of Object.keys(session)) delete session[key];
+    tabs.forEach(tab => { tab.id += 100; tab.windowId += 10; });
+    const next = stores(); next.favorites.recovery.wait = async () => {};
+    const result = await next.favorites.dispatch(req('get', { windowId: 21 }));
+    assert(result.favorites.every(f => f.tabId && f.recovery));
+});
+
+for (const delay of ['loading', 'title', 'pending']) test(`one ready Favorite does not cut off another restored candidate settling (${delay})`, async () => {
+    local[FAVORITES_KEY].push({ id: 'g', title: 'Other', url: 'https://other-favorite.test/', sourceBookmarkId: null });
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [
+        { favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' },
+        { favoriteId: 'g', windowId: 1, tabId: 2, mode: 'ordinary' }
+    ], attempts: [] };
+    const before = stores();
+    await before.favorites.dispatch(req('get'));
+    assert.equal(local.favoriteRestartHints.entries.length, 2);
+    const savedBefore = clone(local[FAVORITES_KEY]);
+    for (const key of Object.keys(session)) delete session[key];
+    tabs.forEach(tab => { tab.id += 100; tab.windowId += 10; });
+    if (delay === 'loading') tab(101).status = 'loading';
+    if (delay === 'title') tab(101).title = 'Loading page';
+    if (delay === 'pending') tab(101).pendingUrl = tab(101).url;
+    const after = stores(); let passes = 0;
+    after.favorites.recovery.wait = async () => {
+        if (++passes === 3) { tab(101).status = 'complete'; tab(101).title = 'One'; delete tab(101).pendingUrl; }
+    };
+    effects.length = 0;
+    const result = await after.favorites.dispatch(req('get', { windowId: 11 }));
+    assert(passes >= 3 && passes <= 8, 'every hinted candidate gets the bounded settling window');
+    assert.deepEqual(result.favorites.map(item => item.tabId), [101, 102]);
+    assert(result.favorites.every(item => item.recovery?.token));
+    assert.deepEqual(after.favorites.state.bindings, []);
+    assert.deepEqual(local[FAVORITES_KEY], savedBefore);
+    assertGlobal(after, 101); assertGlobal(after, 102);
+    assert.deepEqual(effects, []);
 });

@@ -46,7 +46,7 @@ export class FavoriteAttachment {
             && ![...store.state.bindings, ...store.state.attempts].some(e => e.tabId === tab.id);
     }
     vacant(favoriteId, windowId) {
-        return ![...this.store.state.bindings, ...this.store.state.attempts]
+        return !this.store.recovery?.forFavorite(favoriteId, windowId) && ![...this.store.state.bindings, ...this.store.state.attempts]
             .some(e => e.favoriteId === favoriteId && e.windowId === windowId);
     }
     async candidates(favoriteId, windowId) {
