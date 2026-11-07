@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-export const UX_SPOTLIGHT_HEAD='1ec956febfb0ce83f02ff5daf904e060d4e35948';
+export const UX_SPOTLIGHT_HEAD='3049c6757ba74dfd20e5383537bb2511fd70bd19';
 export function validateLittleArcUxContext(env,event,head){
- const repo='calvwng/arcify',branch='feature/little-arc-size-preview',pr=event?.pull_request;
+ const repo='calvwng/arcify',branch='feature/little-arc-dim-strength',pr=event?.pull_request;
  assert.equal(env.ARCIFY_LITTLE_ARC_UX,'1');assert.equal(env.ARCIFY_PAIRED_RUN_MODE,'little-arc');
  assert.equal(env.GITHUB_REPOSITORY,repo);assert.equal(event?.repository?.full_name,repo);assert.equal(env.GITHUB_EVENT_NAME,'pull_request');
  assert(['opened','reopened','synchronize'].includes(event.action));assert(Number.isSafeInteger(event.number)&&event.number>0);assert.equal(pr?.number,event.number);assert.equal(pr.state,'open');

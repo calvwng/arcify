@@ -30,3 +30,6 @@ test('source navigation during final awaited pairing check is fenced before move
 for(const field of ['pinned','splitViewId'])test('automatic cleanup preserves protected controller '+field,async()=>{const f=fixture();f.tabs.get(3).windowId=10;f.tabs.get(2)[field]=field==='pinned'?true:0;const result=await finishLittleArcPlacement(f.api,f.record,{tabId:3,windowId:10,phase:'committed'});assert.equal(result.controllerClosed,false);assert(f.tabs.has(2));});
 
 test('paired worker identity alone cannot mint authorization without live registered instance proof',async()=>{const f=fixture();f.setAuthorized(false);await assert.rejects(f.prepare(),{code:'STALE_DIRECT_AUTHORITY'});assert.equal(f.calls.length,0);});
+test('old direct grants cannot survive controller replacement or explicit record revocation',async()=>{
+ for(const revoke of [false,true]){const f=fixture(),grant=await f.prepare();if(revoke)f.service.revokeRecord(f.record.token);f.record.controllerTabId=9;await assert.rejects(f.place(grant));assert.equal(f.calls.length,0);}
+});

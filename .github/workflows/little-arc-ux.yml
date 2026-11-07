@@ -7,7 +7,7 @@ permissions:
 jobs:
   little-arc-ux:
     runs-on: ubuntu-24.04
-    if: github.repository == 'calvwng/arcify' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feature/little-arc-size-preview' && github.event.pull_request.base.ref == 'main'
+    if: github.repository == 'calvwng/arcify' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feature/little-arc-dim-strength' && github.event.pull_request.base.ref == 'main'
     timeout-minutes: 20
     env:
       ARCIFY_LITTLE_ARC_UX: '1'
@@ -15,7 +15,7 @@ jobs:
       ARCIFY_PAIRED_RUN_MODE: little-arc
       ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha }}
       ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-      ARCIFY_SPOTLIGHT_HEAD: 1ec956febfb0ce83f02ff5daf904e060d4e35948
+      ARCIFY_SPOTLIGHT_HEAD: 3049c6757ba74dfd20e5383537bb2511fd70bd19
     steps:
       - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
         uses: actions/checkout@v4
@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 1ec956febfb0ce83f02ff5daf904e060d4e35948
+          ref: 3049c6757ba74dfd20e5383537bb2511fd70bd19
           persist-credentials: false
           path: arcify-spotlight
       - name: Record and verify exact source provenance before installation
@@ -74,6 +74,13 @@ jobs:
           npm ci --prefix arcify-spotlight
       - name: Verify isolated driver and sandbox defaults (no browser launch)
         run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Verify exact paired dimming preferences and cosmetic delivery
+        working-directory: arcify
+        env:
+          ARCIFY_DIMMING_SPOTLIGHT_ROOT: ${{ github.workspace }}/arcify-spotlight
+        run: |
+          set -euo pipefail
+          node --test tests/integration/little-arc-dimming-pair.test.mjs tests/integration/little-arc-header-settings-pair.test.mjs tests/integration/little-arc-controller-recovery-pair.test.mjs 2>&1 | tee test-results/paired-chrome-little-arc/dimming-pair-integration.log
       - name: Build the exact pair and retain production hashes
         run: |
           set -euo pipefail

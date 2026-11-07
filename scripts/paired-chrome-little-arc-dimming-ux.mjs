@@ -1,6 +1,7 @@
 /** Real hosted fixture input only; all page/API evaluations below are observations. */
 import assert from 'node:assert/strict';
 import { attachLittleArcControllerTargets, readLittleArcRawState } from './paired-chrome-little-arc.mjs';
+import {exerciseDimFocusLifecycle} from './paired-chrome-little-arc-dim-focus-lifecycle.mjs';
 
 export function observeSourceInput() {
     globalThis.__dimInputObserver?.stop();
@@ -12,15 +13,90 @@ export function observeSourceInput() {
 export function readSourceDim() {
     const hosts = [...document.body.children].filter(node => node.getAttribute('aria-hidden') === 'true'
         && node.style.position === 'fixed' && node.style.pointerEvents === 'none'
-        && node.style.zIndex === '2147483646' && node.style.background.includes('0.28'));
-    return { count: hosts.length, pointerEvents: hosts[0] ? getComputedStyle(hosts[0]).pointerEvents : null,
+        && node.style.zIndex === '2147483646');
+    const style=hosts[0]?getComputedStyle(hosts[0]):null;
+    const match=style?.backgroundColor.match(/^rgba?\(\s*0\s*,\s*0\s*,\s*0\s*(?:,\s*(0(?:\.\d+)?|1(?:\.0+)?))?\s*\)$/);
+    return { count: hosts.length, pointerEvents: style?.pointerEvents??null, backgroundColor:style?.backgroundColor??null,
+        alpha:match?Number(match[1]??1):null, elementOpacity:style?Number(style.opacity):null,
         focus: document.hasFocus(), url: document.URL, documentId: document.body.dataset.documentId, hasLaunchStatus: Boolean(document.getElementById('arcify-peek-host')),
         checked: document.querySelector('#little-arc-check')?.checked };
 }
 
+export function assertUnsavedDimDraft(before,after,events) {
+    assert.deepEqual(after,before,'Draft preview and Cancel cannot change saved dimming preferences.');
+    assert.equal(events.length,0,'Draft preview and Cancel cannot produce a dimming preference-change event.');
+}
+
+export function assertSourceDim(dim,{enabled,strength}) {
+    assert.equal(dim.count,enabled?1:0,'Only the exact source document receives a cosmetic dim.');
+    if(enabled){assert.equal(dim.alpha,strength/100);assert.equal(dim.elementOpacity,1);assert.equal(dim.pointerEvents,'none');}
+}
+
+export function readDimControls() {
+    const node=id=>document.getElementById(id),sample=node('source-dim-sample');
+    return {enabled:node('source-dim-enabled').checked,strength:Number(node('source-dim-strength').value),
+        output:node('source-dim-value').textContent,sampleOpacity:Number(getComputedStyle(sample,'::after').opacity),
+        disabled:node('source-dim-enabled').disabled||node('source-dim-strength').disabled,
+        saveDisabled:node('save-source-dim').disabled,status:node('source-dim-status').textContent};
+}
+
+/** Passive mutation witness catches even an overlay removed before the next poll. */
+export function observeDisabledSourceDim() {
+    globalThis.__disabledDimObservation?.stop();
+    const seen=[];
+    const capture=node=>{if(node?.getAttribute?.('aria-hidden')==='true'&&node.style?.position==='fixed'&&node.style.zIndex==='2147483646')seen.push({background:node.style.background,pointerEvents:node.style.pointerEvents});};
+    const observer=new MutationObserver(records=>{
+        for(const record of records){for(const node of record.addedNodes??[])capture(node);if(record.type==='attributes')capture(record.target);}
+        for(const node of document.body.children)capture(node);
+    });
+    for(const node of document.body.children)capture(node);
+    observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['style','aria-hidden']});
+    globalThis.__disabledDimObservation={seen,stop:()=>observer.disconnect()};
+}
+
+export function assertDisabledDimObservation({dim,seen,destinationFocused}) {
+    assert.equal(dim.count,0,'Disabled preference must remain undimmed throughout the observation window.');
+    assert.deepEqual(seen,[],'No transient source overlay may be inserted while dimming is disabled.');
+    assert.equal(destinationFocused,true,'Observe absence while the destination remains focused, before source focus can clear it.');
+}
+
 export async function exerciseSourceDimming({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint}) {
     const targetUrl = `${fixture.base}/little-arc/${nonce}/ux-target`;
-    const original = await spotlightOptions.evaluate(() => chrome.storage.local.get(['peekEnabled','peekIframeEnabled','littleArcDimSource']));
+    const controller=first.controller;
+    const original = await spotlightOptions.evaluate(() => chrome.storage.local.get(['peekEnabled','peekIframeEnabled','littleArcDimSource','littleArcDimStrength']));
+    const originalDim={enabled:original.littleArcDimSource===true,strength:original.littleArcDimStrength??55};
+    const beforeRaw=Object.fromEntries(Object.entries(original).filter(([key])=>['littleArcDimSource','littleArcDimStrength'].includes(key)));
+    assert(Number.isInteger(originalDim.strength)&&originalDim.strength>=15&&originalDim.strength<=100,'Synthetic fixture begins with valid effective preferences.');
+    const readPreferences=()=>spotlightOptions.evaluate(()=>chrome.storage.local.get(['littleArcDimSource','littleArcDimStrength']));
+    const dimEvents=()=>spotlightOptions.evaluate(()=>globalThis.__dimPreferenceObservation.events);
+    const readControls=()=>controller.evaluate(readDimControls);
+    const settled=()=>poll(readControls,state=>!state.disabled,'confirmed controller dimming settings');
+    const openSettings=async()=>{
+        if(!await controller.$eval('#more-settings',node=>node.open))await controller.click('#more-settings > summary');
+        await controller.waitForSelector('#source-dim-enabled');await settled();
+    };
+    const editDim=async preference=>{
+        await openSettings();
+        if(await controller.$eval('#source-dim-enabled',node=>node.checked)!==preference.enabled)await controller.click('#source-dim-enabled');
+        assert.deepEqual(await controller.$eval('#source-dim-strength',node=>({min:node.min,max:node.max,step:node.step})),{min:'15',max:'100',step:'1'});
+        await controller.focus('#source-dim-strength');
+        const fromMinimum=preference.strength-15<=100-preference.strength;
+        await controller.keyboard.press(fromMinimum?'Home':'End');
+        for(let i=0;i<(fromMinimum?preference.strength-15:100-preference.strength);i++)await controller.keyboard.press(fromMinimum?'ArrowRight':'ArrowLeft');
+        const controls=await poll(readControls,state=>state.sampleOpacity===(preference.enabled?preference.strength/100:0),'illustrative draft sample follows real controls');
+        assert.equal(controls.enabled,preference.enabled);assert.equal(controls.strength,preference.strength);
+        assert.equal(controls.output,`${preference.strength}%`);assert.equal(controls.sampleOpacity,preference.enabled?preference.strength/100:0);
+        return controls;
+    };
+    const saveDim=async preference=>{
+        await ui(controller,'Save source dimming through the real Little Arc controls',async()=>{
+            await openSettings();await controller.click('#refresh-source-dim');await settled();await editDim(preference);
+            if(!await controller.$eval('#save-source-dim',node=>node.disabled))await controller.click('#save-source-dim');
+        });
+        await settled();
+        const saved=await poll(readPreferences,state=>(state.littleArcDimSource===true)===preference.enabled&&(state.littleArcDimStrength??55)===preference.strength,'saved effective Spotlight preference from controller Save');
+        return saved;
+    };
     const setOption = async (selector,key,value) => {
         await ui(spotlightOptions, `Set ${key} through its actual options checkbox`, async () => {
             await spotlightOptions.waitForSelector(selector);
@@ -31,8 +107,8 @@ export async function exerciseSourceDimming({browser,observePage,apiPage,spotlig
     };
     const trace=()=>apiPage.evaluate(()=>globalThis.__spaceActionObservation.events);
     const raw=()=>apiPage.evaluate(readLittleArcRawState);
-    const launch=async enabled=>{
-        await setOption('#peek-dim-source','littleArcDimSource',enabled);
+    const launch=async({enabled,strength})=>{
+        if(!enabled)await source.page.evaluate(observeDisabledSourceDim);
         const sourceBefore=await source.page.evaluate(readSourceDim);const before=await raw(), beforeTargets=new Set(browser.targets()), offset=(await trace()).length;
         await ui(source.page,'Focus source and Shift-click its real fixture link',async()=>{
             await source.page.waitForSelector('#little-arc-ux-link');
@@ -73,34 +149,59 @@ export async function exerciseSourceDimming({browser,observePage,apiPage,spotlig
         await poll(()=>target.url(),url=>url===targetUrl,'exact created page finishes initial navigation');
         await poll(()=>source.page.evaluate(readSourceDim),value=>!value.hasLaunchStatus,'real launch acknowledgement retires status');
         const dim=enabled?await poll(()=>source.page.evaluate(readSourceDim),value=>value.count===1,'source cosmetic dim following acknowledged Shift-click'):await source.page.evaluate(readSourceDim);
-        assert.equal(dim.count,enabled?1:0);assert.equal(dim.documentId,sourceBefore.documentId);assert.equal((await first.page.evaluate(readSourceDim)).count,0,'Unrelated existing Little Arc page is never dimmed');if(enabled){assert.equal(dim.pointerEvents,'none');assert.equal(dim.focus,false);assert.equal(await apiPage.evaluate(id=>chrome.windows.get(id).then(w=>w.focused),claimed.windowId),true,'Dim belongs to the actually focused destination window');}
+        let disabledObservation;
+        if(!enabled){
+            const started=Date.now();
+            disabledObservation=await poll(async()=>{
+                const observation={dim:await source.page.evaluate(readSourceDim),seen:await source.page.evaluate(()=>globalThis.__disabledDimObservation.seen),destinationFocused:await apiPage.evaluate(id=>chrome.windows.get(id).then(window=>window.focused),claimed.windowId),elapsedMs:Date.now()-started};
+                assertDisabledDimObservation(observation);return observation;
+            },value=>value.elapsedMs>=4500,'continuous disabled-source absence beyond the four-second cosmetic offer lease');
+            await source.page.evaluate(()=>{globalThis.__disabledDimObservation.stop();delete globalThis.__disabledDimObservation;});
+        }
+        assertSourceDim(dim,{enabled,strength});assert.equal(dim.documentId,sourceBefore.documentId);assert.equal((await first.page.evaluate(readSourceDim)).count,0,'Unrelated existing Little Arc page is never dimmed');if(enabled){assert.equal(dim.focus,false);assert.equal(await apiPage.evaluate(id=>chrome.windows.get(id).then(w=>w.focused),claimed.windowId),true,'Dim belongs to the actually focused destination window');}
         const input=await source.page.evaluate(()=>globalThis.__dimInputObserver.events);
         assert.deepEqual(input,[{trusted:true,shift:true,button:0}]);
+        const lifecycle=enabled?await exerciseDimFocusLifecycle({browser,observePage,apiPage,ui,poll,source,first,target,claimed,fixture,nonce,strength,ownedTabs,checkpoint}):null;
+        if(enabled&&!lifecycle.targetClosed)assertSourceDim(await source.page.evaluate(readSourceDim),{enabled:true,strength});
         const beforeChecked=dim.checked;
         await ui(source.page,'Return to source and click underlying checkbox',()=>source.page.click('#little-arc-check'));
         const cleared=await poll(()=>source.page.evaluate(readSourceDim),value=>value.count===0 && value.checked!==beforeChecked,'source focus clears dim and underlying click is delivered');
         assert.equal(cleared.url,source.page.url());assert.equal(cleared.documentId,sourceBefore.documentId);
-        await checkpoint('source-dimming',{enabled,sourceTabId:source.tab.id,record:claimed,dim,cleared,input,receiptObserved:true,createdTabs:state.tabs.filter(tab=>[claimed.tabId,claimed.controllerTabId].includes(tab.id))});
+        await checkpoint('source-dimming',{enabled,strength,sourceTabId:source.tab.id,record:claimed,dim,disabledObservation,lifecycle,cleared,input,receiptObserved:true,createdTabs:state.tabs.filter(tab=>[claimed.tabId,claimed.controllerTabId].includes(tab.id))});
         await ui(source.page,'Restore source checkbox after click-through proof',()=>source.page.click('#little-arc-check'));
         assert.equal((await source.page.evaluate(readSourceDim)).checked,beforeChecked);
         // Remove only the exact window claimed from the paired receipt above.
-        await apiPage.evaluate(async({id,controller,page})=>{
+        await apiPage.evaluate(async({id,controller,page,targetClosed})=>{
             const tabs=await chrome.tabs.query({windowId:id});
-            if(tabs.length!==2||!tabs.some(tab=>tab.id===controller)||!tabs.some(tab=>tab.id===page))throw Error('Owned fixture window changed before cleanup');
+            if(tabs.length!==(targetClosed?1:2)||!tabs.some(tab=>tab.id===controller)||(targetClosed?tabs.some(tab=>tab.id===page):!tabs.some(tab=>tab.id===page)))throw Error('Owned fixture window changed before cleanup');
             await chrome.windows.remove(id);
-        },{id:claimed.windowId,controller:claimed.controllerTabId,page:claimed.tabId});
+        },{id:claimed.windowId,controller:claimed.controllerTabId,page:claimed.tabId,targetClosed:lifecycle?.targetClosed===true});
         await poll(raw,state=>!state.windows.some(window=>window.id===claimed.windowId)&&!state.registry.records.some(record=>record.token===claimed.token),'owned dimming fixture window and registry cleanup completed');
         ownedWindows.delete(claimed.windowId);ownedTabs.delete(claimed.controllerTabId);ownedTabs.delete(claimed.tabId);
     };
+    await spotlightOptions.evaluate(()=>{
+        const events=[];const listener=(changes,area)=>{if(area==='local'&&['littleArcDimSource','littleArcDimStrength'].some(key=>Object.hasOwn(changes,key)))events.push(changes);};
+        chrome.storage.onChanged.addListener(listener);globalThis.__dimPreferenceObservation={events,stop:()=>chrome.storage.onChanged.removeListener(listener)};
+    });
     try {
         await setOption('#peek-enabled','peekEnabled',true);
         await setOption('#peek-iframe-enabled','peekIframeEnabled',false);
-        await launch(true);await launch(false);
+        await ui(controller,'Preview a local dimming draft without saving',async()=>{await openSettings();await editDim({enabled:!originalDim.enabled,strength:originalDim.strength===100?55:100});});
+        const draft=await readControls();assertUnsavedDimDraft(beforeRaw,await readPreferences(),await dimEvents());
+        await ui(controller,'Cancel the illustrative dimming draft',()=>controller.click('#cancel-source-dim'));
+        const canceled=await settled();assert.equal(canceled.enabled,originalDim.enabled);assert.equal(canceled.strength,originalDim.strength);
+        assertUnsavedDimDraft(beforeRaw,await readPreferences(),await dimEvents());
+        await checkpoint('source-dimming-draft-cancel',{original:originalDim,draft,canceled,storageEvents:await dimEvents()});
+        for(const preference of [{enabled:true,strength:55},{enabled:true,strength:100},{enabled:false,strength:100}]){
+            const saved=await saveDim(preference);await checkpoint('source-dimming-saved',{preference,saved});await launch(preference);
+        }
     } finally {
-        await source.page.evaluate(()=>{globalThis.__dimInputObserver?.stop();delete globalThis.__dimInputObserver;});
-        await setOption('#peek-enabled','peekEnabled',true);
-        await setOption('#peek-iframe-enabled','peekIframeEnabled',original.peekIframeEnabled===true);
-        await setOption('#peek-dim-source','littleArcDimSource',original.littleArcDimSource===true);
-        await setOption('#peek-enabled','peekEnabled',original.peekEnabled===true);
+        await source.page.evaluate(()=>{globalThis.__dimInputObserver?.stop();delete globalThis.__dimInputObserver;globalThis.__disabledDimObservation?.stop();delete globalThis.__disabledDimObservation;});
+        try{
+            await saveDim(originalDim);
+            await setOption('#peek-enabled','peekEnabled',true);
+            await setOption('#peek-iframe-enabled','peekIframeEnabled',original.peekIframeEnabled===true);
+            await setOption('#peek-enabled','peekEnabled',original.peekEnabled===true);
+        }finally{await spotlightOptions.evaluate(()=>{globalThis.__dimPreferenceObservation?.stop();delete globalThis.__dimPreferenceObservation;});}
     }
 }

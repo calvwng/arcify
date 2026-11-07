@@ -29,7 +29,7 @@ function background(completed = false, onboardingVersion = undefined, version = 
         enqueueBookmarkOrder: async () => [],
         createLittleArcWindowGeometry: () => ({}), createTransientWindowStore: () => ({ initialize: async () => {}, observe() {}, observeRemoved() {}, observeWindowRemoved() {},
             observeReplacement() {}, observeDetached() {}, flushObservedUnlocked: async () => {}, isExcluded: () => false, isTransientWindow: () => false }),
-        registerTransientControlMessages() {},
+        registerTransientControlMessages() {}, registerDimmingPreferences() {},
         registerPeek() {}, registerRecoveryObservation() {}, selectedRecoveryDiagnosticsEnabled: true, registerSelectedRecoveryDiagnostics() {}, summarizeRecoveryObservation() {},
         createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTodayMoveMessages() {}, registerTodayRecoveryMessages() {}, registerSharedToday() {}, registerLittleArcHeader() {}, registerLittleArcLinkMenu() {}, registerSavedMoveMessages() {}, registerSelectedTabClose() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {}, registerMoveTabWindowMessages() {}, registerArchiveMessages() {},
         SpaceStore: class { isTransientTab() { return false; } isTransientWindow() { return false; } install() {} async dispatch() { return [{ id: 'home' }]; } },

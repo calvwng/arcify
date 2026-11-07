@@ -23,3 +23,13 @@ Automated mocks do not establish native Helium behavior. Before deployment, veri
 ## Responsive presentation
 
 The panel fills the available width with eight-pixel page margins. Its extension document and embedding iframe use the same explicit dark color scheme to avoid an opaque mismatched canvas. The registered extension frame measures its natural border-box height with ResizeObserver and sends a bounded integer (28–480 pixels) through its private broker connection. The top-frame host clamps to the viewport and leaves content scrollable on very short windows. Page messages cannot resize it. Presentation checks compare the live rectangle to that authenticated measured geometry; height is not treated as proof against clickjacking. Expanding More, status changes, collapse/reopen and width/zoom changes remeasure without fixed unused backing.
+
+## Closed control tab recovery
+
+An explicit Little Arc settings action may recreate a closed control tab in the same Little Arc window. This requires an exact native removal event for the currently registered controller, a surviving unowned web page, and fresh authenticated source-document proofs from Spotlight before creation and before admitting the replacement. Inspecting choices alone never creates a tab.
+
+Recovery creates only an inactive extension control tab; it never recreates, navigates, moves or assigns the web page. The replacement must finish its initial marker navigation and remain the unique controller before settings are focused. Prior views, direct-placement grants and placement drafts are invalidated and bound to the controller identity.
+
+An uncertain journal is saved before the one native creation. A lost result, changed source, conflicting marker or readiness failure is retained without retry or automatic deletion. Closure proof is deliberately memory-only: after a worker restart, a missing controller remains uncertain and cannot be automatically recovered. This limitation avoids treating an API read failure or arbitrary absence as proof that the original controller was closed.
+
+When the source tab becomes active before Arcify receives the native controller-close event, its first choices read can fail. After recording and serializing exact closure proof, Arcify sends the paired Spotlight background a versioned, source-scoped read-only wake-up. The payload contains no controller token or recovery authority. Pairing and live source identity are rechecked before delivery outside the store queue, allowing Spotlight's fresh inspect to re-enter that queue safely. This notification never creates a controller, retries a settings action, or replays placement; a new explicit settings gesture is still required.
