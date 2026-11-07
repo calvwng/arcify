@@ -69,10 +69,12 @@ export class FavoriteRestartRecovery {
                 const unchanged = JSON.stringify(tabs.map(shape).sort()) === JSON.stringify(next.map(shape).sort());
                 tabs = next;
                 if (unchanged) {
-                    let ready = false;
+                    // One fast Favorite must not end the settling window for a
+                    // slower hinted page. Final eligibility still fails closed.
+                    let ready = true;
                     for (const hint of this.hints) {
                         const target = tabs.find(tab => tab.url === hint.url && tab.title === hint.title && stable(tab));
-                        if (target && await signature(tabs.filter(tab => tab.windowId === target.windowId)) === hint.window) { ready = true; break; }
+                        if (!target || await signature(tabs.filter(tab => tab.windowId === target.windowId)) !== hint.window) { ready = false; break; }
                     }
                     if (ready) break;
                 }

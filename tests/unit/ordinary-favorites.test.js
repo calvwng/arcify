@@ -1031,3 +1031,33 @@ test('mixed exact and inferred Favorites retain both hints through worker then f
     const result = await next.favorites.dispatch(req('get', { windowId: 21 }));
     assert(result.favorites.every(f => f.tabId && f.recovery));
 });
+
+for (const delay of ['loading', 'title', 'pending']) test(`one ready Favorite does not cut off another restored candidate settling (${delay})`, async () => {
+    local[FAVORITES_KEY].push({ id: 'g', title: 'Other', url: 'https://other-favorite.test/', sourceBookmarkId: null });
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [
+        { favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' },
+        { favoriteId: 'g', windowId: 1, tabId: 2, mode: 'ordinary' }
+    ], attempts: [] };
+    const before = stores();
+    await before.favorites.dispatch(req('get'));
+    assert.equal(local.favoriteRestartHints.entries.length, 2);
+    const savedBefore = clone(local[FAVORITES_KEY]);
+    for (const key of Object.keys(session)) delete session[key];
+    tabs.forEach(tab => { tab.id += 100; tab.windowId += 10; });
+    if (delay === 'loading') tab(101).status = 'loading';
+    if (delay === 'title') tab(101).title = 'Loading page';
+    if (delay === 'pending') tab(101).pendingUrl = tab(101).url;
+    const after = stores(); let passes = 0;
+    after.favorites.recovery.wait = async () => {
+        if (++passes === 3) { tab(101).status = 'complete'; tab(101).title = 'One'; delete tab(101).pendingUrl; }
+    };
+    effects.length = 0;
+    const result = await after.favorites.dispatch(req('get', { windowId: 11 }));
+    assert(passes >= 3 && passes <= 8, 'every hinted candidate gets the bounded settling window');
+    assert.deepEqual(result.favorites.map(item => item.tabId), [101, 102]);
+    assert(result.favorites.every(item => item.recovery?.token));
+    assert.deepEqual(after.favorites.state.bindings, []);
+    assert.deepEqual(local[FAVORITES_KEY], savedBefore);
+    assertGlobal(after, 101); assertGlobal(after, 102);
+    assert.deepEqual(effects, []);
+});
