@@ -85,7 +85,7 @@ async function readBridgeSnapshot(store, windowId, sharedToday = false) {
             const ordinary = store.favoriteStore.state.bindings.some(binding => binding.favoriteId === id
                 && binding.windowId === windowId && binding.tabId === tabId && binding.mode === 'ordinary');
             return { id, title, url, sourceBookmarkId,
-                tabId: tab && (tab.pinned || ordinary) && store.favoriteStore.ownsTab(tab) && !ownerOf(store.spaces, tabId) ? tabId : null };
+                tabId: tab && !store.favoriteStore.recovery?.entry(tab) && (tab.pinned || ordinary) && store.favoriteStore.ownsTab(tab) && !ownerOf(store.spaces, tabId) ? tabId : null };
         }) } : {}), tabs: live.map(tab => ({ id: tab.id, windowId, title: projectTabTitle(tab, {
         overrides, binding: bindings[tab.id], bookmark: bookmarksByTab.get(tab.id), isSpacePin: Boolean(ownerOf(store.spaces, tab.id)?.spaceBookmarks.includes(tab.id))
     }), url: tab.url || tab.pendingUrl || '',

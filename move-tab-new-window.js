@@ -23,6 +23,7 @@ export function moveTabToNewWindow(store, favorites, request) {
                 || request.favoriteId !== undefined && !text(request.favoriteId)) throw stale();
         let ownerId = null;
         async function resolve() {
+            favorites.recovery?.assertConfirmed(request.tabId, request.favoriteId);
             assertNotTransient(store, { windowId: request.windowId, tabId: request.tabId });
             const sourceWindow = await chrome.windows.get(request.windowId);
             if (sourceWindow.type !== 'normal' || sourceWindow.incognito) throw stale();

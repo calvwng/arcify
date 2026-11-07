@@ -2516,6 +2516,14 @@ select:focus-visible,
 .favorite-attachment-dialog button:disabled { opacity: .55; cursor: default; }
 
 
+/* Recovery review remains visible in both regular and compact Favorite layouts. */
+.favorite-recovery-review { margin: 8px 0; min-width: 0; }
+.favorite-recovery-review[hidden] { display: none; }
+.favorite-recovery-card { padding: 8px; margin-bottom: 6px; border: 1px solid var(--sidebar-border-color, #777); border-radius: 8px; background: var(--theme-panel-bg, #f6f7fb); color: var(--theme-panel-text, #24262d); }
+.favorite-recovery-card p { margin: 0 0 6px; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.favorite-recovery-card button { margin: 0 6px 0 0; padding: 6px 10px; border: 1px solid var(--theme-panel-muted, #555); border-radius: 6px; background: var(--theme-input-bg, #fff); color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.favorite-recovery-card button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
 /* Bottom Space switcher: every chip owns its tint; the strip and + keep theirs. */
 :root[data-theme] #spaceSwitcher.space-switcher button[data-space-id] {
     background: var(--space-chip-bg, var(--sidebar-secondary-bg));

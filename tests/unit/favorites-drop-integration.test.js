@@ -36,6 +36,7 @@ let startupPinRace = true;
 const bookmark = (id, tabId = null) => ({ id, title: id, url: tabId ? tabs[tabId - 1].url : `https://${id}.test/` });
 function resetData() {
     tabs.splice(0, tabs.length, ...[1, 2, 3].map(id => ({ id, windowId: 10, active: id === 2, pinned: false, index: id - 1, title: `Tab ${id}`, url: `https://tab-${id}.test/` })));
+    delete local.favoriteRestartHints; delete session.favoriteRestartRecovery;
     session.activeSpaces = { 10: 'alpha' }; session.favoriteDropAttempts = {}; session.favoriteSession = { version: 1, bindings: [], attempts: [] };
     local.persistentFavorites = []; local.favoriteIconCache = { version: 1, entries: [] }; if (favoriteStore) favoriteStore.initialized = false;
     effects = []; hooks = {}; nextId = 100;
@@ -173,6 +174,11 @@ async function drop(source, target, y) {
     const handle = source.classList.contains('folder') ? source.querySelector(':scope > .folder-header') : source;
     drag(handle, 'dragstart'); drag(target, 'dragover', y);
     drag(target, 'drop', y); drag(handle, 'dragend'); await wait(180);
+    // Wait for this one dispatched operation's visible completion, never replay
+    // input. Async evidence hashing may finish after the old fixed delay.
+    const deadline = Date.now() + 3000;
+    while (favorites().getAttribute('aria-busy') === 'true' && Date.now() < deadline) await wait(10);
+    assert.notEqual(favorites().getAttribute('aria-busy'), 'true', 'Favorite drop did not settle');
 }
 
 const favorites = () => document.getElementById('pinnedFavicons');
