@@ -197,9 +197,12 @@ export class FavoriteRestartRecovery {
     }
     async checkpoint(tabs) {
         if (!this.ready) return;
-        const stamp = JSON.stringify([this.store.state, this.entries, this.revision]);
-        if (stamp === this.checkpointStamp && this.store.now() - this.checkpointAt < 60000) return;
         tabs ||= await this.store.queryAttachmentTabs(undefined);
+        // The full native cohort is evidence too, including newly created tabs
+        // that arrive complete and never emit an onUpdated event.
+        const sample = JSON.stringify(tabs.map(shape).sort());
+        const stamp = JSON.stringify([this.store.state, this.entries, this.revision, this.store.items.map(identity), sample]);
+        if (stamp === this.checkpointStamp && this.store.now() - this.checkpointAt < 60000) return;
         const revision = this.revision, hints = this.entries.filter(entry => entry.phase !== 'undoing').map(entry => entry.hint);
         for (const binding of this.store.state.bindings) {
             const tab = tabs.find(tab => tab.id === binding.tabId && tab.windowId === binding.windowId);
@@ -212,7 +215,8 @@ export class FavoriteRestartRecovery {
             hints.push({ favoriteId: item.id, identity: identity(item), url: tab.url, title: tab.title, pinned: !!tab.pinned,
                 window: await signature(tabs.filter(other => other.windowId === tab.windowId)) });
         }
-        if (revision !== this.revision) return;
+        const fresh = await this.store.queryAttachmentTabs(undefined);
+        if (revision !== this.revision || sample !== JSON.stringify(fresh.map(shape).sort())) return;
         const bounded = hints.filter(hint => bytes(hint) <= MAX_HINT_BYTES).slice(0, MAX_HINTS);
         hints.splice(0, hints.length, ...bounded);
         if (!hints.length && !this.hints.length) return;

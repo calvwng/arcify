@@ -8,15 +8,16 @@ import http from 'node:http';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 const root=path.resolve(import.meta.dirname,'..');
-const scenario=process.env.ARCIFY_FAVORITE_RECOVERY_CASE||'undo';assert(['undo','confirm','ambiguous','undo-repeat'].includes(scenario));
+const scenario=process.env.ARCIFY_FAVORITE_RECOVERY_CASE||'undo';assert(['undo','confirm','ambiguous','undo-repeat','title-update'].includes(scenario));
 const scratch=await mkdtemp(path.join(os.tmpdir(),'arcify-favorite-recovery-'));
 const extension=path.join(scratch,'extension'),profile=path.join(scratch,'profile');
-await cp(path.join(root,'dist'),extension,{recursive:true}); await mkdir(profile);
+await cp(process.env.ARCIFY_FAVORITE_RECOVERY_BUILD||path.join(root,'dist'),extension,{recursive:true}); await mkdir(profile);
 async function inventory(dir,prefix=''){const entries=[];for(const f of await readdir(dir,{withFileTypes:true})){const name=prefix+f.name;if(f.isDirectory())entries.push(...await inventory(path.join(dir,f.name),name+'/'));else entries.push({path:name,sha256:createHash('sha256').update(await readFile(path.join(dir,f.name))).digest('hex')});}return entries.sort((a,b)=>a.path.localeCompare(b.path));}
 await writeFile(path.join(scratch,'build-inventory.json'),JSON.stringify(await inventory(extension),null,2));
-const server=http.createServer((req,res)=>{res.writeHead(200,{'content-type':'text/html'});res.end(`<title>Synthetic Favorite ${req.url}</title><h1>Favorite document</h1><input id="draft" value="Preserve this draft"><script>window.documentToken=crypto.randomUUID()</script>`)});
+let currentTitle;
+const server=http.createServer((req,res)=>{res.writeHead(200,{'content-type':'text/html','cache-control':'no-store'});res.end(`<title>${currentTitle || `Synthetic Favorite ${req.url}`}</title><h1>Favorite document</h1><input id="draft" value="Preserve this draft"><script>window.documentToken=crypto.randomUUID()</script>`)});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
-const report={scenario,scratch,checks:[],limits:['Disposable headless Edge, not Helium or a native sidebar panel.'],disposals:[]};
+const report={scenario,scratch,browserExecutable:process.env.ARCIFY_DISPOSABLE_BROWSER||'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',checks:[],limits:['Disposable headless browser with synthetic pages, not the user profile or a native sidebar panel.'],disposals:[]};
 let browser,id,control;
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function close(){if(!browser)return;const p=browser.process();await browser.close();browser=null;report.disposals.push({pid:p.pid,exitCode:p.exitCode,signalCode:p.signalCode});}
@@ -30,6 +31,20 @@ const page=await browser.newPage();await page.goto(base+'/unique');await pause(7
 const tab=await control.evaluate(async url=>(await chrome.tabs.query({})).find(t=>t.url===url),page.url());
 await req('addTab',{tabId:tab.id});if(scenario==='ambiguous'){const duplicate=await browser.newPage();await duplicate.goto(base+'/unique');}await pause(1000);report.before=await req('get');
 report.hints=await control.evaluate(()=>chrome.storage.local.get('favoriteRestartHints'));console.log('BEFORE',JSON.stringify(report.before),'HINTS',JSON.stringify(report.hints));
+if(scenario==='title-update'){
+// Remove sidebar listeners so UI refreshes cannot mask a missing worker event.
+await control.goto(`chrome-extension://${id}/offscreen.html`);await pause(500);
+currentTitle='Synthetic Calendar next week';
+await page.evaluate(title=>{document.title=title;},currentTitle);
+// Observe the stored hint directly: a Favorite get would reconcile and hide the event bug.
+for(let attempt=0;attempt<40;attempt++){
+report.updatedHints=await control.evaluate(()=>chrome.storage.local.get('favoriteRestartHints'));
+if(report.updatedHints.favoriteRestartHints?.entries.some(h=>h.url===base+'/unique'&&h.title===currentTitle))break;
+await pause(100);
+}
+assert(report.updatedHints.favoriteRestartHints?.entries.some(h=>h.url===base+'/unique'&&h.title===currentTitle),'Title-only change must refresh exact hint before any Favorite read');
+report.checks.push('Title-only event refreshed exact hint without a Favorite read');
+}
 await close();await launch();await pause(3000);report.after=await req('get');console.log('AFTER',JSON.stringify(report.after));
 if(scenario==='undo-repeat'){await close();await launch();await pause(3000);report.afterSecondRestart=await req('get');report.after=report.afterSecondRestart;}
 report.diagnostics=await control.evaluate(async()=>({tabs:await chrome.tabs.query({}),local:await chrome.storage.local.get(['favoriteRestartHints','spaces','spaceTabSnapshot']),session:await chrome.storage.session.get(['favoriteRestartRecovery','favoriteSession'])}));

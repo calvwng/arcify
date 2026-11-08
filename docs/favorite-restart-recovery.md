@@ -29,6 +29,15 @@ windows, duplicate pages, changed titles, missing evidence, and malformed hints
 remain manual. The existing **Attach existing tab** flow is available for them.
 No late new-tab opening is automatically claimed after the startup pass.
 
+Exact bindings refresh their checkpoint when the sampled native cohort changes,
+including a newly created already-complete tab, or when only a page title changes.
+An asynchronous capture is discarded if the native sample changes before writing.
+Unconfirmed inferred associations retain their original evidence and Undo
+placement. Their current URL, title, pin state or window cohort can change during
+the session without promoting ownership, but a later full restart can then leave
+them manual. Confirm the association to establish exact ownership; evidence from
+an inferred association is not silently refreshed into new restart authority.
+
 ## Review and Undo
 
 The sidebar marks a recovered Favorite and keeps visible **Undo** and **Confirm**
@@ -72,7 +81,12 @@ profile is changed by the implementation/test process.
 Run `npm run test:unit`, `npm run build`, and the disposable native recovery
 fixture `node scripts/disposable-favorite-recovery.mjs`. Set
 `ARCIFY_DISPOSABLE_BROWSER` to an already-installed browser executable and
-`ARCIFY_FAVORITE_RECOVERY_CASE` to `undo-repeat`, `confirm`, or `ambiguous`.
+`ARCIFY_FAVORITE_RECOVERY_CASE` to `undo-repeat`, `confirm`, `ambiguous`, or
+`title-update`. The title case removes sidebar listeners before changing only the
+page title, observes the stored checkpoint without a Favorite read, then verifies
+full restart recovery and Undo. `ARCIFY_FAVORITE_RECOVERY_BUILD` can select an
+existing build directory for baseline comparison; that directory is copied, never
+modified.
 It always creates a fresh temporary profile and closes only its own processes. Unit coverage
 includes ambiguity, stale consent, destructive-route guards, V3 projection,
 Space-bookmark precedence, exact Undo placement, failed local/session writes,

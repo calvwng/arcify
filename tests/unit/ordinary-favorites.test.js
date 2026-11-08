@@ -1061,3 +1061,69 @@ for (const delay of ['loading', 'title', 'pending']) test(`one ready Favorite do
     assertGlobal(after, 101); assertGlobal(after, 102);
     assert.deepEqual(effects, []);
 });
+
+
+test('a completed creation refreshes exact Favorite cohort before the checkpoint cache expires', async () => {
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
+    const s = stores({ install: true });
+    await s.favorites.dispatch(req('get'));
+    const previous = local.favoriteRestartHints.entries[0].window;
+    tabs.push({ ...tab(2), id: 3, url: 'https://created.test/', title: 'Created', status: 'complete' });
+    chrome.tabs.onCreated.emit(tab(3));
+    await s.idle();
+    assert.notEqual(local.favoriteRestartHints.entries[0].window, previous);
+    for (const key of Object.keys(session)) delete session[key];
+    tabs.forEach(tab => { tab.id += 100; tab.windowId += 10; });
+    const next = stores(); next.favorites.recovery.wait = async () => {};
+    effects.length = 0;
+    const result = await next.favorites.dispatch(req('get', { windowId: 11 }));
+    assert.equal(result.favorites[0].tabId, 101); assert(result.favorites[0].recovery);
+    assert.deepEqual(next.favorites.state.bindings, []); assert.deepEqual(effects, []);
+});
+
+test('checkpoint cache includes the sampled native cohort without relying on events', async () => {
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
+    const s = stores(); await s.favorites.dispatch(req('get'));
+    const previous = local.favoriteRestartHints.entries[0].window;
+    tabs.push({ ...tab(2), id: 3, url: 'https://created.test/', title: 'Created', status: 'complete' });
+    await s.favorites.recovery.checkpoint(clone(tabs));
+    assert.notEqual(local.favoriteRestartHints.entries[0].window, previous);
+});
+
+test('title-only update refreshes exact Favorite hint without another sidebar read', async () => {
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
+    const s = stores({ install: true }); await s.favorites.dispatch(req('get'));
+    tab(1).title = 'Calendar next week';
+    chrome.tabs.onUpdated.emit(1, { title: tab(1).title }, tab(1));
+    // Await the event's already-enqueued operation; do not enqueue a new read.
+    await s.spaces.chain;
+    assert.equal(local.favoriteRestartHints.entries[0].title, 'Calendar next week');
+    for (const key of Object.keys(session)) delete session[key];
+    tabs.forEach(tab => { tab.id += 100; tab.windowId += 10; });
+    const next = stores(); next.favorites.recovery.wait = async () => {};
+    effects.length = 0;
+    const result = await next.favorites.dispatch(req('get', { windowId: 11 }));
+    assert.equal(result.favorites[0].tabId, 101); assert(result.favorites[0].recovery);
+    assert.deepEqual(next.favorites.state.bindings, []); assert.deepEqual(effects, []);
+});
+
+
+test('checkpoint rejects a changed cohort during asynchronous eligibility reads', async () => {
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
+    const s = stores(); await s.favorites.dispatch(req('get'));
+    const previous = clone(local.favoriteRestartHints);
+    s.favorites.recovery.checkpointStamp = null;
+    let changed = false;
+    hooks.localGet = key => {
+        if (key === 'pinnedTabStatesById' && !changed) {
+            changed = true;
+            tabs.push({ ...tab(2), id: 3, url: 'https://racing.test/', title: 'Racing', status: 'complete' });
+        }
+    };
+    await s.favorites.recovery.checkpoint(clone(tabs));
+    assert(changed); assert.deepEqual(local.favoriteRestartHints, previous);
+    assert.equal(s.favorites.recovery.checkpointStamp, null, 'raced evidence is not cached');
+    hooks.localGet = undefined;
+    await s.favorites.recovery.checkpoint(clone(tabs));
+    assert.notEqual(local.favoriteRestartHints.entries[0].window, previous.entries[0].window);
+});

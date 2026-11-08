@@ -887,6 +887,7 @@ export class FavoriteStore {
     install() {
         const handle = operation => this.run(operation).catch(error => console.warn('Favorites tracking deferred:', error));
         // Invalidate synchronously, before queued reconciliation can await IO.
+        chrome.tabs.onCreated?.addListener(tab => this.recovery.invalidate(tab.id));
         chrome.tabs.onRemoved.addListener(tabId => (this.attachment.invalidate(tabId), this.recovery.invalidate(tabId)));
         chrome.tabs.onDetached?.addListener(tabId => (this.attachment.invalidate(tabId), this.recovery.invalidate(tabId)));
         chrome.tabs.onAttached?.addListener(tabId => (this.attachment.invalidate(tabId), this.recovery.invalidate(tabId)));
@@ -906,7 +907,7 @@ export class FavoriteStore {
             handle(() => this.reconcile());
         });
         chrome.tabs.onUpdated.addListener((tabId, change) => {
-            if (change.pinned === undefined && change.favIconUrl === undefined && change.status !== 'complete') return;
+            if (change.pinned === undefined && change.favIconUrl === undefined && change.title === undefined && change.status !== 'complete') return;
             handle(async () => {
                 const tabs = await this.reconcile();
                 const binding = this.state.bindings.find(binding => binding.tabId === this.exactId(tabId));
