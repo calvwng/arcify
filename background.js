@@ -334,7 +334,7 @@ async function runAutoArchiveCheck() {
                 const currentProtectedIds = new Set(spaceStore.spaces.flatMap(space => space.spaceBookmarks));
                 if (!spaceId || current.windowId !== tab.windowId || current.incognito || current.active || current.audible
                     || isStartupLauncherTab(current) || spaceStore.isGlobalTab(current) || spaceStore.isTransientTab(current)
-                    || isProtectedFavorite(current, currentProtectedIds, await Utils.getPinnedTabStates(), protectedUrlKeys)) return;
+                    || isProtectedFavorite(current, currentProtectedIds, await Utils.getPinnedTabStates(), protectedUrlKeys, favoriteStore)) return;
                 const space = spaceStore.spaces.find(space => space.id === spaceId);
                 await spaceStore.archiveStore.archiveUnlocked({ tabId: current.id, windowId: current.windowId,
                     spaceId, bookmarkFolderId: space.bookmarkFolderId, url: current.url }, { automatic: true, protectedUrlKeys });

@@ -13,23 +13,43 @@ const bytes = value => new TextEncoder().encode(JSON.stringify(value)).byteLengt
 const identity = item => JSON.stringify([item.id, item.url, item.sourceBookmarkId]);
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 4096;
 const stale = () => { throw Object.assign(new Error('The recovered page changed. Refresh Favorites before reviewing it.'), { code: 'STALE_RECOVERY' }); };
-const blocked = () => { throw Object.assign(new Error('Confirm this recovered tab or Undo recovery before changing or closing it.'), { code: 'RECOVERY_REVIEW_REQUIRED' }); };
+const blocked = () => { throw Object.assign(new Error('Use Undo recovery in the Favorite menu before changing or closing this automatically reconnected tab.'), { code: 'RECOVERY_REVIEW_REQUIRED' }); };
 const signature = async tabs => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(
     tabs.filter(tab => isFavoriteUrl(tab.url) && !tab.incognito).map(tab => [tab.url, !!tab.pinned])
         .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))))))).map(byte => byte.toString(16).padStart(2, '0')).join('');
 const stable = tab => tab && isFavoriteUrl(tab.url) && text(tab.title) && !tab.incognito && !tab.pendingUrl
     && tab.status !== 'loading' && !hasNativeSplit(tab) && !(tab.groupId >= 0) && !isStartupLauncherTab(tab);
 const shape = tab => JSON.stringify([tab.id, tab.windowId, tab.url, tab.title, !!tab.pinned, tab.pendingUrl, tab.status, tab.groupId, tab.splitViewId]);
+const validObservation = hint => hint && isFavoriteUrl(hint.url) && text(hint.title) && typeof hint.pinned === 'boolean' && typeof hint.window === 'string' && /^[a-f0-9]{64}$/.test(hint.window);
+const validProvenance = hint => hint.provenance === undefined && hint.origin === undefined && hint.recoveredAt === undefined
+    || hint.provenance === 'inferred' && validObservation(hint.origin) && Number.isSafeInteger(hint.recoveredAt) && hint.recoveredAt >= 0;
 const validHint = hint => hint && text(hint.favoriteId) && text(hint.identity) && isFavoriteUrl(hint.url)
-    && text(hint.title) && (!hint.placement || typeof hint.placement.spaceId === 'string'
+    && validProvenance(hint) && text(hint.title) && (!hint.placement || typeof hint.placement.spaceId === 'string'
         && typeof hint.placement.bookmarkFolderId === 'string' && Array.isArray(hint.placement.before) && hint.placement.before.length <= 3 && Array.isArray(hint.placement.after) && hint.placement.after.length <= 3
         && [...hint.placement.before, ...hint.placement.after].every(page => page && isFavoriteUrl(page.url) && typeof page.title === 'string')) && typeof hint.pinned === 'boolean' && typeof hint.window === 'string' && /^[a-f0-9]{64}$/.test(hint.window);
 
 // Inference is deliberately NOT a favoriteSession binding or continuity proof.
-// Old/V3 readers keep their exact schemas. Every inferred tab stays guarded until
-// an explicit confirmation promotes it through the existing attachment transaction.
+// Old/V3 readers keep their exact schemas. Fresh observations never promote an
+// inference to exact identity. Its original evidence and Undo stay independent.
 export class FavoriteRestartRecovery {
-    constructor(store) { this.store = store; this.entries = []; this.hints = []; this.ready = false; this.active = false; this.revision = 0; this.dirty = false; this.wait = ms => new Promise(resolve => setTimeout(resolve, ms)); this.checkpointStamp = null; }
+    constructor(store) { this.store = store; this.entries = []; this.hints = []; this.ready = false; this.active = false; this.revision = 0; this.dirty = false; this.wait = ms => new Promise(resolve => setTimeout(resolve, ms)); this.checkpointStamp = null; this.suppressed = []; this.protectedTabs = []; }
+    inferredHint(hint) {
+        if (hint.provenance === 'inferred') return hint;
+        const { url, title, pinned, window } = hint;
+        return { ...hint, provenance: 'inferred', recoveredAt: this.store.now(), origin: { url, title, pinned, window } };
+    }
+    async saveHints(hints, suppressed = this.suppressed) {
+        // V2 observations are not restart authority for older inference readers.
+        await chrome.storage.local.set({ [RESTART_HINTS_KEY]: { version: 2, phase: 'committed', capturedAt: this.store.now(), entries: copy(hints), suppressed: copy(suppressed) } });
+        this.hints = hints; this.suppressed = suppressed; this.checkpointStamp = null;
+    }
+    protects(tab) {
+        return this.entries.some(entry => entry.tabId === tab.id && entry.windowId === tab.windowId && !tab.incognito)
+            || this.protectedTabs.some(entry => entry.tabId === tab.id && entry.windowId === tab.windowId && !tab.incognito);
+    }
+    async saveEntries(entries) {
+        await chrome.storage.session.set({ [RESTART_SESSION_KEY]: { version: 1, entries: copy(entries), protectedTabs: copy(this.protectedTabs) } });
+    }
     invalidate(tabId) {
         this.revision++;
         for (const entry of this.entries) if (entry.tabId === tabId) { entry.token = crypto.randomUUID(); this.dirty = true; }
@@ -76,18 +96,28 @@ export class FavoriteRestartRecovery {
         const local = await chrome.storage.local.get(RESTART_HINTS_KEY);
         const saved = (await chrome.storage.session.get(RESTART_SESSION_KEY))[RESTART_SESSION_KEY];
         report.capture = saved == null;
+        this.protectedTabs = [];
+        if (saved?.protectedTabs !== undefined) {
+            if (!Array.isArray(saved.protectedTabs) || saved.protectedTabs.length > MAX_HINTS
+                || !saved.protectedTabs.every(entry => entry && isWindowId(entry.tabId) && isWindowId(entry.windowId))) {
+                throw new Error('Favorite recovery protection could not be read. No tabs were changed.');
+            }
+            this.protectedTabs = copy(saved.protectedTabs);
+        }
         const journal = local[RESTART_HINTS_KEY];
         count(report, 'savedFavorites', this.store.items.length);
         count(report, 'hintsSeen', Array.isArray(journal?.entries) ? journal.entries.length : 0);
-        this.hints = journal?.version === 1 && journal.phase === 'committed' && Array.isArray(journal.entries)
+        const validJournalVersion = journal?.version === 1 || journal?.version === 2 && Array.isArray(journal.suppressed) && journal.suppressed.length <= MAX_HINTS && journal.suppressed.every(text);
+        this.suppressed = journal?.version === 2 && validJournalVersion ? copy(journal.suppressed) : [];
+        this.hints = validJournalVersion && journal.phase === 'committed' && Array.isArray(journal.entries)
             && journal.entries.length <= MAX_HINTS && journal.entries.every(hint => validHint(hint) && bytes(hint) <= MAX_HINT_BYTES)
             && Number.isFinite(journal.capturedAt) && journal.capturedAt <= this.store.now()
             && this.store.now() - journal.capturedAt < 30 * 86400000 ? copy(journal.entries) : [];
         if (!journal) count(report, 'hintJournalMissing');
         else if (Number.isFinite(journal.capturedAt) && this.store.now() - journal.capturedAt >= 30 * 86400000) count(report, 'hintJournalExpired');
-        else if (!this.hints.length && !(journal?.version === 1 && journal.phase === 'committed' && Array.isArray(journal.entries) && !journal.entries.length)) count(report, 'hintJournalInvalid');
+        else if (!this.hints.length && !(validJournalVersion && journal.phase === 'committed' && Array.isArray(journal.entries) && !journal.entries.length)) count(report, 'hintJournalInvalid');
         const beforeIdentityFilter = this.hints.length;
-        this.hints = this.hints.filter(hint => this.store.items.some(item => identity(item) === hint.identity));
+        this.hints = this.hints.filter(hint => !this.suppressed.includes(hint.favoriteId) && this.store.items.some(item => identity(item) === hint.identity));
         count(report, 'hintIdentityChanged', beforeIdentityFilter - this.hints.length);
         count(report, 'hintsValid', this.hints.length);
         const known = [...this.store.state.bindings, ...this.store.state.attempts];
@@ -137,7 +167,7 @@ export class FavoriteRestartRecovery {
                 if (tab && tab.windowId === entry.windowId && !tab.incognito
                     && available(entry.favoriteId, entry.tabId, entry.windowId)
                     && identity(this.store.item(entry.favoriteId)) === entry.hint.identity
-                    && !isTransientTab(this.store.spaceStore, tab) && !isTransientWindow(this.store.spaceStore, tab.windowId)) entries.push(entry);
+                    && !isTransientTab(this.store.spaceStore, tab) && !isTransientWindow(this.store.spaceStore, tab.windowId)) entries.push({ ...entry, hint: this.inferredHint(entry.hint) });
             }
         } else {
             // Require exact current-page URL, title, pin bit AND the full window
@@ -161,7 +191,7 @@ export class FavoriteRestartRecovery {
                 if (!reason && !!tab.pinned !== hint.pinned) reason = 'pinChanged';
                 if (!reason && await signature(tabs.filter(t => t.windowId === tab.windowId)) !== hint.window) reason = 'windowCohortChanged';
                 if (reason) { count(report, reason); continue; }
-                entries.push({ favoriteId: hint.favoriteId, tabId: tab.id, windowId: tab.windowId, token: crypto.randomUUID(), hint });
+                entries.push({ favoriteId: hint.favoriteId, tabId: tab.id, windowId: tab.windowId, token: crypto.randomUUID(), hint: this.inferredHint(hint) });
             }
             // Recheck the entire native sample after every asynchronous eligibility
             // read. A race or partial startup leaves the uncertain case manual.
@@ -169,7 +199,7 @@ export class FavoriteRestartRecovery {
             const fresh = await this.store.queryAttachmentTabs(undefined);
             if (revision !== this.revision || JSON.stringify(tabs.map(shape).sort()) !== JSON.stringify(fresh.map(shape).sort())) { count(report, 'nativeSampleChanged'); entries = []; }
         }
-        await chrome.storage.session.set({ [RESTART_SESSION_KEY]: { version: 1, entries: copy(entries) } });
+        await this.saveEntries(entries);
         this.entries = entries; this.dirty = false; this.ready = true;
     }
     recoverySource(entry) {
@@ -229,14 +259,18 @@ export class FavoriteRestartRecovery {
         count(this.startupDiagnostic, 'hintOversized', entries.filter(entry => bytes(entry.hint) > MAX_HINT_BYTES).length);
         entries = entries.filter(entry => entry.source !== undefined && bytes(entry.hint) <= MAX_HINT_BYTES).slice(0, MAX_HINTS);
         if (entries.length) {
-            const hints = [...entries.filter(entry => entry.phase !== 'undoing').map(entry => entry.hint),
-                ...this.hints.filter(hint => this.store.state.bindings.some(binding => binding.favoriteId === hint.favoriteId)
-                    && !entries.some(entry => entry.favoriteId === hint.favoriteId))];
-            await chrome.storage.local.set({ [RESTART_HINTS_KEY]: { version: 1, phase: 'committed', capturedAt: this.store.now(), entries: copy(hints) } });
-            this.hints = hints; this.checkpointStamp = null;
+            // Local observations govern the next restart. Never resurrect rejected
+            // evidence from an older worker/session entry. Placement is independent.
+            const hints = this.hints.flatMap(hint => {
+                const entry = entries.find(entry => entry.favoriteId === hint.favoriteId && entry.phase !== 'undoing');
+                if (this.suppressed.includes(hint.favoriteId)) return [];
+                if (entry) return [{ ...this.inferredHint(hint), ...(entry.hint.placement ? { placement: entry.hint.placement } : {}) }];
+                return this.store.state.bindings.some(binding => binding.favoriteId === hint.favoriteId) ? [hint] : [];
+            });
+            await this.saveHints(hints);
         }
         // Persist rollback placement before inference can exclude any membership.
-        await chrome.storage.session.set({ [RESTART_SESSION_KEY]: { version: 1, entries: copy(entries) } });
+        await this.saveEntries(entries);
         this.entries = entries; this.active = true;
         count(this.startupDiagnostic, 'recovered', entries.filter(entry => entry.phase !== 'undoing').length);
         if (this.startupDiagnostic) await recordRestartDiagnostic('startup', this.startupDiagnostic);
@@ -248,13 +282,13 @@ export class FavoriteRestartRecovery {
     async finishUndo() {
         if (!this.entries.some(entry => entry.phase === 'undoing')) return;
         const entries = this.entries.filter(entry => entry.phase !== 'undoing');
-        await chrome.storage.session.set({ [RESTART_SESSION_KEY]: { version: 1, entries: copy(entries) } });
+        await this.saveEntries(entries);
         this.entries = entries;
     }
     async beforeSave() {
         if (!this.ready || !this.hints.length) return;
         // Invalidate stale hints before release/close/remove can be acknowledged.
-        await chrome.storage.local.set({ [RESTART_HINTS_KEY]: { version: 1, phase: 'invalid' } });
+        await chrome.storage.local.set({ [RESTART_HINTS_KEY]: { version: 2, phase: 'invalid', suppressed: copy(this.suppressed) } });
         this.checkpointStamp = null;
     }
     async checkpoint(tabs) {
@@ -273,20 +307,31 @@ export class FavoriteRestartRecovery {
         if (stamp === this.checkpointStamp && this.store.now() - this.checkpointAt < 60000) return;
         report.capture = this.store.state.bindings.length > 0 || this.entries.length > 0 || this.hints.length > 0;
         count(report, 'exactBindings', this.store.state.bindings.length);
-        const revision = this.revision, hints = this.entries.filter(entry => entry.phase !== 'undoing').map(entry => entry.hint);
-        count(report, 'inferredHintsRetained', hints.length);
-        for (const binding of this.store.state.bindings) {
+        const revision = this.revision, hints = [];
+        // Durable negative intent may outlive a session acknowledgement. Only an
+        // explicit exact attachment can clear it, never another inferred sample.
+        const suppressed = this.suppressed.filter(id => this.entries.some(entry => entry.favoriteId === id)
+            && !this.store.state.bindings.some(binding => binding.favoriteId === id));
+        const observed = [...this.store.state.bindings, ...this.entries.filter(entry => entry.phase !== 'undoing' && !suppressed.includes(entry.favoriteId))];
+        for (const binding of observed) {
+            const inferred = Boolean(binding.hint);
             const tab = tabs.find(tab => tab.id === binding.tabId && tab.windowId === binding.windowId);
             const item = this.store.items.find(item => item.id === binding.favoriteId);
             let reason = !item ? 'missingFavorite' : await this.eligibilityRejection(tab);
-            if (!reason && binding.mode !== 'ordinary' && !tab.pinned) reason = 'pinChanged';
+            if (!reason && !inferred && binding.mode !== 'ordinary' && !tab.pinned) reason = 'pinChanged';
             if (!reason && tabs.some(other => other.windowId === tab.windowId && (other.pendingUrl && other.pendingUrl !== other.url))) reason = 'windowNavigating';
             if (!reason && this.store.state.attempts.some(entry => entry.tabId === tab.id)) reason = 'attachmentPending';
             if (!reason && tabs.filter(other => other.url === tab.url && !other.incognito).length !== 1) reason = 'duplicateNativePage';
             if (!reason && this.store.items.filter(other => other.url === item.url).length !== 1) reason = 'duplicateSavedFavorite';
             if (reason) { count(report, reason); continue; }
-            hints.push({ favoriteId: item.id, identity: identity(item), url: tab.url, title: tab.title, pinned: !!tab.pinned,
-                window: await signature(tabs.filter(other => other.windowId === tab.windowId)) });
+            const observation = { favoriteId: item.id, identity: identity(item), url: tab.url, title: tab.title, pinned: !!tab.pinned,
+                window: await signature(tabs.filter(other => other.windowId === tab.windowId)) };
+            if (inferred) {
+                const { provenance, recoveredAt, origin, placement } = this.inferredHint(binding.hint);
+                Object.assign(observation, { provenance, recoveredAt, origin, ...(placement ? { placement } : {}) });
+                count(report, 'inferredHintsRetained');
+            }
+            hints.push(observation);
         }
         const fresh = await this.store.queryAttachmentTabs(undefined);
         if (revision !== this.revision || sample !== JSON.stringify(fresh.map(shape).sort())) { report.status = 'skipped'; count(report, 'nativeSampleChanged'); return; }
@@ -295,11 +340,33 @@ export class FavoriteRestartRecovery {
         const bounded = hints.filter(hint => bytes(hint) <= MAX_HINT_BYTES).slice(0, MAX_HINTS);
         hints.splice(0, hints.length, ...bounded);
         if (!hints.length && !this.hints.length) { report.status = 'skipped'; return; }
-        await chrome.storage.local.set({ [RESTART_HINTS_KEY]: { version: 1, phase: 'committed', capturedAt: this.store.now(), entries: copy(hints) } });
+        await this.saveHints(hints, suppressed);
+        // Native events can arrive while storage commits. Do not retain raced
+        // observations as eligibility for a future full browser restart.
+        const committed = await this.store.queryAttachmentTabs(undefined);
+        if (revision !== this.revision || sample !== JSON.stringify(committed.map(shape).sort())) {
+            await chrome.storage.local.set({ [RESTART_HINTS_KEY]: { version: 2, phase: 'invalid', suppressed: copy(suppressed) } });
+            this.hints = []; report.status = 'skipped'; count(report, 'nativeSampleChanged'); return;
+        }
         count(report, 'hintsWritten', hints.length);
-        this.hints = hints; this.checkpointStamp = stamp; this.checkpointAt = this.store.now();
+        this.checkpointStamp = stamp; this.checkpointAt = this.store.now();
     }
     async reconcile(tabs) {
+        // Late competitors defeat uniqueness. Revoke through the same durable,
+        // non-native Undo transaction, preserving the page and prior placement.
+        if (this.active && this.store.spaceStore.initialized) {
+            for (const entry of [...this.entries]) {
+                if (entry.phase === 'undoing') continue;
+                const tab = tabs.get(entry.tabId), item = this.store.items.find(item => item.id === entry.favoriteId);
+                if (tab && tab.windowId === entry.windowId && !tab.incognito && item
+                    && ([...tabs.values()].filter(other => other.url === tab.url && !other.incognito).length > 1
+                        || this.store.items.filter(other => other.url === item.url).length > 1)) {
+                    await this.review({ favoriteId: entry.favoriteId, windowId: entry.windowId, tabId: entry.tabId, token: entry.token }, false, { automatic: true });
+                }
+            }
+        }
+        const protectedTabs = this.protectedTabs.filter(entry => tabs.get(entry.tabId)?.windowId === entry.windowId && !tabs.get(entry.tabId)?.incognito);
+        if (protectedTabs.length !== this.protectedTabs.length) { this.protectedTabs = protectedTabs; this.dirty = true; }
         const entries = this.entries.filter(entry => {
             const tab = tabs.get(entry.tabId);
             return tab && tab.windowId === entry.windowId && !tab.incognito
@@ -309,11 +376,11 @@ export class FavoriteRestartRecovery {
                     || e.favoriteId === entry.favoriteId && e.windowId === entry.windowId);
         });
         if (this.dirty || entries.length !== this.entries.length) {
-            await chrome.storage.session.set({ [RESTART_SESSION_KEY]: { version: 1, entries: copy(entries) } });
+            await this.saveEntries(entries);
             this.entries = entries; this.dirty = false;
         }
     }
-    async review(message, confirm) {
+    async review(message, confirm, { automatic = false } = {}) {
         const entry = this.forFavorite(message.favoriteId, message.windowId);
         if (!entry || entry.tabId !== message.tabId || entry.token !== message.token) stale();
         const tab = await this.store.currentTab(entry.tabId, entry.windowId);
@@ -332,18 +399,21 @@ export class FavoriteRestartRecovery {
             } catch (error) { this.entries.push(entry); throw error; }
         } else {
             const hints = this.hints.filter(hint => hint.favoriteId !== entry.favoriteId);
-            await chrome.storage.local.set({ [RESTART_HINTS_KEY]: { version: 1, phase: 'committed', capturedAt: this.store.now(), entries: copy(hints) } });
-            this.hints = hints;
+            const suppressed = [...new Set([...this.suppressed.filter(id => this.entries.some(entry => entry.favoriteId === id)), entry.favoriteId])];
+            await this.saveHints(hints, suppressed);
         }
+        // Automatic refusal is not consent to native group/cleanup changes.
+        // Keep a session-only safety guard after restoring ordinary Today display.
+        if (automatic && !this.protectedTabs.some(item => item.tabId === entry.tabId)) this.protectedTabs.push({ tabId: entry.tabId, windowId: entry.windowId });
         const remaining = confirm ? this.entries.filter(e => e !== entry)
             : this.entries.map(e => e === entry ? { ...e, phase: 'undoing' } : e);
-        try { await chrome.storage.session.set({ [RESTART_SESSION_KEY]: { version: 1, entries: copy(remaining) } }); }
+        try { await this.saveEntries(remaining); }
         catch (error) { this.store.initialized = false; throw error; }
         this.entries = remaining;
         if (!confirm) this.store.restoreRecoverySource(tab.id, entry.source);
         this.store.spaceStore.track(tab);
         try {
-            await this.store.spaceStore.persist();
+            await this.store.spaceStore.persist({ skipGroupSync: automatic });
             await this.finishUndo();
         } catch (error) {
             this.store.initialized = false; this.store.spaceStore.initialized = false;

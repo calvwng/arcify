@@ -1,13 +1,15 @@
 # Conservative Favorite recovery after restart
 
 Arcify can reconnect a uniquely matching restored page without opening, navigating,
-pinning, focusing, closing, or moving it. This is a clearly labeled **inferred
-association**, not proof of browser identity. Existing exact session/witness
+pinning, focusing, closing, or moving it. The Favorite quietly appears Open. It
+retains an **inferred association**, not proof of browser identity. Existing exact session/witness
 continuity remains unchanged.
 
 ## Eligibility
 
-A recent hint must have been captured while Arcify owned the exact Favorite tab.
+An initial hint must have been captured while Arcify owned the exact Favorite
+tab. Later observations may refresh an existing inference, retaining its original
+evidence and inferred provenance without establishing exact ownership.
 The first upgrade cannot infer a history that earlier builds never recorded.
 Hints are local only, expire after 30 days, and do not change saved Favorite URLs,
 titles, source bookmarks, manifests, permissions, or the V3 bridge schema.
@@ -32,24 +34,31 @@ No late new-tab opening is automatically claimed after the startup pass.
 Exact bindings refresh their checkpoint when the sampled native cohort changes,
 including a newly created already-complete tab, or when only a page title changes.
 An asynchronous capture is discarded if the native sample changes before writing.
-Unconfirmed inferred associations retain their original evidence and Undo
-placement. Their current URL, title, pin state or window cohort can change during
-the session without promoting ownership, but a later full restart can then leave
-them manual. Confirm the association to establish exact ownership; evidence from
-an inferred association is not silently refreshed into new restart authority.
+Inferred associations refresh their current URL, title, pin state and full window
+cohort only after the same eligibility, uniqueness, fresh-sample and revision checks.
+They retain their first recovery time, original evidence, inferred provenance and
+independent Undo placement. A later restart must again pass every matching gate;
+refreshing observations never creates an exact binding or a V3 continuity receipt.
+Ineligible observations remove restart eligibility while keeping same-session Undo.
+Worker activation never republishes stale session observations over the local journal.
+A native change during checkpoint persistence invalidates the committed journal.
 
-## Review and Undo
+## Quiet recovery and Undo
 
-The sidebar marks a recovered Favorite and keeps visible **Undo** and **Confirm**
-controls, including in compact layout. Opening it focuses the existing page.
-Moving, closing, releasing, re-adopting or removing an inferred association is
-blocked until confirmation or Undo. The same backend guards apply to stale UI
-requests. Space cleanup and automatic group projection leave its page alone.
+There is no persistent review card or Confirm prompt. A recovered Favorite looks
+Open and activates the existing page. Its tooltip explains automatic reconnection;
+right-click or Shift+F10 offers **Undo recovery**, including in compact layout.
+Moving, closing, releasing, re-adopting or removing an inferred association remains
+guarded. Undo first to return it to Today, then perform the intended explicit action.
+Stale UI requests use the same backend guards. No automatic path calls Confirm.
+The legacy explicit Confirm transaction remains compatible with an already-open
+older sidebar, but is not surfaced or required by the quiet UI.
 
-**Confirm** uses the existing explicit attachment transaction, including its
-provisional fence and rollback. It preserves the current page and native pin
-state. Tokens are invalidated by relevant native changes, and the exact document
-sample/revision is checked before fresh attachment consent is used.
+A late duplicate live URL or saved Favorite revokes the inference through durable
+rollback, preserving both pages. It does not retry the rejected association. A
+session-only safety record keeps the formerly inferred native tab protected from
+automatic grouping and cleanup after rollback, including across worker restarts.
+These numeric safety guards never cross a full browser restart or attach a page.
 
 **Undo** removes only the inferred association, keeps the saved Favorite and page,
 and restores the prior normal Space and relative order. Its session journal
@@ -62,17 +71,19 @@ not overwritten, and a Space bookmark is never stolen.
 ## Storage and compatibility
 
 - `favoriteRestartHints` in local storage holds bounded recent evidence, a compact
-  window fingerprint, and optional stable rollback placement.
+  window fingerprint, optional stable rollback placement, and explicit inferred
+  provenance plus original evidence. V2 observations are ignored by V1 readers.
 - `favoriteRestartRecovery` in session storage holds inferred tab associations,
-  review tokens, and the current-session Undo receipt.
+  Undo tokens, the current-session Undo receipt, and revoked-match safety guards.
 - Neither key is `favoriteSession`, a continuity receipt, or a saved Favorite.
   Inferred associations are never exported as exact Favorite bindings to V3.
 - Hint invalidation precedes acknowledged ownership removal. Failed writes do not
-  authorize native tab mutation. Interrupted Undo remains journaled until Space
+  authorize native tab mutation. Durable suppression prevents a failed Undo session
+  acknowledgement from recreating restart hints. Interrupted Undo stays journaled until Space
   persistence succeeds.
 
 Older builds ignore these auxiliary keys. They cannot maintain inferred recovery
-or its safeguards; finish review before downgrading. Saved link and exact
+or its safeguards; Undo inferred associations before downgrading. Saved link and exact
 ownership schemas remain compatible. No installed extension or normal browser
 profile is changed by the implementation/test process.
 
@@ -81,7 +92,7 @@ profile is changed by the implementation/test process.
 Run `npm run test:unit`, `npm run build`, and the disposable native recovery
 fixture `node scripts/disposable-favorite-recovery.mjs`. Set
 `ARCIFY_DISPOSABLE_BROWSER` to an already-installed browser executable and
-`ARCIFY_FAVORITE_RECOVERY_CASE` to `undo-repeat`, `confirm`, `ambiguous`, or
+`ARCIFY_FAVORITE_RECOVERY_CASE` to `quiet-repeat`, `undo-repeat`, `confirm`, `ambiguous`, or
 `title-update`, or `diagnostic-title-change`. The title case removes sidebar listeners before changing only the
 page title, observes the stored checkpoint without a Favorite read, then verifies
 full restart recovery and Undo. The diagnostic case changes a synthetic page title only after closing the disposable browser, then verifies fail-closed recovery and the packaged Settings report. `ARCIFY_FAVORITE_RECOVERY_BUILD` can select an
@@ -91,7 +102,9 @@ It always creates a fresh temporary profile and closes only its own processes. U
 includes ambiguity, stale consent, destructive-route guards, V3 projection,
 Space-bookmark precedence, exact Undo placement, failed local/session writes,
 worker restart, and a second full browser restart. Native acceptance evidence is
-recorded separately and is not implied by mock tests. Physical Helium restart,
+recorded separately and is not implied by mock tests. The quiet-repeat case changes
+the inferred page and window cohort, performs two more full restarts, then uses
+menu Undo without Confirm and verifies the same live document, draft and history. Physical Helium restart,
 mixed-profile behavior and installed-build acceptance remain separate checks.
 
 
@@ -127,7 +140,8 @@ page is loading or another page in its window is navigating, and a tab disappear
 can make its prior binding ineligible. These paths are reproduced by synthetic unit
 tests, not established as the cause of any particular Helium session. This diagnostic
 change does not alter that policy, the bounded settling interval, matching safeguards,
-review/Undo behavior, or the rule against claiming arbitrary late-created tabs.
+the rule against claiming arbitrary late-created tabs. Quiet recovery keeps
+inferred provenance and Undo while refreshing eligible observations as described above.
 
 Identical skipped-checkpoint status/counters are not saved again just to advance the timestamp.
 Their timestamp remains the first observation of that unchanged summary; a changed

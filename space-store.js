@@ -651,7 +651,7 @@ export class SpaceStore {
         if (transientChanged()) return retry();
         const pendingLayoutWindows=pendingLayoutWindowIds(this,[...tabs.values()],await explicitTodayEpochs(this));
         try { if (!skipGroupSync) await syncSpaceGroups(this.spaces, this.active, [...tabs.values()].filter(tab => this.isGlobalTab(tab)).map(tab => tab.id), {
-            isExcludedTab: tab => this.isTransientTab(tab) || Boolean(this.favoriteStore?.recovery?.entry(tab)), isExcludedWindow: id => this.isTransientWindow(id),
+            isExcludedTab: tab => this.isTransientTab(tab) || Boolean(this.favoriteStore?.recovery?.protects(tab)), isExcludedWindow: id => this.isTransientWindow(id),
             isProjectionDeferredWindow: id => pendingLayoutWindows.has(id),
             observeTab: tab => this.observeTab(tab), flushObserved: () => this.transientWindows?.flushObservedUnlocked()
         }); }
@@ -829,7 +829,7 @@ export class SpaceStore {
         }
         const legacyBindings = temporaryOnly ? await Utils.getPinnedTabStates() : {};
         const protectedIds = new Set(temporaryOnly ? space.spaceBookmarks : []), closed = [];
-        const isProtected = tab => isProtectedFavorite(tab, protectedIds, legacyBindings, protectedUrls)
+        const isProtected = tab => isProtectedFavorite(tab, protectedIds, legacyBindings, protectedUrls, this.favoriteStore)
             || Boolean(tab.pendingUrl && protectedUrls.has(Utils.getPinnedUrlKey(tab.pendingUrl)));
         for (const tab of await this.queryTabs({})) {
             if (windowId !== undefined && tab.windowId !== windowId || tab.pinned || tab.incognito || isStartupLauncherTab(tab)

@@ -8,7 +8,7 @@ import http from 'node:http';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 const root=path.resolve(import.meta.dirname,'..');
-const scenario=process.env.ARCIFY_FAVORITE_RECOVERY_CASE||'undo';assert(['undo','confirm','ambiguous','undo-repeat','title-update','diagnostic-title-change'].includes(scenario));
+const scenario=process.env.ARCIFY_FAVORITE_RECOVERY_CASE||'undo';assert(['undo','confirm','ambiguous','undo-repeat','title-update','diagnostic-title-change','quiet-repeat'].includes(scenario));
 const scratch=await mkdtemp(path.join(os.tmpdir(),'arcify-favorite-recovery-'));
 const extension=path.join(scratch,'extension'),profile=path.join(scratch,'profile');
 await cp(process.env.ARCIFY_FAVORITE_RECOVERY_BUILD||path.join(root,'dist'),extension,{recursive:true}); await mkdir(profile);
@@ -18,7 +18,7 @@ let currentTitle;
 const server=http.createServer((req,res)=>{res.writeHead(200,{'content-type':'text/html','cache-control':'no-store'});res.end(`<title>${currentTitle || `Synthetic Favorite ${req.url}`}</title><h1>Favorite document</h1><input id="draft" value="Preserve this draft"><script>window.documentToken=crypto.randomUUID()</script>`)});
 await new Promise(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${server.address().port}`;
 const report={scenario,scratch,browserExecutable:process.env.ARCIFY_DISPOSABLE_BROWSER||'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',checks:[],limits:['Disposable headless browser with synthetic pages, not the user profile or a native sidebar panel.'],disposals:[]};
-let browser,id,control;
+let browser,id,control,liveUrl=base+'/unique';
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function close(){if(!browser)return;const p=browser.process();await browser.close();browser=null;report.disposals.push({pid:p.pid,exitCode:p.exitCode,signalCode:p.signalCode});}
 async function launch(){browser=await puppeteer.launch({executablePath:process.env.ARCIFY_DISPOSABLE_BROWSER||'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',headless:true,protocolTimeout:60000,userDataDir:profile,waitForInitialPage:false,ignoreDefaultArgs:['--disable-extensions','about:blank'],args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--restore-last-session','--no-first-run']});
@@ -47,6 +47,20 @@ report.checks.push('Title-only event refreshed exact hint without a Favorite rea
 }
 if(scenario==='diagnostic-title-change')currentTitle='Synthetic changed after restart';
 await close();await launch();await pause(3000);report.after=await req('get');console.log('AFTER',JSON.stringify(report.after));
+if(scenario==='quiet-repeat'){
+const initiallyRecovered=report.after.favorites.find(r=>r.url===base+'/unique');assert(initiallyRecovered?.recovery?.token);
+const initialHints=await control.evaluate(()=>chrome.storage.local.get('favoriteRestartHints'));
+report.originalEvidence=initialHints.favoriteRestartHints.entries[0].origin;
+currentTitle='Synthetic refreshed Favorite';liveUrl=base+'/updated';
+const recoveredPage=(await browser.pages()).find(p=>p.url()===base+'/unique');await recoveredPage.goto(liveUrl);
+const cohort=await browser.newPage();await cohort.goto(base+'/cohort');await pause(1200);await req('get');
+const refreshed=await control.evaluate(()=>chrome.storage.local.get('favoriteRestartHints'));
+assert.equal(refreshed.favoriteRestartHints.entries[0].url,liveUrl);
+assert.equal(refreshed.favoriteRestartHints.entries[0].provenance,'inferred');
+assert.deepEqual(refreshed.favoriteRestartHints.entries[0].origin,report.originalEvidence);
+for(let restart=0;restart<2;restart++){await close();await launch();await pause(3000);report.after=await req('get');assert(report.after.favorites.find(r=>r.id===initiallyRecovered.id)?.recovery?.token);}
+report.checks.push('Fresh inferred navigation/title/cohort observations survived two more browser restarts without Confirm');
+}
 if(scenario==='undo-repeat'){await close();await launch();await pause(3000);report.afterSecondRestart=await req('get');report.after=report.afterSecondRestart;}
 report.diagnostics=await control.evaluate(async()=>({tabs:await chrome.tabs.query({}),local:await chrome.storage.local.get(['favoriteRestartHints','favoriteRestartDiagnostic','spaces','spaceTabSnapshot']),session:await chrome.storage.session.get(['favoriteRestartRecovery','favoriteSession'])}));
 const row=report.after.favorites.find(r=>r.url===base+'/unique');if(scenario==='diagnostic-title-change'){
@@ -67,10 +81,22 @@ await control.screenshot({path:path.join(scratch,'restart-diagnostic.png')});
 report.checks.push('Full restart title mismatch stays manual and persists exact sanitized rejection with pre-startup checkpoint');
 report.checks.push('Packaged Settings displays historical rejection on explicit click without exposing page identity');
 }else if(scenario==='ambiguous'){assert.equal(row.tabId,null);assert.equal(row.recovery,undefined);assert.equal((await browser.pages()).filter(p=>p.url()===base+'/unique').length,2);report.checks.push('Duplicate live URL remains manual after full browser restart; no third page created');}else{assert(row?.recovery?.token,'Native browser restart must recover unique page');report.checks.push('Native full browser-process close/relaunch recovered unique Favorite');
-const restored=(await browser.pages()).find(p=>p.url()===base+'/unique');assert(restored);const token=await restored.evaluate(()=>({token:window.documentToken,draft:document.querySelector('#draft').value,history:history.length}));
-await control.bringToFront();await control.reload();await pause(1200);await control.waitForSelector('.favorite-recovery-card');await control.screenshot({path:path.join(scratch,'recovered.png')});
-const buttons=await control.$$eval('.favorite-recovery-card button',es=>es.map(e=>e.textContent));assert.deepEqual(buttons,['Undo','Confirm']);report.checks.push('Rendered recovered card exposes Undo and Confirm');
-console.log('UI_SCREENSHOT_DONE');const beforeTabs=await control.evaluate(()=>chrome.tabs.query({}));await control.click(scenario==='confirm'?'.favorite-recovery-card button:nth-of-type(2)':'.favorite-recovery-card button');console.log('REVIEW_CLICK_DONE');await pause(1000);report.undone=await req('get');assert.equal(report.undone.favorites.find(r=>r.id===row.id).tabId,scenario==='confirm'?row.tabId:null);assert.equal(report.undone.favorites.find(r=>r.id===row.id).recovery,undefined);
+const restored=(await browser.pages()).find(p=>p.url()===liveUrl);assert(restored);const token=await restored.evaluate(()=>({token:window.documentToken,draft:document.querySelector('#draft').value,history:history.length}));
+await control.bringToFront();await control.reload();await pause(1200);
+const selector='.saved-favorite[data-favorite-id="'+row.id+'"]';await control.waitForSelector(selector+'[data-recovery-token]');
+assert.equal(await control.$eval(selector+' .favorite-state',e=>e.textContent),'Open');
+assert.equal(await control.$('.favorite-recovery-card'),null);
+await control.screenshot({path:path.join(scratch,'recovered.png')});
+const beforeTabs=await control.evaluate(()=>chrome.tabs.query({}));
+if(scenario==='confirm')await req('confirmRecovery',{favoriteId:row.id,tabId:row.tabId,token:row.recovery.token});
+else{
+await control.click(selector,{button:'right'});await control.waitForSelector('#tab-context-menu');
+const actions=await control.$$eval('#tab-context-menu button',es=>es.map(e=>e.textContent));assert.deepEqual(actions,['Go to Tab','Undo recovery']);
+await control.screenshot({path:path.join(scratch,'undo-menu.png')});
+await control.click('#tab-context-menu button:nth-of-type(2)');
+}
+report.checks.push('Quiet Open Favorite retains keyboard/context-menu Undo without a persistent Confirm prompt');
+await pause(1000);report.undone=await req('get');assert.equal(report.undone.favorites.find(r=>r.id===row.id).tabId,scenario==='confirm'?row.tabId:null);assert.equal(report.undone.favorites.find(r=>r.id===row.id).recovery,undefined);
 console.log('REVIEW_READ_DONE',JSON.stringify(report.undone));await restored.bringToFront();assert.deepEqual(await restored.evaluate(()=>({token:window.documentToken,draft:document.querySelector('#draft').value,history:history.length})),token);assert.deepEqual((await control.evaluate(()=>chrome.tabs.query({}))).map(t=>[t.id,t.url]),beforeTabs.map(t=>[t.id,t.url]));report.checks.push(`${scenario} preserved same document, draft, history and exact tab IDs/URLs`);await control.screenshot({path:path.join(scratch,'undone.png')});
 }
 report.status='passed';

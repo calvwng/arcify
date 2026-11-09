@@ -30,11 +30,6 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
     let generation = 0, snapshot = { favorites: [], nativeTabs: [] };
     const pending = new Map();
     let disposed = false;
-    const recoveryPanel = document.createElement('section');
-    recoveryPanel.className = 'favorite-recovery-review';
-    recoveryPanel.setAttribute('aria-label', 'Recovered Favorites to review');
-    recoveryPanel.hidden = true;
-    container.after(recoveryPanel);
     let disposeMenu = () => {};
     const request = (action, payload = {}) => favoriteRequest(action, { windowId: getWindowId(), ...payload }, api);
     const attachment = createFavoriteAttachmentUI({ document, getWindowId, request, onStatus, onAttached: () => refresh() });
@@ -72,42 +67,14 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
         return operation;
     }
 
-    function reviewRecovery(action, favoriteId, tabId, token, windowId) {
+    function undoRecovery(favoriteId, tabId, token, windowId) {
         return run(`recovery:${favoriteId}`, async () => {
             const current = snapshot.favorites.find(row => row.id === favoriteId);
             if (disposed || getWindowId() !== windowId || current?.tabId !== tabId || current?.recovery?.token !== token) {
-                throw new Error('This recovered Favorite changed. Refresh and review it again.');
+                throw new Error('This recovered Favorite changed. Refresh and try Undo again.');
             }
-            return request(action, { favoriteId, tabId, token, windowId });
-        }, action === 'undoRecovery' ? 'Recovery undone. Your tab and saved Favorite were kept.' : 'Recovered tab confirmed.');
-    }
-
-    function renderRecoveryReview(favorites) {
-        const existing = new Map([...recoveryPanel.children].map(card => [card.dataset.favoriteId, card]));
-        for (const row of favorites.filter(row => row.tabId && row.recovery?.token)) {
-            const windowId = getWindowId(), token = row.recovery.token;
-            let card = existing.get(row.id);
-            existing.delete(row.id);
-            if (!card || card.dataset.token !== token || card.dataset.windowId !== String(windowId) || card.dataset.tabId !== String(row.tabId)) {
-                card?.remove();
-                card = document.createElement('div');
-                card.className = 'favorite-recovery-card';
-                Object.assign(card.dataset, { favoriteId: row.id, token, tabId: String(row.tabId), windowId: String(windowId) });
-                const label = document.createElement('p');
-                card.appendChild(label);
-                for (const [text, action] of [['Undo', 'undoRecovery'], ['Confirm', 'confirmRecovery']]) {
-                    const button = document.createElement('button');
-                    button.type = 'button'; button.textContent = text;
-                    button.setAttribute('aria-label', `${text} recovery for ${row.title || row.url}`);
-                    button.addEventListener('click', () => void reviewRecovery(action, row.id, row.tabId, token, windowId));
-                    card.appendChild(button);
-                }
-            }
-            card.querySelector('p').textContent = `Recovered: ${row.title || row.url}. Review this tab association.`;
-            recoveryPanel.appendChild(card);
-        }
-        for (const card of existing.values()) card.remove();
-        recoveryPanel.hidden = !recoveryPanel.children.length;
+            return request('undoRecovery', { favoriteId, tabId, token, windowId });
+        }, 'Recovery undone. Your tab and saved Favorite were kept.');
     }
 
     async function activate(node) {
@@ -144,8 +111,7 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
         item(favoriteId && !tabId ? 'Open Favorite' : 'Go to Tab', () => activate(node));
         if (favoriteId && !tabId) item('Attach existing tab…', () => attachment.open(node, favoriteId, windowId));
         if (recoveryToken) {
-            item('Undo recovery', () => reviewRecovery('undoRecovery', favoriteId, tabId, recoveryToken, windowId));
-            item('Confirm recovered tab', () => reviewRecovery('confirmRecovery', favoriteId, tabId, recoveryToken, windowId));
+            item('Undo recovery', () => undoRecovery(favoriteId, tabId, recoveryToken, windowId));
         }
         if (tabId && !recoveryToken) item('Move to New Window', () => run(`move-window:${tabId}`, async () => {
             if (getWindowId() !== windowId) throw new Error('This window changed. Reopen the menu.');
@@ -208,12 +174,12 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
             const recovered = Boolean(row.saved && row.tabId && row.recovery?.token);
             if (recovered) node.dataset.recoveryToken = row.recovery.token; else delete node.dataset.recoveryToken;
             node.draggable = !recovered;
-            const state = recovered ? 'Recovered - review or undo the tab association below' : row.saved ? (row.tabId ? 'Open in this window' : 'Closed · click to open') : 'Browser pin · not saved';
+            const state = recovered ? 'Open in this window. Automatically reconnected; right-click or press Shift+F10 for Undo recovery' : row.saved ? (row.tabId ? 'Open in this window' : 'Closed · click to open') : 'Browser pin · not saved';
             const recovery = row.saved && !row.tabId ? '. Right-click or press Shift+F10 to attach an existing tab' : '';
             node.title = `${row.title || row.url}\n${state}${recovery}`; node.setAttribute('aria-label', `${row.title || row.url}. ${state}${recovery}`);
             node.classList.toggle('favorite-closed', Boolean(row.saved && !row.tabId));
             node.classList.toggle('active', Boolean(row.tabId && row.tabId === activeTabId));
-            node.querySelector('.favorite-state').textContent = recovered ? 'Recovered' : row.saved ? (row.tabId ? 'Open' : 'Closed') : 'Pin';
+            node.querySelector('.favorite-state').textContent = row.saved ? (row.tabId ? 'Open' : 'Closed') : 'Pin';
             const img = node.querySelector('img');
             const cached = row.saved && favoriteIconCacheUrl(row.url, api) || Utils.getFaviconUrl(row.url, '96');
             const icon = row.saved && isFavoriteIcon(row.faviconDataUrl) ? row.faviconDataUrl : cached;
@@ -234,10 +200,9 @@ export function createSavedFavoritesUI({ document, container, getWindowId, onSta
             container.appendChild(node);
         }
         for (const node of existing.values()) node.remove();
-        renderRecoveryReview(favorites);
         const placeholder = container.querySelector('.pinned-placeholder-container');
         if (placeholder) placeholder.style.display = rows.length ? 'none' : 'block';
     }
 
-    return { refresh, request, getSnapshot: () => snapshot, dispose() { disposed = true; recoveryPanel.remove(); ++generation; disposeMenu(); attachment.dispose(); } };
+    return { refresh, request, getSnapshot: () => snapshot, dispose() { disposed = true; ++generation; disposeMenu(); attachment.dispose(); } };
 }
