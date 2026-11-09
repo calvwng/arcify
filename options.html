@@ -58,6 +58,12 @@
             <button type="button" id="recovery-status-refresh" class="appearance-reset">Read recovery status</button>
             <p id="recovery-status-notice" class="options-description" role="status" aria-live="polite">No status read requested.</p>
             <div id="recovery-status-output" aria-label="Recovery observation"></div>
+            <h3>Favorite restart diagnostic</h3>
+            <p class="options-description">Read the saved diagnostic from the last captured startup, the checkpoint saved before it, and the latest checkpoint. This is historical, not live status or proof of successful recovery. Only counts, timestamps and stage statuses are shown; no page URLs, titles, identifiers or error details. Nothing is read or copied until you request it.</p>
+            <button type="button" id="favorite-restart-diagnostic-read" class="appearance-reset">Read Favorite restart diagnostic</button>
+            <button type="button" id="favorite-restart-diagnostic-copy" class="appearance-reset" disabled>Copy diagnostic</button>
+            <p id="favorite-restart-diagnostic-notice" class="options-description" role="status" aria-live="polite">No diagnostic read requested.</p>
+            <div id="favorite-restart-diagnostic-output" aria-label="Historical Favorite restart diagnostic"></div>
         </section>
 
         <section class="options-section" aria-labelledby="tabsHeading">

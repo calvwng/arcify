@@ -840,6 +840,16 @@ for (const scenario of ['duplicate-page', 'duplicate-favorite', 'duplicate-hint'
         });
         assert.equal(s.result.favorites[0].tabId, null); assert.equal(s.favorites.ownsTab(101), false);
         assert(!effects.some(([kind]) => ['create', 'remove'].includes(kind)));
+        const reasons = {
+            'duplicate-page': 'duplicateNativePage', 'duplicate-favorite': 'duplicateSavedFavorite',
+            'duplicate-hint': 'duplicateHint', 'changed-title': 'titleChanged', 'changed-url': 'missingNativePage',
+            'changed-pin': 'pinChanged', 'changed-window': 'windowCohortChanged', 'partial-window': 'windowCohortChanged',
+            pending: 'pendingNavigation', loading: 'pageLoading', split: 'nativeSplit', group: 'nativeGroup',
+            private: 'missingNativePage', bookmark: 'spaceBookmark', expired: 'hintJournalExpired', invalid: 'hintJournalInvalid'
+        };
+        assert.equal(local.favoriteRestartDiagnostic.startup.counts[reasons[scenario]], scenario === 'duplicate-hint' ? 2 : 1);
+        assert.equal(local.favoriteRestartDiagnostic.beforeStartup.counts.hintsWritten, 1);
+        assert(!JSON.stringify(local.favoriteRestartDiagnostic).includes('https://'));
     });
 }
 
@@ -1126,4 +1136,71 @@ test('checkpoint rejects a changed cohort during asynchronous eligibility reads'
     hooks.localGet = undefined;
     await s.favorites.recovery.checkpoint(clone(tabs));
     assert.notEqual(local.favoriteRestartHints.entries[0].window, previous.entries[0].window);
+});
+
+
+test('startup rejection diagnostic survives checkpointing and worker wake without retrying inference', async () => {
+    const s = await restartFixture(() => { tab(101).status = 'loading'; });
+    const report = clone(local.favoriteRestartDiagnostic.startup);
+    assert.equal(report.counts.pageLoading, 1);
+    assert.equal(report.counts.settleBudgetExhausted, 1);
+    assert.equal(report.counts.settlePasses, 8);
+    tab(101).status = 'complete';
+    await s.favorites.dispatch(req('get', { windowId: 11 }));
+    const resumed = stores(); resumed.favorites.recovery.wait = async () => { throw new Error('Must not infer again'); };
+    const result = await resumed.favorites.dispatch(req('get', { windowId: 11 }));
+    assert.equal(result.favorites[0].tabId, null);
+    assert.deepEqual(local.favoriteRestartDiagnostic.startup, report);
+    assert.deepEqual(effects, []);
+});
+
+test('diagnostic preserves a pre-restart checkpoint refusal after temporary loading erases its hint', async () => {
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
+    const before = stores(); await before.favorites.dispatch(req('get'));
+    tab(1).status = 'loading';
+    await before.favorites.recovery.checkpoint(clone(tabs));
+    assert.equal(local.favoriteRestartHints.entries.length, 0, 'existing replacement behavior, not a proposed retention policy');
+    assert.equal(local.favoriteRestartDiagnostic.checkpoint.counts.pageLoading, 1);
+    for (const key of Object.keys(session)) delete session[key];
+    tabs.forEach(tab => { tab.id += 100; tab.windowId += 10; tab.status = 'complete'; });
+    const after = stores(); after.favorites.recovery.wait = async () => {};
+    const result = await after.favorites.dispatch(req('get', { windowId: 11 }));
+    assert.equal(result.favorites[0].tabId, null);
+    assert.equal(local.favoriteRestartDiagnostic.startup.counts.noHints, 1);
+    assert.equal(local.favoriteRestartDiagnostic.beforeStartup.counts.pageLoading, 1);
+    assert.equal(local.favoriteRestartDiagnostic.beforeStartup.counts.hintsWritten, 0);
+});
+
+test('diagnostic storage failure cannot veto recovery or change native tabs', async () => {
+    const s = await restartFixture(() => {
+        hooks.localSet = value => { if (value.favoriteRestartDiagnostic) throw new Error('Diagnostic write failed with private content'); };
+    });
+    assert.equal(s.result.favorites[0].tabId, 101);
+    assert(s.result.favorites[0].recovery.token);
+    assert.deepEqual(effects, []);
+});
+
+
+test('diagnostic no-hint startup survives later exact checkpoint and worker wake', async () => {
+    const first = stores(); await first.favorites.dispatch(req('get'));
+    const startup = clone(local.favoriteRestartDiagnostic.startup);
+    assert.equal(startup.counts.noHints, 1);
+    const offer = await attachmentOffer(first);
+    await first.favorites.dispatch(offer);
+    await first.favorites.recovery.checkpoint(clone(tabs));
+    assert.equal(local.favoriteRestartDiagnostic.checkpoint.counts.hintsWritten, 1);
+    const resumed = stores(); await resumed.favorites.dispatch(req('get'));
+    assert.deepEqual(local.favoriteRestartDiagnostic.startup, startup);
+    assert.equal(local.favoriteRestartDiagnostic.beforeStartup, undefined);
+});
+
+test('diagnostic reports activation persistence failure without suppressing it', async () => {
+    await assert.rejects(restartFixture(() => {
+        hooks.localSet = value => {
+            if (value.favoriteRestartHints?.entries?.some(hint => hint.placement)) throw new Error('Activation write failed');
+        };
+    }), /Activation write failed/);
+    assert.equal(local.favoriteRestartDiagnostic.startup.status, 'failed');
+    assert.equal(local.favoriteRestartDiagnostic.startup.counts.operationFailed, 1);
+    assert.equal(local.favoriteRestartDiagnostic.startup.counts.recovered, undefined);
 });

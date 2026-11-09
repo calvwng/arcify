@@ -10,11 +10,18 @@ import { moveSavedItemsToSpace } from '../../saved-move-store.js';
 import { runTabMenuActionCore } from '../../tab-menu-actions.js';
 import { runTodaySplitActionCore } from '../../today-split-action.js';
 import { removeSavedSpacePin } from '../../space-pin-actions.js';
+import { RESTART_DIAGNOSTIC_KEY, RESTART_DIAGNOSTIC_SESSION_KEY, sanitizeRestartDiagnostic } from '../../favorite-restart-diagnostics.js';
 import { Utils } from '../../utils.js';
 
 const clone = value => structuredClone(value);
 const url = 'https://page.test/';
 const transient = error => error.code === 'TRANSIENT_CONTEXT';
+const diagnosticEffect = ([kind, area, value]) => kind === 'storage' && Object.keys(value).length === 1 && (area === 'local'
+    ? Object.hasOwn(value, RESTART_DIAGNOSTIC_KEY) && !!sanitizeRestartDiagnostic(value[RESTART_DIAGNOSTIC_KEY])
+    : area === 'session' && Object.hasOwn(value, RESTART_DIAGNOSTIC_SESSION_KEY)
+        && value[RESTART_DIAGNOSTIC_SESSION_KEY]?.version === 1 && typeof value[RESTART_DIAGNOSTIC_SESSION_KEY]?.attempted === 'boolean'
+        && Object.keys(value[RESTART_DIAGNOSTIC_SESSION_KEY]).length === 2);
+
 function fixture() {
     const effects = [], hooks = {}, excludedTabs = new Set(), excludedWindows = new Set();
     const items = [{ id: 'favorite', title: 'Saved', url, sourceBookmarkId: null }];
@@ -96,7 +103,7 @@ test('Favorite late adoption validation rejects transient classification before 
     const f = fixture(); await f.favorites.initialize();
     f.hooks.tab = () => f.excludedTabs.add(1);
     await assert.rejects(f.favorites.addFavorite({ action: 'addTab', windowId: 10, tabId: 1 }), transient);
-    assert.deepEqual(f.effects, []);
+    assert.deepEqual(f.effects.filter(effect => !diagnosticEffect(effect)), []);
 });
 test('Favorite continuity does not recover ownership or selection from a transient anchor', async () => {
     const f = fixture(); f.excludedTabs.add(1);
@@ -169,7 +176,7 @@ test('Favorite existing-tab focus stops when the final guard classifies its iden
     const f = fixture(); f.tabs[0].pinned = true;
     f.session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'favorite', windowId: 10, tabId: 1 }], attempts: [] };
     await assert.rejects(f.favorites.open('favorite', 10, { beforeMutation: async () => { f.excludedTabs.add(1); } }), transient);
-    assert.deepEqual(f.effects.filter(([kind]) => kind !== 'track'), []);
+    assert.deepEqual(f.effects.filter(effect => effect[0] !== 'track' && !diagnosticEffect(effect)), []);
 });
 test('Archive reopen rechecks exact source after native window validation before session write', async () => {
     const f = fixture(); delete f.session[ARCHIVE_SESSION_KEY]; f.hooks.window = () => f.excludedTabs.add(1);

@@ -3,6 +3,7 @@ import { hasNativeSplit } from './native-split-safety.js';
 import { isTransientTab, isTransientWindow } from './transient-safety.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { Utils } from './utils.js';
+import { addRestartDiagnosticCount as count, recordRestartDiagnostic } from './favorite-restart-diagnostics.js';
 
 export const RESTART_HINTS_KEY = 'favoriteRestartHints';
 export const RESTART_SESSION_KEY = 'favoriteRestartRecovery';
@@ -42,29 +43,63 @@ export class FavoriteRestartRecovery {
     assertConfirmed(tabId, favoriteId) {
         if (this.entry(tabId) || favoriteId && this.entries.some(entry => entry.phase !== 'undoing' && entry.favoriteId === favoriteId)) blocked();
     }
-    async eligible(tab) {
-        if (!stable(tab) || isTransientTab(this.store.spaceStore, tab) || isTransientWindow(this.store.spaceStore, tab.windowId)) return false;
+    async eligibilityRejection(tab) {
+        if (!tab || !isFavoriteUrl(tab.url)) return 'invalidPage';
+        if (!text(tab.title)) return 'missingTitle';
+        if (tab.incognito) return 'privatePage';
+        if (tab.pendingUrl) return 'pendingNavigation';
+        if (tab.status === 'loading') return 'pageLoading';
+        if (hasNativeSplit(tab)) return 'nativeSplit';
+        if (tab.groupId >= 0) return 'nativeGroup';
+        if (isStartupLauncherTab(tab)) return 'startupHelper';
+        if (isTransientTab(this.store.spaceStore, tab) || isTransientWindow(this.store.spaceStore, tab.windowId)) return 'transientPage';
         const window = await chrome.windows.get(tab.windowId);
-        return window.type === 'normal' && !window.incognito && !(await Utils.getPinnedTabState(tab.id))?.bookmarkId;
+        if (window.type !== 'normal' || window.incognito) return 'ineligibleWindow';
+        if ((await Utils.getPinnedTabState(tab.id))?.bookmarkId) return 'spaceBookmark';
+        return null;
     }
+    async eligible(tab) { return !await this.eligibilityRejection(tab); }
     async initialize() {
+        const report = { capturedAt: this.store.now(), status: 'complete', counts: {}, capture: true };
+        this.startupDiagnostic = null;
+        try { await this.initializeRecovery(report); }
+        catch (error) { report.status = 'failed'; count(report, 'operationFailed'); throw error; }
+        finally {
+            if (report.capture) {
+                const recorded = await recordRestartDiagnostic('startup', report, chrome, { newStartup: true, attempted: report.attempted });
+                if (recorded) this.startupDiagnostic = report;
+            }
+        }
+    }
+    async initializeRecovery(report) {
         this.ready = false; this.active = false; this.checkpointStamp = null;
         const local = await chrome.storage.local.get(RESTART_HINTS_KEY);
         const saved = (await chrome.storage.session.get(RESTART_SESSION_KEY))[RESTART_SESSION_KEY];
+        report.capture = saved == null;
         const journal = local[RESTART_HINTS_KEY];
+        count(report, 'savedFavorites', this.store.items.length);
+        count(report, 'hintsSeen', Array.isArray(journal?.entries) ? journal.entries.length : 0);
         this.hints = journal?.version === 1 && journal.phase === 'committed' && Array.isArray(journal.entries)
             && journal.entries.length <= MAX_HINTS && journal.entries.every(hint => validHint(hint) && bytes(hint) <= MAX_HINT_BYTES)
             && Number.isFinite(journal.capturedAt) && journal.capturedAt <= this.store.now()
             && this.store.now() - journal.capturedAt < 30 * 86400000 ? copy(journal.entries) : [];
+        if (!journal) count(report, 'hintJournalMissing');
+        else if (Number.isFinite(journal.capturedAt) && this.store.now() - journal.capturedAt >= 30 * 86400000) count(report, 'hintJournalExpired');
+        else if (!this.hints.length && !(journal?.version === 1 && journal.phase === 'committed' && Array.isArray(journal.entries) && !journal.entries.length)) count(report, 'hintJournalInvalid');
+        const beforeIdentityFilter = this.hints.length;
         this.hints = this.hints.filter(hint => this.store.items.some(item => identity(item) === hint.identity));
+        count(report, 'hintIdentityChanged', beforeIdentityFilter - this.hints.length);
+        count(report, 'hintsValid', this.hints.length);
         const known = [...this.store.state.bindings, ...this.store.state.attempts];
-        if (saved == null && (!this.hints.length || this.hints.every(hint => known.some(entry => entry.favoriteId === hint.favoriteId)))) { this.entries = []; this.ready = true; return; }
+        if (saved == null && (!this.hints.length || this.hints.every(hint => known.some(entry => entry.favoriteId === hint.favoriteId)))) { count(report, this.hints.length ? 'alreadyKnown' : 'noHints'); report.status = 'skipped'; this.entries = []; this.ready = true; return; }
+        report.attempted = saved == null;
         let tabs = await this.store.queryAttachmentTabs(undefined);
         if (saved == null && this.hints.length) {
             // Let native restoration settle before the single inference pass. A
             // partial/slow restore still fails closed and remains attachable.
             for (let pass = 0; pass < 8; pass++) {
                 await this.wait(250);
+                count(report, 'settlePasses');
                 const next = await this.store.queryAttachmentTabs(undefined);
                 const unchanged = JSON.stringify(tabs.map(shape).sort()) === JSON.stringify(next.map(shape).sort());
                 tabs = next;
@@ -78,8 +113,10 @@ export class FavoriteRestartRecovery {
                     }
                     if (ready) break;
                 }
+                if (pass === 7) count(report, 'settleBudgetExhausted');
             }
         }
+        count(report, 'nativeTabs', tabs.length);
         const revision = this.revision;
         const available = (favoriteId, tabId, windowId) => this.store.items.some(item => item.id === favoriteId)
             && !known.some(entry => entry.tabId === tabId || entry.favoriteId === favoriteId && entry.windowId === windowId);
@@ -109,19 +146,28 @@ export class FavoriteRestartRecovery {
             for (const hint of this.hints) {
                 const item = this.store.items.find(item => identity(item) === hint.identity);
                 const matches = tabs.filter(tab => tab.url === hint.url && !tab.incognito);
-                if (!item || matches.length !== 1 || this.hints.filter(h => h.url === hint.url || h.favoriteId === hint.favoriteId).length !== 1
-                    || this.store.items.filter(other => other.url === item.url).length !== 1) continue;
+                let reason;
+                if (!item) reason = 'missingFavorite';
+                else if (!matches.length) reason = 'missingNativePage';
+                else if (matches.length !== 1) reason = 'duplicateNativePage';
+                else if (this.hints.filter(h => h.url === hint.url || h.favoriteId === hint.favoriteId).length !== 1) reason = 'duplicateHint';
+                else if (this.store.items.filter(other => other.url === item.url).length !== 1) reason = 'duplicateSavedFavorite';
+                if (reason) { count(report, reason); continue; }
                 const tab = matches[0];
-                if (!available(hint.favoriteId, tab.id, tab.windowId) || !await this.eligible(tab)
-                    || tabs.some(other => other.windowId === tab.windowId && (other.pendingUrl && other.pendingUrl !== other.url))
-                    || tab.title !== hint.title || !!tab.pinned !== hint.pinned
-                    || await signature(tabs.filter(t => t.windowId === tab.windowId)) !== hint.window) continue;
+                if (!available(hint.favoriteId, tab.id, tab.windowId)) reason = 'alreadyOwned';
+                else reason = await this.eligibilityRejection(tab);
+                if (!reason && tabs.some(other => other.windowId === tab.windowId && (other.pendingUrl && other.pendingUrl !== other.url))) reason = 'windowNavigating';
+                if (!reason && tab.title !== hint.title) reason = 'titleChanged';
+                if (!reason && !!tab.pinned !== hint.pinned) reason = 'pinChanged';
+                if (!reason && await signature(tabs.filter(t => t.windowId === tab.windowId)) !== hint.window) reason = 'windowCohortChanged';
+                if (reason) { count(report, reason); continue; }
                 entries.push({ favoriteId: hint.favoriteId, tabId: tab.id, windowId: tab.windowId, token: crypto.randomUUID(), hint });
             }
             // Recheck the entire native sample after every asynchronous eligibility
             // read. A race or partial startup leaves the uncertain case manual.
+            count(report, 'inferredCandidates', entries.length);
             const fresh = await this.store.queryAttachmentTabs(undefined);
-            if (revision !== this.revision || JSON.stringify(tabs.map(shape).sort()) !== JSON.stringify(fresh.map(shape).sort())) entries = [];
+            if (revision !== this.revision || JSON.stringify(tabs.map(shape).sort()) !== JSON.stringify(fresh.map(shape).sort())) { count(report, 'nativeSampleChanged'); entries = []; }
         }
         await chrome.storage.session.set({ [RESTART_SESSION_KEY]: { version: 1, entries: copy(entries) } });
         this.entries = entries; this.dirty = false; this.ready = true;
@@ -157,16 +203,30 @@ export class FavoriteRestartRecovery {
             before: source.ids.slice(0, position).map(page).filter(Boolean).slice(-3), after: source.ids.slice(position + 1).map(page).filter(Boolean).slice(0, 3) } };
     }
     async activate() {
+        try { await this.activateRecovery(); }
+        catch (error) {
+            if (this.startupDiagnostic) {
+                this.startupDiagnostic.status = 'failed';
+                count(this.startupDiagnostic, 'operationFailed');
+                await recordRestartDiagnostic('startup', this.startupDiagnostic);
+            }
+            throw error;
+        }
+    }
+    async activateRecovery() {
         if (!this.ready || this.active || !this.store.spaceStore.initialized) return;
         const spaces = this.store.spaceStore;
         if (!this.entries.length) { this.active = true; return; }
         let entries = this.entries.filter(entry => !spaces.spaces.some(space => space.spaceBookmarks.includes(entry.tabId)));
+        count(this.startupDiagnostic, 'spaceBookmarkConflict', this.entries.length - entries.length);
         for (const entry of entries) {
             if (entry.phase === 'undoing') {
                 this.store.restoreRecoverySource(entry.tabId, entry.source);
             } else if (!Object.hasOwn(entry, 'source')) entry.source = this.recoverySource(entry);
             if (entry.source !== undefined) this.rememberPlacement(entry);
         }
+        count(this.startupDiagnostic, 'rollbackUnavailable', entries.filter(entry => entry.source === undefined).length);
+        count(this.startupDiagnostic, 'hintOversized', entries.filter(entry => bytes(entry.hint) > MAX_HINT_BYTES).length);
         entries = entries.filter(entry => entry.source !== undefined && bytes(entry.hint) <= MAX_HINT_BYTES).slice(0, MAX_HINTS);
         if (entries.length) {
             const hints = [...entries.filter(entry => entry.phase !== 'undoing').map(entry => entry.hint),
@@ -178,6 +238,8 @@ export class FavoriteRestartRecovery {
         // Persist rollback placement before inference can exclude any membership.
         await chrome.storage.session.set({ [RESTART_SESSION_KEY]: { version: 1, entries: copy(entries) } });
         this.entries = entries; this.active = true;
+        count(this.startupDiagnostic, 'recovered', entries.filter(entry => entry.phase !== 'undoing').length);
+        if (this.startupDiagnostic) await recordRestartDiagnostic('startup', this.startupDiagnostic);
         for (const entry of entries.filter(entry => entry.phase !== 'undoing')) {
             const tab = spaces.liveTabs?.get(entry.tabId);
             if (tab) spaces.track(tab);
@@ -196,6 +258,12 @@ export class FavoriteRestartRecovery {
         this.checkpointStamp = null;
     }
     async checkpoint(tabs) {
+        const report = { capturedAt: this.store.now(), status: 'complete', counts: {}, capture: false };
+        try { await this.captureCheckpoint(tabs, report); }
+        catch (error) { report.status = 'failed'; count(report, 'operationFailed'); throw error; }
+        finally { if (report.capture) await recordRestartDiagnostic('checkpoint', report); }
+    }
+    async captureCheckpoint(tabs, report) {
         if (!this.ready) return;
         tabs ||= await this.store.queryAttachmentTabs(undefined);
         // The full native cohort is evidence too, including newly created tabs
@@ -203,24 +271,32 @@ export class FavoriteRestartRecovery {
         const sample = JSON.stringify(tabs.map(shape).sort());
         const stamp = JSON.stringify([this.store.state, this.entries, this.revision, this.store.items.map(identity), sample]);
         if (stamp === this.checkpointStamp && this.store.now() - this.checkpointAt < 60000) return;
+        report.capture = this.store.state.bindings.length > 0 || this.entries.length > 0 || this.hints.length > 0;
+        count(report, 'exactBindings', this.store.state.bindings.length);
         const revision = this.revision, hints = this.entries.filter(entry => entry.phase !== 'undoing').map(entry => entry.hint);
+        count(report, 'inferredHintsRetained', hints.length);
         for (const binding of this.store.state.bindings) {
             const tab = tabs.find(tab => tab.id === binding.tabId && tab.windowId === binding.windowId);
             const item = this.store.items.find(item => item.id === binding.favoriteId);
-            if (!item || !await this.eligible(tab) || binding.mode !== 'ordinary' && !tab.pinned
-                || tabs.some(other => other.windowId === tab.windowId && (other.pendingUrl && other.pendingUrl !== other.url))
-                || this.store.state.attempts.some(entry => entry.tabId === tab.id)
-                || tabs.filter(other => other.url === tab.url && !other.incognito).length !== 1
-                || this.store.items.filter(other => other.url === item.url).length !== 1) continue;
+            let reason = !item ? 'missingFavorite' : await this.eligibilityRejection(tab);
+            if (!reason && binding.mode !== 'ordinary' && !tab.pinned) reason = 'pinChanged';
+            if (!reason && tabs.some(other => other.windowId === tab.windowId && (other.pendingUrl && other.pendingUrl !== other.url))) reason = 'windowNavigating';
+            if (!reason && this.store.state.attempts.some(entry => entry.tabId === tab.id)) reason = 'attachmentPending';
+            if (!reason && tabs.filter(other => other.url === tab.url && !other.incognito).length !== 1) reason = 'duplicateNativePage';
+            if (!reason && this.store.items.filter(other => other.url === item.url).length !== 1) reason = 'duplicateSavedFavorite';
+            if (reason) { count(report, reason); continue; }
             hints.push({ favoriteId: item.id, identity: identity(item), url: tab.url, title: tab.title, pinned: !!tab.pinned,
                 window: await signature(tabs.filter(other => other.windowId === tab.windowId)) });
         }
         const fresh = await this.store.queryAttachmentTabs(undefined);
-        if (revision !== this.revision || sample !== JSON.stringify(fresh.map(shape).sort())) return;
+        if (revision !== this.revision || sample !== JSON.stringify(fresh.map(shape).sort())) { report.status = 'skipped'; count(report, 'nativeSampleChanged'); return; }
+        count(report, 'hintOversized', hints.filter(hint => bytes(hint) > MAX_HINT_BYTES).length);
+        count(report, 'hintLimit', Math.max(0, hints.filter(hint => bytes(hint) <= MAX_HINT_BYTES).length - MAX_HINTS));
         const bounded = hints.filter(hint => bytes(hint) <= MAX_HINT_BYTES).slice(0, MAX_HINTS);
         hints.splice(0, hints.length, ...bounded);
-        if (!hints.length && !this.hints.length) return;
+        if (!hints.length && !this.hints.length) { report.status = 'skipped'; return; }
         await chrome.storage.local.set({ [RESTART_HINTS_KEY]: { version: 1, phase: 'committed', capturedAt: this.store.now(), entries: copy(hints) } });
+        count(report, 'hintsWritten', hints.length);
         this.hints = hints; this.checkpointStamp = stamp; this.checkpointAt = this.store.now();
     }
     async reconcile(tabs) {

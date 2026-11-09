@@ -82,9 +82,9 @@ Run `npm run test:unit`, `npm run build`, and the disposable native recovery
 fixture `node scripts/disposable-favorite-recovery.mjs`. Set
 `ARCIFY_DISPOSABLE_BROWSER` to an already-installed browser executable and
 `ARCIFY_FAVORITE_RECOVERY_CASE` to `undo-repeat`, `confirm`, `ambiguous`, or
-`title-update`. The title case removes sidebar listeners before changing only the
+`title-update`, or `diagnostic-title-change`. The title case removes sidebar listeners before changing only the
 page title, observes the stored checkpoint without a Favorite read, then verifies
-full restart recovery and Undo. `ARCIFY_FAVORITE_RECOVERY_BUILD` can select an
+full restart recovery and Undo. The diagnostic case changes a synthetic page title only after closing the disposable browser, then verifies fail-closed recovery and the packaged Settings report. `ARCIFY_FAVORITE_RECOVERY_BUILD` can select an
 existing build directory for baseline comparison; that directory is copied, never
 modified.
 It always creates a fresh temporary profile and closes only its own processes. Unit coverage
@@ -93,3 +93,42 @@ Space-bookmark precedence, exact Undo placement, failed local/session writes,
 worker restart, and a second full browser restart. Native acceptance evidence is
 recorded separately and is not implied by mock tests. Physical Helium restart,
 mixed-profile behavior and installed-build acceptance remain separate checks.
+
+
+## Persistent startup diagnostic
+
+Settings > Recovery status > **Read Favorite restart diagnostic** displays the
+latest locally recorded startup decision, the last relevant hint checkpoint,
+and a frozen copy of that checkpoint from before the startup decision. **Copy
+diagnostic** copies only that displayed sanitized report on an explicit click.
+Opening Settings or reading this report never runs recovery, retries inference,
+changes settings, or modifies tabs or saved Favorites.
+
+The diagnostic contains only allowlisted bounded counters, status values and
+capture timestamps. It includes no URLs, titles, IDs, names, window fingerprints,
+review tokens, exceptions or telemetry. It is stored under the separate local
+`favoriteRestartDiagnostic` key; it does not participate in any matching or
+ownership decision. Failed diagnostic writes do not veto recovery. At most three
+fixed-shape summaries are retained and overwritten by subsequent observations;
+this is not an event history or evidence of a clean browser shutdown.
+
+Startup counters explain the first failing gate for each hint, including missing
+or invalid evidence, duplicate candidates, loading/navigation, changed title/pin,
+changed window cohort, and the final changed-sample check. A successful match and
+an activated association are counted separately; later Space-bookmark or rollback
+placement refusals are visible. A separate diagnostic-only session marker preserves the startup decision across
+worker wakeups, including a skipped no-hint decision. If the unchanged recovery
+lifecycle later makes its first actual inference attempt, that attempt replaces
+the earlier skip. This marker never authorizes or suppresses recovery itself.
+
+Checkpoint counters can distinguish a missing hint from a prior capture refusal.
+For example, the current checkpoint replacement policy can drop evidence while a
+page is loading or another page in its window is navigating, and a tab disappearing
+can make its prior binding ineligible. These paths are reproduced by synthetic unit
+tests, not established as the cause of any particular Helium session. This diagnostic
+change does not alter that policy, the bounded settling interval, matching safeguards,
+review/Undo behavior, or the rule against claiming arbitrary late-created tabs.
+
+The report describes historical observations, not the live browser state. It cannot
+reconstruct a failure from before this build captured it. Validate an installed build
+and reproduce the browser restart before treating its report as native evidence.

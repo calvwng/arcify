@@ -2,17 +2,29 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { FavoriteStore, FAVORITES_KEY, FAVORITE_SESSION_KEY, MAX_FAVORITE_BOOKMARK_BATCH, validateFavoriteRequest, registerFavoriteMessages } from '../../favorite-store.js';
 import { captureFavoriteIcon, favoriteIconCacheSize, MAX_FAVORITE_ICON_CACHE, FAVORITE_ICON_CACHE_KEY } from '../../favorite-icons.js';
+import { RESTART_DIAGNOSTIC_KEY, RESTART_DIAGNOSTIC_SESSION_KEY, sanitizeRestartDiagnostic } from '../../favorite-restart-diagnostics.js';
 import { pngIcon } from '../fixtures/favorite-icons.js';
 
 // Actual worker module, Chrome API boundary mocks. No browser launched here.
 const SELF = 'b'.repeat(32), URL = 'https://saved.test/';
 const copy = value => structuredClone(value);
 const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, emit(...args) { this.listeners.forEach(fn => fn(...copy(args))); } });
-let local, session, tabs, windows, nodes, effects, nextId, hooks, spaceStore;
+let local, session, tabs, windows, nodes, effects, nextId, hooks, spaceStore, diagnosticWrites;
+// Initialization diagnostics are separate from the ownership/native mutations under test.
+// Mixed patches, wrong-area keys, and malformed reports remain ordinary writes.
+const diagnosticPatch = (area, value) => Object.keys(value).length === 1 && (area === 'local'
+    ? Object.hasOwn(value, RESTART_DIAGNOSTIC_KEY) && !!sanitizeRestartDiagnostic(value[RESTART_DIAGNOSTIC_KEY])
+    : area === 'session' && Object.hasOwn(value, RESTART_DIAGNOSTIC_SESSION_KEY)
+        && value[RESTART_DIAGNOSTIC_SESSION_KEY]?.version === 1 && typeof value[RESTART_DIAGNOSTIC_SESSION_KEY]?.attempted === 'boolean'
+        && Object.keys(value[RESTART_DIAGNOSTIC_SESSION_KEY]).length === 2);
+const recordOwnershipWrite = (writes, area, value) => { if (!diagnosticPatch(area, value)) writes.push(copy(value)); };
+const withoutDiagnostics = (area, data) => Object.fromEntries(Object.entries(data).filter(([key, value]) => !diagnosticPatch(area, { [key]: value })));
+
 function storage(data, area) {
     return {
         async get(keys) { await hooks[`${area}BeforeGet`]?.(keys); return Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(key => [key, copy(data[key])])); },
         async set(value) {
+            if (diagnosticPatch(area, value)) diagnosticWrites.push([area, copy(value)]);
             await hooks[`${area}BeforeSet`]?.(value);
             Object.assign(data, copy(value));
             await hooks[`${area}AfterSet`]?.(value);
@@ -43,7 +55,7 @@ const iconIdle = async store => {
 async function added(store, input = bookmark()) { const result = await store.dispatch(input); return { result, favorite: result.favorites[0], tab: result.tab }; }
 beforeEach(() => {
     local = { pinnedTabStatesById: { 2: { bookmarkId: 'bookmark', pinnedUrl: URL } } }; session = {};
-    hooks = {}; effects = []; nextId = 100; spaceStore = queueStore();
+    hooks = {}; effects = []; diagnosticWrites = []; nextId = 100; spaceStore = queueStore();
     windows = [{ id: 1, type: 'normal' }, { id: 2, type: 'normal' }, { id: 3, type: 'popup' }, { id: 4, type: 'normal', incognito: true }];
     tabs = [{ id: 1, windowId: 1, url: URL, title: 'Unrelated twin', pinned: false }, { id: 2, windowId: 1, url: 'https://navigated.test/', title: 'Live saved tab', pinned: false },
         { id: 3, windowId: 1, url: URL, title: 'Native pin', pinned: true }];
@@ -317,7 +329,7 @@ test('explicit bookmark drop adopts exactly bound legacy native pin without URL 
     assert.equal(get(3).url, 'https://legacy-navigated.test/'); assert.equal(creates().length, 0);
 });
 
-test('explicit bookmark drop rejects multiple legacy native candidates or a conflicting live source before writes', async () => {
+test('explicit bookmark drop rejects multiple legacy native candidates or a conflicting live source before ownership writes', async () => {
     local.pinnedTabStatesById[3] = { bookmarkId: 'bookmark', pinnedUrl: URL };
     const store = newStore();
     await assert.rejects(store.dispatch(bookmark({ tabId: 2 })), /another native Favorite/);
@@ -791,7 +803,7 @@ test('batch interleaves new and already-saved entries into one stable ordered bl
 
 for (const change of ['deleted', 'moved', 'folder', 'source-space', 'missing-active', 'active', 'tab-window', 'tab-binding', 'folder-entry']) {
     test(`batch preflight rejects late ${change} entry before any saved/session/tab mutation`, async () => {
-        const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+        const writes = []; hooks.localBeforeSet = value => recordOwnershipWrite(writes, 'local', value); hooks.sessionBeforeSet = value => recordOwnershipWrite(writes, 'session', value);
         let entries = [batchBookmark('twin'), batchBookmark('bookmark', { tabId: 2 })];
         if (change === 'deleted') nodes = nodes.filter(node => node.id !== 'bookmark');
         if (change === 'moved') nodes.find(node => node.id === 'bookmark').parentId = 'folder';
@@ -808,10 +820,10 @@ for (const change of ['deleted', 'moved', 'folder', 'source-space', 'missing-act
     });
 }
 
-for (const windowId of [3, 4, 99]) test(`batch rejects unavailable/private/nonnormal window ${windowId} before writes`, async () => {
+for (const windowId of [3, 4, 99]) test(`batch rejects unavailable/private/nonnormal window ${windowId} before ownership writes`, async () => {
     const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(undefined, { windowId })));
     assert.deepEqual(batchStatuses(error), ['unattempted', 'unattempted']);
-    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(session, {});
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(withoutDiagnostics('session', session), {});
 });
 
 test('batch stale destination preflight preserves existing saved order and creates nothing', async () => {
@@ -827,7 +839,7 @@ test('batch rechecks earlier source after later asynchronous preflight lookup de
     hooks.bookmarks = id => { if (id === 'nested' && ++reads === 3) nodes = nodes.filter(node => node.id !== 'bookmark'); };
     const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
     assert.deepEqual(batchStatuses(error), ['failed', 'unattempted']);
-    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(session, {});
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(withoutDiagnostics('session', session), {});
 });
 
 test('batch preflight blocks an existing uncertain Favorite before an earlier new entry is saved', async () => {
@@ -1014,7 +1026,7 @@ test('batch unknown legacy receipt on the last member blocks all earlier additio
     session.favoriteDropAttempts = { [JSON.stringify([1, 'twin'])]: { tabId: null, url: URL } };
     const before = copy(session), error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
     assert.equal(error.code, 'UNCERTAIN_RESULT'); assert.deepEqual(batchStatuses(error), ['unattempted', 'failed']);
-    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(session, before);
+    assert.deepEqual(effects, []); assert.equal(local[FAVORITES_KEY], undefined); assert.deepEqual(withoutDiagnostics('session', session), withoutDiagnostics('session', before));
 });
 
 test('batch known second receipt recovers after binding write failure on worker restart without opening a duplicate', async () => {
@@ -1064,8 +1076,8 @@ for (const reason of ['wrong-parent', 'missing-node']) test(`diagnostic ${reason
     if (reason === 'wrong-parent') entries[0].parentId = 'folder';
     if (reason === 'missing-node') nodes = nodes.filter(node => node.id !== '28');
     const source = copy(nodes), writes = [];
-    hooks.localBeforeSet = value => writes.push(copy(value));
-    hooks.sessionBeforeSet = value => writes.push(copy(value));
+    hooks.localBeforeSet = value => recordOwnershipWrite(writes, 'local', value);
+    hooks.sessionBeforeSet = value => recordOwnershipWrite(writes, 'session', value);
     const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(entries)));
     assert.equal(error.message, 'The saved bookmark changed or cannot be opened.');
     assert.deepEqual(batchStatuses(error), ['failed', ...Array(7).fill('unattempted')]);
@@ -1077,7 +1089,7 @@ test('diagnostic seventh source preflight failure reports zero completed without
     addBatchNodes(...ids);
     const entries = ids.map(bookmarkId => batchBookmark(bookmarkId));
     entries[6].parentId = 'folder';
-    const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+    const writes = []; hooks.localBeforeSet = value => recordOwnershipWrite(writes, 'local', value); hooks.sessionBeforeSet = value => recordOwnershipWrite(writes, 'session', value);
     const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest(entries)));
     assert.equal(error.message, 'The saved bookmark changed or cannot be opened.');
     assert.deepEqual(batchStatuses(error), [...Array(6).fill('unattempted'), 'failed', 'unattempted']);
@@ -1109,7 +1121,7 @@ for (const skippedIndex of [0, 3, 6, 7]) test(`mixed eight-bookmark batch skips 
     assert.equal(creates().length, 6); assert.equal(updates().length, 1);
 });
 
-test('all unsupported schemes and oversized HTTP URL skip without storage, tab, icon, or reconciliation mutations', async () => {
+test('all unsupported schemes and oversized HTTP URL skip without ownership storage, tab, icon, or reconciliation mutations', async () => {
     const urls = [unsupportedUrl, 'chrome://settings/', 'file:///tmp/example.html', 'javascript:alert(1)', 'data:text/plain,example', 'ftp://example.test/', `https://example.test/${'x'.repeat(16384)}`];
     const ids = urls.map((_, index) => `unsupported-${index}`); addBatchNodes(...ids);
     for (const [index, bookmarkId] of ids.entries()) nodes.find(node => node.id === bookmarkId).url = urls[index];
@@ -1117,12 +1129,12 @@ test('all unsupported schemes and oversized HTTP URL skip without storage, tab, 
     session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'old-favorite', windowId: 1, tabId: 1 }],
         attempts: [{ favoriteId: 'removed-favorite', windowId: 1, tabId: null, url: URL }] };
     const before = { local: copy(local), session: copy(session), nodes: copy(nodes), tabs: copy(tabs) }, writes = []; let captures = 0;
-    hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+    hooks.localBeforeSet = value => recordOwnershipWrite(writes, 'local', value); hooks.sessionBeforeSet = value => recordOwnershipWrite(writes, 'session', value);
     const store = newStore({ captureIcon: async () => { captures++; return null; } }), result = await store.dispatch(batchRequest(ids.map(id => batchBookmark(id))));
     assert.deepEqual(result, { batch: { complete: true, entries: ids.map(id => skippedEntry(id, id)) } });
     await iconIdle(store);
     assert.equal(captures, 0); assert.deepEqual(writes, []); assert.deepEqual(effects, []);
-    assert.deepEqual({ local, session, nodes, tabs }, before); assert.deepEqual(store.state, before.session[FAVORITE_SESSION_KEY]);
+    assert.deepEqual({ local: withoutDiagnostics('local', local), session: withoutDiagnostics('session', session), nodes, tabs }, { ...before, local: withoutDiagnostics('local', before.local), session: withoutDiagnostics('session', before.session) }); assert.deepEqual(store.state, before.session[FAVORITE_SESSION_KEY]);
 });
 
 for (const change of ['parent', 'deleted', 'folder', 'active', 'missing-active', 'tab-window', 'tab-binding', 'tab-space', 'private-tab']) {
@@ -1138,7 +1150,7 @@ for (const change of ['parent', 'deleted', 'folder', 'active', 'missing-active',
         if (change === 'tab-binding') local.pinnedTabStatesById[2].bookmarkId = 'twin';
         if (change === 'tab-space') spaceStore.spaces[0].spaceBookmarks = [];
         if (change === 'private-tab') get(2).incognito = true;
-        const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+        const writes = []; hooks.localBeforeSet = value => recordOwnershipWrite(writes, 'local', value); hooks.sessionBeforeSet = value => recordOwnershipWrite(writes, 'session', value);
         const before = copy(nodes), error = await batchError(newStore({ captureIcon: async () => null }).dispatch(input));
         assert.equal(error.batch.complete, false); assert(!error.batch.entries.some(entry => ['completed', 'skipped'].includes(entry.status)));
         assert.deepEqual(writes, []); assert.deepEqual(effects, []); assert.deepEqual(nodes, before);
@@ -1150,7 +1162,7 @@ for (const [initialUrl, laterUrl] of [[URL, unsupportedUrl], [unsupportedUrl, UR
         nodes.find(node => node.id === 'bookmark').url = initialUrl;
         let reads = 0;
         hooks.bookmarks = id => { if (id === 'nested' && ++reads === 3) nodes.find(node => node.id === 'bookmark').url = laterUrl; };
-        const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+        const writes = []; hooks.localBeforeSet = value => recordOwnershipWrite(writes, 'local', value); hooks.sessionBeforeSet = value => recordOwnershipWrite(writes, 'session', value);
         const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
         assert.equal(error.code, 'STALE_BOOKMARK'); assert.deepEqual(batchStatuses(error), ['failed', 'unattempted']);
         assert.deepEqual(writes, []); assert.deepEqual(effects, []);
@@ -1203,8 +1215,16 @@ for (const laterUrl of ['https://changed.test/', 'chrome://settings/']) test(`sk
     nodes.find(node => node.id === 'twin').url = unsupportedUrl;
     let reads = 0;
     hooks.bookmarks = id => { if (id === 'nested' && ++reads === 10) nodes.find(node => node.id === 'bookmark').url = laterUrl; };
-    const writes = []; hooks.localBeforeSet = value => writes.push(copy(value)); hooks.sessionBeforeSet = value => writes.push(copy(value));
+    const writes = []; hooks.localBeforeSet = value => recordOwnershipWrite(writes, 'local', value); hooks.sessionBeforeSet = value => recordOwnershipWrite(writes, 'session', value);
     const error = await batchError(newStore({ captureIcon: async () => null }).dispatch(batchRequest()));
     assert.equal(error.code, 'STALE_BOOKMARK'); assert.deepEqual(batchStatuses(error), ['failed', 'unattempted']);
     assert.deepEqual(writes, []); assert.deepEqual(effects, []);
+});
+
+
+test('invalid request rejected before initialization writes neither diagnostics nor ownership', async () => {
+    const store = newStore();
+    await assert.rejects(store.dispatch({ type: 'favoriteStore', action: 'not-an-action' }));
+    assert.deepEqual(diagnosticWrites, []);
+    assert.deepEqual(effects, []);
 });

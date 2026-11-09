@@ -8,7 +8,7 @@ import http from 'node:http';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 const root=path.resolve(import.meta.dirname,'..');
-const scenario=process.env.ARCIFY_FAVORITE_RECOVERY_CASE||'undo';assert(['undo','confirm','ambiguous','undo-repeat','title-update'].includes(scenario));
+const scenario=process.env.ARCIFY_FAVORITE_RECOVERY_CASE||'undo';assert(['undo','confirm','ambiguous','undo-repeat','title-update','diagnostic-title-change'].includes(scenario));
 const scratch=await mkdtemp(path.join(os.tmpdir(),'arcify-favorite-recovery-'));
 const extension=path.join(scratch,'extension'),profile=path.join(scratch,'profile');
 await cp(process.env.ARCIFY_FAVORITE_RECOVERY_BUILD||path.join(root,'dist'),extension,{recursive:true}); await mkdir(profile);
@@ -21,7 +21,7 @@ const report={scenario,scratch,browserExecutable:process.env.ARCIFY_DISPOSABLE_B
 let browser,id,control;
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function close(){if(!browser)return;const p=browser.process();await browser.close();browser=null;report.disposals.push({pid:p.pid,exitCode:p.exitCode,signalCode:p.signalCode});}
-async function launch(){browser=await puppeteer.launch({executablePath:process.env.ARCIFY_DISPOSABLE_BROWSER||'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',headless:true,protocolTimeout:20000,userDataDir:profile,waitForInitialPage:false,ignoreDefaultArgs:['--disable-extensions','about:blank'],args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--restore-last-session','--no-first-run']});
+async function launch(){browser=await puppeteer.launch({executablePath:process.env.ARCIFY_DISPOSABLE_BROWSER||'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',headless:true,protocolTimeout:60000,userDataDir:profile,waitForInitialPage:false,ignoreDefaultArgs:['--disable-extensions','about:blank'],args:[`--disable-extensions-except=${extension}`,`--load-extension=${extension}`,'--restore-last-session','--no-first-run']});
 const worker=await browser.waitForTarget(t=>t.type()==='service_worker'&&t.url().endsWith('/background.js'),{timeout:20000});id=new URL(worker.url()).host;
 control=(await browser.pages()).find(p=>p.url()===`chrome-extension://${id}/sidebar.html`);if(!control){control=await browser.newPage();await control.goto(`chrome-extension://${id}/sidebar.html`);}await control.setViewport({width:380,height:850});await pause(1800);}
 async function req(action,payload={}){const r=await control.evaluate(async({action,payload})=>{const t=await chrome.tabs.getCurrent();return chrome.runtime.sendMessage({type:'favoriteStore',action,windowId:t.windowId,...payload});},{action,payload});assert.equal(r.success,true,JSON.stringify(r));return r;}
@@ -45,10 +45,28 @@ await pause(100);
 assert(report.updatedHints.favoriteRestartHints?.entries.some(h=>h.url===base+'/unique'&&h.title===currentTitle),'Title-only change must refresh exact hint before any Favorite read');
 report.checks.push('Title-only event refreshed exact hint without a Favorite read');
 }
+if(scenario==='diagnostic-title-change')currentTitle='Synthetic changed after restart';
 await close();await launch();await pause(3000);report.after=await req('get');console.log('AFTER',JSON.stringify(report.after));
 if(scenario==='undo-repeat'){await close();await launch();await pause(3000);report.afterSecondRestart=await req('get');report.after=report.afterSecondRestart;}
-report.diagnostics=await control.evaluate(async()=>({tabs:await chrome.tabs.query({}),local:await chrome.storage.local.get(['favoriteRestartHints','spaces','spaceTabSnapshot']),session:await chrome.storage.session.get(['favoriteRestartRecovery','favoriteSession'])}));
-const row=report.after.favorites.find(r=>r.url===base+'/unique');if(scenario==='ambiguous'){assert.equal(row.tabId,null);assert.equal(row.recovery,undefined);assert.equal((await browser.pages()).filter(p=>p.url()===base+'/unique').length,2);report.checks.push('Duplicate live URL remains manual after full browser restart; no third page created');}else{assert(row?.recovery?.token,'Native browser restart must recover unique page');report.checks.push('Native full browser-process close/relaunch recovered unique Favorite');
+report.diagnostics=await control.evaluate(async()=>({tabs:await chrome.tabs.query({}),local:await chrome.storage.local.get(['favoriteRestartHints','favoriteRestartDiagnostic','spaces','spaceTabSnapshot']),session:await chrome.storage.session.get(['favoriteRestartRecovery','favoriteSession'])}));
+const row=report.after.favorites.find(r=>r.url===base+'/unique');if(scenario==='diagnostic-title-change'){
+assert.equal(row.tabId,null);assert.equal(row.recovery,undefined);
+const diagnostic=report.diagnostics.local.favoriteRestartDiagnostic;
+assert.equal(diagnostic.startup.counts.titleChanged,1);
+assert.equal(diagnostic.beforeStartup.counts.hintsWritten,1);
+assert(!JSON.stringify(diagnostic).includes(base));
+await control.goto(`chrome-extension://${id}/options.html`);
+console.log('DIAGNOSTIC_OPTIONS_READY');
+await control.bringToFront();
+await control.click('#favorite-restart-diagnostic-read');
+console.log('DIAGNOSTIC_READ_CLICKED');
+await control.waitForFunction(()=>document.getElementById('favorite-restart-diagnostic-output').textContent.includes('Page title changed'));
+const display=await control.$eval('#favorite-restart-diagnostic-output',el=>el.textContent);
+assert(!display.includes(base));report.diagnosticDisplay=display;
+await control.screenshot({path:path.join(scratch,'restart-diagnostic.png')});
+report.checks.push('Full restart title mismatch stays manual and persists exact sanitized rejection with pre-startup checkpoint');
+report.checks.push('Packaged Settings displays historical rejection on explicit click without exposing page identity');
+}else if(scenario==='ambiguous'){assert.equal(row.tabId,null);assert.equal(row.recovery,undefined);assert.equal((await browser.pages()).filter(p=>p.url()===base+'/unique').length,2);report.checks.push('Duplicate live URL remains manual after full browser restart; no third page created');}else{assert(row?.recovery?.token,'Native browser restart must recover unique page');report.checks.push('Native full browser-process close/relaunch recovered unique Favorite');
 const restored=(await browser.pages()).find(p=>p.url()===base+'/unique');assert(restored);const token=await restored.evaluate(()=>({token:window.documentToken,draft:document.querySelector('#draft').value,history:history.length}));
 await control.bringToFront();await control.reload();await pause(1200);await control.waitForSelector('.favorite-recovery-card');await control.screenshot({path:path.join(scratch,'recovered.png')});
 const buttons=await control.$$eval('.favorite-recovery-card button',es=>es.map(e=>e.textContent));assert.deepEqual(buttons,['Undo','Confirm']);report.checks.push('Rendered recovered card exposes Undo and Confirm');
