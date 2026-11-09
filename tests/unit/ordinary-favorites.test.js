@@ -1394,3 +1394,22 @@ test('malformed protectedTabs rejects worker initialization without changing nat
         assert.deepEqual(effects, []);
     }
 });
+
+for(const reordered of [false,true])test('layout diagnostic uses actual quiet Favorite ownership across full restart '+reordered,async()=>{
+    nodes.push({id:'c',parentId:'root',title:'c'});
+    tabs.push({id:3,windowId:1,title:'Third',url:'https://third.test/',pinned:false,groupId:-1,index:2});
+    local.spaces=[space('a'),space('b',[2]),space('c',[3])];sync.defaultSpaceName='a';
+    const s=await restartFixture(()=>{if(reordered){tab(102).index=2;tab(103).index=1;}});
+    const {createRecoveryObserver}=await import('../../recovery-observation.js');
+    const {diagnoseDurableLayout}=await import('../../durable-layout-diagnostics.js');
+    for(const t of tabs)t.incognito=false;
+    chrome.windows.getAll=async()=>[{id:11,type:'normal',incognito:false}];chrome.bookmarks.onCreated=event();
+    const before=clone({local,session,tabs,effects});
+    const observer=createRecoveryObserver(s.spaces,chrome,{layoutDetails:true});
+    const diagnostic=await diagnoseDurableLayout(await observer.capture());observer.dispose();
+    assert.equal(diagnostic.status,'stable');assert.equal(diagnostic.counts.observedEligibleSlots,2);
+    assert.equal(diagnostic.counts.excludedGlobalSlots,1);assert.equal(diagnostic.counts.reorderedNativeSlots,reordered?1:0);
+    assert.equal(diagnostic.counts.pendingWindowLayouts,reordered?1:0);
+    assert.deepEqual({local,session,tabs,effects},before);
+    assert.equal(s.result.favorites[0].tabId,101);assert(s.result.favorites[0].recovery);
+});

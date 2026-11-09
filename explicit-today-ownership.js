@@ -7,18 +7,18 @@ import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 const SESSION_EPOCH = 'spaceExplicitTodayEpoch';
 export const EXPLICIT_TODAY_CHECKPOINT = 'spaceExplicitTodayCheckpoint';
 const token = value => typeof value === 'string' && value.length > 0 && value.length <= 256;
-async function epochs(store, create = false) {
+async function epochs(store, create = false, api = chrome) {
     const identity = await store.favoriteStore?.ownershipPersistence?.browserIdentity?.({ recovered: true });
-    let epoch = (await chrome.storage.session.get(SESSION_EPOCH))[SESSION_EPOCH];
+    let epoch = (await api.storage.session.get(SESSION_EPOCH))[SESSION_EPOCH];
     const browser = token(identity?.epoch) && token(identity?.generation) ? { kind: 'browser', epoch: identity.epoch, generation: identity.generation } : null;
     if (!token(epoch) && !browser && create) {
         epoch = crypto.randomUUID();
-        await chrome.storage.session.set({ [SESSION_EPOCH]: epoch });
-        if ((await chrome.storage.session.get(SESSION_EPOCH))[SESSION_EPOCH] !== epoch) throw new Error('Current tab identity could not be verified. Nothing was moved.');
+        await api.storage.session.set({ [SESSION_EPOCH]: epoch });
+        if ((await api.storage.session.get(SESSION_EPOCH))[SESSION_EPOCH] !== epoch) throw new Error('Current tab identity could not be verified. Nothing was moved.');
     }
     return [...(browser ? [browser] : []), ...(token(epoch) ? [{ kind: 'session', epoch }] : [])];
 }
-export const explicitTodayEpochs = store => epochs(store);
+export const explicitTodayEpochs = (store, api = chrome) => epochs(store, false, api);
 export async function explicitTodayEpoch(store, create = false) {
     return (await epochs(store,create))[0] || null;
 }

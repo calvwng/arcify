@@ -8,7 +8,7 @@ import http from 'node:http';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 const root=path.resolve(import.meta.dirname,'..');
-const scenario=process.env.ARCIFY_FAVORITE_RECOVERY_CASE||'undo';assert(['undo','confirm','ambiguous','undo-repeat','title-update','diagnostic-title-change','quiet-repeat'].includes(scenario));
+const scenario=process.env.ARCIFY_FAVORITE_RECOVERY_CASE||'undo';assert(['undo','confirm','ambiguous','undo-repeat','title-update','diagnostic-title-change','quiet-repeat','layout-diagnostic'].includes(scenario));
 const scratch=await mkdtemp(path.join(os.tmpdir(),'arcify-favorite-recovery-'));
 const extension=path.join(scratch,'extension'),profile=path.join(scratch,'profile');
 await cp(process.env.ARCIFY_FAVORITE_RECOVERY_BUILD||path.join(root,'dist'),extension,{recursive:true}); await mkdir(profile);
@@ -45,6 +45,7 @@ await pause(100);
 assert(report.updatedHints.favoriteRestartHints?.entries.some(h=>h.url===base+'/unique'&&h.title===currentTitle),'Title-only change must refresh exact hint before any Favorite read');
 report.checks.push('Title-only event refreshed exact hint without a Favorite read');
 }
+if(scenario==='layout-diagnostic'){const today=await browser.newPage();await today.goto(base+'/today');await pause(1000);}
 if(scenario==='diagnostic-title-change')currentTitle='Synthetic changed after restart';
 await close();await launch();await pause(3000);report.after=await req('get');console.log('AFTER',JSON.stringify(report.after));
 if(scenario==='quiet-repeat'){
@@ -62,6 +63,32 @@ for(let restart=0;restart<2;restart++){await close();await launch();await pause(
 report.checks.push('Fresh inferred navigation/title/cohort observations survived two more browser restarts without Confirm');
 }
 if(scenario==='undo-repeat'){await close();await launch();await pause(3000);report.afterSecondRestart=await req('get');report.after=report.afterSecondRestart;}
+if(scenario==='layout-diagnostic'){
+await pause(1000);
+report.layoutDiagnostic=await control.evaluate(async()=>{
+ const current=await chrome.tabs.getCurrent(),native=await chrome.tabs.query({windowId:current.windowId});
+ const state=await chrome.runtime.sendMessage({type:'spaceStore',action:'get'});
+ if(!state.success)throw Error(state.error);
+ const today=native.find(t=>t.url.endsWith('/today')),space=state.spaces.find(s=>s.temporaryTabs.includes(today.id));
+ const activation=await chrome.runtime.sendMessage({type:'spaceStore',action:'activate',spaceId:space.id,windowId:current.windowId});
+ if(!activation.success)throw Error(activation.error);
+ const keys=['spaces','spaceDurableTodayLayout','spaceTabSnapshot','favoriteRestartHints'];
+ const before=await chrome.storage.local.get(keys),tabsBefore=await chrome.tabs.query({});
+ const result=await chrome.runtime.sendMessage({type:'arcifySelectedRecoveryDiagnostic',windowId:current.windowId,
+  spaceId:space.id,bookmarkFolderId:space.bookmarkFolderId,entries:[{tabId:today.id,url:today.url}]});
+ if(!result.success)throw Error('Diagnostic request failed');
+ const after=await chrome.storage.local.get(keys),tabsAfter=await chrome.tabs.query({});
+ return {result,stateUnchanged:JSON.stringify(before)===JSON.stringify(after),
+  tabsUnchanged:JSON.stringify(tabsBefore.map(t=>[t.id,t.url,t.windowId,t.index]))===JSON.stringify(tabsAfter.map(t=>[t.id,t.url,t.windowId,t.index]))};
+});
+assert.equal(report.layoutDiagnostic.result.layoutReport.schema,'arcify-layout-diagnostic-v3');
+assert.equal(report.layoutDiagnostic.result.layoutReport.status,'stable');
+assert(report.layoutDiagnostic.result.layoutReport.counts.excludedGlobalSlots>=1);
+assert.equal(report.layoutDiagnostic.result.layoutReport.automaticRestore,'enabled');
+assert(report.layoutDiagnostic.stateUnchanged);assert(report.layoutDiagnostic.tabsUnchanged);
+assert(!JSON.stringify(report.layoutDiagnostic.result).includes(base));
+report.checks.push('Packaged read-only layout v3 report excludes quiet Favorite and preserves storage/native tabs');
+}
 report.diagnostics=await control.evaluate(async()=>({tabs:await chrome.tabs.query({}),local:await chrome.storage.local.get(['favoriteRestartHints','favoriteRestartDiagnostic','spaces','spaceTabSnapshot']),session:await chrome.storage.session.get(['favoriteRestartRecovery','favoriteSession'])}));
 const row=report.after.favorites.find(r=>r.url===base+'/unique');if(scenario==='diagnostic-title-change'){
 assert.equal(row.tabId,null);assert.equal(row.recovery,undefined);

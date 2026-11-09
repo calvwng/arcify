@@ -187,7 +187,7 @@ test('additional native slot restores the fresh mapped subset without promoting 
     const saved=structuredClone(f.local[DURABLE_LAYOUT_KEY]);newEpoch(f);
     f.tabs.push({id:9900,windowId:10,index:Math.max(...f.tabs.filter(t=>t.windowId===10).map(t=>t.index))+1,url:'https://startup-extra.test/',pinned:false,incognito:false,splitViewId:-1});
     const cold=await load(f);assert(f.ids.every(id=>owner(cold,id+2000)==='target'));historyPreserved(f,cold);
-    const report=await diagnoseDurableLayout({stable:true,scope:'live-store',local:f.local,tabs:f.tabs,memory:{durableLayout:cold.durableLayout,layoutPending:[...cold.layoutPending],restoreQueue:cold.restoreQueue}});
+    const report=await diagnoseDurableLayout({stable:true,scope:'live-store',local:f.local,tabs:f.tabs.map(tab=>({...tab,knownGlobal:false,knownGlobalId:false,effectiveTransient:false})),windows:[{id:10,type:'normal',incognito:false},{id:20,type:'normal',incognito:false}],layoutChecks:{currentEpochs:cold.explicitTodayEpochs||[],bookmarkRoots:cold.spaces.map(space=>[space.bookmarkFolderId,true])},memory:{durableLayout:cold.durableLayout,layoutPending:[...cold.layoutPending],restoreQueue:cold.restoreQueue,spaces:cold.spaces,explicitToday:[...cold.explicitToday],explicitTodayEpoch:cold.explicitTodayEpoch,explicitTodayEpochs:cold.explicitTodayEpochs,provisional:[...cold.provisional],automaticLayoutRestore:cold.automaticLayoutRestore}});
     assert.equal(report.counts.pendingWindowLayouts,1);assert(!cold.explicitToday.has(9900));assert(!cold.restoredRanks.has(9900));
     const fresh=cold.durableLayout.cohorts.find(c=>c.explicitOnly);assert(fresh.contextSubset);assert(!fresh.signature.some(t=>t.url==='https://startup-extra.test/'));assert.equal(fresh.placements.length,7);
     await cold.persist();const warm=await load(f);assert(!warm.durableLayout.cohorts.find(c=>c.id===fresh.id).signature.some(t=>t.url==='https://startup-extra.test/'));
@@ -281,7 +281,7 @@ test('explicit move against changed pending layout captures fresh authority acro
     const f=await setup();for(const tab of f.tabs.filter(t=>t.windowId===20))tab.url=`https://other-window.test/${tab.id}`;
     await f.store.persist();newEpoch(f);f.tabs.find(t=>t.id===1001).url='https://changed-anchor.test/';
     const s=await load(f);s.active[10]='source';
-    const report=await diagnoseDurableLayout({stable:true,scope:'live-store',local:f.local,tabs:f.tabs,memory:{durableLayout:s.durableLayout,layoutPending:[...s.layoutPending],restoreQueue:s.restoreQueue}});
+    const report=await diagnoseDurableLayout({stable:true,scope:'live-store',local:f.local,tabs:f.tabs.map(tab=>({...tab,knownGlobal:false,knownGlobalId:false,effectiveTransient:false})),windows:[{id:10,type:'normal',incognito:false},{id:20,type:'normal',incognito:false}],layoutChecks:{currentEpochs:s.explicitTodayEpochs||[],bookmarkRoots:s.spaces.map(space=>[space.bookmarkFolderId,true])},memory:{durableLayout:s.durableLayout,layoutPending:[...s.layoutPending],restoreQueue:s.restoreQueue,spaces:s.spaces,explicitToday:[...s.explicitToday],explicitTodayEpoch:s.explicitTodayEpoch,explicitTodayEpochs:s.explicitTodayEpochs,provisional:[...s.provisional],automaticLayoutRestore:s.automaticLayoutRestore}});
     assert.equal(report.counts.noSequenceCorrespondence,1);assert.equal(report.counts.changedOrMissingCandidates,1);
     const request={...f.request,entries:f.ids.map(id=>({tabId:id+1000,url:`https://layout.test/${id}`}))};
     await moveTodayTabsToSpace(s,request);assert(f.ids.every(id=>owner(s,id+1000)==='target'));
@@ -583,7 +583,7 @@ test('named and pin-metadata records remain historical rather than entering plai
 });
 test('built-in layout evidence reports only bounded counts and distinguishes partial startup',async()=>{
     const f=await setup();newEpoch(f);f.tabs.splice(0,f.tabs.length,...f.tabs.filter(t=>t.id<1104));const s=await load(f);
-    const snapshot={stable:true,scope:'live-store',local:f.local,tabs:f.tabs,memory:{durableLayout:s.durableLayout,layoutPending:[...s.layoutPending],restoreQueue:s.restoreQueue}};
+    const snapshot={stable:true,scope:'live-store',local:f.local,tabs:f.tabs.map(tab=>({...tab,knownGlobal:false,knownGlobalId:false,effectiveTransient:false})),windows:[{id:10,type:'normal',incognito:false},{id:20,type:'normal',incognito:false}],layoutChecks:{currentEpochs:s.explicitTodayEpochs||[],bookmarkRoots:s.spaces.map(space=>[space.bookmarkFolderId,true])},memory:{durableLayout:s.durableLayout,layoutPending:[...s.layoutPending],restoreQueue:s.restoreQueue,spaces:s.spaces,explicitToday:[...s.explicitToday],explicitTodayEpoch:s.explicitTodayEpoch,explicitTodayEpochs:s.explicitTodayEpochs,provisional:[...s.provisional],automaticLayoutRestore:s.automaticLayoutRestore}};
     const report=await diagnoseDurableLayout(snapshot);assert.equal(report.status,'stable');assert(report.counts.incompleteCandidates>0);assert(report.counts.pendingTodayPlacements>=7);
     assert.doesNotMatch(JSON.stringify(report),/https|url|tabId|windowId|fingerprint|incarnation|epoch/);
     assert.throws(()=>validateLayoutDiagnostic({...report,url:'secret'}));

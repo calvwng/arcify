@@ -194,23 +194,15 @@ export function layoutEvidence(cohorts,live) {
             :matches.length?'ambiguous':live.some(w=>partial(w,c))?'incomplete':'changed'};
     });
 }
-export async function restoreDurableLayout(store,tabs) {
-    if(!store.durableLayout)return;
-    const live=windows(store,tabs);
-    store.layoutProvisional=new Set(tabs.filter(tab=>layoutCandidate(store,tab)).map(t=>t.id));
-    // Preserve candidate quarantine before suspending automatic application:
-    // ordinary tracking must not substitute historical matching for this path.
-    if(store.automaticLayoutRestore===false)return;
-    const evidence=layoutEvidence(store.durableLayout.cohorts,live),plans=[];
-    const {pinnedTabStatesById={}}=await chrome.storage.local.get('pinnedTabStatesById');
-    const epoch=await explicitTodayEpoch(store);
+// Pure predicates shared by restoration and the read-only diagnostic. No API reads or writes.
+export function createLayoutRestoreGuards(store,evidence,epoch,pinnedTabStatesById={}, {onPrecedenceCheck=()=>{}}={}) {
     const overridesProven=(c,w)=>c.overrides.every(o=>w.tabs.some(t=>t.id===o.tabId&&explicitTodayOwner(store,t)&&store.explicitToday.get(t.id).incarnation===o.incarnation));
     const placeable=(c,w,states=pinnedTabStatesById)=>{const mapped=mappedTabs(c,w);return overridesProven(c,w)&&c.placements.length>0&&c.placements.every(p=>{
         const tab=mapped?.[c.signature.findIndex(t=>t.index===p.index)];
         return root(store,p)&&eligible(store,tab)&&!states[tab.id]?.bookmarkId
             && !(Number.isInteger(tab.splitViewId)&&tab.splitViewId>=0)&&!store.spaces.some(s=>s.spaceBookmarks.includes(tab.id));
     });};
-    const precedenceAllows=(c,w,observations=evidence,currentEpoch=epoch,states=pinnedTabStatesById)=> (c.blockedBy||[]).every(id=>{
+    const precedenceAllows=(c,w,observations=evidence,currentEpoch=epoch,states=pinnedTabStatesById)=> { onPrecedenceCheck(); return (c.blockedBy||[]).every(id=>{
         const next=store.durableLayout.cohorts.find(n=>n.id===id);if(!next)return false;
         // Exact current-epoch ownership permits merging an older full baseline
         // around newer choices during partial startup, never overwriting them.
@@ -222,7 +214,22 @@ export async function restoreDurableLayout(store,tabs) {
         if(current)return true;
         const proof=observations.find(e=>e.cohort.id===id);
         return proof?.status==='ready'&&proof.matches[0].id!==w.id&&placeable(next,proof.matches[0],states)&&precedenceAllows(next,proof.matches[0],observations,currentEpoch,states);
-    });
+    }); };
+    return {overridesProven,placeable,precedenceAllows};
+}
+export { eligible as layoutEligible, windows as layoutWindows, root as layoutSpaceRoot, mappedTabs as layoutMappedTabs };
+
+export async function restoreDurableLayout(store,tabs) {
+    if(!store.durableLayout)return;
+    const live=windows(store,tabs);
+    store.layoutProvisional=new Set(tabs.filter(tab=>layoutCandidate(store,tab)).map(t=>t.id));
+    // Preserve candidate quarantine before suspending automatic application:
+    // ordinary tracking must not substitute historical matching for this path.
+    if(store.automaticLayoutRestore===false)return;
+    const evidence=layoutEvidence(store.durableLayout.cohorts,live),plans=[];
+    const {pinnedTabStatesById={}}=await chrome.storage.local.get('pinnedTabStatesById');
+    const epoch=await explicitTodayEpoch(store);
+    const {overridesProven,placeable,precedenceAllows}=createLayoutRestoreGuards(store,evidence,epoch,pinnedTabStatesById);
     for(const item of evidence){
         const c=item.cohort;if(!store.layoutPending.has(c.id)||item.status!=='ready')continue;
         const w=item.matches[0];

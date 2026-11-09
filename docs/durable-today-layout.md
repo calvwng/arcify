@@ -63,7 +63,9 @@ integrity-checked stored data, not proven current or historical identity.
 
 Mismatch relations distinguish pinned anchors, shifted indices, additional native
 slots, reordered slots and no sequence correspondence. Counts may overlap and
-never authorize restoration. Reports contain no URLs, titles, IDs, raw records or
+never authorize restoration. The v3 report also explains snapshot refusal guards for complete sequence candidates,
+using effective Favorite exclusion. Saved record counts can repeat tabs; passing
+observed checks is not a restore promise. Reports contain no URLs, titles, IDs, raw records or
 reusable hashes. See [recovery diagnostics](recovery-diagnostics.md) for schemas,
 privacy bounds and the independent diagnostic build gate.
 

@@ -8,7 +8,7 @@ needed. The report can be copied with **Copy diagnostic** for troubleshooting.
 This reads only. It never adopts, restores, moves or closes tabs, invokes the
 recovery matcher, clears flags, or writes storage. Counts explain saved-identity
 refusal conditions; zero blockers is not permission or proof that recovery will
-succeed. Normal Move to Space assigns exact live tabs independently from historical identity. The layout evidence uses schema v2; see durable-today-layout.md for its mismatch counts and limitations.
+succeed. Normal Move to Space assigns exact live tabs independently from historical identity. The layout evidence uses schema v3; see durable-today-layout.md for its mismatch counts and limitations.
 
 ## Report and privacy boundary
 
@@ -74,3 +74,43 @@ Vite regenerates that directory. `scripts/zip.js` packages the generated `dist`.
 Developer-only transient-window hooks and paired-Chrome probes remain separate
 from this user-facing counts-only diagnostic. Their activation/privacy contracts
 must not be conflated with this report. No additional diagnostic was removed here.
+
+## Snapshot refusal counts (layout diagnostic v3)
+
+The layout report uses the same pure native-window eligibility, sequence mapping,
+Space association and precedence/override predicates as production. Effective
+Favorite ownership includes active inferred recovery, not just exact bindings.
+All non-private native windows participate in matching, including popup windows
+that can make a match ambiguous; only eligible normal windows may be restored.
+The selected-row and aggregate report retain their existing narrower window view.
+
+Complete sequence candidates are then counted against automatic-mode, newer-choice,
+unproven-override, Space association, bookmark-folder, saved-pin, native-split and
+window checks. Counts overlap. Passing these observed checks does not establish
+historical identity, run recovery or guarantee a later restore: production still
+revalidates asynchronous evidence before applying anything. Saved placement counts
+are records across historical layouts and may repeat the same live tabs.
+
+The selected report adds two bounded read-only epoch/folder observations, effective
+exclusion flags, and bookmark-event stability checks. It never creates an epoch,
+initializes stores, invokes their query/reconcile wrappers, writes storage, or
+performs native actions. Missing capabilities, races or work-budget exhaustion
+return incomplete/changing without counts. Extra fields remain inside the worker;
+only allowlisted counts and mode values reach the UI/clipboard. The aggregate
+settings reader does not perform the new folder/epoch reads.
+
+`tests/unit/layout-refusal-diagnostics.test.js` compares refusals to the actual
+restoration path, including precedence, overrides, roots, saved pins, splits,
+popup competition and zero-placement semantics. It also covers read/write traps,
+privacy, admission eligibility, mode, races and work limits. Integrated ordinary
+Favorite tests cover active quiet recovery plus both unchanged and reordered
+Today layouts. The ledger remains version 3; matching and restore behavior are
+unchanged.
+
+For packaged native validation without touching an existing browser profile, build
+the extension and run `ARCIFY_FAVORITE_RECOVERY_CASE=layout-diagnostic node
+scripts/disposable-favorite-recovery.mjs` (set the environment variable separately
+in PowerShell). The fixture creates its own temporary headless browser profile,
+checks the actual packaged receiver after a full restart, verifies quiet-Favorite
+exclusion and unchanged storage/tabs, then exercises Undo. It closes only its owned
+browser. This is not Helium-profile acceptance.
