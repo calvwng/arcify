@@ -22,6 +22,7 @@ import { EXPLICIT_TODAY_CHECKPOINT, restoreExplicitToday, explicitTodayEpochs, e
 import { DURABLE_LAYOUT_KEY, initializeDurableLayout, restoreDurableLayout, captureDurableLayout, layoutCandidate, durableRestartQueue, layoutContainsCurrent, pendingLayoutWindowIds } from './durable-today-layout.js';
 import { encodeFavoriteContinuityState as encodeLayout } from './favorite-continuity.js';
 import { stageCurrentLayoutAuthority, stageObservedLayoutCreation } from './current-layout-authority.js';
+import { prepareProvenContextRepair } from './proven-context-repair.js';
 
 const sections = ['spaceBookmarks', 'temporaryTabs'];
 export const tabIds = space => sections.flatMap(key => space?.[key] || []);
@@ -518,11 +519,11 @@ export class SpaceStore {
         }
     }
 
-    async persist({ skipGroupSync = false, beforeWrite = null, savedMove = null, preserveRecoveryQueue = false } = {}) {
-        try { return await this.persistCore({skipGroupSync,beforeWrite,savedMove,preserveRecoveryQueue}); }
+    async persist({ skipGroupSync = false, beforeWrite = null, savedMove = null, preserveRecoveryQueue = false, explicitLayoutIntentIds = [] } = {}) {
+        try { return await this.persistCore({skipGroupSync,beforeWrite,savedMove,preserveRecoveryQueue,explicitLayoutIntentIds}); }
         catch(error) { if(this.durableLayout || this.layoutWriteFence)this.initialized=false; this.layoutWriteFence=null; throw error; }
     }
-    async persistCore({ skipGroupSync = false, beforeWrite = null, savedMove = null, preserveRecoveryQueue = false } = {}) {
+    async persistCore({ skipGroupSync = false, beforeWrite = null, savedMove = null, preserveRecoveryQueue = false, explicitLayoutIntentIds = [] } = {}) {
         const tabs = new Map((await this.queryTabs({})).map(t => [t.id, t]));
         this.liveTabs = tabs;
         const promotedCreations=[];
@@ -535,7 +536,7 @@ export class SpaceStore {
         if (!preserveRecoveryQueue) await restoreDurableLayout(this,[...tabs.values()]);
         const excludedAtRead = new Set([...tabs.values()].filter(tab => this.isTransientTab(tab)).map(tab => tab.id));
         const transientChanged = () => [...tabs.values()].some(tab => this.isTransientTab(tab) && !excludedAtRead.has(tab.id));
-        const retry = () => this.persist({ skipGroupSync, beforeWrite, savedMove, preserveRecoveryQueue });
+        const retry = () => this.persist({ skipGroupSync, beforeWrite, savedMove, preserveRecoveryQueue, explicitLayoutIntentIds });
         const liveWindows = new Set([...tabs.values()].filter(tab => !this.isTransientTab(tab) && !this.isTransientWindow(tab.windowId)).map(t => t.windowId));
         for (const windowId of Object.keys(this.active)) if (this.isTransientWindow(Number(windowId)) || this.privateWindowIds?.has(Number(windowId))) delete this.active[windowId];
         for (const keys of [this.windowKeys, this.restoreWindowKeys]) {
@@ -615,18 +616,24 @@ export class SpaceStore {
         const spaceRankCheckpoint = await createSpaceRankCheckpoint([...this.restoredRanks], spaceTabSnapshot);
         const checkpoint = { spaces: clone(this.spaces), spaceModelVersion: 2, spaceTabSnapshot, spaceRankCheckpoint, spaceWindowSnapshot: windowSnapshot, [SPACE_CONTINUITY_KEY]: stamp };
         checkpoint[EXPLICIT_TODAY_CHECKPOINT] = this.explicitToday?.size ? await createExplicitCheckpoint(snapshot.length, spaceRankCheckpoint.fingerprint) : null;
-        checkpoint[DURABLE_LAYOUT_KEY] = await captureDurableLayout(this,[...tabs.values()],snapshot,spaceRankCheckpoint.fingerprint,{allowFreshExplicit:preserveRecoveryQueue||this.currentLayoutTransition,provenContextOnly:!!this.currentLayoutTransition});
+        // A fresh explicit move proves only its current ownership witnesses.
+        // Unchosen fallback neighbours must not become required restart anchors.
+        // Existing signatures stay intact; only fresh choices use subset capture.
+        const contextRepair = !preserveRecoveryQueue && !savedMove && !explicitLayoutIntentIds.length
+            ? await prepareProvenContextRepair(this,[...tabs.values()],snapshot,spaceRankCheckpoint.fingerprint) : null;
+        checkpoint[DURABLE_LAYOUT_KEY] = contextRepair?.layout || await captureDurableLayout(this,[...tabs.values()],snapshot,spaceRankCheckpoint.fingerprint,{allowFreshExplicit:preserveRecoveryQueue||this.currentLayoutTransition,provenContextOnly:preserveRecoveryQueue||!!this.currentLayoutTransition,explicitIntentIds:[...explicitLayoutIntentIds,...promotedCreations]});
         if (savedMove) checkpoint[SAVED_MOVE_JOURNAL_KEY] = await checkpointSavedMove(savedMove, checkpoint, snapshot.length);
         if (beforeWrite) await beforeWrite();
         if (this.layoutWriteFence) await this.layoutWriteFence();
         if (this.currentLayoutFence) await this.currentLayoutFence();
         if (transientChanged()) return retry();
+        if (contextRepair) await contextRepair.validate();
         await chrome.storage.local.set(checkpoint);
         const layoutReadback=await chrome.storage.local.get(DURABLE_LAYOUT_KEY);
         if(encodeLayout(layoutReadback[DURABLE_LAYOUT_KEY])!==encodeLayout(checkpoint[DURABLE_LAYOUT_KEY]))throw new Error('Layout checkpoint could not be verified. Nothing was retried.');
-        if(this.currentLayoutTransition){
+        if(this.currentLayoutTransition || contextRepair){
             const readback=await chrome.storage.local.get(Object.keys(checkpoint));
-            if(encodeLayout(readback)!==encodeLayout(checkpoint))throw new Error('Current layout checkpoint could not be verified. Nothing was retried.');
+            if(encodeLayout(readback)!==encodeLayout(checkpoint))throw new Error(contextRepair ? 'Proven context checkpoint could not be verified. Nothing was retried.' : 'Current layout checkpoint could not be verified. Nothing was retried.');
         }
         this.durableLayout=checkpoint[DURABLE_LAYOUT_KEY];this.layoutWriteFence=null;
         for(const id of promotedCreations)this.layoutObservedCreations.delete(id);

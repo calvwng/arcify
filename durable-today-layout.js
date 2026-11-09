@@ -49,6 +49,7 @@ export async function readDurableLayout(value) {
         || value.fingerprint!==await hash({revision:value.revision,cohorts:value.cohorts,snapshotProof:value.snapshotProof}))return null;
     return clone(value);
 }
+export const sealDurableLayout = (revision,cohorts,snapshotProof=null) => sealed(revision,cohorts,snapshotProof);
 async function sealed(revision,cohorts,snapshotProof=null) {
     // Older builds must fail closed rather than silently ignore precedence.
     return {version:3,revision,cohorts:clone(cohorts),snapshotProof,fingerprint:await hash({revision,cohorts,snapshotProof})};
@@ -136,8 +137,8 @@ export function layoutCandidate(store,tab) {
         && c.signature.some(t=>t.url===tab.url));
 }
 export function needsExplicitSubsetChoice(store,tab) {
-    return (store.durableLayout?.cohorts||[]).some(c=>c.contextSubset&&c.binding?.windowId===tab.windowId
-        && !store.layoutPending?.has(c.id)&&!c.binding.tabIds.includes(tab.id));
+    return (store.durableLayout?.cohorts||[]).some(c=>(c.contextSubset||c.explicitOnly)&&c.binding?.windowId===tab.windowId
+        &&!store.layoutPending?.has(c.id)&&!c.placements.some(p=>c.binding.tabIds[c.signature.findIndex(slot=>slot.index===p.index)]===tab.id));
 }
 // Reserve possible restoring windows from cosmetic native projection. This is
 // only a deferral, never evidence authorizing membership or historical identity.
@@ -305,18 +306,42 @@ export async function restoreDurableLayout(store,tabs) {
     store.layoutProvisional=new Set(tabs.filter(tab=>layoutCandidate(store,tab)).map(t=>t.id));
     store.layoutWriteFence=validate;
 }
-export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{allowFreshExplicit=false,provenContextOnly=false}={}) {
+export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{allowFreshExplicit=false,provenContextOnly=false,explicitIntentIds=[]}={}) {
     if(!store.durableLayout)store.durableLayout=await sealed(0,[]);
     store.layoutPending ||= new Set();store.layoutRemovedIds ||= new Set();
     const cohorts=clone(store.durableLayout.cohorts),live=windows(store,tabs);
-    let epoch=null;const freshPlans=[];
+    let epoch=null;const freshPlans=[],intentIds=new Set(explicitIntentIds);
+    const currentEpochs=allowFreshExplicit&&provenContextOnly?await explicitTodayEpochs(store):[];
     for(const w of live){
         const window=await chrome.windows.get(w.id);if(window?.type!=='normal'||window.incognito)continue;
         const existing=cohorts.filter(c=>c.binding?.windowId===w.id&&!store.layoutPending.has(c.id)).sort((a,b)=>(b.choiceRevision||0)-(a.choiceRevision||0))[0];
         const pending=cohorts.filter(c=>store.layoutPending.has(c.id)&&c.signature.some(t=>w.signature.some(n=>n.url===t.url)));
-        const explicitExtra=allowFreshExplicit&&existing?.contextSubset&&w.tabs.some(t=>!existing.binding.tabIds.includes(t.id)&&explicitTodayOwner(store,t));
-        const fresh=explicitExtra||allowFreshExplicit&&pending.length&&!existing&&w.tabs.some(t=>explicitTodayOwner(store,t));
-        if(explicitExtra)pending.push(existing);
+        const ownedIds=new Set(existing?.placements.map(p=>existing.binding.tabIds[existing.signature.findIndex(t=>t.index===p.index)])||[]);
+        const intent=w.tabs.filter(t=>intentIds.has(t.id)&&explicitTodayOwner(store,t));
+        const actualOwner=tab=>explicitTodayOwner(store,tab)&&currentEpochs.some(e=>encode(e)===encode(store.explicitToday.get(tab.id).epoch));
+        const explicitExtra=allowFreshExplicit&&existing?.contextSubset&&intent.some(t=>!ownedIds.has(t.id));
+        // Only exact new intent can expand or supersede a current cohort. Replay
+        // witnesses prove current membership, not an additional durable choice.
+        const explicitRecapture=allowFreshExplicit&&intent.length>0&&provenContextOnly&&existing?.explicitOnly&&!existing.contextSubset&&!existing.blockedBy?.length
+            &&currentEpochs.some(e=>encode(e)===encode(existing.binding.epoch))&&intent.some(actualOwner);
+        // A pending same-epoch baseline can be re-encoded without widening only
+        // when every previous placement has exact current native-ID proof. Never
+        // select its scope by URLs, or advance an unresolved newer-choice edge.
+        const replayScopes=allowFreshExplicit&&provenContextOnly&&!existing?pending.filter(c=>c.binding?.windowId===w.id
+            &&!c.blockedBy?.length&&currentEpochs.some(e=>encode(e)===encode(c.binding.epoch))&&c.placements.length
+            &&c.placements.every(p=>{
+                const tab=w.tabs.find(t=>t.id===c.binding.tabIds[c.signature.findIndex(slot=>slot.index===p.index)]);
+                return actualOwner(tab)&&(intentIds.has(tab.id)||root(store,p)?.temporaryTabs.includes(tab.id)
+                    &&store.explicitToday.get(tab.id).spaceId===p.spaceId);
+            })&&(!c.overrides.length||intent.length>0&&c.overrides.every(o=>{
+                const tab=w.tabs.find(t=>t.id===o.tabId),witness=store.explicitToday.get(o.tabId);
+                return actualOwner(tab)&&witness.incarnation===o.incarnation&&encode(witness.epoch)===encode(o.epoch)
+                    &&(intentIds.has(o.tabId)||c.placements.some(p=>c.binding.tabIds[c.signature.findIndex(slot=>slot.index===p.index)]===o.tabId));
+            }))):[];
+        const replayScope=replayScopes.length===1?replayScopes[0]:null;
+        const fresh=explicitExtra||explicitRecapture||allowFreshExplicit&&pending.length&&!existing&&(intent.length>0||!!replayScope);
+        if(explicitExtra||explicitRecapture)pending.push(existing);
+        const scopeIds=new Set([...ownedIds,...intent.map(t=>t.id),...(!existing&&replayScope?replayScope.placements.map(p=>replayScope.binding.tabIds[replayScope.signature.findIndex(slot=>slot.index===p.index)]):[])]);
         if(pending.length&&!existing){
             if(!fresh)for(const c of pending)for(const tab of w.tabs)if(explicitTodayOwner(store,tab)){
                 const b=store.explicitToday.get(tab.id);
@@ -328,14 +353,15 @@ export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{
         // shutdown or incomplete native restoration. Preserve the full baseline.
         if(existing?.binding.tabIds.some(id=>!w.tabs.some(t=>t.id===id)&&!store.layoutRemovedIds.has(id)
             &&!tabs.some(t=>t.id===id&&(t.windowId!==w.id||t.pinned||store.isGlobalTab?.(t)||store.isGlobalTab?.(t.id)))))continue;
-        const captureTabs=provenContextOnly&&fresh?w.tabs.filter(t=>explicitTodayOwner(store,t))
-            :existing?.contextSubset?w.tabs.filter(t=>existing.binding.tabIds.includes(t.id)||fresh&&explicitTodayOwner(store,t)):w.tabs;
-        const ownedIds=new Set(existing?.placements.map(p=>existing.binding.tabIds[existing.signature.findIndex(t=>t.index===p.index)])||[]);
+        const captureTabs=provenContextOnly&&fresh?w.tabs.filter(t=>scopeIds.has(t.id)&&explicitTodayOwner(store,t))
+            :existing?.contextSubset?w.tabs.filter(t=>existing.binding.tabIds.includes(t.id)||fresh&&scopeIds.has(t.id)&&explicitTodayOwner(store,t)):w.tabs;
         const placements=snapshot.filter(r=>r.section==='temporaryTabs'&&!r.pinnedState&&!r.nameOverride&&captureTabs.some(t=>t.id===r.tabId)
-            &&(!existing?.contextSubset||fresh||ownedIds.has(r.tabId)||explicitTodayOwner(store,w.tabs.find(t=>t.id===r.tabId)))
+            &&(!(existing?.contextSubset||existing?.explicitOnly)||ownedIds.has(r.tabId)||intentIds.has(r.tabId))
             && (!(fresh||existing?.explicitOnly)||explicitTodayOwner(store,w.tabs.find(t=>t.id===r.tabId))))
             .map(r=>({index:w.tabs.find(t=>t.id===r.tabId).index,spaceId:r.spaceId,bookmarkFolderId:store.spaces.find(s=>s.id===r.spaceId)?.bookmarkFolderId,order:store.spaces.find(s=>s.id===r.spaceId).temporaryTabs.indexOf(r.tabId)}));
         if(!placements.length&&!existing)continue;
+        if((!existing||fresh)&&cohorts.length>=1000||fresh&&store.durableLayout.revision>=Number.MAX_SAFE_INTEGER)
+            throw new Error('Layout checkpoint exceeds its supported limits. Nothing was committed.');
         epoch ||= await explicitTodayEpoch(store,true);
         const c={...(!fresh?existing:{}),id:!fresh&&existing?.id||crypto.randomUUID(),signature:signature(captureTabs),placements,binding:{epoch,windowId:w.id,tabIds:captureTabs.map(t=>t.id)},overrides:[],
             ...(explicitExtra||provenContextOnly&&fresh?{contextSubset:true}:{}),
@@ -343,9 +369,10 @@ export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{
         if(!validCohort(c))continue;
         if(fresh){
             const chosen=new Set(placements.map(p=>w.tabs.find(t=>t.index===p.index).url));
-            for(const prior of pending)if(prior.placements.some(p=>chosen.has(prior.signature.find(t=>t.index===p.index)?.url)))
+            for(const prior of replayScope&&!intent.length?[replayScope]:pending)if(prior.placements.some(p=>chosen.has(prior.signature.find(t=>t.index===p.index)?.url)))
                 prior.blockedBy=[...new Set([...(prior.blockedBy||[]),c.id])];
-            freshPlans.push({c,w});
+            const witnesses=new Map(captureTabs.filter(t=>explicitTodayOwner(store,t)).map(t=>[t.id,encode(store.explicitToday.get(t.id))]));
+            freshPlans.push({c,w,witnesses});
         }
         if(existing&&!fresh)cohorts[cohorts.indexOf(existing)]=c;else cohorts.push(c);
     }
@@ -357,16 +384,27 @@ export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{
                 const window=await chrome.windows.get(w.id);if(window?.type!=='normal'||window.incognito)throw new Error('Fresh window changed. Nothing was committed.');
                 for(const p of c.placements)await getSpaceBookmarkFolder(root(store,p));
             }
-            if(encode(await explicitTodayEpoch(store))!==encode(epoch))throw new Error('Fresh layout epoch changed. Nothing was committed.');
             const metadata=await chrome.storage.local.get(['pinnedTabStatesById','tabNameOverridesById']);
             const current=windows(store,await store.queryTabs({}));
-            for(const {c,w} of freshPlans){const now=current.find(n=>n.id===w.id);
+            // A secondary proof can expire during either awaited read even if
+            // the preferred browser epoch survives. Check all epochs last.
+            const acceptedEpochs=await explicitTodayEpochs(store);
+            if(encode(acceptedEpochs[0]||null)!==encode(epoch))throw new Error('Fresh layout epoch changed. Nothing was committed.');
+            for(const {c,w,witnesses} of freshPlans){const now=current.find(n=>n.id===w.id);
                 if(!now||encode(now.signature)!==encode(w.signature)||encode(now.tabs.map(t=>t.id))!==encode(w.tabs.map(t=>t.id))
+                    ||[...witnesses].some(([id,proof])=>encode(store.explicitToday.get(id))!==proof)
+                    ||provenContextOnly&&c.binding.tabIds.some(id=>!explicitTodayOwner(store,now.tabs.find(t=>t.id===id))
+                        ||!acceptedEpochs.some(e=>encode(e)===encode(store.explicitToday.get(id)?.epoch)))
                     ||c.placements.some(p=>{const tab=now.tabs.find(t=>t.index===p.index);return !explicitTodayOwner(store,tab)
+                        ||!acceptedEpochs.some(e=>encode(e)===encode(store.explicitToday.get(tab.id)?.epoch))
+                        ||store.explicitToday.get(tab.id).spaceId!==p.spaceId||store.explicitToday.get(tab.id).bookmarkFolderId!==p.bookmarkFolderId
+                        ||root(store,p)?.temporaryTabs.indexOf(tab.id)!==p.order
                         ||metadata.pinnedTabStatesById?.[tab.id]||metadata.tabNameOverridesById?.[tab.id]
                         ||Number.isInteger(tab.splitViewId)&&tab.splitViewId>=0;}))throw new Error('Fresh native layout changed. Nothing was committed.');
             }
         };
     }
-    return sealed(store.durableLayout.revision+(encode(cohorts)!==encode(store.durableLayout.cohorts)?1:0),cohorts,{liveCount:snapshot.length,rankFingerprint});
+    const next=await sealed(store.durableLayout.revision+(encode(cohorts)!==encode(store.durableLayout.cohorts)?1:0),cohorts,{liveCount:snapshot.length,rankFingerprint});
+    if(!await readDurableLayout(next))throw new Error('Layout checkpoint exceeds its supported limits. Nothing was committed.');
+    return next;
 }

@@ -4,10 +4,34 @@ This corrects the approved durable-layout behavior: a successful explicit Today
 move must remain durable even when older window evidence cannot match. It does not
 add a repair dialog or infer old historical identity.
 
-When a validated explicit move encounters an unmatched pending layout, capture a
-fresh complete eligible native signature. Only exact current explicit ownership
-contributes placements and canonical order; fallback neighbours are matching
-context, not adopted placements. Existing authoritative cohorts update in place.
+A validated explicit Move passes its exact selected IDs through internal persistence
+options, separate from authenticated replay. Native creation contributes only the
+IDs actually observed and promoted by the initialized worker. These IDs can expand
+the prior placement scope; replay-only witnesses cannot. Fresh signatures and
+placements contain prior independently proven placement IDs plus exact new intent
+IDs, never every cached witness in the window. A Move in one window cannot expand
+another window's replay-only context.
+
+A new explicit choice can append a subset successor for a current, bound,
+explicit-only full-window cohort. Its binding must use an actually accepted epoch,
+and it must have no outgoing newer-choice blockers. The predecessor keeps its
+signature, placements and binding; only its newer-choice edge is added. Unplaced
+in-binding context anchors also require new explicit ownership before Move can
+adopt them. Ordinary non-explicit full-window capture remains unchanged.
+
+Pure authenticated replay cannot enlarge an existing explicit-only or mapped
+subset cohort's placement scope. If the baseline is pending, same-epoch native
+IDs and complete current placement/root proof can authorize a scope-preserving
+successor, but not arbitrary newly replayed neighbours. Pure replay refuses
+outgoing newer-choice blockers and all unresolved overrides; it adds only its
+proven predecessor edge. A genuine new Move can retain proven current overrides
+only when every override matches its current witness and lies inside retained
+placement IDs or the exact new intent IDs. Missing proof defers capture.
+
+Ordinary persistence also has a separately validated no-move representation repair
+for complete committed explicit placement evidence. See
+[proven current-context repair](proven-context-repair-candidate.md). Existing
+signatures are never shortened in place.
 
 Retain old cohorts and historical records. A strictly newer choice revision and
 `blockedBy` references record potential conflict, never proof that two cohorts
@@ -20,7 +44,10 @@ newer choices during partial startup. It never overwrites the newer placements.
 Precedence is evaluated before ambiguity: a predecessor does not make its successor
 ambiguous, but unrelated identical cohorts/windows still do. The final write fence
 rechecks unique correspondence, native IDs, signatures, epoch, metadata and relevant
-newer evidence. Fresh cohort, precedence, ownership, ranks and snapshot proof share
+newer evidence. Fresh capture additionally rechecks every included witness against
+actual accepted epochs, exact witness/incarnation/transaction equality, destination
+root and canonical placement order. An expired secondary session witness is not
+accepted merely because the preferred browser epoch still survives. Fresh cohort, precedence, ownership, ranks and snapshot proof share
 the canonical local commit and existing readback/interrupted-write reconciliation.
 
 The conservative tradeoff is possible deferral of an unrelated same-URL old layout
@@ -110,3 +137,31 @@ rows in visible order, close the process, then restore again. It asserts the new
 membership/order and unchanged history while the old pending evidence remains.
 This is actual source-module/native-browser integration, not packaged Helium
 acceptance or evidence about the user's original mismatch.
+
+
+## Activation limits
+
+This local source candidate combines future-capture prevention and a proof-complete
+no-move repair of already-stored explicit full-context cohorts. Ordinary same-session
+persistence or warm initialization can append a selected-only successor when the
+committed live checkpoint, every current witness, membership/order/root and full
+native observations agree. The original cohort and unresolved history remain.
+A cold restart that has already lost this incarnation proof cannot use the repair.
+Installation alone is not a claim that any particular existing record qualifies.
+
+Authenticated replay may prove ordinary neighbours such as Extensions for current
+membership, but it does not add them to an existing durable subset's placement
+scope. Later actual Moves and observed creations add only their exact intent IDs,
+so those replay-only neighbours remain outside the subset. Integration tests cover
+no-move repair, two subsequent authenticated replays, and a cold restart with
+duplicate unrelated Extensions in both ordering modes.
+
+Every captured slot must still have one complete unique ordered embedding in one
+native window. Duplicate chosen URLs with multiple embeddings, missing/reordered
+chosen slots, competing cohorts, and multiple matching windows remain unresolved.
+Two windows with identical chosen subsets cannot be distinguished using discarded
+unproven neighbours. When genuinely different proven chosen slots distinguish two
+windows, the original newer-choice checks can still release the older placement.
+
+This source candidate remains local and has not been installed or activated.
+See [restart prevention candidate evidence](restart-prevention-candidate.md).

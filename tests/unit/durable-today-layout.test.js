@@ -32,6 +32,12 @@ async function changedPending(){
     const request={...f.request,entries:f.ids.map(id=>({tabId:id+1000,url:`https://layout.test/${id}`}))};
     return {f,s,request};
 }
+async function changedChosenPending(){
+    const state=await changedPending();
+    state.f.tabs.find(t=>t.id===1101).url='https://new-chosen-slot.test/';
+    state.request.entries[0].url='https://new-chosen-slot.test/';
+    return state;
+}
 async function chooseSourceAgain(state){
     const {s,request}=state;await moveTodayTabsToSpace(s,request);s.active[10]='target';
     await moveTodayTabsToSpace(s,{...request,spaceId:'target',bookmarkFolderId:'target-root',destinationSpaceId:'source',destinationBookmarkFolderId:'source-root'});
@@ -203,16 +209,19 @@ test('mixed eight-tab move records the extra no-history tab only through explici
 });
 test('old signature returning while the newer layout is absent remains deferred',async()=>{
     const state=await changedPending();await chooseSourceAgain(state);const {f}=state;
-    f.tabs.find(t=>t.id===1001).url='https://same.test/';newEpoch(f);const cold=await load(f);
+    f.tabs.find(t=>t.id===1001).url='https://same.test/';
+    // The newer proof is its explicitly chosen slots, not unrelated context.
+    f.tabs.find(t=>t.id===1101).url='https://missing-chosen-slot.test/';newEpoch(f);const cold=await load(f);
     assert(f.ids.every(id=>owner(cold,id+2000)!=='target'));assert(cold.layoutPending.size);historyPreserved(f,cold);
 });
-test('distinct complete windows release older same-URL placement opportunities',async()=>{
+test('different unrelated context cannot disambiguate identical chosen subsets',async()=>{
     const state=await changedPending();await chooseSourceAgain(state);const {f,s}=state;const olderIds=addOldWindow(f,s);
     newEpoch(f);const cold=await load(f);assert(f.ids.every(id=>owner(cold,id+2000)==='source'));
-    assert(olderIds.every(id=>owner(cold,id+1000)==='target'));historyPreserved(f,cold);
+    assert(olderIds.every(id=>owner(cold,id+1000)!=='target'));assert(cold.layoutPending.size);
+    assert(f.ids.every(id=>!cold.explicitToday.has(id+2000)));historyPreserved(f,cold);
 });
 test('every newer conflict must be proven before an older window can restore',async()=>{
-    const state=await changedPending();await chooseSourceAgain(state);const {f,s}=state;const olderIds=addOldWindow(f,s);
+    const state=await changedChosenPending();await chooseSourceAgain(state);const {f,s}=state;const olderIds=addOldWindow(f,s);
     const ledger=f.local[DURABLE_LAYOUT_KEY],old=ledger.cohorts.find(c=>c.blockedBy?.length),fresh=ledger.cohorts.find(c=>c.explicitOnly);
     const branch=structuredClone(fresh);branch.id='second-newer-choice';branch.binding=null;branch.choiceRevision=++ledger.revision;
     branch.signature[0].url='https://missing-newer-window.test/';ledger.cohorts.push(branch);old.blockedBy.push(branch.id);await reseal(ledger);
@@ -229,21 +238,22 @@ test('a duplicate window appearing during restoration validation rejects the pla
     await assert.rejects(load(f),/changed during restoration/);assert.deepEqual(f.local[DURABLE_LAYOUT_KEY],before);
 });
 test('a newer successor with unproven overrides cannot release older authority',async()=>{
-    const state=await changedPending();await chooseSourceAgain(state);const {f,s}=state,olderIds=addOldWindow(f,s);
+    const state=await changedChosenPending();await chooseSourceAgain(state);const {f,s}=state,olderIds=addOldWindow(f,s);
     const ledger=f.local[DURABLE_LAYOUT_KEY];ledger.cohorts.find(c=>c.explicitOnly).overrides.push({tabId:9999,incarnation:'unproven',epoch:{kind:'session',epoch:'gone'}});await reseal(ledger);
     newEpoch(f);const cold=await load(f);assert(olderIds.every(id=>owner(cold,id+1000)!=='target'));historyPreserved(f,cold);
 });
 test('deleting a newer destination cannot revive an older valid destination',async()=>{
-    const {f,s,request}=await changedPending();s.spaces.push({id:'new-target',name:'New',color:'blue',bookmarkFolderId:'new-root',temporaryTabs:[],spaceBookmarks:[]});
+    const {f,s,request}=await changedChosenPending();s.spaces.push({id:'new-target',name:'New',color:'blue',bookmarkFolderId:'new-root',temporaryTabs:[],spaceBookmarks:[]});
     f.nodes.push({id:'new-root',parentId:'arcify',title:'New'});await s.persist();
     await moveTodayTabsToSpace(s,{...request,destinationSpaceId:'new-target',destinationBookmarkFolderId:'new-root'});
     const olderIds=addOldWindow(f,s);f.local.spaces=f.local.spaces.filter(space=>space.id!=='new-target');newEpoch(f);const cold=await load(f);
     assert(olderIds.every(id=>owner(cold,id+1000)!=='target'));assert(cold.layoutPending.size);historyPreserved(f,cold);
 });
 test('changed newer proof during awaited restoration cannot release an older window',async()=>{
-    const state=await changedPending();await chooseSourceAgain(state);const {f,s}=state;addOldWindow(f,s);newEpoch(f);
+    const state=await changedChosenPending();
+    await chooseSourceAgain(state);const {f,s}=state;addOldWindow(f,s);newEpoch(f);
     const before=structuredClone(f.local[DURABLE_LAYOUT_KEY]);let changed=false;
-    f.hooks.bookmark=()=>{if(!changed){changed=true;f.tabs.find(t=>t.windowId===10&&t.url==='https://changed-anchor.test/').url='https://newer-proof-changed.test/';}};
+    f.hooks.bookmark=()=>{if(!changed){changed=true;f.tabs.find(t=>t.windowId===10&&t.url==='https://new-chosen-slot.test/').url='https://newer-proof-changed.test/';}};
     await assert.rejects(load(f),/changed during restoration/);assert.deepEqual(f.local[DURABLE_LAYOUT_KEY],before);
 });
 for(const phase of ['before-local','after-local','before-session','after-session'])test(`fresh layout atomic reconciliation survives ${phase} interruption`,async()=>{
@@ -593,4 +603,12 @@ test('invalid durable data is retained rather than overwritten by a fallback pro
     const f=await setup();f.local[DURABLE_LAYOUT_KEY].cohorts[0].placements[0].order++;
     const before=structuredClone(f.local[DURABLE_LAYOUT_KEY]);newEpoch(f);await assert.rejects(load(f),/invalid/);
     assert.deepEqual(f.local[DURABLE_LAYOUT_KEY],before);
+});
+
+
+test('distinct proven chosen slots release older same-URL placements in another window',async()=>{
+    const state=await changedChosenPending();await chooseSourceAgain(state);const {f,s}=state,olderIds=addOldWindow(f,s);
+    newEpoch(f);const cold=await load(f);
+    assert(f.ids.every(id=>owner(cold,id+2000)==='source'&&cold.explicitToday.has(id+2000)));
+    assert(olderIds.every(id=>owner(cold,id+1000)==='target'&&cold.explicitToday.has(id+1000)));historyPreserved(f,cold);
 });
