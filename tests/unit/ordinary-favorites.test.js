@@ -1204,3 +1204,19 @@ test('diagnostic reports activation persistence failure without suppressing it',
     assert.equal(local.favoriteRestartDiagnostic.startup.counts.operationFailed, 1);
     assert.equal(local.favoriteRestartDiagnostic.startup.counts.recovered, undefined);
 });
+
+
+test('unchanged refused checkpoints do not write diagnostics during read-only Archive observation', async () => {
+    session[FAVORITE_SESSION_KEY] = { version: 1, bindings: [{ favoriteId: 'f', windowId: 1, tabId: 1, mode: 'ordinary' }], attempts: [] };
+    tabs.push({ ...tab(1), id: 3 });
+    const s = stores(); await s.favorites.dispatch(req('get'));
+    assert.equal(local.favoriteRestartDiagnostic.checkpoint.counts.duplicateNativePage, 1);
+    const before = clone(local), writes = [];
+    const start = Date.now(); let tick = 0;
+    s.favorites.now = () => start + ++tick * 1000;
+    hooks.localSet = value => writes.push(clone(value));
+    await s.favorites.recovery.checkpoint(clone(tabs));
+    await s.favorites.recovery.checkpoint(clone(tabs));
+    assert.deepEqual(writes, [], 'An unchanged rejection cannot generate timestamp-only local writes');
+    assert.deepEqual(local, before);
+});

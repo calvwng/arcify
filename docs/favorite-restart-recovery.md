@@ -129,6 +129,11 @@ tests, not established as the cause of any particular Helium session. This diagn
 change does not alter that policy, the bounded settling interval, matching safeguards,
 review/Undo behavior, or the rule against claiming arbitrary late-created tabs.
 
+Identical skipped-checkpoint status/counters are not saved again just to advance the timestamp.
+Their timestamp remains the first observation of that unchanged summary; a changed
+reason, status or count creates a fresh report. No matching or Archive mutation
+guard is relaxed.
+
 The report describes historical observations, not the live browser state. It cannot
 reconstruct a failure from before this build captured it. Validate an installed build
 and reproduce the browser restart before treating its report as native evidence.

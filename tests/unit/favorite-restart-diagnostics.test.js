@@ -73,3 +73,21 @@ test('diagnostic writer touches only exact auxiliary keys and preserves recovery
     assert.deepEqual(session.favoriteSession, { bindings: ['unchanged'] });
     assert(sanitizeRestartDiagnostic(local[key]));
 });
+
+
+test('unchanged checkpoint summaries retain their observation time without another write', async () => {
+    const original = { capturedAt: 100, status: 'skipped', counts: { exactBindings: 1, duplicateNativePage: 1 } };
+    const data = { [key]: { version: 1, checkpoint: original } }, writes = [];
+    const api = { storage: { local: { async get() { return structuredClone(data); }, async set(value) { writes.push(value); Object.assign(data, structuredClone(value)); } } } };
+    await recordRestartDiagnostic('checkpoint', { capturedAt: 200, status: 'skipped', counts: { duplicateNativePage: 1, exactBindings: 1 } }, api);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(data[key].checkpoint, original);
+    await recordRestartDiagnostic('checkpoint', { capturedAt: 300, status: 'complete', counts: { exactBindings: 1, hintsWritten: 1 } }, api);
+    assert.equal(writes.length, 1);
+    assert.equal(data[key].checkpoint.capturedAt, 300);
+    await recordRestartDiagnostic('checkpoint', { capturedAt: 400, status: 'complete', counts: { exactBindings: 2, hintsWritten: 2 } }, api);
+    assert.equal(writes.length, 2, 'Changed counters remain observable');
+    await recordRestartDiagnostic('checkpoint', { capturedAt: 500, status: 'complete', counts: { exactBindings: 2, hintsWritten: 2 } }, api);
+    assert.equal(writes.length, 3, 'A completed capture retains its new timestamp');
+    assert.equal(data[key].checkpoint.capturedAt, 500);
+});

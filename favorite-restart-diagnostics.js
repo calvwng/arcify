@@ -42,6 +42,10 @@ export async function recordRestartDiagnostic(kind, report, api = chrome, { newS
         const part = sanitizePart({ capturedAt: report.capturedAt, status: report.status, counts: report.counts });
         if (!part) return;
         const previous = sanitizeRestartDiagnostic((await api.storage.local.get(RESTART_DIAGNOSTIC_KEY))[RESTART_DIAGNOSTIC_KEY]) || { version: 1 };
+        // Reconciliation may revisit an unchanged refusal without writing hints.
+        // Do not turn that read-only path into timestamp-only storage mutations.
+        if (kind === 'checkpoint' && part.status === 'skipped' && previous.checkpoint?.status === part.status
+            && RESTART_DIAGNOSTIC_COUNTS.every(key => previous.checkpoint.counts[key] === part.counts[key])) return false;
         if (kind === 'startup' && newStartup) {
             const marker = (await api.storage.session?.get(RESTART_DIAGNOSTIC_SESSION_KEY))?.[RESTART_DIAGNOSTIC_SESSION_KEY];
             const validMarker = marker?.version === 1 && typeof marker.attempted === 'boolean';
