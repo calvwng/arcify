@@ -1,3 +1,4 @@
+import { observeMenuOpenInput, finishMenuOpenInputObservation } from './paired-chrome-menu-input.mjs';
 /** CI-only real paired Chrome exercise. Importing this module never launches Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -198,15 +199,30 @@ export async function readRenamedTabSearch({ page, ui, poll, query, alias, sourc
 }
 
 /** Reacquire only a proven pre-input stale handle; never replay a menu action. */
-export async function openFreshTabMenu({ page, selector, menuSelector, record = async () => {} }) {
-    await clickFreshResult(async remaining => {
-        const element = await page.waitForSelector(selector, { visible: true, timeout: remaining });
-        assert(element, 'The exact context-menu target must exist.');
-        return { click: () => element.click({ button: 'right' }), dispose: () => element.dispose() };
-    }, record);
-    // Keep the postcondition outside the reacquisition boundary: once genuine
-    // input succeeds, even a missing menu or timeout must fail without a replay.
-    await page.waitForSelector(menuSelector, { visible: true });
+export async function openFreshTabMenu({ page, selector, menuSelector, record = async () => {}, observe = false }) {
+    if (observe) await page.evaluate(observeMenuOpenInput, { selector, menuSelector });
+    let outcome = 'failed';
+    try {
+        await clickFreshResult(async remaining => {
+            const element = await page.waitForSelector(selector, { visible: true, timeout: remaining });
+            assert(element, 'The exact context-menu target must exist.');
+            return { click: () => element.click({ button: 'right' }), dispose: () => element.dispose() };
+        }, record);
+        // Keep the postcondition outside the reacquisition boundary: once genuine
+        // input succeeds, even a missing menu or timeout must fail without a replay.
+        await page.waitForSelector(menuSelector, { visible: true });
+        outcome = 'menu-visible';
+    } finally {
+        if (observe) {
+            // Evidence failure cannot replace the original input/postcondition error.
+            try {
+                const observation = await page.evaluate(finishMenuOpenInputObservation);
+                await record({ status: 'menu-input-observation', outcome, observation });
+            } catch (error) {
+                await Promise.resolve().then(() => record({ status: 'menu-input-observation-failed', outcome, error: error.message })).catch(() => {});
+            }
+        }
+    }
 }
 
 /**
@@ -330,7 +346,7 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             const open = async () => {
                 if (menuSelector === '#tab-context-menu') return menu(selector);
                 await ui(sidebar.page, 'Right-click exact saved folder', async () => {
-                    await openFreshTabMenu({ page: sidebar.page, selector, menuSelector,
+                    await openFreshTabMenu({ page: sidebar.page, selector, menuSelector, observe: true,
                         record: observation => checkpoint('context-menu-input', { selector, menuSelector, ...observation }) });
                 });
             };
