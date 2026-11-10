@@ -11,6 +11,7 @@ import {assertTerminalEvidence,assertNoRevival,assertUnrelatedPreserved} from '.
 import {readDeveloperModeDomState,developerModeStateReady,enableDeveloperModeViaUi,findInstalledExtension} from './paired-chrome-extensions.mjs';
 import {CHROME_EXECUTABLE,inspectInstalledChromeRuntime,inspectChromeProcessRuntime,validateChromeLaunchArguments,validateNamespaceLaunchEnvironment,validateChromeNamespaceSandboxStatus} from './paired-chrome-sandbox.mjs';
 import {waitForExactRestartRegistry} from './packaged-layout-exhaustion-registry.mjs';
+import {reloadPackagedExtensionForPersistence,assertPersistentSetupBeforeScenario} from './packaged-layout-exhaustion-registration.mjs';
 import {snapshotChromeLaunchOptions,restartObservedBrowser} from './paired-chrome-browser-restart.mjs';
 assert.equal(process.env.GITHUB_ACTIONS,'true','Only an owned GitHub-hosted disposable runner may execute this fixture');
 assert.equal(process.env.CI,'true');assert.notEqual(process.getuid?.(),0,'Do not disable sandbox for root');
@@ -57,6 +58,26 @@ async function move(ids,destination){
  const r=await chrome.runtime.sendMessage({type:'moveTodayTabsToSpace',windowId,spaceId:source.id,bookmarkFolderId:source.bookmarkFolderId,destinationSpaceId:target.id,destinationBookmarkFolderId:target.bookmarkFolderId,inverted,entries:(inverted?[...ordered].reverse():ordered).map(tabId=>({tabId,url:tabs.find(t=>t.id===tabId).url}))});
  if(!r.success)throw Error(JSON.stringify(r));return r;
 },{ids,destination});}
+async function restartWithRegistry(label){
+ const stage=receipt[label]={status:'running'};try{assert.deepEqual(await inventory(extension),receipt.inventory);
+ const manifest=JSON.parse(await readFile(path.join(extension,'manifest.json'),'utf8')),expectedExtension={id:extensionId,name:manifest.name,version:manifest.version,path:extension};
+ const registry=async b=>{const session=await b.target().createCDPSession();try{return (await session.send('Extensions.getExtensions')).extensions;}finally{await session.detach();}};
+ stage.registryBefore=await registry(browser);assert.equal(findInstalledExtension(stage.registryBefore,expectedExtension).enabled,true);await save();
+ const restart=await restartObservedBrowser({browser,launchOptions,launch:options=>puppeteer.launch(structuredClone(options)),revalidate:async b=>{
+  await sandboxCheck(b);await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);
+  // Match the proven paired fixture's passive startup gate. Never re-enable
+  // Developer mode or install/reload an absent extension after restart.
+  const extensionsPage=await b.newPage();try{
+   await extensionsPage.goto('chrome://extensions/',{waitUntil:'domcontentloaded'});
+   const mode=await poll(async()=>{const state=await extensionsPage.evaluate(readDeveloperModeDomState);(stage.restartDeveloperMode||=[]).push({observedAt:new Date().toISOString(),state});await save();return state;},developerModeStateReady,'read-only restored Developer-mode readiness');
+   assert.equal(mode.manager.inDevMode,true,'Developer mode must remain enabled; do not re-enable it');
+   stage.registryAfter=await waitForExactRestartRegistry({read:()=>registry(b),before:stage.registryBefore,expected:expectedExtension,record:async entries=>{(stage.restartRegistry||=[]).push({observedAt:new Date().toISOString(),entries});await save();}});
+  }finally{await extensionsPage.close();}
+  return {runtime:true,sandbox:true,registry:true};
+ },record:async event=>{(stage.restart||=[]).push(event);await save();}});browser=restart.browser;assert.deepEqual(await inventory(extension),receipt.inventory);stage.status='passed';await save();
+ }catch(error){stage.status='failed';stage.error={message:error.message};await save();throw error;}
+}
+
 try{
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(0,'127.0.0.1',resolve);});const base=`http://127.0.0.1:${server.address().port}`,urls=Array.from({length:1},(_,i)=>`${base}/chosen/${i}`);
  receipt.runtime=await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);validateChromeLaunchArguments(await puppeteer.defaultArgs(structuredClone(launchOptions)));
@@ -68,6 +89,12 @@ try{
   try{await handle.asElement().click();}finally{await handle.dispose();}
  }});await extensions.close();extensionId=await browser.installExtension(extension);
  control=await browser.newPage();await control.goto(`chrome-extension://${extensionId}/options.html`);
+ const manifest=JSON.parse(await readFile(path.join(extension,'manifest.json'),'utf8'));
+ receipt.persistentSetup={scenarioStarted:false,mechanism:'One legitimate pre-seed runtime.reload followed by actual browser preflight; no post-measurement rescue',chromeSourceBasis:'Chrome156 loadUnpacked sets INSTALLED_VIA_CDP; startup clears that registration. Ordinary unpacked reload creates a new installer without that flag. Empirical preflight is mandatory; source reasoning alone is insufficient.'};
+ const prepared=await reloadPackagedExtensionForPersistence({browser,control,expected:{id:extensionId,name:manifest.name,version:manifest.version,path:extension},record:async event=>{(receipt.persistentSetup.events||=[]).push(event);await save();}});control=prepared.control;receipt.persistentSetup.reloadObserved=prepared.reloadObserved;
+ await restartWithRegistry('registrationPreflight');receipt.persistentSetup.preflightRestart=receipt.registrationPreflight.status;assert.deepEqual(await inventory(extension),receipt.inventory);receipt.persistentSetup.packageUnchanged=true;
+ assertPersistentSetupBeforeScenario(receipt.persistentSetup);receipt.checks.push('persistent registration survived real pre-seed browser preflight without reinstall');
+ control=await browser.newPage();await control.goto(`chrome-extension://${extensionId}/options.html`);receipt.persistentSetup.scenarioStarted=true;await save();
  const setup=await control.evaluate(async({urls,base})=>{
   await chrome.storage.sync.set({syncTabGroups:false,onboardingCompleted:true});
   const reply=await chrome.runtime.sendMessage({type:'spaceStore',action:'get'});if(!reply.success)throw Error(reply.error);const source=reply.spaces[0];
@@ -93,21 +120,7 @@ try{
  await control.evaluate(ids=>chrome.tabs.remove(ids),setup.ids);
  observed=await poll(observe,o=>o.ledger?.version===4&&o.ledger.retirements?.some(r=>r.cohortId===chosen.id),'real removal terminal commit');
  await assertTerminalEvidence(before,observed.ledger,chosen.id,historyId,{beforeSnapshot});receipt.unrelatedAnchor=assertUnrelatedPreserved(beforeClose,observed,base+'/unrelated-anchor');receipt.before=before;receipt.preCloseSnapshot=beforeSnapshot;receipt.terminal=observed.ledger;receipt.checks.push('real removal events persisted valid v4 and intact history');await save();
- const manifest=JSON.parse(await readFile(path.join(extension,'manifest.json'),'utf8')),expectedExtension={id:extensionId,name:manifest.name,version:manifest.version,path:extension};
- const registry=async b=>{const session=await b.target().createCDPSession();try{return (await session.send('Extensions.getExtensions')).extensions;}finally{await session.detach();}};
- receipt.registryBefore=await registry(browser);assert.equal(findInstalledExtension(receipt.registryBefore,expectedExtension).enabled,true);await save();
- const restart=await restartObservedBrowser({browser,launchOptions,launch:options=>puppeteer.launch(structuredClone(options)),revalidate:async b=>{
-  await sandboxCheck(b);await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);
-  // Match the proven paired fixture's passive startup gate. Never re-enable
-  // Developer mode or install/reload an absent extension after restart.
-  const extensionsPage=await b.newPage();try{
-   await extensionsPage.goto('chrome://extensions/',{waitUntil:'domcontentloaded'});
-   const mode=await poll(async()=>{const state=await extensionsPage.evaluate(readDeveloperModeDomState);(receipt.restartDeveloperMode||=[]).push({observedAt:new Date().toISOString(),state});await save();return state;},developerModeStateReady,'read-only restored Developer-mode readiness');
-   assert.equal(mode.manager.inDevMode,true,'Developer mode must remain enabled; do not re-enable it');
-   receipt.registryAfter=await waitForExactRestartRegistry({read:()=>registry(b),before:receipt.registryBefore,expected:expectedExtension,record:async entries=>{(receipt.restartRegistry||=[]).push({observedAt:new Date().toISOString(),entries});await save();}});
-  }finally{await extensionsPage.close();}
-  return {runtime:true,sandbox:true,registry:true};
- },record:async event=>{(receipt.restart||=[]).push(event);await save();}});browser=restart.browser;
+ await restartWithRegistry('measuredRestart');
  control=await browser.newPage();await control.goto(`chrome-extension://${extensionId}/options.html`);const afterRestart=await observe();await assertTerminalEvidence(before,afterRestart.ledger,chosen.id,historyId,{beforeSnapshot});receipt.checks.push('actual browser restart retained terminal evidence');
  const reopened=await control.evaluate(async urls=>{const win=await chrome.windows.create({url:urls[0],focused:false});const ids=[win.tabs[0].id];for(const url of urls.slice(1))ids.push((await chrome.tabs.create({windowId:win.id,url,active:false})).id);return ids;},urls);
  observed=await poll(observe,o=>reopened.every(id=>o.tabs.some(t=>t.id===id&&urls.includes(t.url)&&!t.pendingUrl)),'fresh same-URL native tabs');

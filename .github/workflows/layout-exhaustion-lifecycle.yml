@@ -8,6 +8,7 @@ on:
       - 'tests/unit/packaged-layout-exhaustion.test.js'
       - 'scripts/paired-chrome-runtime/**'
       - 'scripts/paired-chrome-browser-restart.mjs'
+      - 'scripts/paired-chrome-worker.mjs'
       - 'scripts/paired-chrome-extensions.mjs'
       - 'scripts/paired-chrome-sandbox.mjs'
       - 'durable-today-layout.js'

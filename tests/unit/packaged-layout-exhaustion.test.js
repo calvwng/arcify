@@ -27,7 +27,7 @@ test('no-revival assertion rejects reassignment and missing fresh tabs',()=>{
 test('hosted fixture uses owned profile, production APIs, observed restart, and normal sandbox only',async()=>{
  const source=await readFile(new URL('../../scripts/packaged-layout-exhaustion.mjs',import.meta.url),'utf8');
  for(const required of ["process.env.GITHUB_ACTIONS","mkdtemp(","userDataDir:profile","browser.installExtension(extension)","moveTodayTabsToSpace","chrome.tabs.remove(ids)","restartObservedBrowser(","assertTerminalEvidence(","assertNoRevival(","validateChromeNamespaceSandboxStatus(","receipt.profileRemoved=false"] )assert(source.includes(required),required);
- for(const forbidden of ['puppeteer.connect','--no-sandbox','--disable-setuid-sandbox','--disable-web-security','Debugger.pause','runtime.reload','stageDurableExhaustion(','observeDurableIndividualClose('])assert(!source.includes(forbidden),forbidden);
+ for(const forbidden of ['puppeteer.connect','--no-sandbox','--disable-setuid-sandbox','--disable-web-security','Debugger.pause','stageDurableExhaustion(','observeDurableIndividualClose('])assert(!source.includes(forbidden),forbidden);
  assert.match(source,/Array\.from\(\{length:1\}/);assert(!source.includes('process.kill('));
 });
 test('workflow is bounded, exact-head, locked existing runtime, and uploads no profile',async()=>{
@@ -84,7 +84,27 @@ test('duplicate extension identity cannot pass convergence',async()=>{
 test('restart revalidation only observes restored policy and registry before waking extension',async()=>{
  const source=await readFile(new URL('../../scripts/packaged-layout-exhaustion.mjs',import.meta.url),'utf8');
  const revalidation=source.slice(source.indexOf('revalidate:async b=>'),source.indexOf('return {runtime:true,sandbox:true,registry:true}'));
- for(const required of ["extensionsPage.goto('chrome://extensions/'","developerModeStateReady","mode.manager.inDevMode,true","waitForExactRestartRegistry","receipt.restartRegistry","receipt.restartDeveloperMode"])assert(revalidation.includes(required),required);
+ for(const required of ["extensionsPage.goto('chrome://extensions/'","developerModeStateReady","mode.manager.inDevMode,true","waitForExactRestartRegistry","stage.restartRegistry","stage.restartDeveloperMode"])assert(revalidation.includes(required),required);
  for(const forbidden of ['installExtension(', 'enableDeveloperModeViaUi(', 'chrome.storage', "options.html", '.click(', 'runtime.reload'])assert(!revalidation.includes(forbidden),forbidden);
  assert.equal((source.match(/browser\.installExtension\(/g)||[]).length,1,'Only initial fresh-profile installation is permitted');
+});
+
+test('persistent setup gate requires observed reload, actual browser preflight and unchanged package before seeds',async()=>{
+ const {assertPersistentSetupBeforeScenario}=await import('../../scripts/packaged-layout-exhaustion-registration.mjs');
+ const valid={reloadObserved:true,preflightRestart:'passed',packageUnchanged:true,scenarioStarted:false};assertPersistentSetupBeforeScenario(valid);
+ for(const change of [{reloadObserved:false},{preflightRestart:'running'},{preflightRestart:'failed'},{packageUnchanged:false},{scenarioStarted:true}])assert.throws(()=>assertPersistentSetupBeforeScenario({...valid,...change}));
+ assert.throws(()=>assertPersistentSetupBeforeScenario(null));
+});
+test('persistent setup uses the existing observed full reload path without installation or preference edits',async()=>{
+ const source=await readFile(new URL('../../scripts/packaged-layout-exhaustion-registration.mjs',import.meta.url),'utf8');
+ for(const required of ['reloadObservedExtension({','requestObservedExtensionReload(control','contexts.size>0','old.targetId','next.targetId','findInstalledExtension(before,expected)','identity.id,expected.id','identity.manifest.version,expected.version'])assert(source.includes(required),required);
+ for(const forbidden of ['installExtension(', 'Extensions.loadUnpacked','chrome.storage','writeFile(','Preferences','runtime.reload('])assert(!source.includes(forbidden),forbidden);
+});
+test('one legitimate setup reload and a preflight restart precede scenario; measured restart has no rescue',async()=>{
+ const source=await readFile(new URL('../../scripts/packaged-layout-exhaustion.mjs',import.meta.url),'utf8');
+ const setupReload=source.indexOf('await reloadPackagedExtensionForPersistence('),preflight=source.indexOf("await restartWithRegistry('registrationPreflight')"),gate=source.indexOf('assertPersistentSetupBeforeScenario(receipt.persistentSetup)'),seed=source.indexOf('const setup=await control.evaluate'),measured=source.indexOf("await restartWithRegistry('measuredRestart')");
+ assert(setupReload>0&&preflight>setupReload&&gate>preflight&&seed>gate&&measured>seed);
+ assert.equal((source.match(/await reloadPackagedExtensionForPersistence\(/g)||[]).length,1);
+ for(const forbidden of ['reloadPackagedExtensionForPersistence(', 'installExtension(', 'runtime.reload','chrome.storage.local.set','enableDeveloperModeViaUi('])assert(!source.slice(measured).includes(forbidden),forbidden);
+ assert(source.includes('assert.deepEqual(await inventory(extension),receipt.inventory)'));
 });

@@ -382,7 +382,21 @@ function originalNativeMenuCallback(definition) {
     return definition.callback.replace(current, previous);
 }
 
+function originalTodayOrderDiagnosticCallback(definition) {
+    if (![42, 43].includes(definition.caseIndex)) return definition.callback;
+    const current = `peerPage:spotlightOptions,groupSync:${definition.caseIndex === 43},observeGroupConsole:observeTodayOrderConsole,reloadArcify:`;
+    const previous = `peerPage:spotlightOptions,groupSync:${definition.caseIndex === 43},reloadArcify:`;
+    assert.equal(definition.callback.split('observeGroupConsole:').length - 1, 1,
+        'Each reviewed Today-order callback must have exactly one passive console observer.');
+    assert.equal(definition.callback.split(current).length - 1, 1,
+        'Only the exact reviewed observer name, position and sync mode may be normalized.');
+    return definition.callback.replace(current, previous);
+}
+
 function originalCallbackBytes(item) {
+    // Exact inverse of the two reviewed passive diagnostic properties only.
+    // Every original callback byte and all existing digest literals stay guarded.
+    item = { ...item, callback: originalTodayOrderDiagnosticCallback(item) };
     return (item.caseIndex === 38 ? originalNativeMenuCallback(item).replace(/^async \(\) => \{\n        await (exerciseTabMenuActions\([\s\S]*?\}\));\n        return exerciseMoveToNewWindow\([\s\S]*?\);\n    \}$/, (_, original) => '() => ' + original.replaceAll('\n            ', '\n        ')) : originalFavoriteLookupBytes(item)).replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
             .replace('            if (serveSpotlightSplitFixture(request, response)) return;\n', '')
@@ -394,6 +408,33 @@ function originalCallbackBytes(item) {
             .replace("        await exerciseBookmarkFallback({apiPage:arcifyOptions,spotlightOptions,arcifyOptions,newTabPage,ui,screenshot,poll,fixture,\n            spotlightId,arcifyId,search,sidebarInput,typeUI,clickUI,snapshot,\n            record:async observation=>{report.bookmarkFallback=observation;await saveReport();}});\n", '')
             .replace('        helperNavigation:true,\n', '');
 }
+
+for (const caseIndex of [42, 43]) test(`case ${caseIndex} diagnostic inverse rejects missing, renamed, duplicate, moved or wrong-mode injection`, async () => {
+    const definitions = []; await runOrchestration('full', null, definitions);
+    const original = definitions.find(item => item.caseIndex === caseIndex), injection = 'observeGroupConsole:observeTodayOrderConsole,';
+    for (const mutate of [
+        text => text.replace(injection, ''),
+        text => text.replace(injection, 'observeGroupConsole:unreviewedObserver,'),
+        text => text.replace(injection, injection + injection),
+        text => text.replace(`groupSync:${caseIndex === 43},${injection}`, `${injection}groupSync:${caseIndex === 43},`),
+        text => text.replace(`groupSync:${caseIndex === 43},`, `groupSync:${caseIndex !== 43},`)
+    ]) assert.throws(() => originalCallbackBytes({ ...original, callback: mutate(original.callback) }));
+});
+
+for (const caseIndex of [42, 43]) test(`case ${caseIndex} diagnostic inverse does not hide extra behavior, changed action, evidence sink, or foreign-case injection`, async () => {
+    const definitions = []; await runOrchestration('full', null, definitions);
+    const original = definitions.find(item => item.caseIndex === caseIndex);
+    const receipt = item => digest({ ...item, callback: originalCallbackBytes(item) }), expected = receipt(original);
+    for (const mutate of [
+        text => text.replace('record:async', 'extraBehavior:()=>chrome.tabs.create({}),record:async'),
+        text => text.replace('exerciseTodayCreationOrder', 'skipTodayCreationOrder'),
+        text => text.replace(caseIndex === 43 ? 'report.todayOrderSyncOn' : 'report.todayOrderSyncOff', 'report.ignored')
+    ]) assert.notEqual(receipt({ ...original, callback: mutate(original.callback) }), expected);
+    const foreign = { ...original, caseIndex: 41 };
+    assert(originalCallbackBytes(foreign).includes('observeGroupConsole:observeTodayOrderConsole,'));
+    const baseline = definitions.find(item => item.callback.includes('assert.'));
+    assert(baseline); assert.notEqual(receipt({ ...baseline, callback: baseline.callback.replace('assert.', 'ignoredAssertion.') }), receipt(baseline));
+});
 
 test('existing callbacks retain their reviewed bytes except exact additive routes and peer helper compatibility', async () => {
     const definitions = new Map();

@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
+import { EventEmitter } from 'node:events';
 import { readSourceText } from '../source-text.js';
 import { TODAY_ORDER_CASES, visibleTodayOrder, serveTodayOrderFixture, assertTodayOrderState, assertTodayCreated,
-    assertTodayOrderUnchanged, assertTodayManualOrder, installTodayOrderTrace, assertTodayOrderInput } from '../../scripts/paired-chrome-today-order.mjs';
+    assertTodayOrderUnchanged, assertTodayManualOrder, installTodayOrderTrace, assertTodayOrderInput,
+    readTodayOrderProjectionInputs, observeTodayOrderCreation, observeTodayOrderGroupConsole } from '../../scripts/paired-chrome-today-order.mjs';
 
 function project(state, spaceId = 'work') {
     state.snapshot = { windowId: 7, activeSpaceId: spaceId,
@@ -209,4 +211,156 @@ test('reload diagnostics capture before reload, retain final failed poll and app
     assert.match(source, /stage: result.stage, assertion: result.assertion/);
     assert.match(source, /'today-order-failed'.*reloadDiagnostic/);
     assert.match(source, /event => checkpoint\(event.phase, \{ errors: event.errors \}\)/);
+});
+
+async function projectionInputs(local = {}, session = {}, sync = {}) {
+    const previous = globalThis.chrome, calls = [];
+    globalThis.chrome = { storage: Object.fromEntries(Object.entries({ local, session, sync }).map(([area, values]) =>
+        [area, { get: async keys => { assert(Array.isArray(keys)); calls.push({ area, keys }); return structuredClone(values); } }])) };
+    try { return { evidence: await readTodayOrderProjectionInputs(), calls }; } finally { globalThis.chrome = previous; }
+}
+test('projection diagnostics read only exact synthetic keys and exclude unrelated or nested secret fields', async () => {
+    const { evidence, calls } = await projectionInputs({ pairingToken: 'DO-NOT-COPY', spaceDurableTodayLayout: { version: 4, revision: 2, secret: 'NESTED-SECRET', cohorts: [] } },
+        { recoverySecret: 'SESSION-SECRET', spaceExplicitTodayEpoch: 'synthetic-session-epoch' }, { syncTabGroups: true, token: 'SYNC-SECRET' });
+    assert.deepEqual(calls, [
+        { area: 'local', keys: ['spaceDurableTodayLayout', 'spaceTabSnapshot', 'spaceRankCheckpoint', 'spaceExplicitTodayCheckpoint'] },
+        { area: 'session', keys: ['spaceExplicitTodayEpoch', 'spaceRecoveryCandidates', 'spaceGroupSplitDeferrals'] },
+        { area: 'sync', keys: ['syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop'] }
+    ]);
+    assert.equal(evidence.complete, false); assert.equal(evidence.unknownFields, 1);
+    for (const secret of ['DO-NOT-COPY', 'NESTED-SECRET', 'SESSION-SECRET', 'SYNC-SECRET', 'pairingToken', 'recoverySecret']) assert(!JSON.stringify(evidence).includes(secret));
+    assert.equal(evidence.data.sync.syncTabGroups.value, true); assert.equal(evidence.source, 'persisted-inputs-only'); assert.equal(evidence.atomic, false);
+    assert(evidence.unavailable.includes('runtime layoutPending'));
+});
+test('bounded complete terminal checkpoint evidence retains exact bytes needed for offline ledger validation', async () => {
+    const { sealDurableLayout, readDurableLayout } = await import('../../durable-today-layout.js');
+    const { encodeFavoriteContinuityState } = await import('../../favorite-continuity.js');
+    const epoch = { kind: 'session', epoch: 'synthetic-epoch' }, witness = { version: 1, epoch, incarnation: 'i', transaction: 't', windowId: 7, spaceId: 'work', bookmarkFolderId: 'folder' };
+    const cohort = { id: 'closed', contextSubset: true, explicitOnly: true, choiceRevision: 1, signature: [{ index: 0, url: 'chrome://newtab/', pinned: false }],
+        placements: [{ index: 0, spaceId: 'work', bookmarkFolderId: 'folder', order: 0 }], binding: { epoch, windowId: 7, tabIds: [11] }, overrides: [] };
+    const fingerprint = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(encodeFavoriteContinuityState(cohort))))).map(byte => byte.toString(16).padStart(2, '0')).join('');
+    const ledger = await sealDurableLayout(2, [cohort], { liveCount: 1, rankFingerprint: 'rank' }, [{ cohortId: 'closed', cohortFingerprint: fingerprint, reason: 'observed-individual-close', revision: 2, closed: [{ index: 0, tabId: 11, witness }] }]);
+    const { evidence } = await projectionInputs({ spaceDurableTodayLayout: ledger, spaceTabSnapshot: [{ tabId: 11, tabIndex: 0, url: 'chrome://newtab/', currentOwnership: witness }] });
+    assert.equal(evidence.complete, true); assert.deepEqual(evidence.data.local.spaceDurableTodayLayout.value, ledger);
+    assert(await readDurableLayout(evidence.data.local.spaceDurableTodayLayout.value));
+    assert.deepEqual(evidence.data.local.spaceTabSnapshot.value[0].currentOwnership, witness);
+    assert(evidence.unavailable.includes('actual native projection decision'), 'Valid persisted ledger is not proof of the runtime decision');
+});
+test('projection diagnostics distinguish absent keys, explicit null, and malformed types', async () => {
+    const { evidence } = await projectionInputs({ spaceDurableTodayLayout: null, spaceTabSnapshot: 'not-an-array' });
+    assert.deepEqual(evidence.data.local.spaceDurableTodayLayout, { present: true, value: null });
+    assert.deepEqual(evidence.data.local.spaceExplicitTodayCheckpoint, { present: false });
+    assert.equal(evidence.complete, false); assert.equal(evidence.unknownFields, 1);
+});
+for (const kind of ['array', 'string', 'nodes', 'bytes']) test(`projection diagnostic ${kind} bounds are explicit and cannot be mistaken for complete proof`, async () => {
+    const rows = kind === 'string' ? [{ url: 'x'.repeat(3000) }] : kind === 'array' ? Array.from({ length: 300 }, () => ({ tabId: 1 }))
+        : Array.from({ length: 256 }, () => ({ tabId: 1, url: 'x'.repeat(2048) }));
+    const local = { spaceTabSnapshot: rows };
+    if (kind === 'nodes') local.spaceDurableTodayLayout = { cohorts: Array.from({ length: 256 }, () => ({ signature: Array.from({ length: 256 }, () => ({ index: 1, url: 'x', pinned: false })) })) };
+    const { evidence } = await projectionInputs(local);
+    assert.equal(evidence.complete, false); assert(evidence.truncated > 0 || evidence.measuredBytes > evidence.limits.bytes);
+    assert(JSON.stringify(evidence).length < evidence.limits.bytes + 2000);
+    if (kind === 'bytes') assert.deepEqual(evidence.data, { omitted: 'byte-budget' });
+});
+
+function creationDiagnosticFixture({ failure = false, actionError = null, captureError = null, recordError = false, consoleError = false } = {}) {
+    const s = sample({ groupSync: true }), states = [structuredClone(s.after), structuredClone(s.after)];
+    if (failure) { states[0].projection = {}; states[1].tabs.at(-1).groupId = -1; }
+    const original = Object.freeze(new Error('original poll failure')), records = [], owned = new Set(), counts = { actions: 0, reads: 0, samples: 0, closes: 0, assertions: 0 };
+    const args = { phase: 'synthetic-create', before: s.before,
+        read: async () => structuredClone(states[counts.reads++]), action: async () => { counts.actions++; if (actionError) throw actionError; return { id: 100 }; },
+        onResult: result => owned.add(result.id), onObservation: state => { for (const tab of state.tabs.filter(t => !s.before.tabs.some(old => old.id === t.id))) owned.add(tab.id); },
+        captureInputs: async () => { counts.samples++; if (captureError) throw captureError; return { sample: counts.samples }; },
+        observeConsole: async () => ({ snapshot: () => ({ warnings: [] }), close: () => { counts.closes++; if (consoleError) throw Error('console close failed'); } }),
+        assertCreated: state => { counts.assertions++; return assertTodayCreated(s.before, state, s.request); },
+        poll: async (read, accept, label) => { assert.equal(label, 'synthetic-create: one exact created identity at its required visible position'); for (let i = 0; i < states.length; i++) { const state = await read(); if (accept(state)) return state; } throw original; },
+        record: async (stage, attempt) => { records.push({ stage, attempt }); if (recordError) throw Error('record failed'); }
+    };
+    return { args, original, records, owned, counts, states };
+}
+test('creation failure preserves baseline, first after-action state, first/last assertion and exact original frozen error', async () => {
+    const f = creationDiagnosticFixture({ failure: true });
+    await assert.rejects(observeTodayOrderCreation(f.args), error => error === f.original);
+    assert.deepEqual(f.counts, { actions: 1, reads: 2, samples: 3, closes: 1, assertions: 2 }); assert.deepEqual([...f.owned], [100]);
+    assert.deepEqual(f.records.map(r => r.stage), ['creation-attempt-started', 'creation-attempt-finished']);
+    const started = f.records[0].attempt, ended = f.records[1].attempt;
+    assert.deepEqual(started.before, f.args.before); assert.equal(started.afterAction, undefined);
+    assert.deepEqual(ended.afterAction, f.states[0]); assert.deepEqual(ended.last.state, f.states[1]);
+    assert.equal(ended.firstFailure.observation, 1); assert.match(ended.firstFailure.assertion.message, /Number\.isInteger\(groupId\)/);
+    assert.equal(ended.last.passed, false); assert.equal(ended.outcome, 'failed'); assert.equal(ended.error.message, f.original.message);
+});
+test('successful observation retains the original strict oracle and does not add controller reads or action retries', async () => {
+    const f = creationDiagnosticFixture(); assert.deepEqual(await observeTodayOrderCreation(f.args), f.states[0]);
+    assert.deepEqual(f.counts, { actions: 1, reads: 1, samples: 3, closes: 1, assertions: 1 });
+    assert.equal(f.records.at(-1).attempt.outcome, 'passed'); assert.equal(f.records.at(-1).attempt.firstFailure, undefined);
+});
+for (const mode of ['capture', 'record', 'console']) test(`diagnostic ${mode} failure never replaces the original failed oracle`, async () => {
+    const f = creationDiagnosticFixture({ failure: true, captureError: mode === 'capture' ? Error('storage read failed') : null, recordError: mode === 'record', consoleError: mode === 'console' });
+    await assert.rejects(observeTodayOrderCreation(f.args), error => error === f.original);
+    assert.equal(f.counts.actions, 1); assert.equal(f.counts.reads, 2); assert.equal(f.counts.closes, 1);
+    assert.equal(f.records.at(-1).attempt.error.message, f.original.message);
+});
+test('action failure still preserves the pre-action evidence and never issues an extra observation/controller command', async () => {
+    const original = Object.freeze(Error('native create failed')), f = creationDiagnosticFixture({ actionError: original });
+    await assert.rejects(observeTodayOrderCreation(f.args), error => error === original);
+    assert.equal(f.counts.actions, 1); assert.equal(f.counts.reads, 0); assert.equal(f.counts.samples, 2); assert.equal(f.counts.closes, 1);
+    assert.deepEqual(f.records.at(-1).attempt.before, f.args.before); assert.equal(f.records.at(-1).attempt.afterAction, undefined);
+});
+
+test('worker-console capture accepts only fresh exact group warnings, bounds records, and removes its listener', async () => {
+    const session = new EventEmitter(), commands = []; session.send = async command => { commands.push(command); return {}; };
+    const observer = await observeTodayOrderGroupConsole(session);
+    const event = { type: 'warning', timestamp: Date.now(), args: [{ value: 'Tab group sync deferred:' }, { className: 'Error', description: 'x'.repeat(2000), preview: { token: 'SECRET-PREVIEW' } }] };
+    session.emit('Runtime.consoleAPICalled', { ...event, timestamp: 0 });
+    session.emit('Runtime.consoleAPICalled', { ...event, args: [{ value: 'unrelated-secret' }, { description: 'SECRET-OTHER' }] });
+    for (let i = 0; i < 25; i++) session.emit('Runtime.consoleAPICalled', event);
+    const result = observer.snapshot(); assert.equal(result.warnings.length, 20); assert.equal(result.dropped, 5); assert.equal(result.warnings[0].description.length, 1024);
+    assert(!JSON.stringify(result).includes('SECRET')); assert.equal(result.absenceIsNotProof, true); assert.deepEqual(commands, ['Runtime.enable']);
+    observer.close(); observer.close(); assert.equal(session.listenerCount('Runtime.consoleAPICalled'), 0);
+    session.emit('Runtime.consoleAPICalled', event); assert.equal(observer.snapshot().dropped, 5);
+});
+test('unavailable worker/session and Runtime enable failure remain diagnostic gaps with no attachment/retry', async () => {
+    const absent = await observeTodayOrderGroupConsole(null); assert.equal(absent.snapshot().status, 'unavailable'); absent.close();
+    const session = new EventEmitter(); let sends = 0; session.send = async () => { sends++; throw Error('worker went away'); };
+    const failed = await observeTodayOrderGroupConsole(session); assert.equal(failed.snapshot().status, 'unavailable'); assert.match(failed.snapshot().error.message, /worker went away/);
+    assert.equal(sends, 1); assert.equal(session.listenerCount('Runtime.consoleAPICalled'), 0);
+});
+test('passive worker lookup has a real bounded deadline and does not later attach when its existing-session promise settles', async () => {
+    let release; const held = new Promise(resolve => { release = resolve; });
+    const result = await observeTodayOrderGroupConsole(held); assert.match(result.snapshot().error.message, /deadline/);
+    const session = new EventEmitter(); session.send = () => assert.fail('A late session cannot start capture'); release(session); await Promise.resolve();
+    assert.equal(session.listenerCount('Runtime.consoleAPICalled'), 0); result.close();
+});
+test('a pending Runtime.enable deadline removes the installed listener and late completion cannot resume capture', async () => {
+    const session = new EventEmitter(); let release, sends = 0;
+    session.send = () => { sends++; return new Promise(resolve => { release = resolve; }); };
+    const observer = await observeTodayOrderGroupConsole(session);
+    assert.equal(sends, 1); assert.match(observer.snapshot().error.message, /deadline/);
+    assert.equal(session.listenerCount('Runtime.consoleAPICalled'), 0);
+    release({}); await Promise.resolve(); assert.equal(session.listenerCount('Runtime.consoleAPICalled'), 0);
+    observer.close(); assert.equal(observer.snapshot().status, 'unavailable');
+});
+test('smoke console adapter observes existing session only and reports missing, ambiguous or changed worker identity', async () => {
+    const smoke = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
+    const source = smoke.slice(smoke.indexOf('async function observeTodayOrderConsole()'), smoke.indexOf('// END passive Today-order console adapter'));
+    const target = () => ({ type: () => 'service_worker', url: () => 'chrome-extension://arcify/background.js' });
+    const original = target(), replacement = target(), sessions = new Map(); let targets = [original];
+    const session = new EventEmitter(); session.send = async () => ({}); sessions.set(original, Promise.resolve(session));
+    const adapter = runInNewContext(`(${source})`, { browser: { targets: () => targets }, arcifyId: 'arcify', networkTargets: sessions, observeTodayOrderGroupConsole });
+    const observer = await adapter(); assert.equal(observer.snapshot().workerChangeGap, false);
+    targets = [replacement]; assert.equal(observer.snapshot().workerChangeGap, true); observer.close(); assert.equal(session.listenerCount('Runtime.consoleAPICalled'), 0);
+    for (const current of [[], [original, replacement], [replacement]]) {
+        targets = current; const missing = await adapter(); assert.equal(missing.snapshot().status, 'unavailable');
+        assert.equal(missing.snapshot().workerChangeGap, current.length !== 1); missing.close();
+    }
+});
+test('diagnostic wiring is passive, scoped, and reports worker replacement gaps without new browser/worker/controller operations', () => {
+    const capture = readTodayOrderProjectionInputs.toString(); assert.doesNotMatch(capture, /\.set\(|\.remove\(|sendMessage|\.query\(|get\(null\)/);
+    const smoke = readSourceText(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url));
+    const adapter = smoke.slice(smoke.indexOf('async function observeTodayOrderConsole()'), smoke.indexOf('// END passive Today-order console adapter'));
+    assert.match(adapter, /networkTargets\.get\(target\)/); assert.match(adapter, /workerChangeGap/);
+    assert.doesNotMatch(adapter, /createCDPSession|\.worker\(|waitForTarget|\.newPage\(|\.send\(/);
+    const source = readSourceText(new URL('../../scripts/paired-chrome-today-order.mjs', import.meta.url));
+    assert.match(source, /onResult: result => \{ if \(Number\.isInteger\(result\?\.id \|\| result\?\.tabId\)\) owned\.add/);
+    assert.match(source, /const proof = assertTodayCreated\(before, after/); assert.match(source, /assertTodayNewTabRow\(after\.newTabRow/);
 });

@@ -3,7 +3,7 @@ import { exerciseSpotlightSplit, serveSpotlightSplitFixture, SPOTLIGHT_SPLIT_CAS
 import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
-import { exerciseTodayCreationOrder, serveTodayOrderFixture } from './paired-chrome-today-order.mjs';
+import { exerciseTodayCreationOrder, serveTodayOrderFixture, observeTodayOrderGroupConsole } from './paired-chrome-today-order.mjs';
 import { exerciseTodayMove, serveTodayMoveFixture } from './paired-chrome-today-move.mjs';
 import { exerciseSavedMove, serveSavedMoveFixture } from './paired-chrome-saved-move.mjs';
 import { exerciseNativeNewTabRow, recordNewTabRowEvidence } from './paired-chrome-newtab-row.mjs';
@@ -62,6 +62,21 @@ import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWork
 import { installColdSetupObserver, readColdSetupObserver, stopColdSetupObserver, waitForColdSetupQuiescence } from './paired-chrome-cold-setup.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
+
+// BEGIN passive Today-order console adapter
+async function observeTodayOrderConsole() {
+    const matches = browser.targets().filter(target => target.type() === 'service_worker' && target.url() === `chrome-extension://${arcifyId}/background.js`);
+    // Only reuse the exact existing network-observation session. No new target,
+    // debugger attachment, worker wake/replacement or network policy change.
+    const target = matches.length === 1 ? matches[0] : null;
+    const observer = await observeTodayOrderGroupConsole(target ? networkTargets.get(target) : null);
+    return { close: observer.close, snapshot: () => {
+        const current = browser.targets().filter(item => item.type() === 'service_worker' && item.url() === `chrome-extension://${arcifyId}/background.js`);
+        return { ...observer.snapshot(), initialMatchingWorkers: matches.length, finalMatchingWorkers: current.length,
+            workerChangeGap: !target || current.length !== 1 || current[0] !== target };
+    } };
+}
+// END passive Today-order console adapter
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI !== 'true') {
     throw new Error('This browser fixture is restricted to its dedicated GitHub Actions job. Do not run it locally.');
@@ -2379,10 +2394,10 @@ try {
         snapshot,poll,fixture,arcifyId,spotlightId,search,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayMoveSyncOn = observation; await saveReport(); } }));
     await step(stepNames[42], () => exerciseTodayCreationOrder({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,pageForUrl,ui,screenshot,
-        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
+        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:false,observeGroupConsole:observeTodayOrderConsole,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayOrderSyncOff = observation; await saveReport(); } }));
     await step(stepNames[43], () => exerciseTodayCreationOrder({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,pageForUrl,ui,screenshot,
-        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
+        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:true,observeGroupConsole:observeTodayOrderConsole,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayOrderSyncOn = observation; await saveReport(); } }));
     await step(stepNames[44], () => exerciseSavedMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,ui,screenshot,
         snapshot,bridge,poll,fixture,arcifyId,spotlightId,search,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
