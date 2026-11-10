@@ -152,7 +152,7 @@ const report = {
         'Little Arc supplemental coverage proves only its selected extension-reload scenario; it is not full-browser restart, missing-marker recovery, Helium or full-suite acceptance.',
         'Space theme and Spotlight options require real hosted input, screenshots and passive first-paint evidence. System preference changes use Chrome rendering-media emulation; native OS color picker, physical OS appearance changes and Helium remain manual.',
         'Space emoji proof uses trusted Chrome text input and genuine Ctrl+V from the disposable fixture clipboard; OS emoji picker, IME candidate windows/composition, physical typing and Helium remain manual. Icon-only names retain native title and accessibility labels with real hover/focus; browser-chrome tooltip painting is not captured by page screenshots.',
-        'Outside-focus menu checks use ordinary sidebar.html tabs and a separate disposable localhost browser window with trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; actual native-panel external focus and Helium remain manual.',
+        'Tab and saved-folder outside-focus menu checks use the native SIDE_PANEL; Space-menu checks use a regular sidebar.html tab. A separate disposable localhost window receives trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; Helium remains manual.',
         'General workspace rendering regressions use sidebar.html in a regular tab. Command, Today Move, Space theme and unified New Tab row checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
         'Case 13 reads command registration only. Case 48 separately requires one guarded native XTEST Alt+T per recovery scenario, real browser command dispatch, reload invalidation and cold-worker target ordering. Physical keyboard hardware and Helium shortcut dispatch remain untested.',
@@ -590,11 +590,50 @@ async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
         chrome.sidePanel.onClosed.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'closed', ...info }));
     });
     const helper = await newTabPage('chrome://newtab/');
+    let eventCount = null, panelOwned = false, cleanupPromise;
+    const cleanup = primaryError => cleanupPromise ||= (async () => {
+        const errors = [];
+        try {
+            // A failed/uncertain open must not close a pre-existing or foreign
+            // panel. Require this invocation's fresh receipt and exact host.
+            if (!panelOwned && eventCount !== null) {
+                const state = await nativePanelState();
+                if (state.events.slice(eventCount).some(event => event.type === 'opened' &&
+                    event.windowId === fixture.windowA && ['sidebar.html', '/sidebar.html'].includes(event.path))) {
+                    assertNativeSidebarEvidence(state.contexts, state.events, { extensionId: arcifyId,
+                        windowId: fixture.windowA, afterEvent: eventCount });
+                    const { hosting } = await resolveNativeSidebarTarget();
+                    assert.equal(hosting.tab, null); assert.equal(hosting.windowId, fixture.windowA);
+                    panelOwned = true;
+                }
+            }
+            if (panelOwned) await closeNativeSidebar();
+        } catch (error) { errors.push(error); }
+        // Launcher cleanup is independent of panel-state lookup/close. An
+        // already-absent owned launcher is complete, not an action to replay.
+        try {
+            await arcifyOptions.evaluate(async id => {
+                const exists = (await chrome.tabs.query({})).some(tab => tab.id === id);
+                if (exists) await chrome.tabs.remove(id);
+            }, helper.tab.id);
+        } catch (error) { errors.push(error); }
+        if (errors.length) {
+            const diagnostic = { type: 'native-sidebar-fixture-cleanup', helperTabId: helper.tab.id,
+                windowId: helper.tab.windowId, primaryError: primaryError?.message || null, errors: errors.map(error => error.message) };
+            report.diagnostics.push(diagnostic);
+            try { await saveReport(); } catch (error) { errors.push(error); diagnostic.errors.push(`Report: ${error.message}`); }
+            // Never mutate or replace a primary Error, including frozen ones.
+            if (!primaryError) throw new AggregateError(errors, 'Native sidebar fixture cleanup failed.');
+        }
+    })();
     try {
         await waitSidebarCommand(helper.page);
         await search(helper.page, 'Open Arcify sidebar');
         await helper.page.waitForSelector(`${sidebarSelector}.selected`);
-        const eventCount = (await nativePanelState()).events.length;
+        const beforeOpen = await nativePanelState();
+        assert(!beforeOpen.contexts.some(context => context.documentUrl === `chrome-extension://${arcifyId}/sidebar.html`),
+            'Native fixture must not adopt a pre-existing Arcify panel.');
+        eventCount = beforeOpen.events.length;
         await sidebarEnter(helper.page, 'Open genuine native panel for Today Move');
         await waitSidebarSuccess(helper.page);
         if (revealSpaceId !== null) {
@@ -603,16 +642,15 @@ async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
             (report.nativeSidebarReveals ||= []).push(reveal); await saveReport();
         }
         const evidence = await captureNativeSidebar(eventCount, 'today-move-native-panel-host-proof');
+        panelOwned = true;
         const { page } = await resolveNativeSidebarTarget();
         return { page: await observePage(page), evidence,
             close: async () => {
-                await closeNativeSidebar();
-                await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+                await cleanup();
                 return { tabId: helper.tab.id, windowId: helper.tab.windowId };
             } };
     } catch (error) {
-        if ((await nativePanelState()).contexts.length) await closeNativeSidebar().catch(cleanup => { error.cleanupError = cleanup.message; });
-        await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id).catch(cleanup => { error.cleanupError = cleanup.message; });
+        await cleanup(error);
         throw error;
     }
 }
@@ -2324,7 +2362,7 @@ try {
     // appearance, recovery or Little Arc case is a prerequisite.
     if (report.runMode === 'full' || report.runMode === 'move-drag') {
     await step(stepNames[38], async () => {
-        await exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
+        await exerciseTabMenuActions({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,
             snapshot,poll,fixture,arcifyId,spotlightId,search,
             record:async observation => { report.tabMenus = observation; await saveReport(); } });
         return exerciseMoveToNewWindow({apiPage:arcifyOptions,newTabPage,pageForUrl,nativeSidebar:nativeMoveWindowSidebar,
