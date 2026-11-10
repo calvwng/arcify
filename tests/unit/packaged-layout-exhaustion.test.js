@@ -63,3 +63,28 @@ test('packaged controller is placed and freshly reverified before each Move with
  assert(source.indexOf('chrome.tabs.move(current.id')<source.indexOf("const r=await chrome.runtime.sendMessage({type:'moveTodayTabsToSpace'"));
  for(const forbidden of ['registerTodayMoveMessages(',"sender:{",'sidebar.html','__layoutOpenPanel'])assert(!source.includes(forbidden),forbidden);
 });
+
+const expectedRegistryEntry={id:'synthetic-extension',name:'Arcify',version:'1',path:'/owned/profile/extension',enabled:true};
+async function registryProbe(observations){
+ const {waitForExactRestartRegistry}=await import('../../scripts/packaged-layout-exhaustion-registry.mjs');let tick=0,index=0;const recorded=[];
+ const result=await waitForExactRestartRegistry({before:[expectedRegistryEntry],expected:expectedRegistryEntry,read:async()=>observations[Math.min(index++,observations.length-1)],record:async value=>recorded.push(structuredClone(value))},{timeout:3,interval:1,now:()=>tick,sleep:async()=>{tick++;}});return {result,recorded,index};
+}
+test('registry readiness records missing then requires exact unchanged enabled identity',async()=>{
+ const result=await registryProbe([[],[expectedRegistryEntry]]);assert.equal(result.index,2);assert.deepEqual(result.recorded,[[],[expectedRegistryEntry]]);assert.deepEqual(result.result,[expectedRegistryEntry]);
+});
+test('permanently missing extension remains a bounded failure without reinstall',async()=>{
+ await assert.rejects(registryProbe([[]]),/no reinstall or policy workaround/);
+});
+for(const mutation of ['id','path','version','name','enabled'])test(`registry readiness refuses changed ${mutation} rather than waiting it away`,async()=>{
+ const changed={...expectedRegistryEntry,[mutation]:mutation==='enabled'?false:'wrong'};await assert.rejects(registryProbe([[changed],[expectedRegistryEntry]]),/identity|state/);
+});
+test('duplicate extension identity cannot pass convergence',async()=>{
+ await assert.rejects(registryProbe([[expectedRegistryEntry,expectedRegistryEntry]]),/Duplicate registry/);
+});
+test('restart revalidation only observes restored policy and registry before waking extension',async()=>{
+ const source=await readFile(new URL('../../scripts/packaged-layout-exhaustion.mjs',import.meta.url),'utf8');
+ const revalidation=source.slice(source.indexOf('revalidate:async b=>'),source.indexOf('return {runtime:true,sandbox:true,registry:true}'));
+ for(const required of ["extensionsPage.goto('chrome://extensions/'","developerModeStateReady","mode.manager.inDevMode,true","waitForExactRestartRegistry","receipt.restartRegistry","receipt.restartDeveloperMode"])assert(revalidation.includes(required),required);
+ for(const forbidden of ['installExtension(', 'enableDeveloperModeViaUi(', 'chrome.storage', "options.html", '.click(', 'runtime.reload'])assert(!revalidation.includes(forbidden),forbidden);
+ assert.equal((source.match(/browser\.installExtension\(/g)||[]).length,1,'Only initial fresh-profile installation is permitted');
+});
