@@ -1,4 +1,4 @@
-import { DURABLE_LAYOUT_KEY,readDurableLayout,layoutEvidence,layoutWindows,layoutSpaceRoot,layoutMappedTabs,createLayoutRestoreGuards } from './durable-today-layout.js';
+import { DURABLE_LAYOUT_KEY,readDurableLayout,layoutEvidence,layoutWindows,layoutSpaceRoot,layoutMappedTabs,createLayoutRestoreGuards,layoutRetired } from './durable-today-layout.js';
 export const LAYOUT_GUARD_COUNT_KEYS=['readyBlockedByAutomaticRestore','readyBlockedByNewerChoices','readyBlockedByUnprovenOverrides',
     'readyBlockedBySpaceRoot','readyBlockedByBookmarkRoot','readyBlockedBySavedPin','readyBlockedByNativeSplit',
     'readyBlockedByWindow','readyPassingObservedGuards'];
@@ -92,7 +92,7 @@ export async function diagnoseDurableLayout(snapshot){
     const savedChars=raw.cohorts.reduce((n,c)=>n+chars(c.signature),0),liveChars=chars(snapshot.tabs);
     if(savedChars+liveChars>1000000)return result('incomplete');
     let layout;try{layout=await readDurableLayout(snapshot.local[DURABLE_LAYOUT_KEY]);}catch{return result('incomplete');}
-    if(!layout||layout.fingerprint!==snapshot.memory.durableLayout?.fingerprint)return result('incomplete');
+    if(!layout||layout.version===4||layout.fingerprint!==snapshot.memory.durableLayout?.fingerprint)return result('incomplete');
     const m=snapshot.memory;
     if(!Array.isArray(m.spaces)||m.spaces.length>200||!m.spaces.every(s=>Array.isArray(s.temporaryTabs)&&Array.isArray(s.spaceBookmarks))
         ||m.spaces.reduce((n,s)=>n+s.temporaryTabs.length+s.spaceBookmarks.length,0)>20000
@@ -102,7 +102,7 @@ export async function diagnoseDurableLayout(snapshot){
     const store=observedStore(snapshot,layout),pending=store.layoutPending,live=layoutWindows(store,snapshot.tabs);
     if(live.length*layout.cohorts.length>10000
         ||savedChars*(layout.cohorts.length+live.length)+liveChars*layout.cohorts.length>8000000)return result('incomplete');
-    const allEvidence=layoutEvidence(layout.cohorts,live),evidence=allEvidence.filter(e=>pending.has(e.cohort.id));
+    const allEvidence=layoutEvidence(layout.cohorts,live,layout.retirements),evidence=allEvidence.filter(e=>!layoutRetired(layout,e.cohort)&&pending.has(e.cohort.id));
     let refusals;try{refusals=refusalCounts(snapshot,store,allEvidence);}catch{return result('incomplete');}
     const records=(snapshot.memory.restoreQueue||[]).filter(r=>r.currentOwnership?.version===1);
     return result('stable',{

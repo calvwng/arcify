@@ -50,7 +50,7 @@ function observeValidation() {
 // Only an already committed complete explicit placement set can be narrowed.
 // The cohort's numeric binding alone never supplies incarnation authority.
 export async function prepareProvenContextRepair(store, tabs, snapshot, rankFingerprint) {
-    if (!store.durableLayout || store.automaticLayoutRestore === false || store.currentLayoutTransition
+    if (!store.durableLayout || store.durableLayout.version===4 || store.automaticLayoutRestore === false || store.currentLayoutTransition
         || store.currentLayoutFence || store.layoutWriteFence || store.restoredMetadata?.length
         || !store.durableLayout.cohorts.some(c => c.explicitOnly && !c.contextSubset
             && c.binding && c.placements.length && c.signature.length > c.placements.length && !c.blockedBy?.length)) return null;

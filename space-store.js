@@ -19,7 +19,7 @@ import { withSavedMoveLock, SAVED_MOVE_JOURNAL_KEY } from './saved-move-lock.js'
 import { captureWindowTabs, matchRestoreRecord } from './space-restore.js';
 import { SPACE_CONTINUITY_KEY, createSpaceContinuityStamp, readSpaceContinuitySnapshot, createSpaceRankCheckpoint, readSpaceRankCheckpoint } from './space-continuity.js';
 import { EXPLICIT_TODAY_CHECKPOINT, restoreExplicitToday, explicitTodayEpochs, explicitTodayOwner, explicitSnapshotWitness, createExplicitCheckpoint } from './explicit-today-ownership.js';
-import { DURABLE_LAYOUT_KEY, initializeDurableLayout, restoreDurableLayout, captureDurableLayout, layoutCandidate, durableRestartQueue, layoutContainsCurrent, pendingLayoutWindowIds } from './durable-today-layout.js';
+import { DURABLE_LAYOUT_KEY, initializeDurableLayout, restoreDurableLayout, captureDurableLayout, layoutCandidate, durableRestartQueue, layoutContainsCurrent, pendingLayoutWindowIds, layoutRetired, assertDurableLayoutReadable, observeDurableIndividualClose, stageDurableExhaustion, invalidateDurableCloseEvidence } from './durable-today-layout.js';
 import { encodeFavoriteContinuityState as encodeLayout } from './favorite-continuity.js';
 import { stageCurrentLayoutAuthority, stageObservedLayoutCreation } from './current-layout-authority.js';
 import { prepareProvenContextRepair } from './proven-context-repair.js';
@@ -79,6 +79,7 @@ export class SpaceStore {
     constructor({ automaticLayoutRestore = automaticLayoutRestoreEnabled } = {}) { this.automaticLayoutRestore = automaticLayoutRestore; this.chain = Promise.resolve(); this.initialized = false; this.pendingCreations = new Set(); this.archiveStore = new ArchiveStore(this); }
     run(operation) {
         const pending = this.chain.then(async () => {
+            await assertDurableLayoutReadable(await chrome.storage.local.get(DURABLE_LAYOUT_KEY));
             // Transient identity is loaded before either ownership system can
             // adopt live tabs. Observations are durable on this same queue.
             await this.transientWindows?.initialize();
@@ -120,12 +121,14 @@ export class SpaceStore {
     }
     async initializeUnlocked() {
         if (this.initialized) return;
+        await assertDurableLayoutReadable(await chrome.storage.local.get(DURABLE_LAYOUT_KEY));
         this.currentLayoutFence=null;this.currentLayoutTransition=false;this.layoutObservedCreations=new Map();this.currentLayoutWorker=crypto.randomUUID();
         await this.transientWindows?.initialize();
         await this.transientWindows?.flushObservedUnlocked();
         if (this.favoriteStore) await this.favoriteStore.initialize();
         await this.readTodayPlacement();
         const data = await chrome.storage.local.get(['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'archivedTabs', 'spaceRankCheckpoint', SPACE_CONTINUITY_KEY, SAVED_MOVE_JOURNAL_KEY, EXPLICIT_TODAY_CHECKPOINT, DURABLE_LAYOUT_KEY]);
+        await assertDurableLayoutReadable(data);
         const session = await chrome.storage.session.get(['spaceSession', 'spaceRestoreQueue', 'activeSpaces', 'restoredTabRanks', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'spaceRecoveryCandidates', 'spaceSavedMoveSession']);
         this.provisional = new Set();
         this.recoveryCandidates = new Set(session.spaceSession ? session.spaceRecoveryCandidates || [] : []);
@@ -526,6 +529,7 @@ export class SpaceStore {
     async persistCore({ skipGroupSync = false, beforeWrite = null, savedMove = null, preserveRecoveryQueue = false, explicitLayoutIntentIds = [] } = {}) {
         const tabs = new Map((await this.queryTabs({})).map(t => [t.id, t]));
         this.liveTabs = tabs;
+        await stageDurableExhaustion(this,[...tabs.values()]);
         const promotedCreations=[];
         for(const [id,creation] of this.layoutObservedCreations||[]){
             const tab=tabs.get(id),space=ownerOf(this.spaces,id);
@@ -628,14 +632,15 @@ export class SpaceStore {
         if (this.currentLayoutFence) await this.currentLayoutFence();
         if (transientChanged()) return retry();
         if (contextRepair) await contextRepair.validate();
+        if (this.layoutRetirementFence) await this.layoutRetirementFence();
         await chrome.storage.local.set(checkpoint);
         const layoutReadback=await chrome.storage.local.get(DURABLE_LAYOUT_KEY);
         if(encodeLayout(layoutReadback[DURABLE_LAYOUT_KEY])!==encodeLayout(checkpoint[DURABLE_LAYOUT_KEY]))throw new Error('Layout checkpoint could not be verified. Nothing was retried.');
-        if(this.currentLayoutTransition || contextRepair){
+        if(this.currentLayoutTransition || contextRepair || this.layoutRetirementStaged){
             const readback=await chrome.storage.local.get(Object.keys(checkpoint));
             if(encodeLayout(readback)!==encodeLayout(checkpoint))throw new Error(contextRepair ? 'Proven context checkpoint could not be verified. Nothing was retried.' : 'Current layout checkpoint could not be verified. Nothing was retried.');
         }
-        this.durableLayout=checkpoint[DURABLE_LAYOUT_KEY];this.layoutWriteFence=null;
+        this.durableLayout=checkpoint[DURABLE_LAYOUT_KEY];this.layoutCommittedBaseline=clone(this.durableLayout);this.layoutCommittedSnapshot=clone(checkpoint.spaceTabSnapshot);this.layoutWriteFence=null;this.layoutRetirementFence=null;this.layoutRetirementStaged=false;
         for(const id of promotedCreations)this.layoutObservedCreations.delete(id);
         this.currentLayoutFence=null;this.currentLayoutTransition=false;
         if (transientChanged()) return retry();
@@ -878,10 +883,11 @@ export class SpaceStore {
             else this.track(current);
         };
         chrome.tabs.onCreated.addListener(tab => {
+            invalidateDurableCloseEvidence(this,tab.id);
             // Event-time quarantine must precede any older queued persistence.
             this.observeTab(tab);
             if(this.initialized&&!this.liveTabs?.has(tab.id)&&this.explicitTodayEpoch
-                &&this.durableLayout?.cohorts.some(c=>c.binding?.windowId===tab.windowId&&!this.layoutPending?.has(c.id)))
+                &&this.durableLayout?.cohorts.some(c=>!layoutRetired(this.durableLayout,c)&&c.binding?.windowId===tab.windowId&&!this.layoutPending?.has(c.id)))
                 (this.layoutObservedCreations ||= new Map()).set(tab.id,{windowId:tab.windowId,
                     worker:this.currentLayoutWorker ||= crypto.randomUUID(),token:crypto.randomUUID()});
             this.pendingCreations.add(tab.id);
@@ -889,10 +895,13 @@ export class SpaceStore {
             handle(() => trackCurrent(tab.id));
         });
         chrome.tabs.onUpdated.addListener((id, change, tab) => {
+            invalidateDurableCloseEvidence(this,id);
             this.observeTab(tab);
             if (change.url || change.pinned !== undefined) handle(() => trackCurrent(id));
         });
         chrome.tabs.onRemoved.addListener((id, info) => {
+            invalidateDurableCloseEvidence(this,id);
+            observeDurableIndividualClose(this,id,info);
             this.layoutObservedCreations?.delete(id);
             if (!info?.isWindowClosing) (this.layoutRemovedIds ||= new Set()).add(id);
             // Public exclusion deliberately fails closed before registry loading.
@@ -918,6 +927,7 @@ export class SpaceStore {
             });
         });
         chrome.tabs.onReplaced.addListener((added, removed) => {
+            invalidateDurableCloseEvidence(this,added,removed);
             this.layoutObservedCreations?.delete(removed);this.layoutObservedCreations?.delete(added);
             this.explicitToday?.delete(removed);
             this.explicitToday?.delete(added);
@@ -959,8 +969,9 @@ export class SpaceStore {
             clearTimeout(syncTimer);
             syncTimer = setTimeout(() => this.run(() => this.persist()).catch(console.error), 200);
         };
-        chrome.tabs.onMoved.addListener(scheduleSync);
+        chrome.tabs.onMoved.addListener(id => { invalidateDurableCloseEvidence(this,id); scheduleSync(); });
         chrome.tabs.onAttached?.addListener((tabId, info) => {
+            invalidateDurableCloseEvidence(this,tabId);
             this.layoutObservedCreations?.delete(tabId);
             this.observeTab({ id: tabId, windowId: info?.newWindowId });
             return handle(async () => {
@@ -970,6 +981,7 @@ export class SpaceStore {
             });
         });
         chrome.tabs.onDetached?.addListener((tabId, info) => {
+            invalidateDurableCloseEvidence(this,tabId);
             this.layoutObservedCreations?.delete(tabId);
             this.transientWindows?.observeDetached?.(tabId, info?.oldWindowId);
             scheduleSync();
