@@ -27,6 +27,35 @@ export async function waitForRecoveryIdle(f,{timeout=10000}={}){
   assert.equal(f.pendingMutations(),0,'Recovery end callback must release the mutation hold');
  }finally{cancelDeadline(timer);}
 }
+// A fixed number of event-loop turns cannot wait for an actual storage/crypto
+// completion. Observe the exact fixture/DOM stage, retaining a real-time safety
+// deadline even when a test mocks the product's preview-expiry timer.
+function waitForRecoveryStage(f,stage,read,{timeout=10000}={}){
+ return new Promise((resolve,reject)=>{
+  let timer,observer,unsubscribe=()=>{},settled=false;
+  const finish=(error,value)=>{
+   if(settled)return;settled=true;cancelDeadline(timer);unsubscribe();observer?.disconnect();
+   if(error)reject(error);else resolve(value);
+  };
+  const check=()=>{
+   try{
+    if(f.recoveryStageClosed())return finish(new Error(`Recovery ${stage} was not reached before fixture cleanup`));
+    const value=read();if(value)return finish(null,value);
+    if(f.pendingMutations()===0)finish(new Error(`Recovery ${stage} was not reached before the mutation ended: ${f.notice()}`));
+   }catch(error){finish(error);}
+  };
+  try{
+   unsubscribe=f.onRecoveryStageChange(check);
+   observer=new f.window.MutationObserver(check);observer.observe(f.document,{childList:true,subtree:true});
+   timer=scheduleDeadline(()=>finish(new Error(`Recovery ${stage} was not reached before the safety deadline`)),timeout);
+   check();
+  }catch(error){finish(error);}
+ });
+}
+export const waitForRecoveryDialog=(f,options)=>waitForRecoveryStage(f,'dialog',()=>f.document.getElementById('todayRecoveryDialog'),options);
+export const waitForRecoveryPreview=(f,{after,...options}={})=>waitForRecoveryStage(f,'held preview',()=>{
+ const preview=f.releasePreview();return preview&&preview!==after?preview:null;
+},options);
 
 export async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOnClose=false,previewMode="normal",senderMode="normal",seven=false}={}){
  const backend=seven?await setupSeven({inverted}):await setup({inverted});const backendChrome=globalThis.chrome;
@@ -61,7 +90,8 @@ export async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOn
  for(const id of ids){selection.register(row(id));split.register(row(id),native.find(tab=>tab.id===id));}
  const select=values=>{selection.clear();for(const id of values)event(row(id),'click',{ctrlKey:true});};
  let release;const tabRead=new Promise(resolve=>{release=()=>resolve(native.find(tab=>tab.id===clicked));});
- const sessions=new EditSessionRegistry();let paints=0,pendingMutations=0;const idleWaiters=new Set();
+ const sessions=new EditSessionRegistry();let paints=0,pendingMutations=0,stageClosed=false;const idleWaiters=new Set(),stageListeners=new Set();
+ const stageChanged=()=>{for(const listener of [...stageListeners])listener();};
  const coordinator=new RefreshCoordinator({isBusy:()=>sessions.isActive()||pendingMutations>0,schedule:()=>null,cancel:()=>{},readSpaces:async()=>context.spaces,adoptSpaces:async()=>true,render:async()=>{
   paints++;for(const id of ids){const old=row(id),copy=old.cloneNode(true);selection.register(copy);old.replaceWith(copy);}selection.reconcile();return true;
  }});
@@ -76,14 +106,14 @@ export async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOn
  let releasePreview;
  const ports=connectRecoveryFixture(backendChrome,{sender,requestHook:(envelope,deliver)=>{
   calls.push(envelope.request);
-  if(previewMode==='held'&&envelope.request.type==='previewTodayRecovery'){const heldPort=ports.at(-1);releasePreview={reply:()=>{deliver();return Promise.resolve();},reject:()=>heldPort.server.disconnect()};return;}
+  if(previewMode==='held'&&envelope.request.type==='previewTodayRecovery'){const heldPort=ports.at(-1);releasePreview={reply:()=>{deliver();return Promise.resolve();},reject:()=>heldPort.server.disconnect()};stageChanged();return;}
   if(previewMode==='transport-error'){ports.at(-1).server.disconnect();return;}
   if(previewMode==='no-background'){ports.at(-1).server.postMessage({requestId:envelope.requestId,response:undefined});return;}
   queueMicrotask(deliver);
  },replyHook:reply=>{if(previewMode==='old-backend'&&reply.response?.preview)delete reply.response.preview.protocolVersion;if(previewMode==='malformed'&&reply.response?.preview)reply.response.preview.tabIds=[1];return reply;}});
  registerTodayRecoveryMessages(backend.store);
  const move=createTodaySpaceMoveAction({document,selection,getContext:()=>context,showStatus:report,sendRequest:()=>assert.fail('Recovery must use its bound Port'),
-  begin:()=>{pendingMutations++;},end:()=>{pendingMutations--;coordinator.schedule();if(pendingMutations===0){for(const resolve of idleWaiters)resolve();idleWaiters.clear();}}});
+  begin:()=>{pendingMutations++;},end:()=>{pendingMutations--;coordinator.schedule();if(pendingMutations===0){for(const resolve of idleWaiters)resolve();idleWaiters.clear();stageChanged();}}});
  const deps={selectedTabClose:()=>null,document,window,tabMenuActions:{cancelEdit(){}},spaceContextMenu:{close(){}},closeTabContextMenu,createContextMenuSession:(...args)=>{const session=createContextMenuSession(...args);if(invalidateOnClose)session.onClose(()=>selection.clear());return session;},
   tabElement:row(clicked),tab:native.find(tab=>tab.id===clicked),isPinned:false,isBookmarkOnly:false,todaySelection:selection,bookmarkSelection:bookmarks,
   todaySplit:split,moveTodaySelection:move,pendingActiveSpaceId:null,showFavoritesStatus:report,chrome:{tabs:{get:()=>tabRead}},
@@ -92,7 +122,8 @@ export async function fixture({inverted=false,clicked=3,splitIds=[],invalidateOn
  const open=new Function('deps',`const {${Object.keys(deps).join(',')}}=deps;let tabContextMenuRequest=0;${menuBody};return openTabContextMenu;`)(deps);
  let opening;deps.tabElement.addEventListener('contextmenu',event=>{opening=open(event);});
  return{backend,ports,sender,submits,captures,pendingMutations:()=>pendingMutations,whenIdle:()=>pendingMutations===0?Promise.resolve():new Promise(resolve=>idleWaiters.add(resolve)),releasePreview:()=>releasePreview,notice:()=>document.getElementById('favoritesDropStatus').textContent,document,window,context,native,row,event,select,selection,split,calls,statuses,sessions,coordinator,release,paints:()=>paints,
-  open:()=>{event(deps.tabElement,'contextmenu',{pageX:0,pageY:0});return opening;},cleanup:async()=>{closeTabContextMenu();await tick();Object.assign(globalThis,previous);}};
+  onRecoveryStageChange:listener=>{stageListeners.add(listener);return()=>stageListeners.delete(listener);},recoveryStageClosed:()=>stageClosed,recoveryStageListenerCount:()=>stageListeners.size,
+  open:()=>{event(deps.tabElement,'contextmenu',{pageX:0,pageY:0});return opening;},cleanup:async()=>{stageClosed=true;stageChanged();stageListeners.clear();closeTabContextMenu();await tick();Object.assign(globalThis,previous);}};
 }
 async function setup({inverted=false}={}){
  const f=backendFixture({inverted});f.tabs.forEach(t=>t.url=`https://tab-${t.id}.test/`);f.request.entries=f.request.entries.map(e=>({tabId:e.tabId,url:`https://tab-${e.tabId}.test/`}));

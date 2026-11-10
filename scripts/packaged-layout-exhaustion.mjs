@@ -35,11 +35,25 @@ async function sandboxCheck(b){
  }finally{await p.close();}
 }
 async function observe(){return control.evaluate(async()=>{const reply=await chrome.runtime.sendMessage({type:'spaceStore',action:'get'});if(!reply.success)throw Error(reply.error);const data=await chrome.storage.local.get(['spaceDurableTodayLayout','spaceTabSnapshot']);return {spaces:reply.spaces,tabs:await chrome.tabs.query({}),ledger:data.spaceDurableTodayLayout,snapshot:data.spaceTabSnapshot};});}
-async function move(ids,destination){return control.evaluate(async({ids,destination})=>{
+async function move(ids,destination){
+ // The production receiver permits options.html, but an ordinary-tab sender
+ // must belong to the requested native window. Move only our owned controller.
+ const senderProof=await control.evaluate(async ids=>{
+  if(location.href!==chrome.runtime.getURL('options.html'))throw Error('Unexpected fixture controller realm');
+  const current=await chrome.tabs.getCurrent(),tabs=await chrome.tabs.query({});if(!current)throw Error('Expected owned ordinary options controller');
+  const selected=ids.map(id=>tabs.find(t=>t.id===id));if(selected.some(t=>!t)||new Set(selected.map(t=>t.windowId)).size!==1)throw Error('Selected fixture tabs must share one real window');
+  const windowId=selected[0].windowId;if(current.windowId!==windowId)await chrome.tabs.move(current.id,{windowId,index:-1});
+  const fresh=await chrome.tabs.getCurrent();if(fresh.id!==current.id||fresh.windowId!==windowId)throw Error('Options sender did not enter the exact requested window');
+  return {tabId:fresh.id,windowId:fresh.windowId,requestedWindowId:windowId,url:location.href};
+ },ids);(receipt.moveSenders||=[]).push(senderProof);await save();
+ return control.evaluate(async({ids,destination})=>{
  const reply=await chrome.runtime.sendMessage({type:'spaceStore',action:'get'});if(!reply.success)throw Error(reply.error);const tabs=await chrome.tabs.query({});
  const source=reply.spaces.find(s=>ids.every(id=>s.temporaryTabs.includes(id)));if(!source)throw Error('Move entries lack one exact current source');
  const target=reply.spaces.find(s=>s.id===destination),inverted=(await chrome.storage.local.get('todayOrderRepresentation')).todayOrderRepresentation.inverted;
- const ordered=source.temporaryTabs.filter(id=>ids.includes(id));const r=await chrome.runtime.sendMessage({type:'moveTodayTabsToSpace',windowId:tabs.find(t=>t.id===ids[0]).windowId,spaceId:source.id,bookmarkFolderId:source.bookmarkFolderId,destinationSpaceId:target.id,destinationBookmarkFolderId:target.bookmarkFolderId,inverted,entries:(inverted?[...ordered].reverse():ordered).map(tabId=>({tabId,url:tabs.find(t=>t.id===tabId).url}))});
+ const ordered=source.temporaryTabs.filter(id=>ids.includes(id));
+ const sender=await chrome.tabs.getCurrent(),live=await chrome.tabs.query({}),windowId=live.find(t=>t.id===ids[0])?.windowId;
+ if(!sender||sender.windowId!==windowId||ids.some(id=>live.find(t=>t.id===id)?.windowId!==windowId))throw Error('Real sender/window proof changed before Move');
+ const r=await chrome.runtime.sendMessage({type:'moveTodayTabsToSpace',windowId,spaceId:source.id,bookmarkFolderId:source.bookmarkFolderId,destinationSpaceId:target.id,destinationBookmarkFolderId:target.bookmarkFolderId,inverted,entries:(inverted?[...ordered].reverse():ordered).map(tabId=>({tabId,url:tabs.find(t=>t.id===tabId).url}))});
  if(!r.success)throw Error(JSON.stringify(r));return r;
 },{ids,destination});}
 try{

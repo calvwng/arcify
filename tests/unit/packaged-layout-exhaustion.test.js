@@ -44,3 +44,22 @@ test('unrelated anchor identity and ownership must survive exact close boundary'
  const before={tabs:[{id:2,windowId:1,index:0,url:'anchor',pinned:false}],spaces:[{id:'source',temporaryTabs:[2]}]};assertUnrelatedPreserved(before,structuredClone(before),'anchor');
  for(const change of [o=>o.tabs[0].id=3,o=>o.tabs[0].windowId=2,o=>o.spaces[0].temporaryTabs=[]]){const after=structuredClone(before);change(after);assert.throws(()=>assertUnrelatedPreserved(before,after,'anchor'));}
 });
+
+test('actual Today receiver rejects cross-window options sender before any move',async()=>{
+ const {fixture}=await import('./today-recovery-fixture.js');const {registerTodayMoveMessages}=await import('../../today-move-store.js');
+ const f=fixture();registerTodayMoveMessages(f.store);const before=structuredClone(f.store.spaces),effects=f.effects.length;let reply;
+ const keep=f.listeners.at(-1)(f.request,{id:'test',url:'chrome-extension://test/options.html',origin:'chrome-extension://test',tab:{id:700,windowId:20}},r=>{reply=r;});
+ assert.equal(keep,undefined);assert.deepEqual(reply,{success:false,error:'Invalid Today move sender.'});assert.deepEqual(f.store.spaces,before);assert.equal(f.effects.length,effects);
+});
+test('actual Today receiver accepts legitimate same-window options sender',async()=>{
+ const {fixture}=await import('./today-recovery-fixture.js');const {registerTodayMoveMessages}=await import('../../today-move-store.js');
+ const f=fixture();registerTodayMoveMessages(f.store);
+ const reply=await new Promise(resolve=>{assert.equal(f.listeners.at(-1)(f.request,{id:'test',url:'chrome-extension://test/options.html',origin:'chrome-extension://test',tab:{id:700,windowId:10}},resolve),true);});
+ assert.equal(reply.success,true,reply.error);assert(f.store.spaces.find(s=>s.id==='target').temporaryTabs.includes(1));assert(f.store.spaces.find(s=>s.id==='target').temporaryTabs.includes(3));
+});
+test('packaged controller is placed and freshly reverified before each Move without sender spoofing',async()=>{
+ const source=await readFile(new URL('../../scripts/packaged-layout-exhaustion.mjs',import.meta.url),'utf8');
+ for(const required of ["location.href!==chrome.runtime.getURL('options.html')","chrome.tabs.move(current.id,{windowId,index:-1})","fresh.id!==current.id||fresh.windowId!==windowId","sender.windowId!==windowId","receipt.moveSenders"])assert(source.includes(required),required);
+ assert(source.indexOf('chrome.tabs.move(current.id')<source.indexOf("const r=await chrome.runtime.sendMessage({type:'moveTodayTabsToSpace'"));
+ for(const forbidden of ['registerTodayMoveMessages(',"sender:{",'sidebar.html','__layoutOpenPanel'])assert(!source.includes(forbidden),forbidden);
+});
