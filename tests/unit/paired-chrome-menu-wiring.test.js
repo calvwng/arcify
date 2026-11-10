@@ -21,7 +21,7 @@ test('menu modules retain single definitions before Favorite receipts; only case
         assert(call < runner.indexOf('await step(stepNames[36]'));
         assert(call < runner.indexOf('await step(stepNames[32]'));
     }
-    assert.match(runner, /exerciseTabMenuActions\(\{ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,\s*snapshot,poll,fixture,arcifyId,spotlightId,search,/);
+    assert.match(runner, /exerciseTabMenuActions\(\{ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,\s*snapshot,poll,fixture,arcifyId,spotlightId,search,/);
     assert.match(runner, /report\.spaceContextMenus\.push\(observation\); await saveReport\(\)/);
     assert.match(runner, /report\.tabMenus = observation; await saveReport\(\)/);
 });

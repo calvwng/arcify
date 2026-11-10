@@ -129,7 +129,7 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             // Rebase live ranks without rewriting the historical records' order.
             if (explicit) store.restoreQueue = structuredClone(beforeQueue);
             expectedRanks = new Map(store.restoredRanks);
-            await store.persist({ skipGroupSync, preserveRecoveryQueue: !!explicit, beforeWrite: async () => {
+            await store.persist({ skipGroupSync, preserveRecoveryQueue: !!explicit, explicitLayoutIntentIds: ids, beforeWrite: async () => {
                 // persist awaits metadata and continuity before writing. Recheck at
                 // that final boundary, not only before staging the in-memory move.
                 const fresh = await validate(destinationSpaceId);

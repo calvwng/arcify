@@ -91,6 +91,17 @@ test('adapter proves menu removal in background before one keyboard dispatch and
     assert.deepEqual(h.records.map(record => record.phase), ['outside-focus-before-input', 'outside-focus-dismissed']);
     assert.deepEqual(h.calls.slice(-2), ['source:stopExternalMenuFocus', 'destination:stopExternalMenuFocus']);
 });
+test('native panel label retains the same single-input and external-focus postconditions', async () => {
+    const h = harness(), result = await exerciseExternalMenuDismissal({ ...h, nativePanel: true });
+    assert.equal(result.nativePanel, true); assert.equal(result.surface, 'native Arcify SIDE_PANEL');
+    assert.equal(h.calls.filter(call => call === 'destination:click').length, 1);
+    assert.equal(h.calls.filter(call => call === 'destination:key').length, 1);
+    assert.equal(result.afterScreenshot.source.menuCount, 0);
+    assert.equal(result.afterScreenshot.destination.focused, true);
+    const failed = harness({ menuStays: true });
+    await assert.rejects(exerciseExternalMenuDismissal({ ...failed, nativePanel: true }));
+    assert.equal(failed.calls.filter(call => call === 'destination:click').length, 1);
+});
 for (const options of [{ menuStays: true }, { stealAfterPoll: true }, { stealDuringCapture: true }, { noScreenshot: true }]) {
     test(`adapter fails without reopening or replaying ${JSON.stringify(options)}`, async () => {
         const h = harness(options); await assert.rejects(exerciseExternalMenuDismissal(h));
