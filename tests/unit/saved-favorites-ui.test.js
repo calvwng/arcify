@@ -13,11 +13,12 @@ function fixture() {
         { id: 'two', title: 'Saved Two', url: 'https://two.test/', sourceBookmarkId: 'b2', tabId: null }];
     const nativeTabs = [{ id: 20, title: 'Native', url: 'https://native.test/', pinned: true, windowId: 1, index: 1 }];
     const tabs = [{ id: 10, title: 'Navigated', url: 'https://one.test/deep', pinned: true, active: true, windowId: 1 }, ...nativeTabs];
-    let windowId = 1, beforeGet, attachmentReply;
+    let windowId = 1, beforeGet, attachmentReply, recoveryReply;
     const calls = [], statuses = [];
     const api = {
         runtime: { getURL: path => `chrome-extension://fixture/${path}`, async sendMessage(message) {
             calls.push(structuredClone(message));
+            if (['undoRecovery', 'confirmRecovery'].includes(message.action) && recoveryReply) return recoveryReply(message);
             if (['attachmentCandidates', 'attachExisting'].includes(message.action) && attachmentReply) return attachmentReply(message);
             if (message.action === 'get') { const result = structuredClone({ success: true, favorites, nativeTabs }); await beforeGet?.(); return result; }
             if (message.action === 'closeTab') {
@@ -41,7 +42,7 @@ function fixture() {
     const row = id => [...container.querySelectorAll('.saved-favorite')].find(node => node.dataset.favoriteId === id);
     const menu = (node, text) => { event(node, 'contextmenu'); const item = [...document.querySelectorAll('[role="menuitem"]')].find(node => node.textContent === text); assert(item, text); event(item, 'click'); };
     return { document, window, container, favorites, nativeTabs, tabs, calls, statuses, ui, row, event, menu, drag, context,
-        setWindow(id) { windowId = id; context.windowId = id; }, setBeforeGet(value) { beforeGet = value; }, setAttachmentReply(value) { attachmentReply = value; } };
+        setWindow(id) { windowId = id; context.windowId = id; }, setBeforeGet(value) { beforeGet = value; }, setAttachmentReply(value) { attachmentReply = value; }, setRecoveryReply(value) { recoveryReply = value; } };
 }
 
 test('real renderer keeps stable saved IDs, visible closed state and native distinction without migration hint', async () => {
@@ -321,6 +322,93 @@ test('attachment completion after leaving the surface never presents status or r
         assert.equal(f.statuses.length, 0, `${outcome}: ${exit}`);
         assert.equal(f.calls.filter(call => call.action === 'get').length, reads, `${outcome}: ${exit}`);
         assert.equal(f.document.querySelector('dialog'), null);
+        f.ui.dispose();
+    }
+});
+
+const recoveryMenu = f => {
+    f.event(f.row('one'), 'keydown', { key: 'F10', shiftKey: true });
+    return [...f.document.querySelectorAll('[role="menuitem"]')].find(item => item.textContent === 'Undo recovery');
+};
+
+test('automatic recovery is quietly Open with accessible optional Undo and guarded dragging/actions', async () => {
+    const f = fixture(); f.favorites[0].recovery = { token: 'recovered-10' };
+    await f.ui.refresh(); const row = f.row('one');
+    assert.match(row.getAttribute('aria-label'), /Automatically reconnected.*right-click.*Shift\+F10.*Undo recovery/);
+    assert.match(row.title, /Automatically reconnected/);
+    assert.equal(row.querySelector('.favorite-state').textContent, 'Open');
+    assert.equal(row.draggable, false);
+    assert(f.event(row, 'dragstart').defaultPrevented);
+    assert(recoveryMenu(f));
+    assert.deepEqual([...f.document.querySelectorAll('[role="menuitem"]')].map(item => item.textContent), ['Go to Tab', 'Undo recovery']);
+    await f.ui.refresh(); assert.equal(f.row('one'), row); assert(recoveryMenu(f));
+    assert.equal(f.document.querySelector('.favorite-recovery-review'), null);
+    assert.equal(f.document.querySelector('.favorite-recovery-card'), null);
+    assert(f.calls.every(call => call.action === 'get'));
+    f.menu(row, 'Go to Tab'); await tick();
+    assert.equal(f.calls.filter(call => call.action === 'open').length, 1);
+    assert(!f.calls.some(call => call.action === 'confirmRecovery'));
+    f.ui.dispose();
+});
+
+test('Undo sends exact recovery identity, coalesces repeated menu choices, and restores normal state', async () => {
+    const f = fixture(); let release;
+    f.favorites[0].recovery = { token: 'recovered-10' };
+    f.setRecoveryReply(() => new Promise(resolve => { release = resolve; }));
+    await f.ui.refresh();
+    f.event(recoveryMenu(f), 'click');
+    f.event(recoveryMenu(f), 'click');
+    assert.deepEqual(f.calls.filter(call => call.action === 'undoRecovery'), [{ type: 'favoriteStore', action: 'undoRecovery', windowId: 1, favoriteId: 'one', tabId: 10, token: 'recovered-10' }]);
+    assert(!f.calls.some(call => call.close || call.update || ['remove', 'open', 'confirmRecovery'].includes(call.action)));
+    delete f.favorites[0].recovery; f.favorites[0].tabId = null;
+    release({ success: true }); await tick();
+    assert.equal(f.row('one').draggable, true);
+    assert.equal(f.row('one').querySelector('.favorite-state').textContent, 'Closed');
+    f.event(f.row('one'), 'contextmenu');
+    assert([...f.document.querySelectorAll('[role="menuitem"]')].some(item => item.textContent === 'Remove Favorite'));
+    assert.equal(f.document.querySelector('.favorite-recovery-review'), null);
+    f.ui.dispose();
+});
+
+test('stale Undo cannot change a binding, token, window, removed record, or disposed UI', async () => {
+    for (const change of ['binding', 'token', 'window', 'remove', 'dispose']) {
+        const f = fixture(); f.favorites[0].recovery = { token: 'recovered-10' };
+        await f.ui.refresh(); const undo = recoveryMenu(f);
+        if (change === 'binding') f.favorites[0].tabId = 11;
+        if (change === 'token') f.favorites[0].recovery.token = 'new-token';
+        if (change === 'remove') f.favorites.splice(0, 1);
+        if (change === 'window') f.setWindow(2);
+        if (change === 'dispose') f.ui.dispose(); else await f.ui.refresh();
+        f.event(undo, 'click'); await tick();
+        assert(!f.calls.some(call => ['undoRecovery', 'confirmRecovery'].includes(call.action)), change);
+        f.ui.dispose();
+    }
+});
+
+test('recovery worker errors preserve optional Undo without retrying or changing the tab', async () => {
+    const f = fixture(); f.favorites[0].recovery = { token: 'recovered-10' };
+    f.setRecoveryReply(() => ({ success: false, code: 'STALE_TAB', error: 'This recovery changed. Try again.' }));
+    await f.ui.refresh(); f.event(recoveryMenu(f), 'click'); await tick();
+    assert.equal(f.calls.filter(call => call.action === 'undoRecovery').length, 1);
+    assert.match(f.statuses.at(-1), /recovery changed/);
+    assert(recoveryMenu(f)); assert(!f.calls.some(call => call.close || call.update || call.action === 'confirmRecovery'));
+    f.ui.dispose();
+});
+
+test('Undo completion after disposal or a window change never announces or refreshes the new context', async () => {
+    for (const exit of ['dispose', 'window']) {
+        const f = fixture(); let release;
+        f.favorites[0].recovery = { token: 'recovered-10' };
+        f.setRecoveryReply(() => new Promise(resolve => { release = resolve; }));
+        await f.ui.refresh();
+        f.event(recoveryMenu(f), 'click'); f.event(recoveryMenu(f), 'click');
+        assert.equal(f.calls.filter(call => call.action === 'undoRecovery').length, 1);
+        assert(!f.calls.some(call => call.action === 'confirmRecovery'));
+        if (exit === 'dispose') f.ui.dispose(); else f.setWindow(2);
+        const reads = f.calls.filter(call => call.action === 'get').length;
+        release({ success: true }); await tick();
+        assert.equal(f.statuses.length, 0);
+        assert.equal(f.calls.filter(call => call.action === 'get').length, reads);
         f.ui.dispose();
     }
 });

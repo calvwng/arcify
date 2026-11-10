@@ -29,7 +29,7 @@ for the exact metadata and authorization checks.
 
 The optional continuity adapter journals ownership separately from saved links. It can recover only when a configured, authenticated Spotlight session still witnesses the exact Arcify epoch/revision. The adapter runs before Space initialization and owns all session/journal writes. Failed ownership persistence blocks subsequent ownership-dependent work until the current receipt is safely persisted. A surviving own session can refresh the peer witness; an old local journal cannot enroll its own old epoch as proof.
 
-A full browser restart, loss of both extension sessions, an unavailable/unpaired/unsupported peer, or unproven continuity leaves saved Favorites closed. Restored ordinary pages may be adopted as normal Space tabs and managed by the ordinary cleanup rules. Clicking a saved Favorite can then create a second page. No URL, title, group, or numeric-ID inference repairs this limitation. Close live ordinary Favorites before downgrading to an older Arcify build; older builds preserve saved links but cannot maintain this ownership model.
+A full browser restart, loss of both extension sessions, an unavailable/unpaired/unsupported peer, or unproven continuity leaves saved Favorites closed. Restored ordinary pages may be adopted as normal Space tabs and managed by the ordinary cleanup rules. Clicking a saved Favorite can then create a second page. Exact continuity never infers identity from URL, title, group, or numeric ID. The separate [conservative restart recovery](favorite-restart-recovery.md) may label a uniquely matching restored page as recovered, with Undo and mandatory review before destructive actions. Close live ordinary Favorites before downgrading to an older Arcify build; older builds preserve saved links but cannot maintain this ownership model.
 
 ### Attach an existing page after restart
 
@@ -61,7 +61,7 @@ closed on initialization, including witnessed reload recovery. Failed rollback
 forces reinitialization before any later ownership choice. Older builds do not
 understand this marker; finish or cancel attachment before downgrading.
 
-This is explicit recovery, not automatic browser-restart identity restoration.
+This dialog is explicit recovery. The separate [automatic restart recovery](favorite-restart-recovery.md) provides guarded inference, not browser identity proof.
 No browser-persisted document token is available here: navigation invalidation uses
 browser tab events and fresh tab reads. A navigation after the ownership commit
 continues in the now-attached Favorite normally. Browser/Helium acceptance remains

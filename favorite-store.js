@@ -5,6 +5,7 @@ import { getSpaceBookmarkById } from './space-bookmarks.js';
 import { Utils } from './utils.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 import { FavoriteAttachment } from './favorite-attachment.js';
+import { FavoriteRestartRecovery } from './favorite-restart-recovery.js';
 import { isFavoriteUrl, isWindowId } from './spotlight-bridge-protocol.js';
 import { captureFavoriteIcon, favoriteIconCacheSize, isFavoriteIcon, MAX_FAVORITE_ICON_CACHE, FAVORITE_ICON_CACHE_KEY } from './favorite-icons.js';
 
@@ -44,7 +45,7 @@ function restoreSpaceSource(store, tabId, source) {
     return true;
 }
 const fields = {
-    get: [], attachmentCandidates: ['favoriteId'], attachExisting: ['favoriteId', 'tabId', 'token'], addTab: ['tabId', 'beforeId'],
+    get: [], undoRecovery: ['favoriteId', 'tabId', 'token'], confirmRecovery: ['favoriteId', 'tabId', 'token'], attachmentCandidates: ['favoriteId'], attachExisting: ['favoriteId', 'tabId', 'token'], addTab: ['tabId', 'beforeId'],
     addBookmark: ['spaceId', 'bookmarkFolderId', 'bookmarkId', 'parentId', 'tabId', 'beforeId'],
     addBookmarks: ['spaceId', 'bookmarkFolderId', 'bookmarks', 'beforeId'],
     open: ['favoriteId'], remove: ['favoriteId'], reorder: ['favoriteId', 'beforeId'],
@@ -53,9 +54,9 @@ const fields = {
 export function validateFavoriteRequest(message) {
     if (!message || typeof message !== 'object' || Array.isArray(message) || message.type !== 'favoriteStore' || !Object.hasOwn(fields, message.action) || !isWindowId(message.windowId)
         || Object.keys(message).some(name => !['type', 'action', 'windowId', ...fields[message.action]].includes(name))
-        || ['open', 'remove', 'reorder', 'closeTab', 'releaseTab', 'attachmentCandidates', 'attachExisting'].includes(message.action) && !id(message.favoriteId)
-        || ['addTab', 'releaseTab', 'closeTab', 'attachExisting'].includes(message.action) && !isWindowId(message.tabId)
-        || message.action === 'attachExisting' && !id(message.token)
+        || ['open', 'remove', 'reorder', 'closeTab', 'releaseTab', 'attachmentCandidates', 'attachExisting', 'undoRecovery', 'confirmRecovery'].includes(message.action) && !id(message.favoriteId)
+        || ['addTab', 'releaseTab', 'closeTab', 'attachExisting', 'undoRecovery', 'confirmRecovery'].includes(message.action) && !isWindowId(message.tabId)
+        || ['attachExisting', 'undoRecovery', 'confirmRecovery'].includes(message.action) && !id(message.token)
         || message.tabId !== undefined && !isWindowId(message.tabId)
         || message.action === 'addBookmark' && !['spaceId', 'bookmarkFolderId', 'bookmarkId', 'parentId'].every(name => id(message[name]))
         || message.beforeId !== undefined && message.beforeId !== null && !id(message.beforeId)
@@ -77,7 +78,7 @@ export function validateFavoriteRequest(message) {
 // There is exactly one writer, sharing SpaceStore's worker queue. Internal methods
 // below are called only while that queue is held; they never call run/dispatch.
 // Durable links and browser-session identities are deliberately separate. Clearing
-// storage.session at browser restart never causes URL-based adoption or tab opens.
+// storage.session never opens pages. Separate guarded restart inference is not exact ownership.
 export class FavoriteStore {
     constructor(spaceStore, { captureIcon = captureFavoriteIcon, now = Date.now, ownershipPersistence = null } = {}) {
         this.spaceStore = spaceStore;
@@ -92,11 +93,13 @@ export class FavoriteStore {
         this.iconAttempts = new Map();
         this.activeIconJobs = 0;
         this.attachment = new FavoriteAttachment(this);
+        this.recovery = new FavoriteRestartRecovery(this);
         spaceStore.favoriteStore = this;
     }
     run(operation) { return this.spaceStore.run(async () => { await this.initialize(); return operation(); }); }
     async initialize() {
         if (this.initialized) { if (this.persistenceDirty) await this.saveSession(); return; }
+        this.recovery.ready = false;
         const local = await chrome.storage.local.get(FAVORITES_KEY);
         const session = await chrome.storage.session.get(FAVORITE_SESSION_KEY);
         const items = local[FAVORITES_KEY] ?? [];
@@ -132,6 +135,7 @@ export class FavoriteStore {
             !isTransientWindow(this.spaceStore, entry.windowId) && !isTransientTab(this.spaceStore, entry.tabId));
         this.spaceExclusions.clear();
         await this.attachment.recoverInterrupted();
+        await this.recovery.initialize();
         this.initialized = true;
     }
     async loadIcons() {
@@ -212,6 +216,7 @@ export class FavoriteStore {
         // Keep exact receipts in memory even if a write fails. On worker restart,
         // the prior pending receipt safely blocks a duplicate create.
         try {
+            await this.recovery.beforeSave();
             if (this.ownershipPersistence) await this.ownershipPersistence.save({ state: copy(this.state), items: copy(this.items) });
             else await chrome.storage.session.set({ [FAVORITE_SESSION_KEY]: copy(this.state) });
             this.persistenceDirty = false;
@@ -237,7 +242,7 @@ export class FavoriteStore {
         const tabId = this.exactId(typeof tabOrId === 'object' ? tabOrId.id : tabOrId);
         if (!this.initialized || !isWindowId(tabId) || isTransientTab(this.spaceStore, tabOrId)
             || isTransientTab(this.spaceStore, tabId) || isTransientTab(this.spaceStore, tab)) return false;
-        return [...this.state.bindings, ...this.state.attempts].some(entry => this.exactId(entry.tabId) === tabId
+        return Boolean(this.recovery.active && this.recovery.entry(tab || tabId)) || [...this.state.bindings, ...this.state.attempts].some(entry => this.exactId(entry.tabId) === tabId
             && (!tab || !tab.incognito && !isStartupLauncherTab(tab) && entry.windowId === tab.windowId
                 && (entry.mode === 'ordinary' || tab.pinned || entry.kind === 'adopt')));
     }
@@ -250,7 +255,7 @@ export class FavoriteStore {
     }
     isOwnedBookmarkTab(tab, bookmarkId) { return !isTransientTab(this.spaceStore, tab) && [...this.state.bindings.filter(entry => entry.mode === 'ordinary'), ...this.state.attempts.filter(entry => entry.kind === 'adopt' && this.spaceExclusions.has(`${entry.favoriteId}:${tab.id}`))].some(entry => entry.tabId === tab.id && entry.windowId === tab.windowId
         && this.items.some(item => item.id === entry.favoriteId && item.sourceBookmarkId === bookmarkId)); }
-    hasOrdinaryOwnership() { return [...(this.state?.bindings || []), ...(this.state?.attempts || [])].some(entry => entry.mode === 'ordinary'); }
+    hasOrdinaryOwnership() { return this.recovery.entries.some(entry => !entry.hint.pinned) || [...(this.state?.bindings || []), ...(this.state?.attempts || [])].some(entry => entry.mode === 'ordinary'); }
     async ordinaryMode() { return (await chrome.storage.sync?.get('ordinaryFavoriteTabs'))?.ordinaryFavoriteTabs === true; }
     async requiresOrdinaryCapability() { await this.initialize(); return this.hasOrdinaryOwnership() || await this.ordinaryMode(); }
     async reconcile({ updateSpaces = true } = {}) {
@@ -265,7 +270,7 @@ export class FavoriteStore {
             }
             return windows.get(tab.windowId) && !isTransientTab(this.spaceStore, tab);
         };
-        const oldOwners = new Set([...this.state.bindings, ...this.state.attempts].map(entry => this.exactId(entry.tabId)).filter(isWindowId));
+        const oldOwners = new Set([...this.state.bindings, ...this.state.attempts, ...(this.recovery?.entries || [])].map(entry => this.exactId(entry.tabId)).filter(isWindowId));
         const existing = [], moved = [];
         for (const binding of this.state.bindings) {
             if (!saved.has(binding.favoriteId) || isTransientWindow(this.spaceStore, binding.windowId)
@@ -299,6 +304,7 @@ export class FavoriteStore {
         const receiptKeys = new Set(attempts.map(entry => `${entry.favoriteId}:${entry.tabId}`));
         for (const exclusion of this.spaceExclusions) if (!receiptKeys.has(exclusion)) this.spaceExclusions.delete(exclusion);
         this.liveOwnershipTabs = tabs;
+        await this.recovery?.reconcile(tabs);
         if (before !== JSON.stringify(this.state)) await this.saveSession();
         if (updateSpaces && this.spaceStore.initialized) {
             for (const tabId of oldOwners) {
@@ -307,13 +313,14 @@ export class FavoriteStore {
             }
             if (before !== JSON.stringify(this.state)) await this.spaceStore.persist();
         }
+        await this.recovery?.checkpoint([...tabs.values()]);
         return tabs;
     }
     async read(windowId) {
         await this.initialize();
         await this.normalWindow(windowId);
         const tabs = await this.reconcile();
-        const liveBindings = this.state.bindings.filter(binding => binding.windowId === windowId
+        const liveBindings = [...this.state.bindings, ...this.recovery.entries].filter(binding => binding.windowId === windowId
             && tabs.get(binding.tabId)?.windowId === windowId && this.ownsTab(tabs.get(binding.tabId)));
         const used = new Set(liveBindings.map(binding => binding.tabId));
         for (const item of this.items) {
@@ -322,7 +329,8 @@ export class FavoriteStore {
         }
         return {
             favorites: this.items.map(item => ({ ...copy(item), ...(this.icon(item) ? { faviconDataUrl: this.icon(item) } : {}),
-                tabId: liveBindings.find(binding => binding.favoriteId === item.id)?.tabId ?? null })),
+                tabId: liveBindings.find(binding => binding.favoriteId === item.id)?.tabId ?? null,
+                ...(this.recovery.forFavorite(item.id, windowId) ? { recovery: { token: this.recovery.forFavorite(item.id, windowId).token } } : {}) })),
             nativeTabs: [...tabs.values()].filter(tab => tab.windowId === windowId && tab.pinned && !tab.incognito
                 && !isStartupLauncherTab(tab) && !isTransientTab(this.spaceStore, tab) && !used.has(tab.id)).map(copy)
         };
@@ -347,8 +355,25 @@ export class FavoriteStore {
         if (!tab || tab.windowId !== windowId || tab.incognito || isStartupLauncherTab(tab)) fail('STALE_TAB', 'The tab or its window changed. Refresh Favorites.');
         return tab;
     }
-    queryAttachmentTabs(windowId) { return queryTabs(this.spaceStore, { windowId }); }
+    captureRecoverySource(tabId) {
+        const source = captureSpaceSource(this.spaceStore, tabId);
+        if (source) { const at = source.ids.indexOf(tabId); source.ids = source.ids.slice(Math.max(0, at - 25), at + 26); }
+        return source && { ...source, explicit: copy(this.spaceStore.explicitToday?.get(tabId)),
+            layoutProvisional: this.spaceStore.layoutProvisional?.has(tabId) };
+    }
+    restoreRecoverySource(tabId, source) {
+        if (source && this.spaceStore.spaces.some(space => space.id === source.spaceId)
+            && !this.spaceStore.spaces.some(space => space.spaceBookmarks.includes(tabId))) this.spaceStore.forgetTab(tabId);
+        if (restoreSpaceSource(this.spaceStore, tabId, source)) {
+            if (source.explicit) this.spaceStore.explicitToday?.set(tabId, copy(source.explicit));
+            if (source.layoutProvisional) this.spaceStore.layoutProvisional?.add(tabId);
+            return true;
+        }
+        return false;
+    }
+    queryAttachmentTabs(windowId) { return queryTabs(this.spaceStore, windowId === undefined ? {} : { windowId }); }
     async bind(favoriteId, tab, windowId, mode) {
+        this.recovery.assertConfirmed(tab.id);
         const current = await this.currentTab(tab.id, windowId);
         assertNotNativeSplit(current);
         if (mode !== 'ordinary' && !current.pinned) fail('STALE_TAB', 'This tab is no longer pinned. Its saved Favorite was kept.');
@@ -387,12 +412,13 @@ export class FavoriteStore {
     async open(favoriteId, windowId, { activate = true, tabId, beforeMutation = async () => {} } = {}) {
         assertNotTransient(this.spaceStore, { windowId, tabId });
         await this.initialize();
+        if (tabId) this.recovery.assertConfirmed(tabId);
         await this.normalWindow(windowId);
         // Explicit adoption is not committed until bind's fresh validation.
         // Its pending receipt must not prematurely eject the source Space.
         const item = this.item(favoriteId), tabs = await this.reconcile({ updateSpaces: !tabId });
         const targetKey = key({ favoriteId, windowId });
-        let binding = this.state.bindings.find(binding => key(binding) === targetKey);
+        let binding = this.state.bindings.find(binding => key(binding) === targetKey) || this.recovery.forFavorite(favoriteId, windowId);
         let tab = binding && tabs.get(binding.tabId);
         if (binding && !tab) {
             this.state.bindings = this.state.bindings.filter(entry => entry !== binding);
@@ -755,6 +781,7 @@ export class FavoriteStore {
         }
     }
     async releaseTab(tabId, windowId, favoriteId) {
+        this.recovery.assertConfirmed(tabId, favoriteId);
         if (![...this.state.bindings, ...this.state.attempts].some(entry => entry.favoriteId === favoriteId && entry.windowId === windowId && entry.tabId === this.exactId(tabId))) fail('STALE_TAB', 'This Favorite’s open tab changed. Refresh and try again.');
         const tab = await this.currentTab(tabId, windowId);
         assertNotNativeSplit(tab);
@@ -797,10 +824,13 @@ export class FavoriteStore {
         assertNotTransient(this.spaceStore, { windowId: message.windowId, tabId: message.tabId });
         for (const entry of message.bookmarks || []) assertNotTransient(this.spaceStore, { tabId: entry.tabId });
         await this.initialize();
+        for (const entry of message.bookmarks || []) this.recovery.assertConfirmed(entry.tabId);
         if (message.action === 'addBookmarks') return this.addBookmarks(message);
         await this.normalWindow(message.windowId);
         await this.reconcile();
         assertNotTransient(this.spaceStore, { windowId: message.windowId, tabId: message.tabId });
+        if (message.action === 'undoRecovery' || message.action === 'confirmRecovery') return this.recovery.review(message, message.action === 'confirmRecovery');
+        if (!['get', 'open', 'reorder'].includes(message.action)) this.recovery.assertConfirmed(message.tabId, message.favoriteId);
         if (message.action === 'attachmentCandidates') return this.attachment.candidates(message.favoriteId, message.windowId);
         if (message.action === 'attachExisting') return this.attachment.attach(message);
         if (message.action !== 'get') this.attachment.invalidate();
@@ -857,13 +887,14 @@ export class FavoriteStore {
     install() {
         const handle = operation => this.run(operation).catch(error => console.warn('Favorites tracking deferred:', error));
         // Invalidate synchronously, before queued reconciliation can await IO.
-        chrome.tabs.onRemoved.addListener(tabId => this.attachment.invalidate(tabId));
-        chrome.tabs.onDetached?.addListener(tabId => this.attachment.invalidate(tabId));
-        chrome.tabs.onAttached?.addListener(tabId => this.attachment.invalidate(tabId));
-        chrome.tabs.onMoved?.addListener(tabId => this.attachment.invalidate(tabId));
-        chrome.tabs.onReplaced.addListener((_added, removed) => this.attachment.invalidate(removed));
+        chrome.tabs.onCreated?.addListener(tab => this.recovery.invalidate(tab.id));
+        chrome.tabs.onRemoved.addListener(tabId => (this.attachment.invalidate(tabId), this.recovery.invalidate(tabId)));
+        chrome.tabs.onDetached?.addListener(tabId => (this.attachment.invalidate(tabId), this.recovery.invalidate(tabId)));
+        chrome.tabs.onAttached?.addListener(tabId => (this.attachment.invalidate(tabId), this.recovery.invalidate(tabId)));
+        chrome.tabs.onMoved?.addListener(tabId => (this.attachment.invalidate(tabId), this.recovery.invalidate(tabId)));
+        chrome.tabs.onReplaced.addListener((_added, removed) => (this.attachment.invalidate(removed), this.recovery.invalidate(removed)));
         chrome.tabs.onUpdated.addListener((tabId, change) => {
-            if (['url', 'pendingUrl', 'status', 'pinned', 'groupId', 'splitViewId', 'title'].some(key => Object.hasOwn(change, key))) this.attachment.invalidate(tabId);
+            if (['url', 'pendingUrl', 'status', 'pinned', 'groupId', 'splitViewId', 'title'].some(key => Object.hasOwn(change, key))) (this.attachment.invalidate(tabId), this.recovery.invalidate(tabId));
         });
         chrome.tabs.onRemoved.addListener(tabId => handle(async () => {
             if (!this.state.bindings.some(binding => binding.tabId === tabId) && !this.state.attempts.some(attempt => attempt.tabId === tabId)) return;
@@ -876,7 +907,7 @@ export class FavoriteStore {
             handle(() => this.reconcile());
         });
         chrome.tabs.onUpdated.addListener((tabId, change) => {
-            if (change.pinned === undefined && change.favIconUrl === undefined && change.status !== 'complete') return;
+            if (change.pinned === undefined && change.favIconUrl === undefined && change.title === undefined && change.status !== 'complete') return;
             handle(async () => {
                 const tabs = await this.reconcile();
                 const binding = this.state.bindings.find(binding => binding.tabId === this.exactId(tabId));
@@ -889,7 +920,7 @@ export class FavoriteStore {
             });
         });
         chrome.tabs.onAttached?.addListener(() => handle(() => this.reconcile()));
-        // No automatic migration, restoration, or tab opening at startup.
+        // Restart recovery changes association only; it never opens or navigates pages.
     }
 }
 

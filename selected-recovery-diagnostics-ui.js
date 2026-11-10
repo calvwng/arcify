@@ -1,12 +1,17 @@
 import { SELECTED_RECOVERY_DIAGNOSTIC, validateDiagnosticReport } from './selected-recovery-diagnostics.js';
 import { validateLayoutDiagnostic } from './durable-layout-diagnostics.js';
-const layoutLabels={confirmedWindowLayouts:'Saved window layouts',confirmedTodayPlacements:'Saved Today placements',pendingWindowLayouts:'Layouts awaiting restoration',
+const layoutLabels={confirmedWindowLayouts:'Saved window layout records',confirmedTodayPlacements:'Saved Today placement records (may repeat tabs)',pendingWindowLayouts:'Layouts awaiting restoration',
     pendingTodayPlacements:'Saved placements awaiting restoration',completeUniqueCandidates:'Complete unique layout candidates',incompleteCandidates:'Incomplete native layouts',
     ambiguousCandidates:'Indistinguishable layouts',changedOrMissingCandidates:'Changed or missing native layouts',cohortsWithNewerChoices:'Layouts protected by newer choices',
     pendingExplicitHistoryRecords:'Prior explicit placements retained in history',pendingExplicitHistoryWithOrder:'Prior explicit placements retaining order',
     observedEligibleWindows:'Observed eligible windows',observedEligibleSlots:'Observed eligible native slots',pendingWithPinnedAnchors:'Pending layouts containing native pinned anchors',
     indexOnlyMismatch:'Pending layouts with matching sequence but shifted indices',additionalNativeSlots:'Pending layouts with additional native slots',
-    reorderedNativeSlots:'Pending layouts with the same slots in a different order',noSequenceCorrespondence:'Pending layouts without a sequence correspondence'};
+    reorderedNativeSlots:'Pending layouts with the same slots in a different order',noSequenceCorrespondence:'Pending layouts without a sequence correspondence',excludedGlobalSlots:'Global Favorite slots excluded from layout checks',
+    readyBlockedByAutomaticRestore:'Complete candidates blocked by automatic restore being disabled',
+    readyBlockedByNewerChoices:'Complete candidates blocked by newer choices',readyBlockedByUnprovenOverrides:'Complete candidates blocked by unproven overrides',
+    readyBlockedBySpaceRoot:'Complete candidates blocked by missing or conflicting Space associations',readyBlockedByBookmarkRoot:'Complete candidates blocked by unavailable bookmark folders',
+    readyBlockedBySavedPin:'Complete candidates blocked by saved pin ownership',readyBlockedByNativeSplit:'Complete candidates blocked by native Split View',
+    readyBlockedByWindow:'Complete candidates blocked by window eligibility',readyPassingObservedGuards:'Complete candidates passing the observed checks'};
 const labels={multipleHistoricalRecords:'Multiple saved records',otherSpace:'Saved record belongs to another Space',
     nonTodaySection:'Saved record belongs to a different section',pinMetadata:'Saved pin identity',nameMetadata:'Saved name or alias',
     noHistoricalUrlMatch:'No matching historical record',liveUrlDuplicates:'More than one live URL candidate',
@@ -70,7 +75,8 @@ export function createSelectedRecoveryDiagnosticAction({document,selection,sendR
                 ? 'Historical identity remains unresolved. Normal Move to Space can assign the exact live tabs without applying their old identities.'
                 : 'No saved-identity blocker was found in this read. Other recovery checks still apply; nothing was confirmed.';output.append(next);}
             if(layout){const heading=document.createElement('h3');heading.textContent='Saved layout evidence';output.append(heading);
-                const scope=document.createElement('p');scope.textContent='Layout counts cover all observed windows, not only this selection. Reasons may overlap and do not authorize restoration.';output.append(scope);
+                const scope=document.createElement('p');scope.textContent='Layout counts cover all observed windows. Saved records may repeat the same tabs. Refusal counts cover complete sequence candidates and may overlap. Passing observed checks is not identity proof or a restore promise; production must revalidate.';output.append(scope);
+                if(layout.automaticRestore){const mode=document.createElement('p');mode.textContent=`Automatic layout restore: ${layout.automaticRestore}`;output.append(mode);}
                 if(layout.nativeGroupSync){const sync=document.createElement('p');sync.textContent=`Native group sync: ${layout.nativeGroupSync}`;output.append(sync);}
                 if(layout.counts){const list=document.createElement('ul');for(const [key,count] of Object.entries(layout.counts)){const item=document.createElement('li');item.textContent=`${layoutLabels[key]}: ${count}`;list.append(item);}output.append(list);}
                 else {const notice=document.createElement('p');notice.textContent='Stable saved-layout evidence is not available for this read.';output.append(notice);}}

@@ -65,7 +65,7 @@ export function diagnoseSelectedRecovery(snapshot, request) {
 }
 export function registerSelectedRecoveryDiagnostics(store, api=chrome, {enabled=true}={}) {
     if(!enabled)return ()=>{};
-    const observer=createRecoveryObserver(store,api);
+    const observer=createRecoveryObserver(store,api,{layoutDetails:true});
     const listener=(request,sender,respond)=>{
         if(request?.type!==SELECTED_RECOVERY_DIAGNOSTIC)return false;
         if(!trustedRecoveryReader(api,sender) || sender.incognito===true || sender.url!==api.runtime.getURL('sidebar.html') || !validDiagnosticRequest(request)) {
