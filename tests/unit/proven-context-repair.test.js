@@ -15,7 +15,7 @@ function installEvents(f){
         for(const name of names){target[name]=event();f.events.push(target[name]);}
 }
 
-async function setup({inverted=false, browser=false}={}) {
+async function setup({inverted=false, browser=false, contextSubset=false}={}) {
     const f=fixture({inverted});installEvents(f); f.ids=[101,102,103,104,105,106,107];
     f.tabs.splice(0,f.tabs.length,...[1,2,...f.ids].map((id,index)=>({id,index,windowId:10,
         url:id===1?'chrome://extensions/':`https://repair.test/${id}`,pinned:false,incognito:false,splitViewId:-1})));
@@ -31,7 +31,7 @@ async function setup({inverted=false, browser=false}={}) {
     f.store.restoreQueue=copy(f.history); f.store.recoveryCandidates=new Set(); f.store.layoutProvisional=new Set();
     f.store.layoutPending=new Set();f.store.layoutRemovedIds=new Set();f.store.restoredRanks=new Map();
     f.snapshot=f.store.spaces.flatMap(s=>s.temporaryTabs.map((id,order)=>{f.store.restoredRanks.set(id,order);const t=f.tabs.find(t=>t.id===id);return {tabId:id,spaceId:s.id,section:'temporaryTabs',order,url:t.url,tabIndex:t.index,windowKey:'current',...(stage.bindings.has(id)?{currentOwnership:copy(stage.bindings.get(id))}:{})};}));
-    f.cohort={id:'explicit-full',explicitOnly:true,choiceRevision:2,
+    f.cohort={id:'explicit-full',explicitOnly:true,choiceRevision:2,...(contextSubset?{contextSubset:true}:{}),
         signature:f.tabs.map(t=>({index:t.index,url:t.url,pinned:false})),
         placements:f.snapshot.filter(r=>f.ids.includes(r.tabId)).map(r=>({index:r.tabIndex,spaceId:r.spaceId,bookmarkFolderId:'target-root',order:r.order})),
         binding:{epoch:stage.epoch,windowId:10,tabIds:f.tabs.map(t=>t.id)},overrides:[]};
@@ -107,7 +107,7 @@ for(const change of ['missing-witness','incarnation','transaction','epoch','comm
     if(change==='staged-choice')f.store.currentLayoutTransition=true;
     if(change==='readback-layout')f.store.durableLayout.cohorts[0].choiceRevision=1;
     if(change==='missing-placement')f.snapshot=f.snapshot.filter(r=>r.tabId!==101);
-    if(change==='outgoing'){const other={...copy(f.cohort),id:'newer',choiceRevision:3,contextSubset:true};await reseal(f,[{...copy(f.cohort),blockedBy:[other.id]},other]);}
+    if(change==='outgoing'){const other={...copy(f.cohort),id:'newer',choiceRevision:3,contextSubset:true,binding:null};await reseal(f,[{...copy(f.cohort),blockedBy:[other.id]},other]);}
     const before=copy(f.local);assert.equal(await prepare(f),null);assert.deepEqual(f.local,before);noActions(f);
 });
 
@@ -282,4 +282,56 @@ for(const inverted of [false,true])test(`combined no-move repair survives repeat
     assert(f.ids.every(id=>owner(cold,id+1000)==='target'&&cold.explicitToday.has(id+1000)));
     assert.deepEqual(cold.spaces.find(s=>s.id==='target').temporaryTabs.filter(id=>f.ids.includes(id-1000)),(inverted?[...f.ids].reverse():f.ids).map(id=>id+1000));
     for(const record of f.history)assert(cold.restoreQueue.some(r=>JSON.stringify(r)===JSON.stringify(record)));noActions(f);
+});
+
+// Regression: contextSubset means mapped relative to a larger native window;
+// it does not guarantee that every retained signature slot is a placement.
+for(const inverted of [false,true])test(`already-mapped subset with unplaced context is narrowed before cold restart, inverted=${inverted}`,async()=>{
+    const f=await setup({inverted,contextSubset:true});
+    // Both context slots share a URL, exactly the kind of irrelevant native
+    // ambiguity retained by the user's newest checkpoint. Keep them unplaced.
+    f.tabs[1].url=f.tabs[0].url;f.snapshot.find(r=>r.tabId===2).url=f.tabs[0].url;
+    f.cohort.signature[1].url=f.tabs[0].url;
+    f.local.spaceTabSnapshot=[...copy(f.snapshot),...copy(f.history)];
+    f.local.spaceRankCheckpoint=await createSpaceRankCheckpoint([...f.store.restoredRanks],f.local.spaceTabSnapshot);
+    f.local[EXPLICIT_TODAY_CHECKPOINT]=await createExplicitCheckpoint(f.snapshot.length,f.local.spaceRankCheckpoint.fingerprint);
+    f.local[DURABLE_LAYOUT_KEY]=await sealDurableLayout(2,[f.cohort],{liveCount:f.snapshot.length,rankFingerprint:f.local.spaceRankCheckpoint.fingerprint});
+    f.store.durableLayout=copy(f.local[DURABLE_LAYOUT_KEY]);
+    const before=copy(f.store.spaces),old=copy(f.cohort),history=copy(f.history);
+    await f.store.persist({skipGroupSync:true});
+    const next=f.local[DURABLE_LAYOUT_KEY].cohorts.find(c=>c.id!==old.id);
+    assert(next,'mapped subsets with unplaced context still need a proven representation repair');
+    assert.deepEqual(next.binding.tabIds,f.ids);assert.equal(next.signature.length,7);
+    assert.deepEqual(f.store.spaces,before);assert.deepEqual(f.local[DURABLE_LAYOUT_KEY].cohorts[0],{...old,blockedBy:[next.id]});
+    // On the next full epoch one irrelevant duplicate disappears and the other
+    // moves; all seven intended placements remain. No current-incarnation proof
+    // survives, so only the narrowed saved successor can restore them.
+    f.tabs.splice(f.tabs.findIndex(t=>t.id===2),1);
+    f.tabs.find(t=>t.id===1).index=30;
+    for(const key of Object.keys(f.session))delete f.session[key];for(const t of f.tabs)t.id+=1000;
+    const cold=await reload(f);
+    assert.deepEqual(cold.spaces.find(s=>s.id==='target').temporaryTabs.filter(id=>f.ids.includes(id-1000)),
+        (inverted?[...f.ids].reverse():f.ids).map(id=>id+1000));
+    for(const record of history)assert(cold.restoreQueue.some(r=>JSON.stringify(r)===JSON.stringify(record)));noActions(f);
+});
+
+for(const fault of ['no-epoch','no-witness','wrong-space','outgoing','override','missing-placement','duplicate-choice','other-window'])
+test(`mapped unplaced-context repair still refuses ${fault}`,async()=>{
+    const f=await setup({contextSubset:true});
+    if(fault==='no-epoch')delete f.session.spaceExplicitTodayEpoch;
+    if(fault==='no-witness')f.store.explicitToday.clear();
+    if(fault==='wrong-space')f.store.explicitToday.get(101).spaceId='source';
+    if(fault==='outgoing')await reseal(f,[{...f.cohort,blockedBy:['newer']},{...copy(f.cohort),id:'newer',choiceRevision:3,binding:null}]);
+    if(fault==='override')await reseal(f,[{...f.cohort,overrides:[{tabId:999,incarnation:'unknown',epoch:copy(f.cohort.binding.epoch)}]}]);
+    if(fault==='missing-placement')f.tabs.splice(f.tabs.findIndex(t=>t.id===101),1);
+    if(fault==='duplicate-choice')f.tabs.push({...copy(f.tabs.find(t=>t.id===101)),id:999,index:1});
+    if(fault==='other-window')f.tabs.push(...f.tabs.filter(t=>f.ids.includes(t.id)).map(t=>({...copy(t),id:t.id+1000,windowId:20})));
+    const before=copy(f.local);assert.equal(await prepare(f),null);assert.deepEqual(f.local,before);noActions(f);
+});
+
+test('mapped context repair never repairs an outgoing predecessor but can narrow its proven latest leaf',async()=>{
+    const f=await setup({contextSubset:true}),older={...copy(f.cohort),id:'older',choiceRevision:1,blockedBy:[f.cohort.id]};
+    await reseal(f,[older,f.cohort]);const plan=await prepare(f);assert(plan);
+    assert.deepEqual(plan.layout.cohorts[0],older);assert.equal(plan.layout.cohorts.length,3);
+    assert.deepEqual(plan.layout.cohorts[2].binding.tabIds,f.ids);noActions(f);
 });

@@ -48,11 +48,14 @@ function observeValidation() {
 
 // A representation repair is not a move, a new choice, or a historical match.
 // Only an already committed complete explicit placement set can be narrowed.
+// contextSubset only records mapping into a larger native window. It can still
+// contain unplaced anchors, so eligibility depends on excess signature slots,
+// not that flag. Those anchors are removed only with the same full live proof.
 // The cohort's numeric binding alone never supplies incarnation authority.
 export async function prepareProvenContextRepair(store, tabs, snapshot, rankFingerprint) {
     if (!store.durableLayout || store.durableLayout.version===4 || store.automaticLayoutRestore === false || store.currentLayoutTransition
         || store.currentLayoutFence || store.layoutWriteFence || store.restoredMetadata?.length
-        || !store.durableLayout.cohorts.some(c => c.explicitOnly && !c.contextSubset
+        || !store.durableLayout.cohorts.some(c => c.explicitOnly
             && c.binding && c.placements.length && c.signature.length > c.placements.length && !c.blockedBy?.length)) return null;
     if (!canObserve()) return null;
     const committed = await chrome.storage.local.get(keys);
@@ -105,7 +108,7 @@ export async function prepareProvenContextRepair(store, tabs, snapshot, rankFing
             && !store.restoredMetadata?.some(r => r.tabId === id);
     };
     for (const c of cohorts) {
-        if (!c.explicitOnly || c.contextSubset || !c.binding || !c.placements.length
+        if (!c.explicitOnly || !c.binding || !c.placements.length
             || c.signature.length <= c.placements.length || c.blockedBy?.length || c.overrides.length
             || !epochs.some(epoch => same(epoch,c.binding.epoch))
             || !c.placements.every(p => authentic(c,p,tabs,epochs,metadata))) continue;

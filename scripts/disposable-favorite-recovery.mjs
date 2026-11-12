@@ -81,13 +81,15 @@ report.layoutDiagnostic=await control.evaluate(async()=>{
  return {result,stateUnchanged:JSON.stringify(before)===JSON.stringify(after),
   tabsUnchanged:JSON.stringify(tabsBefore.map(t=>[t.id,t.url,t.windowId,t.index]))===JSON.stringify(tabsAfter.map(t=>[t.id,t.url,t.windowId,t.index]))};
 });
-assert.equal(report.layoutDiagnostic.result.layoutReport.schema,'arcify-layout-diagnostic-v3');
+assert.equal(report.layoutDiagnostic.result.layoutReport.schema,'arcify-layout-diagnostic-v4');
 assert.equal(report.layoutDiagnostic.result.layoutReport.status,'stable');
 assert(report.layoutDiagnostic.result.layoutReport.counts.excludedGlobalSlots>=1);
 assert.equal(report.layoutDiagnostic.result.layoutReport.automaticRestore,'enabled');
+assert(Number.isSafeInteger(report.layoutDiagnostic.result.layoutReport.counts.newerChoiceEdgesChecked));
+assert(Number.isSafeInteger(report.layoutDiagnostic.result.layoutReport.counts.newerChoiceEdgesBlocking));
 assert(report.layoutDiagnostic.stateUnchanged);assert(report.layoutDiagnostic.tabsUnchanged);
 assert(!JSON.stringify(report.layoutDiagnostic.result).includes(base));
-report.checks.push('Packaged read-only layout v3 report excludes quiet Favorite and preserves storage/native tabs');
+report.checks.push('Packaged read-only layout v4 report excludes quiet Favorite and preserves storage/native tabs');
 }
 report.diagnostics=await control.evaluate(async()=>({tabs:await chrome.tabs.query({}),local:await chrome.storage.local.get(['favoriteRestartHints','favoriteRestartDiagnostic','spaces','spaceTabSnapshot']),session:await chrome.storage.session.get(['favoriteRestartRecovery','favoriteSession'])}));
 const row=report.after.favorites.find(r=>r.url===base+'/unique');if(scenario==='diagnostic-title-change'){

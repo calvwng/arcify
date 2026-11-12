@@ -7,12 +7,12 @@ import { runInNewContext } from 'node:vm';
 
 const source = readFileSync(new URL('../../options.js', import.meta.url), 'utf8').replace(/^import .*;\s*$/gm, '');
 test('startup setting restores and autosaves without replacing other sync data', async () => {
-    const values = { startupLauncherEnabled: true, defaultSpaceName: 'Work', autoArchiveEnabled: true,
+    const values = { startupLauncherEnabled: true, startupPromptEnabled: false, defaultSpaceName: 'Work', autoArchiveEnabled: true,
         autoArchiveIdleMinutes: 90, ordinaryFavoriteTabs: false, syncTabGroups: true, invertTabOrder: false, todayNewTabsAtTop: true,
         showAllOpenTabsInCollapsedFolders: true, debugLoggingEnabled: true,
         colorOverrides: null, unrelatedSavedSetting: 'keep me' };
     const listeners = {};
-    const elements = Object.fromEntries(['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'autoArchiveEnabled', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop',
+    const elements = Object.fromEntries(['startupLauncherEnabled', 'startupPromptEnabled', 'ordinaryFavoriteTabs', 'autoArchiveEnabled', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop',
         'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'].map(id => [id, { checked: false, addEventListener(type, fn) { listeners[id] = fn; } }]));
     elements.defaultSpaceName = { value: '', innerHTML: '', appendChild() {}, addEventListener() {} };
     elements.autoArchiveIdleMinutes = { value: '', disabled: false, reportValidity: () => true, addEventListener() {} };
@@ -30,7 +30,7 @@ test('startup setting restores and autosaves without replacing other sync data',
     assert.equal(typeof listeners.startupLauncherEnabled, 'function');
     elements.startupLauncherEnabled.checked = false;
     await listeners.startupLauncherEnabled();
-    assert.deepEqual(values, { startupLauncherEnabled: false, defaultSpaceName: 'Work', autoArchiveEnabled: true,
+    assert.deepEqual(values, { startupLauncherEnabled: false, startupPromptEnabled: false, defaultSpaceName: 'Work', autoArchiveEnabled: true,
         autoArchiveIdleMinutes: 90, ordinaryFavoriteTabs: false, syncTabGroups: true, invertTabOrder: false, todayNewTabsAtTop: true,
         showAllOpenTabsInCollapsedFolders: true, debugLoggingEnabled: true,
         colorOverrides: null, unrelatedSavedSetting: 'keep me' });

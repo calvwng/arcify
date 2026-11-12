@@ -8,7 +8,7 @@ needed. The report can be copied with **Copy diagnostic** for troubleshooting.
 This reads only. It never adopts, restores, moves or closes tabs, invokes the
 recovery matcher, clears flags, or writes storage. Counts explain saved-identity
 refusal conditions; zero blockers is not permission or proof that recovery will
-succeed. Normal Move to Space assigns exact live tabs independently from historical identity. The layout evidence uses schema v3; see durable-today-layout.md for its mismatch counts and limitations.
+succeed. Normal Move to Space assigns exact live tabs independently from historical identity. The layout evidence uses schema v4; see durable-today-layout.md for its mismatch counts and limitations.
 
 ## Report and privacy boundary
 
@@ -114,3 +114,36 @@ in PowerShell). The fixture creates its own temporary headless browser profile,
 checks the actual packaged receiver after a full restart, verifies quiet-Favorite
 exclusion and unchanged storage/tabs, then exercises Undo. It closes only its owned
 browser. This is not Helium-profile acceptance.
+
+## Newer-choice links (layout diagnostic v4)
+
+The v4 **report** adds bounded counts explaining precedence links without changing
+the saved layout format or any restoration decisions. It checks each direct link
+from a complete pending layout separately using the existing production predicate,
+so the first refusal cannot hide another one. If a newer layout matches another
+window but itself depends on a blocked choice, the report follows that dependency.
+A source-layout / observed-window / newer-layout link is counted once. These are
+**links, not tabs or distinct saved layouts**; the same record can participate in
+several links. Permitted links count as checked but not blocking.
+
+Every blocking link has one reason: missing record, retired record, unavailable
+observation, changed/missing native layout, incomplete native layout, ambiguous
+layout, same-window match without proven current ownership, failed placement
+checks in another window, or a further blocking choice in another window. The
+last reason also produces counts for the deeper links, not a second reason on the
+same link. Missing-record and retired-record branches are fail-closed defenses;
+malformed ledgers and unsupported terminal evidence still return incomplete
+without counts. A same-window match does **not** assert that the newer layout was
+applied or that it is safe to erase its precedence link.
+
+The analysis is diagnostic-only and calls no restoration planner or write helper.
+The production restoration module is unchanged. All identifiers are private to
+the read; the clipboard exposes only allowlisted bounded integers. Traversal and
+extra placement checks share the existing work budget and return incomplete on
+exhaustion. Current safeguards remain in force regardless of these counts.
+
+Tests in `layout-precedence-diagnostics.test.js` exercise each reason, successful
+current ownership, independent-window proof, multiple direct blockers, dependency
+deduplication, work charging and no mutation. The registered observer tests retain
+write traps and privacy assertions. Old v3 diagnostic reports are rejected rather
+than accepted as an incomplete v4 report; this changes no stored data.

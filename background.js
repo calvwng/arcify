@@ -9,6 +9,7 @@ import { registerLittleArcHeader } from './little-arc-header.js';
 import { registerSharedToday } from './shared-today.js';
 import { registerTourMessages } from './tour-state.js';
 import { registerStartupLauncher } from './startup-launcher.js';
+import { registerStartupPrompt } from './startup-prompt.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 registerTourMessages();
 /**
@@ -64,6 +65,8 @@ chrome.windows.onRemoved.addListener(id => {
 spaceStore.install();
 registerTransientControlMessages(spaceStore);
 registerStartupLauncher(chrome, { beforeWindowRead: () => spaceStore.transientWindows.initialize(),
+    isExcludedWindow: id => spaceStore.isTransientWindow(id) });
+registerStartupPrompt(chrome, { prepareWindowEligibility: () => spaceStore.transientWindows.initialize(),
     isExcludedWindow: id => spaceStore.isTransientWindow(id) });
 registerArchiveMessages(spaceStore);
 registerTodayFolderMessages(spaceStore);

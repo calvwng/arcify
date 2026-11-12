@@ -63,11 +63,28 @@ integrity-checked stored data, not proven current or historical identity.
 
 Mismatch relations distinguish pinned anchors, shifted indices, additional native
 slots, reordered slots and no sequence correspondence. Counts may overlap and
-never authorize restoration. The v3 report also explains snapshot refusal guards for complete sequence candidates,
-using effective Favorite exclusion. Saved record counts can repeat tabs; passing
+never authorize restoration. The v4 report also explains snapshot refusal guards for complete sequence candidates,
+using effective Favorite exclusion. It also classifies blocking newer-choice links,
+including dependent links, without exposing identifiers or changing precedence. Saved record counts can repeat tabs; passing
 observed checks is not a restore promise. Reports contain no URLs, titles, IDs, raw records or
 reusable hashes. See [recovery diagnostics](recovery-diagnostics.md) for schemas,
 privacy bounds and the independent diagnostic build gate.
 
 See [testing durable layouts](testing-durable-layout.md) for reproducible unit,
 source-module and packaged native restart fixtures.
+
+### Same-session worker wake after native change
+
+A service-worker wake is not a browser restart. When the accepted browser/session
+identity and every bound native tab ID are still current in the same window,
+initialization retains the existing cohort's capture authority even if those tabs
+have reordered or are navigating. Placements are checked against the saved
+ID-to-slot mapping, not the current native array position. Membership must be
+unique; missing, moved, private, pinned, global, transient or unknown full-window
+members do not gain authority. A subset cannot absorb unchosen neighbours.
+
+Pending-navigation tabs participate only in this identity check. They remain
+excluded from settled URL matching and capture, whose incomplete-cohort guard
+preserves the previous complete checkpoint until navigation settles. Cold browser
+recovery still requires the existing strict sequence/URL evidence and precedence
+checks. No tabs are moved by this same-session classification.

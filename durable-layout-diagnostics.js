@@ -1,4 +1,5 @@
 import { DURABLE_LAYOUT_KEY,readDurableLayout,layoutEvidence,layoutWindows,layoutSpaceRoot,layoutMappedTabs,createLayoutRestoreGuards,layoutRetired } from './durable-today-layout.js';
+import { LAYOUT_PRECEDENCE_COUNT_KEYS,layoutPrecedenceCounts } from './layout-precedence-diagnostics.js';
 export const LAYOUT_GUARD_COUNT_KEYS=['readyBlockedByAutomaticRestore','readyBlockedByNewerChoices','readyBlockedByUnprovenOverrides',
     'readyBlockedBySpaceRoot','readyBlockedByBookmarkRoot','readyBlockedBySavedPin','readyBlockedByNativeSplit',
     'readyBlockedByWindow','readyPassingObservedGuards'];
@@ -6,9 +7,9 @@ export const LAYOUT_COUNT_KEYS=['confirmedWindowLayouts','confirmedTodayPlacemen
     'completeUniqueCandidates','incompleteCandidates','ambiguousCandidates','changedOrMissingCandidates','cohortsWithNewerChoices',
     'pendingExplicitHistoryRecords','pendingExplicitHistoryWithOrder','observedEligibleWindows','observedEligibleSlots',
     'pendingWithPinnedAnchors','indexOnlyMismatch','additionalNativeSlots','reorderedNativeSlots','noSequenceCorrespondence',
-    'excludedGlobalSlots',...LAYOUT_GUARD_COUNT_KEYS];
+    'excludedGlobalSlots',...LAYOUT_GUARD_COUNT_KEYS,...LAYOUT_PRECEDENCE_COUNT_KEYS];
 export function validateLayoutDiagnostic(value){
-    if(!value||value.schema!=='arcify-layout-diagnostic-v3'||Object.keys(value).length!==5
+    if(!value||value.schema!=='arcify-layout-diagnostic-v4'||Object.keys(value).length!==5
         || !['stable','changing','cold','incomplete'].includes(value.status))throw Error('Invalid layout diagnostic');
     if(value.status==='stable'){
         if(!value.counts||Object.keys(value.counts).length!==LAYOUT_COUNT_KEYS.length||LAYOUT_COUNT_KEYS.some(k=>!Number.isSafeInteger(value.counts[k])||value.counts[k]<0||value.counts[k]>1000000))throw Error('Invalid layout counts');
@@ -54,8 +55,9 @@ function refusalCounts(snapshot,store,evidence) {
         +max('placements')*(snapshot.tabs.length+store.spaces.length+memberships));
     let work=evidence.length*workPerCheck;
     if(work>8000000)throw Error('Diagnostic work limit');
+    const charge=()=>{if((work+=workPerCheck)>8000000)throw Error('Diagnostic work limit');};
     const guards=createLayoutRestoreGuards(store,evidence,snapshot.layoutChecks.currentEpochs[0]||null,states,
-        {onPrecedenceCheck:()=>{if((work+=workPerCheck)>8000000)throw Error('Diagnostic work limit');}});
+        {onPrecedenceCheck:charge});
     for(const item of evidence){
         if(!store.layoutPending.has(item.cohort.id)||item.status!=='ready')continue;
         const c=item.cohort,w=item.matches[0],mapped=layoutMappedTabs(c,w);
@@ -73,13 +75,13 @@ function refusalCounts(snapshot,store,evidence) {
         for(const [key,blocked] of Object.entries(reasons))if(blocked)counts[key]++;
         if(!Object.values(reasons).some(Boolean))counts.readyPassingObservedGuards++;
     }
-    return counts;
+    return {...counts,...layoutPrecedenceCounts(store,evidence,guards,{beforePlacementCheck:charge})};
 }
 export async function diagnoseDurableLayout(snapshot){
     // Matching uses every non-private native window, as production does. The
     // selected-tab/aggregate observer keeps its narrower normal-window view.
     if(snapshot.layoutChecks?.tabs)snapshot={...snapshot,tabs:snapshot.layoutChecks.tabs,windows:snapshot.layoutChecks.windows};
-    const result=(status,counts=null)=>validateLayoutDiagnostic({schema:'arcify-layout-diagnostic-v3',status,counts,
+    const result=(status,counts=null)=>validateLayoutDiagnostic({schema:'arcify-layout-diagnostic-v4',status,counts,
         automaticRestore:status==='stable'?(snapshot.memory.automaticLayoutRestore===false?'disabled':'enabled'):null,
         nativeGroupSync:status==='stable'?(snapshot.groupSyncEnabled===true?'enabled':snapshot.groupSyncEnabled===false?'disabled':'unknown'):null});
     if(!snapshot.stable)return result('changing');if(snapshot.scope!=='live-store')return result('cold');

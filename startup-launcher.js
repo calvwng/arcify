@@ -35,7 +35,10 @@ export function registerStartupLauncher(browser = globalThis.chrome, {
     };
     const readState = async () => (await browser.storage.session.get(STARTUP_LAUNCHER_SESSION))[STARTUP_LAUNCHER_SESSION];
     const writeState = state => browser.storage.session.set({ [STARTUP_LAUNCHER_SESSION]: state });
-    const isEnabled = async () => (await browser.storage.sync.get({ [STARTUP_LAUNCHER_SETTING]: false }))[STARTUP_LAUNCHER_SETTING] === true;
+    const isEnabled = async () => {
+        const settings = await browser.storage.sync.get({ [STARTUP_LAUNCHER_SETTING]: false, startupPromptEnabled: false });
+        return settings[STARTUP_LAUNCHER_SETTING] === true && settings.startupPromptEnabled !== true;
+    };
     const normalWindows = async () => {
         await beforeWindowRead();
         return (await browser.windows.getAll({ windowTypes: ['normal'] }))

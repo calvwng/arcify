@@ -40,3 +40,24 @@ Dedicated synthetic tests cover seven-only repair, normal/inverted order, preser
 Combined verification: the 88 helper/integration tests pass within the 340-test
 focused restart-prevention run. Broader build, full unit and isolated headless
 browser results are recorded by the coordinating task, not inferred from this run.
+
+## Mapped cohorts can still retain unplaced anchors
+
+The `contextSubset` flag records an ordered mapping into a larger native window;
+it does not prove that all saved signature slots are explicit placements. A legacy
+explicit cohort can therefore already be marked `contextSubset` while still
+containing unplaced context slots. Previously the repair skipped those cohorts.
+If duplicated or changed context later prevented the newest cohort from matching,
+its newer-choice edges correctly kept older, differently ordered layouts blocked.
+
+Repair eligibility now checks for excess signature slots rather than excluding
+`contextSubset`. All complete committed current-epoch ownership, snapshot, ranks,
+roots, no-newer-choice, no-override, uniqueness and final validation requirements
+remain. The predecessor and its incoming edges stay intact; only a selected-only
+successor and predecessor edge are appended. No live placement changes occur.
+
+This is a prevention path while current identity evidence survives. It does not
+trim a historical checkpoint after a cold restart, restore raw storage, clear
+precedence links, or guess the identity of already misplaced tabs. An explicit
+user-confirmed Move remains the safe way to establish current ownership when
+that proof is gone.

@@ -31,7 +31,7 @@ function fixture() {
     globalThis.chrome = chrome;
     let launcherRegistered = 0;
     const context = { chrome, console, createNativeSplitWriteGuard, enqueueBookmarkOperation, registerRecoveryObservation() {}, selectedRecoveryDiagnosticsEnabled: true, registerSelectedRecoveryDiagnostics() {}, summarizeRecoveryObservation() {}, registerTourMessages() {}, registerBookmarkListeners() {}, registerSpotlightBridge() {},
-        registerStartupLauncher() { launcherRegistered++; },
+        registerStartupLauncher() { launcherRegistered++; }, registerStartupPrompt() {},
         isStartupLauncherTab: tab => isStartupLauncherTab(tab, chrome), ownerOf, projectLiveTabTitles, isProtectedFavorite: () => false,
         createLittleArcWindowGeometry: () => ({}), createTransientWindowStore: () => ({ initialize: async () => {}, observe() {}, observeRemoved() {}, observeWindowRemoved() {},
             observeReplacement() {}, observeDetached() {}, flushObservedUnlocked: async () => {}, isExcluded: () => false, isTransientWindow: () => false }),

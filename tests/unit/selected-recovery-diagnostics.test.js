@@ -68,7 +68,7 @@ function ui({enabled=true,timeoutMs=10000}={}){
 }
 test('built-in layout evidence appears in the dialog and its sanitized copy',async()=>{
  const {LAYOUT_COUNT_KEYS}=await import('../../durable-layout-diagnostics.js');const f=ui();f.action(f.snapshot);await tick();
- f.resolve({schema:'arcify-layout-diagnostic-v3',status:'stable',nativeGroupSync:'enabled',automaticRestore:'enabled',counts:Object.fromEntries(LAYOUT_COUNT_KEYS.map(k=>[k,k==='pendingTodayPlacements'?7:0]))});await tick();
+ f.resolve({schema:'arcify-layout-diagnostic-v4',status:'stable',nativeGroupSync:'enabled',automaticRestore:'enabled',counts:Object.fromEntries(LAYOUT_COUNT_KEYS.map(k=>[k,k==='pendingTodayPlacements'?7:0]))});await tick();
  assert.match(f.document.querySelector('[role="status"]').textContent,/Saved layout evidence/);
  f.event(f.document.querySelector('button'),'click');await tick();const report=JSON.parse(f.copied[0]);assert.equal(report.layout.counts.pendingTodayPlacements,7);
  assert.doesNotMatch(f.copied[0],/https|tabId|windowId|fingerprint|incarnation/);f.event(f.document.querySelectorAll('button')[1],'click');

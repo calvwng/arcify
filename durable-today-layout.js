@@ -13,8 +13,9 @@ const integer = value => Number.isSafeInteger(value) && value>=0;
 const nativeId = value => Number.isSafeInteger(value) && value>0;
 const epochShape = value => value && text(value.epoch) && (value.kind==='session'
     ? Object.keys(value).length===2 : value.kind==='browser' && text(value.generation) && Object.keys(value).length===3);
-const eligible = (store,tab) => tab && !tab.incognito && !tab.pinned && !store.isGlobalTab?.(tab) && !store.isGlobalTab?.(tab.id)
-    && !store.isTransientTab?.(tab) && !isStartupLauncherTab(tab) && text(tab.url) && (!tab.pendingUrl || tab.pendingUrl===tab.url);
+const nativeIdentityEligible = (store,tab) => tab && !tab.incognito && !tab.pinned && !store.isGlobalTab?.(tab) && !store.isGlobalTab?.(tab.id)
+    && !store.isTransientTab?.(tab) && !isStartupLauncherTab(tab) && text(tab.url);
+const eligible = (store,tab) => nativeIdentityEligible(store,tab) && (!tab.pendingUrl || tab.pendingUrl===tab.url);
 const signature = tabs => tabs.map(tab=>({index:tab.index,url:tab.url,pinned:!!tab.pinned})).sort((a,b)=>a.index-b.index);
 function windows(store,tabs) {
     const groups=new Map();
@@ -218,10 +219,21 @@ export async function initializeDurableLayout(store,data,tabs) {
             });
             cohort.signature=signature(retained);cohort.binding.tabIds=retained.map(t=>t.id);
         }
-        const bound=w?.tabs.filter(t=>cohort.binding?.tabIds.includes(t.id));
-        const exact=w&&accepted(cohort)&&encode(cohort.binding.tabIds)===encode(bound.map(t=>t.id))
-            && (cohort.contextSubset||bound.length===w.tabs.length)
-            && cohort.placements.every(p=>root(store,p)?.temporaryTabs.includes(bound[cohort.signature.findIndex(t=>t.index===p.index)]?.id));
+        // A live same-epoch binding proves native identity, not the old strip
+        // order or URL. Reorder/navigation can wake a fresh worker. Retain its
+        // current capture authority by ID; cold restoration still uses strict
+        // settled-URL sequence matching. A navigating member is not missing:
+        // capture's incomplete-window guard defers writes until it settles.
+        const identityTabs=tabs.filter(t=>t.windowId===cohort.binding?.windowId&&nativeIdentityEligible(store,t));
+        const bound=cohort.binding?.tabIds.map(id=>identityTabs.find(t=>t.id===id));
+        const exact=accepted(cohort)&&bound?.every(Boolean)
+            && new Set(identityTabs.map(t=>t.id)).size===identityTabs.length
+            && (cohort.contextSubset||bound.length===identityTabs.length)
+            && cohort.placements.every(p=>{
+                const id=bound[cohort.signature.findIndex(t=>t.index===p.index)]?.id;
+                return root(store,p)?.temporaryTabs.includes(id)
+                    &&store.spaces.flatMap(s=>[...s.temporaryTabs,...s.spaceBookmarks]).filter(n=>n===id).length===1;
+            });
         if(!exact)store.layoutPending.add(cohort.id);
     }
 }
