@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fixture } from './today-recovery-fixture.js';
 import { SpaceStore } from '../../space-store.js';
 import { moveTodayTabsToSpace } from '../../today-move-store.js';
-import { layoutEvidence, layoutWindows, initializeDurableLayout, DURABLE_LAYOUT_KEY } from '../../durable-today-layout.js';
+import { layoutEvidence, layoutWindows, initializeDurableLayout, sealDurableLayout, DURABLE_LAYOUT_KEY } from '../../durable-today-layout.js';
 
 async function load(f) {
     const store = new SpaceStore();
@@ -184,4 +184,54 @@ test('all bound tabs can navigate during wake without losing the complete captur
     nextBrowserEpoch(f);
     const cold = await load(f);
     assert.deepEqual(ids.map(id => cold.spaces.find(s => s.temporaryTabs.includes(id + 2000))?.id), ['target', 'target', 'target']);
+});
+
+for (const duplicate of ['same-space-today', 'same-space-bookmark', 'other-space-bookmark']) {
+    test(`indexed wake membership still rejects ${duplicate}`, async () => {
+        const { f, store, chosenId } = await setupChosenSubset();
+        const target = store.spaces.find(s => s.id === 'target');
+        if (duplicate === 'same-space-today') target.temporaryTabs.push(1101);
+        else if (duplicate === 'same-space-bookmark') target.spaceBookmarks.push(1101);
+        else store.spaces.find(s => s.id !== 'target').spaceBookmarks.push(1101);
+        await initializeDurableLayout(store, f.local, f.tabs);
+        assert(store.layoutPending.has(chosenId));
+    });
+}
+
+test('wake indexes are rebuilt after membership changes between initializations', async () => {
+    const { f, store, chosenId } = await setupChosenSubset();
+    const other = store.spaces.find(s => s.id !== 'target');
+    other.temporaryTabs.push(1101);
+    await initializeDurableLayout(store, f.local, f.tabs);
+    assert(store.layoutPending.has(chosenId));
+    other.temporaryTabs = other.temporaryTabs.filter(id => id !== 1101);
+    await initializeDurableLayout(store, f.local, f.tabs);
+    assert(!store.layoutPending.has(chosenId));
+});
+
+test('native identity index does not confuse equal IDs from other windows', async () => {
+    const { f, store, chosenId } = await setupChosenSubset();
+    const tab = f.tabs.find(t => t.id === 1101);
+    f.tabs.push({ ...tab, windowId: 999 });
+    await initializeDurableLayout(store, f.local, f.tabs);
+    assert(!store.layoutPending.has(chosenId), 'window-local duplicate policy is unchanged');
+});
+
+
+test('wake scans Space membership arrays once per snapshot, not per historical placement', async () => {
+    const { f, store, chosenId } = await setupChosenSubset();
+    const chosen = structuredClone(store.durableLayout.cohorts.find(c => c.id === chosenId));
+    const cohorts = Array.from({ length: 100 }, (_, i) => ({ ...chosen, id: `history-${i}`, blockedBy: [] }));
+    const data = { ...f.local, [DURABLE_LAYOUT_KEY]: await sealDurableLayout(store.durableLayout.revision, cohorts) };
+    let iterations = 0;
+    for (const space of store.spaces) for (const items of [space.temporaryTabs, space.spaceBookmarks]) {
+        Object.defineProperty(items, Symbol.iterator, { configurable: true, value: function* () {
+            iterations++;
+            yield* Array.prototype.values.call(this);
+        } });
+    }
+    await initializeDurableLayout(store, data, f.tabs);
+    assert.equal(store.layoutPending.size, 0);
+    assert.equal(iterations, store.spaces.length * 3,
+        'one temporary-membership set and one occurrence-count pass over each Space');
 });

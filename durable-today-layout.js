@@ -205,6 +205,19 @@ export async function initializeDurableLayout(store,data,tabs) {
     await stageDurableExhaustion(store,tabs);
     const epochs=await explicitTodayEpochs(store), live=windows(store,tabs);
     const accepted=c=>epochs.some(epoch=>encode(c.binding?.epoch)===encode(epoch));
+    // Index this initialization snapshot once. Counts (rather than sets) keep
+    // duplicate membership and duplicate native IDs fail-closed.
+    const membershipCounts=new Map(), temporaryIds=new Map(), identityWindows=new Map();
+    for(const space of store.spaces){
+        temporaryIds.set(space,new Set(space.temporaryTabs));
+        for(const id of [...space.temporaryTabs,...space.spaceBookmarks])
+            membershipCounts.set(id,(membershipCounts.get(id)||0)+1);
+    }
+    for(const tab of tabs)if(nativeIdentityEligible(store,tab)){
+        let window=identityWindows.get(tab.windowId);
+        if(!window)identityWindows.set(tab.windowId,window={byId:new Map(),count:0});
+        window.count++;window.byId.set(tab.id,tab);
+    }
     for(const cohort of store.durableLayout.cohorts){
         if(layoutRetired(store.durableLayout,cohort))continue;
         const w=live.find(w=>w.id===cohort.binding?.windowId);
@@ -224,15 +237,15 @@ export async function initializeDurableLayout(store,data,tabs) {
         // current capture authority by ID; cold restoration still uses strict
         // settled-URL sequence matching. A navigating member is not missing:
         // capture's incomplete-window guard defers writes until it settles.
-        const identityTabs=tabs.filter(t=>t.windowId===cohort.binding?.windowId&&nativeIdentityEligible(store,t));
-        const bound=cohort.binding?.tabIds.map(id=>identityTabs.find(t=>t.id===id));
+        const identity=identityWindows.get(cohort.binding?.windowId);
+        const bound=cohort.binding?.tabIds.map(id=>identity?.byId.get(id));
+        const signaturePositions=new Map(cohort.signature.map((slot,index)=>[slot.index,index]));
         const exact=accepted(cohort)&&bound?.every(Boolean)
-            && new Set(identityTabs.map(t=>t.id)).size===identityTabs.length
-            && (cohort.contextSubset||bound.length===identityTabs.length)
+            && identity?.byId.size===identity?.count
+            && (cohort.contextSubset||bound.length===identity.count)
             && cohort.placements.every(p=>{
-                const id=bound[cohort.signature.findIndex(t=>t.index===p.index)]?.id;
-                return root(store,p)?.temporaryTabs.includes(id)
-                    &&store.spaces.flatMap(s=>[...s.temporaryTabs,...s.spaceBookmarks]).filter(n=>n===id).length===1;
+                const id=bound[signaturePositions.get(p.index)]?.id;
+                return temporaryIds.get(root(store,p))?.has(id)&&membershipCounts.get(id)===1;
             });
         if(!exact)store.layoutPending.add(cohort.id);
     }
