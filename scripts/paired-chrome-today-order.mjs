@@ -372,7 +372,14 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
             const matches = result.spaces.filter(space => space.bookmarkFolderId === folder.id); if (matches.length !== 1) throw new Error('Fixture Space not reconciled.');
             return { folderId: folder.id, spaceId: matches[0].id, savedIds: [one.id, nested.id, two.id] };
         }, { nonce, base });
-        native = await nativeSidebar(); await select(); await native.page.evaluate(installTodayOrderTrace); await settle([]);
+        native = await nativeSidebar();
+        // The owned New Tab launcher is setup, not a creation-order fixture.
+        // Remove its exact identity before selecting/baselining the disposable
+        // Space; retired New Tab history must not defer this window's projection.
+        const removedLauncher = await native.removeLauncher();
+        await select();
+        await waitForTodayMoveHelperCleanup({ read, poll, closedHelper: removedLauncher });
+        await native.page.evaluate(installTodayOrderTrace); await settle([]);
         sourceId = await created('browser-api-standalone-top', () => apiPage.evaluate(options => chrome.tabs.create(options), { windowId, url: `${base}/source`, active: false }), { expectedUrl: `${base}/source` });
         sourcePage = await pageForUrl(`${base}/source`); await sourcePage.waitForSelector('#today-order-child');
         const second = await created('second-browser-standalone-top', () => apiPage.evaluate(options => chrome.tabs.create(options), { windowId, url: `${base}/second`, active: false }), { expectedUrl: `${base}/second` });

@@ -364,3 +364,14 @@ test('diagnostic wiring is passive, scoped, and reports worker replacement gaps 
     assert.match(source, /onResult: result => \{ if \(Number\.isInteger\(result\?\.id \|\| result\?\.tabId\)\) owned\.add/);
     assert.match(source, /const proof = assertTodayCreated\(before, after/); assert.match(source, /assertTodayNewTabRow\(after\.newTabRow/);
 });
+
+test('initial native launcher is removed and observed absent before the creation baseline, without weakening post-reload helper proof', () => {
+    const source = readSourceText(new URL('../../scripts/paired-chrome-today-order.mjs', import.meta.url));
+    const setup = source.slice(source.indexOf('native = await nativeSidebar();'), source.indexOf("sourceId = await created('browser-api-standalone-top'"));
+    assert(setup.indexOf('await native.removeLauncher()') < setup.indexOf('await select()'));
+    assert(setup.indexOf('await select()') < setup.indexOf('await waitForTodayMoveHelperCleanup'));
+    assert(setup.indexOf('await waitForTodayMoveHelperCleanup') < setup.indexOf('await settle([])'));
+    const reopen = source.slice(source.indexOf('native = await nativeSidebar({ revealSpaceId: folder.spaceId })'));
+    assert(reopen.includes('assert.equal(newHelper.length, 1)'));
+    assert(reopen.includes('const reloadedOrder = [newHelper[0].id, fallback.id, ...manualOrder, bottom]'));
+});
