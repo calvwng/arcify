@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { EventEmitter } from 'node:events';
 import { readSourceText } from '../source-text.js';
-import { TODAY_ORDER_CASES, visibleTodayOrder, serveTodayOrderFixture, assertTodayOrderState, assertTodayCreated,
+import { clickTodayOrderSpace, TODAY_ORDER_CASES, visibleTodayOrder, serveTodayOrderFixture, assertTodayOrderState, assertTodayCreated,
     assertTodayOrderUnchanged, assertTodayManualOrder, installTodayOrderTrace, assertTodayOrderInput,
     readTodayOrderProjectionInputs, observeTodayOrderCreation, observeTodayOrderGroupConsole } from '../../scripts/paired-chrome-today-order.mjs';
 
@@ -374,4 +374,44 @@ test('initial native launcher is removed and observed absent before the creation
     const reopen = source.slice(source.indexOf('native = await nativeSidebar({ revealSpaceId: folder.spaceId })'));
     assert(reopen.includes('assert.equal(newHelper.length, 1)'));
     assert(reopen.includes('const reloadedOrder = [newHelper[0].id, fallback.id, ...manualOrder, bottom]'));
+});
+
+
+function spaceClickHarness(error) {
+    const selectors = [], disposed = [], records = []; let clicks = 0;
+    const page = { async waitForSelector(selector, options) {
+        selectors.push(selector); assert.equal(options.visible, true); assert(options.timeout > 0 && options.timeout <= 20_000);
+        const attempt = selectors.length;
+        return { async click() { clicks++; if (attempt === 1 && error) throw error; }, async dispose() { disposed.push(attempt); } };
+    } };
+    return { page, selectors, disposed, records, clicks: () => clicks };
+}
+function detachedSpaceError(suffix = '') {
+    const error = new Error('Node is detached from document');
+    error.stack = `Error: Node is detached from document
+    at CdpElementHandle.assertConnectedElement (/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1300:23)
+    at async CdpElementHandle.isIntersectingViewport (/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1324:17)
+    at async CdpElementHandle.scrollIntoViewIfNeeded (/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1310:17)
+    at async CdpElementHandle.click (/node_modules/puppeteer-core/lib/puppeteer/api/ElementHandle.js:725:13)${suffix}`;
+    return error;
+}
+test('Today-order Space selection reacquires the exact button after pre-input launcher-cleanup detachment', async () => {
+    const h = spaceClickHarness(detachedSpaceError());
+    await clickTodayOrderSpace(h.page, 'fixture-space', item => h.records.push(item));
+    assert.deepEqual(h.selectors, Array(2).fill('#spaceSwitcher button[data-space-id="fixture-space"]'));
+    assert.deepEqual(h.disposed, [1, 2]);
+    assert.deepEqual(h.records.map(item => item.status), ['detached-before-input', 'clicked']);
+    assert.equal(h.clicks(), 2);
+});
+for (const error of [new Error('Protocol error (Input.dispatchMouseEvent): failed'), detachedSpaceError('\n    at CdpMouse.click (/mouse.js:1:1)')]) {
+    test(`Today-order Space selection never retries uncertain input: ${error.message}`, async () => {
+        const h = spaceClickHarness(error);
+        await assert.rejects(clickTodayOrderSpace(h.page, 'fixture-space'), value => value === error);
+        assert.equal(h.clicks(), 1); assert.equal(h.selectors.length, 1); assert.deepEqual(h.disposed, [1]);
+    });
+}
+test('Today-order setup uses guarded Space selection without weakening post-selection state checks', () => {
+    const source = readSourceText('scripts/paired-chrome-today-order.mjs');
+    assert.match(source, /await input\('Select exact disposable Today-order Space', \(\) => clickTodayOrderSpace\(native\.page, folder\.spaceId/);
+    assert.match(source, /value\.snapshot\.activeSpaceId === folder\.spaceId && value\.rendered\.spaceId === folder\.spaceId/);
 });

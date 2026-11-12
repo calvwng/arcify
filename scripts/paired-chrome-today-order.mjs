@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { cleanupNewTabFixtureSpace, readTodayNewTabRow, assertTodayNewTabRow } from './paired-chrome-newtab-row.mjs';
 import { openFreshTabMenu } from './paired-chrome-tab-menu.mjs';
-import { locateFreshDragGeometry } from './paired-chrome-ui.mjs';
+import { clickFreshResult, locateFreshDragGeometry } from './paired-chrome-ui.mjs';
 import { readFixturePageIdentity, assertFixturePageObservation, assertReloadFixtureProvenance } from './paired-chrome-reload-fixtures.mjs';
 import { assertReloadWindowSelection } from './paired-chrome-ordinary-favorites.mjs';
 import { waitForTodayMoveHelperCleanup } from './paired-chrome-today-move.mjs';
@@ -18,6 +18,15 @@ const same = (before, after, fields) => { for (const key of fields) assert.deepE
 const space = (state, id) => { const matches = state.spaces.filter(item => item.id === id); assert.equal(matches.length, 1); return matches[0]; };
 const identity = ({ id, windowId, url, pendingUrl, pinned, incognito, splitViewId }) => ({ id, windowId, url, pendingUrl, pinned, incognito, splitViewId });
 export const visibleTodayOrder = (ids, inverted) => inverted ? [...ids].reverse() : [...ids];
+
+export async function clickTodayOrderSpace(page, spaceId, record = async () => {}) {
+    const selector = `#spaceSwitcher button[data-space-id="${spaceId}"]`;
+    // Launcher cleanup can replace the switcher before input. Reacquire only
+    // for the shared helper's proven pre-input failures, never uncertain clicks.
+    await clickFreshResult(timeout => page.waitForSelector(selector, { visible: true, timeout }),
+        observation => record({ selector, ...observation }));
+}
+
 
 // Evaluated only in the disposable paired-run profile. These are persisted
 // inputs, NOT the worker's actual layoutPending/projection decision. No broad
@@ -333,7 +342,7 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
         await checkpoint('native-input', { label, hosting }); return action();
     };
     const select = async () => {
-        await input('Select exact disposable Today-order Space', () => native.page.click(`#spaceSwitcher button[data-space-id="${folder.spaceId}"]`));
+        await input('Select exact disposable Today-order Space', () => clickTodayOrderSpace(native.page, folder.spaceId, observation => checkpoint('space-selection-input', observation)));
         if (disconnected) await poll(async () => ({ active: (await apiPage.evaluate(() => chrome.storage.session.get('activeSpaces'))).activeSpaces?.[windowId], rendered: await native.page.evaluate(readTodayOrderSidebar) }), value => value.active === folder.spaceId && value.rendered.spaceId === folder.spaceId, 'native and canonical fixture Space selected while deliberately unpaired');
         else await poll(read, value => value.snapshot.activeSpaceId === folder.spaceId && value.rendered.spaceId === folder.spaceId, 'native and authenticated fixture Space selected');
     };
