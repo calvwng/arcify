@@ -181,7 +181,17 @@ export function assertSpotlightActionContext(context, before, { windowId, source
     }
 }
 export function assertSpotlightActionUnchanged(before, after) {
-    assert.deepEqual(canonical(after), canonical(before), 'Cancellation/rejection must preserve every captured native, saved, binding, journal and per-window identity.');
+    // Chrome may freeze/unfreeze an unrelated background page while a prompt is
+    // open. Keep the raw evidence and its exact prefix; tolerate only appended
+    // boolean frozen-only notifications, never mixed navigation/identity events.
+    assertLifecycleExtension(before.nativeLifecycle, after.nativeLifecycle);
+    for (const event of after.nativeLifecycle.slice(before.nativeLifecycle.length)) {
+        assert(event.type === 'tabs.onUpdated' && Number.isInteger(event.data?.id) &&
+            Object.keys(event.data?.change || {}).length === 1 &&
+            typeof event.data.change.frozen === 'boolean',
+        'Cancellation may append only passive frozen-state notifications.');
+    }
+    assert.deepEqual(canonical({ ...after, nativeLifecycle: before.nativeLifecycle }), canonical(before), 'Cancellation/rejection must preserve every captured native, saved, binding, journal and per-window identity.');
 }
 const quietEvents = events => events.filter(event => /^tabs\.(?!onUpdated)|^windows\.|^sidePanel\./.test(event.type) || event.type === 'tabs.onUpdated' && ['url', 'pendingUrl', 'pinned', 'groupId', 'mutedInfo', 'discarded'].some(key => key in event.data.change));
 export function assertSpotlightActionNoWrites(events, { allowRejectedRequests = false } = {}) {

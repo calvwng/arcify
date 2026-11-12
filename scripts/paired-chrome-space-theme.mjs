@@ -268,7 +268,7 @@ export function assertThemeHeaderSaved(before, after, { spaceId, changes }) {
 }
 
 // The legacy checkbox saves this complete form, even in a previously sparse profile.
-export const THEME_LEGACY_SYNC_KEYS = ['defaultSpaceName', 'startupLauncherEnabled', 'autoArchiveEnabled', 'autoArchiveIdleMinutes',
+export const THEME_LEGACY_SYNC_KEYS = ['defaultSpaceName', 'startupLauncherEnabled', 'startupPromptEnabled', 'autoArchiveEnabled', 'autoArchiveIdleMinutes',
     'ordinaryFavoriteTabs', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop', 'showAllOpenTabsInCollapsedFolders', 'colorOverrides', 'debugLoggingEnabled'];
 
 /** Passive receipt for the genuine legacy save, including a new toast mutation. */
