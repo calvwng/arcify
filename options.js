@@ -1,3 +1,4 @@
+import { mountStartupPromptDiagnostic } from './startup-prompt-diagnostic-ui.js';
 import { normalizeColorOverrides, DEFAULT_SPACE_COLORS } from './space-colors.js';
 import { mountRecoveryVisibility } from './recovery-visibility-ui.js';
 import { mountFavoriteRestartDiagnostics } from './favorite-restart-diagnostics-ui.js';
@@ -87,6 +88,7 @@ async function saveOptions() {
   const settings = {
     defaultSpaceName: defaultSpaceNameSelect?.value || 'Home',
     startupLauncherEnabled: getCheckboxValue(document.getElementById('startupLauncherEnabled'), false),
+    startupPromptEnabled: getCheckboxValue(document.getElementById('startupPromptEnabled'), false),
     autoArchiveEnabled: getCheckboxValue(document.getElementById('autoArchiveEnabled'), false),
     autoArchiveIdleMinutes: parseInt(autoArchiveIdleMinutesInput?.value, 10) || 360,
     ordinaryFavoriteTabs: getCheckboxValue(document.getElementById('ordinaryFavoriteTabs'), false),
@@ -138,6 +140,7 @@ async function restoreOptions() {
 
   // Restore checkbox values
   setCheckboxValue(document.getElementById('startupLauncherEnabled'), settings.startupLauncherEnabled, false);
+  setCheckboxValue(document.getElementById('startupPromptEnabled'), settings.startupPromptEnabled, false);
   setCheckboxValue(document.getElementById('autoArchiveEnabled'), settings.autoArchiveEnabled, false);
   setCheckboxValue(document.getElementById('ordinaryFavoriteTabs'), settings.ordinaryFavoriteTabs, false);
   setCheckboxValue(document.getElementById('syncTabGroups'), settings.syncTabGroups, false);
@@ -245,7 +248,7 @@ function setupAutoSave() {
   addListenerIfExists('defaultSpaceName', 'change', saveOptions);
 
   // Auto-save for checkboxes (most just save immediately)
-  const checkboxIds = ['startupLauncherEnabled', 'ordinaryFavoriteTabs', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
+  const checkboxIds = ['startupLauncherEnabled', 'startupPromptEnabled', 'ordinaryFavoriteTabs', 'syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop', 'showAllOpenTabsInCollapsedFolders', 'debugLoggingEnabled'];
   checkboxIds.forEach(id => addListenerIfExists(id, 'change', saveOptions));
 
   // Auto-archive checkbox needs special handling to update visibility
@@ -264,6 +267,7 @@ function setupAutoSave() {
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
+  mountStartupPromptDiagnostic(document, chrome);
   mountRecoveryVisibility(document, chrome);
   mountFavoriteRestartDiagnostics(document, chrome);
   setupAdvancedOptions();

@@ -9,6 +9,7 @@ function getExtensionInputs() {
     sidebar: resolve(process.cwd(), 'sidebar.html'),
     'transient-window': resolve(process.cwd(), 'transient-window.html'),
     'startup-launcher': resolve(process.cwd(), 'startup-launcher.html'),
+    'startup-prompt': resolve(process.cwd(), 'startup-prompt.html'),
     'tutorial-practice': resolve(process.cwd(), 'tutorial-practice.html'),
     options: resolve(process.cwd(), 'options.html'),
     onboarding: resolve(process.cwd(), 'onboarding.html'),

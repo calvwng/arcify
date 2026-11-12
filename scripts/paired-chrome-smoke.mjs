@@ -606,6 +606,13 @@ async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
     });
     const helper = await newTabPage('chrome://newtab/');
     let eventCount = null, panelOwned = false, cleanupPromise;
+    const removeLauncher = async () => {
+        await arcifyOptions.evaluate(async id => {
+            const exists = (await chrome.tabs.query({})).some(tab => tab.id === id);
+            if (exists) await chrome.tabs.remove(id);
+        }, helper.tab.id);
+        return { tabId: helper.tab.id, windowId: helper.tab.windowId };
+    };
     const cleanup = primaryError => cleanupPromise ||= (async () => {
         const errors = [];
         try {
@@ -627,10 +634,7 @@ async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
         // Launcher cleanup is independent of panel-state lookup/close. An
         // already-absent owned launcher is complete, not an action to replay.
         try {
-            await arcifyOptions.evaluate(async id => {
-                const exists = (await chrome.tabs.query({})).some(tab => tab.id === id);
-                if (exists) await chrome.tabs.remove(id);
-            }, helper.tab.id);
+            await removeLauncher();
         } catch (error) { errors.push(error); }
         if (errors.length) {
             const diagnostic = { type: 'native-sidebar-fixture-cleanup', helperTabId: helper.tab.id,
@@ -660,6 +664,7 @@ async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
         panelOwned = true;
         const { page } = await resolveNativeSidebarTarget();
         return { page: await observePage(page), evidence,
+            removeLauncher: async () => { assert(panelOwned, 'Only a proved native panel may release its launcher early.'); return removeLauncher(); },
             close: async () => {
                 await cleanup();
                 return { tabId: helper.tab.id, windowId: helper.tab.windowId };

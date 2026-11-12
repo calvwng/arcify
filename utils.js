@@ -94,6 +94,7 @@ const Utils = {
         const defaultSettings = {
             defaultSpaceName: 'Home',
             startupLauncherEnabled: false, // Explicit opt-in; never opens the panel automatically
+            startupPromptEnabled: false, // Separate opt-in focused prompt; requires Enter/click
             autoArchiveEnabled: false, // Default: disabled
             autoArchiveIdleMinutes: 360, // Default: 6 hours
             syncTabGroups: false,

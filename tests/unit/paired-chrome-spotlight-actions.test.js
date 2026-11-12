@@ -697,3 +697,47 @@ for (const endpoint of ['before', 'after']) test(`source-only dormant restoratio
     const s = samplePinRemovalRoundtrip(); s[endpoint].ownershipEpoch.session = 'different-epoch';
     assert.throws(() => assertSpotlightActionCommitted(s.before, s.after, s.options));
 });
+
+// Hosted Chrome may freeze a background page during prompt cancellation.
+test('cancel tolerates appended frozen-only events without changing raw evidence', () => {
+    const {before} = sample();
+    before.nativeLifecycle.push({type:'tabs.onCreated',data:[{id:999}]});
+    const after=clone(before);
+    after.nativeLifecycle.push(...[true,false].map(frozen=>({type:'tabs.onUpdated',data:{id:201,change:{frozen}}})));
+    const raw=clone(after); assertSpotlightActionUnchanged(before,after); assert.deepEqual(after,raw);
+    assertSpotlightActionNoWrites(after.nativeLifecycle.slice(before.nativeLifecycle.length));
+});
+for (const change of [{frozen:true,url:'https://away.test/'},{frozen:true,pinned:true},{frozen:true,discarded:true},{frozen:true,splitViewId:0},{frozen:true,groupId:1},{frozen:true,status:'loading'},{frozen:'true'},{}]) {
+    test(`cancel still rejects lifecycle event ${JSON.stringify(change)}`,()=>{
+        const {before}=sample(),after=clone(before);
+        after.nativeLifecycle.push({type:'tabs.onUpdated',data:{id:201,change}});
+        assert.throws(()=>assertSpotlightActionUnchanged(before,after));
+    });
+}
+test('cancel rejects removed or rewritten prior lifecycle even for frozen events',()=>{
+    const {before}=sample();before.nativeLifecycle.push({type:'tabs.onUpdated',data:{id:201,change:{frozen:true}}});
+    for(const nativeLifecycle of [[],[{type:'tabs.onUpdated',data:{id:201,change:{frozen:false}}}]]) {
+        assert.throws(()=>assertSpotlightActionUnchanged(before,{...clone(before),nativeLifecycle}));
+    }
+});
+for (const event of [
+    {type:'tabs.onUpdated',data:{change:{frozen:true}}},
+    {type:'tabs.onUpdated',data:{id:'201',change:{frozen:true}}},
+    {type:'tabs.onCreated',data:{id:201,change:{frozen:true}}},
+]) test(`cancel rejects malformed frozen lifecycle event ${JSON.stringify(event)}`,()=>{
+    const {before}=sample(),after=clone(before); after.nativeLifecycle.push(event);
+    assert.throws(()=>assertSpotlightActionUnchanged(before,after));
+});
+
+test('navigation-style cancellation without passive lifecycle retains exact identity comparison', () => {
+    const {before} = sample(); delete before.nativeLifecycle;
+    const after = clone(before); assertSpotlightActionUnchanged(before, after);
+    assert.throws(() => assertSpotlightActionUnchanged(before, {...after, unexpectedIdentity: true}));
+    for (const value of [undefined, null, [], 'invalid']) {
+        assert.throws(() => assertSpotlightActionUnchanged(before, {...after, nativeLifecycle: value}));
+        assert.throws(() => assertSpotlightActionUnchanged({...before, nativeLifecycle: value}, after));
+    }
+    for (const value of [undefined, null, 'invalid']) {
+        assert.throws(() => assertSpotlightActionUnchanged({...before, nativeLifecycle: value}, {...after, nativeLifecycle: value}));
+    }
+});

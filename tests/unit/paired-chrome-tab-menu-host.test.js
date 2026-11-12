@@ -249,3 +249,16 @@ test('normal teardown aggregates close, removal and recording failure without re
         error.errors[0] === closeError && error.errors[1] === removeError && error.errors[2] === recordError);
     assert.deepEqual(removedIds(f.calls), [f.helperId]); assert.equal(f.calls.filter(call => call === 'close-panel').length, 1);
 });
+
+test('proved native adapter can remove only its launcher early and still close the panel safely', async () => {
+    const f = nativeAdapterFixture(), host = await f.adapter();
+    const removed = await host.removeLauncher(); await host.removeLauncher();
+    assert.deepEqual(JSON.parse(JSON.stringify(removed)), { tabId: f.helperId, windowId });
+    assert.deepEqual(removedIds(f.calls), [f.helperId]);
+    assert.equal(f.panelOpen(), true);
+    assert.equal(f.calls.filter(call => call === 'close-panel').length, 0);
+    await host.close(); await host.close();
+    assert.equal(f.panelOpen(), false);
+    assert.deepEqual(removedIds(f.calls), [f.helperId]);
+    assert.equal(f.calls.filter(call => call === 'close-panel').length, 1);
+});

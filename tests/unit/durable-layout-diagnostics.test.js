@@ -39,7 +39,7 @@ test('mismatch analysis is nonmutating, excludes private/transient/native pins, 
 test('oversized evidence and unstable observations return no counts or sync setting',async()=>{
  const input=await snapshot();input.tabs=Array.from({length:10001},()=>input.tabs[0]);
  assert.equal((await diagnoseDurableLayout(input)).status,'incomplete');
- input.stable=false;assert.deepEqual(await diagnoseDurableLayout(input),{schema:'arcify-layout-diagnostic-v3',status:'changing',counts:null,nativeGroupSync:null,automaticRestore:null});
+ input.stable=false;assert.deepEqual(await diagnoseDurableLayout(input),{schema:'arcify-layout-diagnostic-v4',status:'changing',counts:null,nativeGroupSync:null,automaticRestore:null});
 });
 test('URL-size and comparison-work budgets bound queued diagnostic work',async()=>{
  const input=await snapshot();input.tabs=Array.from({length:100},(_,i)=>({...input.tabs[0],id:i+1,url:'x'.repeat(10001)}));
@@ -52,9 +52,9 @@ test('URL-size and comparison-work budgets bound queued diagnostic work',async()
  ledger.fingerprint=Buffer.from(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(encode({revision:ledger.revision,cohorts:ledger.cohorts,snapshotProof:ledger.snapshotProof})))).toString('hex');
  assert.equal((await diagnoseDurableLayout(work)).status,'incomplete');
 });
-test('strict v3 report schema rejects data-bearing, missing, oversized and invalid fields',async()=>{
+test('strict v4 report schema rejects data-bearing, missing, oversized and invalid fields',async()=>{
  const good=await diagnoseDurableLayout(await snapshot());assert.equal(Object.keys(good.counts).length,LAYOUT_COUNT_KEYS.length);
- for(const bad of [{...good,url:'secret'},{...good,schema:'arcify-layout-diagnostic-v1'},{...good,nativeGroupSync:'secret'},{...good,automaticRestore:'secret'},
+ for(const bad of [{...good,url:'secret'},{...good,schema:'arcify-layout-diagnostic-v1'},{...good,schema:'arcify-layout-diagnostic-v3'},{...good,nativeGroupSync:'secret'},{...good,automaticRestore:'secret'},
   {...good,counts:{...good.counts,additionalNativeSlots:1000001}},{...good,counts:{...good.counts,additionalNativeSlots:-1}},
   {...good,counts:{...good.counts,url:0}},{...good,status:'changing'}])assert.throws(()=>validateLayoutDiagnostic(bad));
 });

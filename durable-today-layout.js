@@ -13,8 +13,9 @@ const integer = value => Number.isSafeInteger(value) && value>=0;
 const nativeId = value => Number.isSafeInteger(value) && value>0;
 const epochShape = value => value && text(value.epoch) && (value.kind==='session'
     ? Object.keys(value).length===2 : value.kind==='browser' && text(value.generation) && Object.keys(value).length===3);
-const eligible = (store,tab) => tab && !tab.incognito && !tab.pinned && !store.isGlobalTab?.(tab) && !store.isGlobalTab?.(tab.id)
-    && !store.isTransientTab?.(tab) && !isStartupLauncherTab(tab) && text(tab.url) && (!tab.pendingUrl || tab.pendingUrl===tab.url);
+const nativeIdentityEligible = (store,tab) => tab && !tab.incognito && !tab.pinned && !store.isGlobalTab?.(tab) && !store.isGlobalTab?.(tab.id)
+    && !store.isTransientTab?.(tab) && !isStartupLauncherTab(tab) && text(tab.url);
+const eligible = (store,tab) => nativeIdentityEligible(store,tab) && (!tab.pendingUrl || tab.pendingUrl===tab.url);
 const signature = tabs => tabs.map(tab=>({index:tab.index,url:tab.url,pinned:!!tab.pinned})).sort((a,b)=>a.index-b.index);
 function windows(store,tabs) {
     const groups=new Map();
@@ -204,6 +205,19 @@ export async function initializeDurableLayout(store,data,tabs) {
     await stageDurableExhaustion(store,tabs);
     const epochs=await explicitTodayEpochs(store), live=windows(store,tabs);
     const accepted=c=>epochs.some(epoch=>encode(c.binding?.epoch)===encode(epoch));
+    // Index this initialization snapshot once. Counts (rather than sets) keep
+    // duplicate membership and duplicate native IDs fail-closed.
+    const membershipCounts=new Map(), temporaryIds=new Map(), identityWindows=new Map();
+    for(const space of store.spaces){
+        temporaryIds.set(space,new Set(space.temporaryTabs));
+        for(const id of [...space.temporaryTabs,...space.spaceBookmarks])
+            membershipCounts.set(id,(membershipCounts.get(id)||0)+1);
+    }
+    for(const tab of tabs)if(nativeIdentityEligible(store,tab)){
+        let window=identityWindows.get(tab.windowId);
+        if(!window)identityWindows.set(tab.windowId,window={byId:new Map(),count:0});
+        window.count++;window.byId.set(tab.id,tab);
+    }
     for(const cohort of store.durableLayout.cohorts){
         if(layoutRetired(store.durableLayout,cohort))continue;
         const w=live.find(w=>w.id===cohort.binding?.windowId);
@@ -218,10 +232,21 @@ export async function initializeDurableLayout(store,data,tabs) {
             });
             cohort.signature=signature(retained);cohort.binding.tabIds=retained.map(t=>t.id);
         }
-        const bound=w?.tabs.filter(t=>cohort.binding?.tabIds.includes(t.id));
-        const exact=w&&accepted(cohort)&&encode(cohort.binding.tabIds)===encode(bound.map(t=>t.id))
-            && (cohort.contextSubset||bound.length===w.tabs.length)
-            && cohort.placements.every(p=>root(store,p)?.temporaryTabs.includes(bound[cohort.signature.findIndex(t=>t.index===p.index)]?.id));
+        // A live same-epoch binding proves native identity, not the old strip
+        // order or URL. Reorder/navigation can wake a fresh worker. Retain its
+        // current capture authority by ID; cold restoration still uses strict
+        // settled-URL sequence matching. A navigating member is not missing:
+        // capture's incomplete-window guard defers writes until it settles.
+        const identity=identityWindows.get(cohort.binding?.windowId);
+        const bound=cohort.binding?.tabIds.map(id=>identity?.byId.get(id));
+        const signaturePositions=new Map(cohort.signature.map((slot,index)=>[slot.index,index]));
+        const exact=accepted(cohort)&&bound?.every(Boolean)
+            && identity?.byId.size===identity?.count
+            && (cohort.contextSubset||bound.length===identity.count)
+            && cohort.placements.every(p=>{
+                const id=bound[signaturePositions.get(p.index)]?.id;
+                return temporaryIds.get(root(store,p))?.has(id)&&membershipCounts.get(id)===1;
+            });
         if(!exact)store.layoutPending.add(cohort.id);
     }
 }

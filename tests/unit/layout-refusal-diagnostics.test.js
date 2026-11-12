@@ -60,8 +60,27 @@ test('newer choices and override refusal explain complete but unapplied historic
   overrides:[{tabId:1,incarnation:'old-incarnation',epoch:{kind:'session',epoch:'old-epoch'}}]});f.store.layoutPending.add('newer');
  await seal(f);const diagnostic=await report(f);
  assert.equal(diagnostic.counts.completeUniqueCandidates,2);assert.equal(diagnostic.counts.readyBlockedByNewerChoices,1);
+ assert.equal(diagnostic.counts.newerChoiceEdgesChecked,1);assert.equal(diagnostic.counts.newerChoiceEdgesBlocking,1);
+ assert.equal(diagnostic.counts.newerChoiceSameWindow,1);
  assert.equal(diagnostic.counts.readyBlockedByUnprovenOverrides,1);assert.equal(diagnostic.counts.readyPassingObservedGuards,0);
  await restoreDurableLayout(f.store,f.tabs);assert.equal(f.store.layoutPending.size,2);
+});
+
+for(const [name,key,alter] of [
+ ['changed','newerChoiceChangedOrMissing',()=>{}],
+ ['incomplete','newerChoiceIncomplete',(f,next)=>next.signature.unshift({index:1,url:f.tabs[0].url,pinned:false})],
+ ['ambiguous','newerChoiceAmbiguous',(f,next)=>{
+  f.tabs.push({...f.tabs[0],id:2,windowId:20,url:next.signature[0].url},{...f.tabs[0],id:3,windowId:30,url:next.signature[0].url});
+  chrome.windows.getAll=async()=>[10,20,30].map(id=>({id,type:'normal',incognito:false}));
+ }]
+])test('registered read classifies newer '+name+' layout without writes or identifiers',async()=>{
+ const f=await setup(),old=f.store.durableLayout.cohorts[0];old.blockedBy=['private-newer'];
+ const next={...clone(old),id:'private-newer',blockedBy:[],explicitOnly:true,choiceRevision:2,
+  signature:[{index:0,url:'https://private-newer.test/',pinned:false}]};
+ f.store.durableLayout.cohorts.push(next);alter(f,next);await seal(f);
+ const diagnostic=await report(f);assert.equal(diagnostic.status,'stable');
+ assert.equal(diagnostic.counts.readyBlockedByNewerChoices,1);assert.equal(diagnostic.counts[key],1);
+ assert.equal(diagnostic.counts.newerChoiceEdgesBlocking,1);
 });
 
 test('guard counts overlap rather than stopping after the first refusal',async()=>{
@@ -132,5 +151,17 @@ for(const kind of ['memberships','overrides','guard-work'])test('guard work refu
   f.store.spaces[0].temporaryTabs=Array.from({length:10000},(_,i)=>i+1);
   c.overrides=Array.from({length:1000},(_,i)=>({tabId:i+1,incarnation:'x',epoch:{kind:'session',epoch:'x'}}));
  }
+ await seal(f);const diagnostic=await report(f);assert.equal(diagnostic.status,'incomplete');assert.equal(diagnostic.counts,null);
+});
+
+test('all-edge analysis shares the bounded work budget and discards partial counts',async()=>{
+ const f=await setup();f.tabs.push(...[2,3].map((id,index)=>({...f.tabs[0],id,index:index+1,url:`https://private-guard.test/${id}`})));
+ const template=f.store.durableLayout.cohorts[0];
+ template.signature=f.tabs.map(({index,url})=>({index,url,pinned:false}));
+ template.placements=f.tabs.map(({index})=>({index,spaceId:'target',bookmarkFolderId:'target-root',order:index}));
+ f.store.durableLayout.revision=101;
+ f.store.durableLayout.cohorts=Array.from({length:100},(_,i)=>({...clone(template),id:`private-${i}`,choiceRevision:i+1,explicitOnly:true,
+  blockedBy:Array.from({length:99-i},(_,j)=>`private-${i+j+1}`)}));
+ f.store.layoutPending=new Set(f.store.durableLayout.cohorts.map(c=>c.id));
  await seal(f);const diagnostic=await report(f);assert.equal(diagnostic.status,'incomplete');assert.equal(diagnostic.counts,null);
 });
