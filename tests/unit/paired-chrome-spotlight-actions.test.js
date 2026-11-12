@@ -728,3 +728,16 @@ for (const event of [
     const {before}=sample(),after=clone(before); after.nativeLifecycle.push(event);
     assert.throws(()=>assertSpotlightActionUnchanged(before,after));
 });
+
+test('navigation-style cancellation without passive lifecycle retains exact identity comparison', () => {
+    const {before} = sample(); delete before.nativeLifecycle;
+    const after = clone(before); assertSpotlightActionUnchanged(before, after);
+    assert.throws(() => assertSpotlightActionUnchanged(before, {...after, unexpectedIdentity: true}));
+    for (const value of [undefined, null, [], 'invalid']) {
+        assert.throws(() => assertSpotlightActionUnchanged(before, {...after, nativeLifecycle: value}));
+        assert.throws(() => assertSpotlightActionUnchanged({...before, nativeLifecycle: value}, after));
+    }
+    for (const value of [undefined, null, 'invalid']) {
+        assert.throws(() => assertSpotlightActionUnchanged({...before, nativeLifecycle: value}, {...after, nativeLifecycle: value}));
+    }
+});

@@ -181,6 +181,12 @@ export function assertSpotlightActionContext(context, before, { windowId, source
     }
 }
 export function assertSpotlightActionUnchanged(before, after) {
+    // Navigation callers capture identity without this optional passive log.
+    // Preserve the original exact comparison when neither endpoint has one.
+    if (!Object.hasOwn(before, 'nativeLifecycle') && !Object.hasOwn(after, 'nativeLifecycle')) {
+        assert.deepEqual(canonical(after), canonical(before), 'Cancellation/rejection must preserve every captured native, saved, binding, journal and per-window identity.');
+        return;
+    }
     // Chrome may freeze/unfreeze an unrelated background page while a prompt is
     // open. Keep the raw evidence and its exact prefix; tolerate only appended
     // boolean frozen-only notifications, never mixed navigation/identity events.
