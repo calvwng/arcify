@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { exerciseSpotlightFolders, SPOTLIGHT_FOLDER_CASE_NAME } from './paired-chrome-spotlight-folders.mjs';
 import { exerciseSpotlightSplit, serveSpotlightSplitFixture, SPOTLIGHT_SPLIT_CASE_NAME } from './paired-chrome-spotlight-split.mjs';
 import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
@@ -144,9 +145,11 @@ const stepNames = [
     'Spotlight Open Archive requires trusted input and the existing popup in the native Side Panel',
     'Spotlight Archive reopens exact same-address entries in their original Space and source window without replay',
     'Spotlight Split and End Split keep exact left and right source panes and original documents',
-    'Little Arc trusted launch and same-tab transfer preserve documents with missing-controller reload fallback'
+    'Little Arc trusted launch and same-tab transfer preserve documents with missing-controller reload fallback',
+    'Spotlight nested folders support fuzzy browse and trusted create rename empty-delete cross-Space move'
 ];
 assert.equal(stepNames[49], SPOTLIGHT_ACTION_CASE_NAME, 'Initial Spotlight action case must retain its reviewed identity.');
+assert.equal(stepNames[56], SPOTLIGHT_FOLDER_CASE_NAME);
 assert.equal(stepNames[50], SPOTLIGHT_NAVIGATION_CASE_NAME, 'Spotlight navigation case must retain its reviewed identity.');
 assert.equal(stepNames[51], SPOTLIGHT_TAB_CASE_NAME, 'Spotlight tab-command case must retain its reviewed identity.');
 assert.equal(stepNames[52], SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, 'Spotlight Archive opening case must retain its identity.');
@@ -180,7 +183,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'move-drag' ? 'test-results/paired-chrome-move-drag' : report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'folder-actions' ? 'test-results/paired-chrome-folder-actions' : report.runMode === 'move-drag' ? 'test-results/paired-chrome-move-drag' : report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -2440,6 +2443,11 @@ try {
 
     // These isolated modules own their fixtures, selected Spaces and settings.
     // They cannot replace or extend the evidence scope of any existing run mode.
+    if (report.runMode === 'folder-actions') {
+        await step(stepNames[56], () => exerciseSpotlightFolders({ apiPage: arcifyOptions, newTabPage, ui, screenshot, snapshot, poll, fixture, spotlightId, search,
+            record: async evidence => { report.spotlightFolders = evidence; await saveReport(); } }));
+    }
+
     if (report.runMode === 'extended-actions') {
     await step(stepNames[50], () => exerciseSpotlightNavigation({ browser,observePage,apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,
         ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,

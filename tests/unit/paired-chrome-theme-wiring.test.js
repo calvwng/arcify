@@ -65,7 +65,7 @@ test('workflow watches new evidence/runtime/paint/docs with all nine legacy exac
     }
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
     assert.equal(pin, 'c3e4e4d374136e608d447716c0321b32b2aa8cfb');
-    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 10);
+    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 11);
     assert.match(runner, /assert\.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);
     assert.match(runner, /assertNoTargetCrashes\(report.targetLifecycle\)/);

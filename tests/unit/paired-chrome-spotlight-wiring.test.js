@@ -180,7 +180,7 @@ test('new workflow watches sources/tests and pins every mandatory job without we
         'spotlight-space-actions.js', 'tests/unit/spotlight-space-actions.test.js', 'tests/unit/spotlight-bridge.test.js']) assert(workflow.includes(`- '${path}'`), path);
     const pin = runner.match(/const PINNED_SPOTLIGHT = '([0-9a-f]{40})'/)[1];
     assert.equal(pin, 'c3e4e4d374136e608d447716c0321b32b2aa8cfb');
-    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 10);
+    assert.equal((workflow.match(new RegExp(`ref: ${pin}`, 'g')) || []).length, 11);
     assert.match(runner, /assert.deepEqual\(await windowBState\(\), fixture.windowBBaseline/);
     assert.match(runner, /assertNoTargetCrashes\(report.targetLifecycle\)/); assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);
     assert.doesNotMatch(workflow, /continue-on-error:|no-sandbox|disable-web-security|CHROME_DEVEL_SANDBOX/);

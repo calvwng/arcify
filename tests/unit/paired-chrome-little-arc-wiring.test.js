@@ -150,7 +150,9 @@ function originalNativeMenuWatchBytes(text) {
 }
 
 function originalLittleArcWorkflowBytes(workflow) {
-    const legacy = originalNativeMenuWatchBytes(workflow);
+    const legacy = originalNativeMenuWatchBytes(workflow)
+        .replace("      - 'scripts/paired-chrome-spotlight-folders.mjs'\n", '')
+        .replace("      - 'tests/unit/paired-chrome-spotlight-folders.test.js'\n", '');
     const restored = legacy.slice(0, legacy.indexOf('  # Supplemental fresh-profile case 38:'))
         .replace("      - 'tests/unit/paired-chrome-move-drag-wiring.test.js'\n", '')
         .replace("      - 'docs/move-drag-paired-ci.md'\n", '')
@@ -163,7 +165,7 @@ test('only an explicit manual Little Arc selection gates the eight unchanged leg
     assert(workflow.includes(`  workflow_dispatch:
 ${dispatchInput}  pull_request:`));
     const jobNames = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)/gm)].map(match => match[1]);
-    assert.deepEqual(jobNames, [...legacyJobNames, 'move-drag', 'little-arc']);
+    assert.deepEqual(jobNames, [...legacyJobNames, 'move-drag', 'little-arc', 'folder-actions']);
     assert.equal(jobSource('move-drag').match(/^    if: (.*)$/m)?.[1], legacyGate);
     for (const name of legacyJobNames) assert.equal(jobSource(name).match(/^    if: (.*)$/m)?.[1], legacyGate);
     assert.equal(littleArcJob.match(/^    if: (.*)$/m)?.[1], littleArcGate);
