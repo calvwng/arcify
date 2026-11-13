@@ -1,3 +1,5 @@
+import { createGeneralUndoUI } from './general-undo-ui.js';
+import { createSavedSplitsUI } from './saved-splits-ui.js';
 import { createSidebarActivationSelection } from './sidebar-activation-selection.js';
 import { createSelectedTabClose, installSelectionCloseKeys } from './selected-tab-close-ui.js';
 import { CommittedSavedSections, observeSavedSectionChanges, savedSectionSignature } from './sidebar-saved-section.js';
@@ -153,7 +155,14 @@ const saveTodaySelection = createTodayFolderAction({ document, selection: todayS
     end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
     refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
 });
+const generalUndo = createGeneralUndoUI({ document, getWindowId: () => currentWindow.id,
+    begin: () => { pendingMutationCount++; },
+    end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
+    sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
+});
 const moveTodaySelection = createTodaySpaceMoveAction({ document, selection: todaySelection, getContext: favoritesContext,
+    offerUndo: token => generalUndo.offer(token),
     sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
     begin: () => { pendingMutationCount++; },
     end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
@@ -172,6 +181,9 @@ const moveSavedSelection = createSavedSpaceMoveAction({ selection: bookmarkSelec
     end: () => { pendingMutationCount--; refreshCoordinator.schedule(); },
     refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); }
 });
+createSavedSplitsUI({ document, getContext: favoritesContext, showStatus: showFavoritesStatus,
+    sendRequest: message => chrome.runtime.sendMessage(message),
+    refresh: async () => { await pendingSpaceSaves; await adoptStoredSpaces(await spaceRequest('get')); await refreshActiveSpaceUI(); } });
 const todaySplit = createTodaySplitUI({ document, selection: todaySelection, getContext: favoritesContext,
     sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
     begin: () => { pendingMutationCount++; },
@@ -191,6 +203,7 @@ const nativeFavoriteConversions = new Set();
 const favoritesStatus = createFavoritesStatus({ document,
     returnFocus: () => document.querySelector('#pinnedFavicons .pinned-favicon') || newTabBtn });
 function showFavoritesStatus(message, preview = false, dismissible = true) {
+    if (!preview) generalUndo.clear();
     favoritesPreview = preview;
     favoritesStatus.show(message, { preview, dismissible });
 }
@@ -460,7 +473,8 @@ async function activatePinnedTabByURL(bookmarkUrl, targetSpaceId, spaceName, boo
 }
 
 // Initialize the sidebar when the DOM is loaded
-document.addEventListener('DOMContentLoaded', async () => {
+async function initializeNormalSidebar() {
+    document.body.removeAttribute('data-sidebar-pending');
     Logger.log('DOM loaded, initializing sidebar...');
     const palette = initializeSpaceColorOverrides({ document, onError: error => Logger.error('Could not load color palette:', error) });
     await initializeSidebarAppearance({ document, onChange: () => { favoritesDropFeedback.refresh(); spaceSwitcherController.refresh(); },
@@ -610,7 +624,9 @@ document.addEventListener('DOMContentLoaded', async () => {
             }, 400); // 400ms cooldown
         }
     }, { passive: false }); // 'passive: false' is required to use preventDefault()
-});
+}
+if (document.readyState === 'interactive' || document.readyState === 'complete') queueMicrotask(initializeNormalSidebar);
+else document.addEventListener('DOMContentLoaded', initializeNormalSidebar, { once: true });
 
 const spaceSaveQueue = new SpacePatchQueue(
     (before, after) => spaceRequest('patch', { before, after }),
@@ -1128,8 +1144,12 @@ async function reorderSpace(operation) {
     pendingMutationCount++;
     try {
         await pendingSpaceSaves;
-        const saved = await spaceRequest('reorder', operation);
-        spaces = projectSpaceOrder(spaces, saved);
+        generalUndo.clear();
+        const result = await chrome.runtime.sendMessage({ type: 'reorderSpaceWithUndo', ...operation, windowId: currentWindow.id });
+        if (!result?.success) throw new Error(result?.error || 'Space reorder could not be confirmed.');
+        spaces = projectSpaceOrder(spaces, result.spaces);
+        showFavoritesStatus('Space order updated.');
+        generalUndo.offer(result.undoToken);
         updateSpaceSwitcher();
     } finally {
         pendingMutationCount--;

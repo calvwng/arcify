@@ -8,6 +8,8 @@ export const GLOBAL_FAVORITES_FEATURE = 'globalFavoritesV1';
 export const ROUTED_OPEN_FEATURE = 'sourceRoutedOpenV1';
 export const HELPER_SOURCE_FEATURE = 'helperSourceV1';
 const helperCommands = ['openTab', 'activateTab', 'activateSpace', 'openBookmark', 'openFavorite', 'openSharedToday'];
+export const FOLDER_ACTIONS_FEATURE = 'folderActionsV1';
+export const FOLDER_ACTION_COMMANDS = ['moveSavedFolderToSpace', 'createChildFolder', 'renameSavedFolder', 'deleteEmptyFolder'];
 export const SPACE_ACTIONS_FEATURE = 'spaceActionsV1';
 export const ARCHIVE_ACTIONS_FEATURE = 'archiveActionsV1';
 export const SPLIT_ACTIONS_FEATURE = 'splitActionsV1';
@@ -17,7 +19,7 @@ export const TAB_ACTION_COMMANDS = ['renameCurrentTab', 'editCurrentPinUrl', 'du
 export const SPACE_ACTION_COMMANDS = ['openSettings', 'createSpaceFolder', 'pinCurrentTab', 'removeCurrentPin'];
 export const SPACE_NAVIGATION_FEATURE = 'spaceNavigationV1';
 export const SPACE_NAVIGATION_COMMANDS = ['switchSpace', 'moveCurrentTodayTab'];
-const supportedFeatures = ['sharedTodayV1', GLOBAL_FAVORITES_FEATURE, ROUTED_OPEN_FEATURE, HELPER_SOURCE_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, ARCHIVE_ACTIONS_FEATURE, SPLIT_ACTIONS_FEATURE];
+const supportedFeatures = [FOLDER_ACTIONS_FEATURE, 'sharedTodayV1', GLOBAL_FAVORITES_FEATURE, ROUTED_OPEN_FEATURE, HELPER_SOURCE_FEATURE, SPACE_ACTIONS_FEATURE, TAB_ACTIONS_FEATURE, SPACE_NAVIGATION_FEATURE, ARCHIVE_ACTIONS_FEATURE, SPLIT_ACTIONS_FEATURE];
 export const isExtensionId = value => typeof value === 'string' && /^[a-p]{32}$/.test(value);
 export const isWindowId = value => Number.isSafeInteger(value) && value > 0;
 const isId = value => typeof value === 'string' && value.length > 0 && value.length <= 200;
@@ -52,6 +54,7 @@ export function isTransientUrl(value) {
     } catch { return false; }
 }
 const commandFields = {
+    moveSavedFolderToSpace: ['context', 'destination'], folderActionContext: ['tabId', 'folderId'], createChildFolder: ['context', 'title'], renameSavedFolder: ['context', 'title'], deleteEmptyFolder: ['context', 'confirmed'],
     openRoutedTab: ['url', 'source'],
     openSharedToday: ['tabId', 'ownerWindowId', 'spaceId', 'bookmarkFolderId'],
     splitActionContext: ['tabId'], createSplitView: ['context', 'target'], endSplitView: ['context'],
@@ -80,6 +83,30 @@ export function sameSplitValue(a, b) {
     return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key) && sameSplitValue(a[key], b[key]));
 }
 // Dedicated Split descriptors never broaden the exact legacy action contexts.
+export function isFolderActionContext(value) {
+    if (!exactKeys(value, ['windowId', 'sourceTabId', 'pairingGeneration', 'spaceId', 'bookmarkFolderId', 'folder', 'ancestors', 'syncTabGroups'])
+        || !isWindowId(value.windowId) || !isTabId(value.sourceTabId) || !(value.pairingGeneration === null || isId(value.pairingGeneration))
+        || !isId(value.spaceId) || !isId(value.bookmarkFolderId) || typeof value.syncTabGroups !== 'boolean'
+        || !Array.isArray(value.ancestors) || value.ancestors.length > 32) return false;
+    const seen = new Set();
+    const tree = (node, depth = 0) => {
+        if (!exactKeys(node, ['id', 'parentId', 'title', 'url', 'children']) || !isId(node.id) || !isId(node.parentId)
+            || !boundedText(node.title, 4096) || !(node.url === null || boundedText(node.url, 16384) && node.url.length > 0)
+            || !Array.isArray(node.children) || node.url !== null && node.children.length || depth > 32 || seen.size >= 2000 || seen.has(node.id)) return false;
+        seen.add(node.id);
+        return node.children.every(child => child?.parentId === node.id && tree(child, depth + 1));
+    };
+    if (!tree(value.folder) || value.folder.url !== null) return false;
+    let parentId = value.folder.parentId;
+    for (const ancestor of value.ancestors) {
+        if (!exactKeys(ancestor, ['id', 'parentId', 'title']) || !isId(ancestor.id) || !isId(ancestor.parentId)
+            || !boundedText(ancestor.title, 4096) || ancestor.id !== parentId || seen.has(ancestor.id)) return false;
+        seen.add(ancestor.id); parentId = ancestor.parentId;
+    }
+    if (value.folder.id === value.bookmarkFolderId ? value.ancestors.length !== 0
+        : value.ancestors.at(-1)?.id !== value.bookmarkFolderId) return false;
+    return JSON.stringify(value).length <= 1000000;
+}
 export function isSplitDescriptor(tab) {
     return exactKeys(tab, ['id', 'url', 'title', 'index', 'groupId', 'pinned', 'splitViewId'])
         && isTabId(tab.id) && normalizeTabActionUrl(tab.url) !== null && !['chrome://newtab', 'chrome://newtab/'].includes(tab.url.split(/[?#]/)[0]) && boundedText(tab.url, 16384)
@@ -174,13 +201,19 @@ export function validateRequest(message, commands) {
     if (message.command === 'openSharedToday' && (!isTabId(message.tabId) || !isWindowId(message.ownerWindowId) || !isId(message.spaceId) || !isId(message.bookmarkFolderId) || !message.supportedFeatures?.includes('sharedTodayV1'))
         || ['activateSpace', 'openBookmark'].includes(message.command) && !isId(message.spaceId)
         || message.command === 'openTab' && message.spaceId !== undefined && !isId(message.spaceId)
-        || ['activateTab', 'navigateTab', 'startupSuggestion', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext', 'splitActionContext'].includes(message.command) && !isTabId(message.tabId)
+        || ['folderActionContext', 'activateTab', 'navigateTab', 'startupSuggestion', 'actionContext', 'tabActionContext', 'navigationContext', 'archiveContext', 'splitActionContext'].includes(message.command) && !isTabId(message.tabId)
         || ['openTab', 'navigateTab'].includes(message.command) && !isSafeUrl(message.url)
         || message.command === 'openTransient' && !isTransientUrl(message.url)
         || message.command === 'openBookmark' && !isId(message.bookmarkId)
         || message.command === 'openFavorite' && !isId(message.favoriteId)
         || message.command === 'launch' && !['current-tab', 'new-tab'].includes(message.mode))
         throw bridgeError('INVALID_REQUEST', 'Invalid command payload.');
+    if (message.command === 'folderActionContext' && !isId(message.folderId)) throw bridgeError('INVALID_REQUEST', 'Invalid folder identity.');
+    if (FOLDER_ACTION_COMMANDS.includes(message.command) && (!isFolderActionContext(message.context) || message.context.windowId !== message.windowId
+        || message.command === 'deleteEmptyFolder' && message.confirmed !== true
+        || message.command === 'moveSavedFolderToSpace' && (!exactKeys(message.destination, ['spaceId', 'bookmarkFolderId']) || !isId(message.destination.spaceId) || !isId(message.destination.bookmarkFolderId) || message.destination.spaceId === message.context.spaceId || message.destination.bookmarkFolderId === message.context.bookmarkFolderId)
+        || ['createChildFolder', 'renameSavedFolder'].includes(message.command) && (!boundedText(message.title, 256) || !message.title.trim())))
+        throw bridgeError('INVALID_REQUEST', 'Invalid folder action context or value.');
     if (SPLIT_ACTION_COMMANDS.includes(message.command) && (!isSplitActionContext(message.context)
         || message.context.windowId !== message.windowId || !message.context.tab
         || message.command === 'createSplitView' && (message.context.tab.splitViewId !== -1 || !isSplitDescriptor(message.target)

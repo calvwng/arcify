@@ -81,6 +81,10 @@ globalThis.chrome = {
                 catch (error) { return { success: false, error: error.message, code: error.code, moved: error.moved, createdId: error.createdId }; }
             }
             if (message.type === 'arcifySharedToday') return { success: true, entries: [] };
+            if (message.type === 'reorderSpaceWithUndo') {
+                storedSpaces = moveSpace(storedSpaces, message);
+                return { success: true, spaces: structuredClone(storedSpaces), undoToken: 'test-undo-token' };
+            }
             assert.equal(message.type, 'spaceStore');
             if (message.action === 'get') { const result = structuredClone(storedSpaces); return { success: true, spaces: result }; }
             if (message.action === 'patch') storedSpaces = applySpacePatch(storedSpaces, message.before, message.after);

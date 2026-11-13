@@ -1,0 +1,11 @@
+# General Undo: Space order and Today Move to Space
+
+The normal sidebar offers an Undo button after a confirmed Space reorder or a confirmed, complete Today **Move to Space** operation. The Today operation keeps the native browser window and restores the original canonical Today order, including interleaved IDs belonging to other windows. It does not reopen, close, navigate, or activate tabs. This first scope does not cover arbitrary Today dragging, bookmarks, saved splits, or destructive actions.
+
+Only one receipt exists in the running SpaceStore. A worker restart expires it. Every later mutation persistence attempt invalidates it, even if the new operation returns the layout to the same shape. Native projection events invalidate at observation rather than at their delayed bookkeeping write, so an action’s own already-observed group projection does not expire its newly confirmed receipt. Exact current Space data and active-Space state must also match the receipt. This intentionally favors refusing Undo over overwriting newer work. A stale button reports the reason without retrying.
+
+The receipt stores an opaque token and the minimum inverse ordering inputs, not an old full Space snapshot. Space Undo remaps current objects by stable ID. Today Undo goes through the existing validated move transaction, with an internal original-order option and explicit active-Space guard. It therefore retains native identity, URL, ordinary-window, binding, split, transient, bookmark-root, durability, explicit-recovery, and uncertainty protections. A partial or uncertain forward move never offers Undo. An attempted Undo consumes its token before any write, so an uncertain acknowledgement cannot lead to a blind retry.
+
+UI initialization is exclusively inside the normal sidebar module. There is no global keyboard shortcut to conflict with text-editor Undo. The worker checks the extension sender and a real normal non-private window; receipt tokens are also bound to the original window.
+
+Validation covers both Today display orders, exact canonical restoration, mixed-window membership, explicit recovery, state/version drift, native tab changes, private/wrong-window callers, one-shot behavior, storage acknowledgement failure, message isolation, and UI duplicate clicks/error handling. Native Helium acceptance remains a separate integration step.

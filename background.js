@@ -1,3 +1,5 @@
+import { registerGeneralUndoMessages } from './general-undo.js';
+import { registerSavedSplitMessages } from './saved-splits.js';
 import { registerSelectedTabClose } from './selected-tab-close.js';
 import { registerPeek } from './peek.js';
 import { registerRecoveryObservation } from './recovery-observation.js';
@@ -71,11 +73,13 @@ registerStartupPrompt(chrome, { prepareWindowEligibility: () => spaceStore.trans
 registerArchiveMessages(spaceStore);
 registerTodayFolderMessages(spaceStore);
 registerTodayMoveMessages(spaceStore);
+registerGeneralUndoMessages(spaceStore);
 registerTodayRecoveryMessages(spaceStore);
 registerSavedMoveMessages(spaceStore);
 registerTabMenuMessages(spaceStore);
 registerSelectedTabClose(spaceStore);
 registerTodaySplitMessages(spaceStore);
+registerSavedSplitMessages(spaceStore);
 const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity({ isTransientTab: tab => spaceStore.isTransientTab(tab),
     isTransientWindow: id => spaceStore.isTransientWindow(id) }) });
 favoriteStore.install();

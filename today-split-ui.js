@@ -149,12 +149,12 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
         const report = (...args) => { lastStatus = args[0]; showStatus(...args); };
         try {
             selection.clear();
-            report(operation.action === 'create' ? 'Creating Split View…' : 'Ending Split View…', false, false);
+            report(operation.action === 'save' ? 'Saving Split View…' : operation.action === 'create' ? 'Creating Split View…' : 'Ending Split View…', false, false);
             attempted = true;
-            const response = await sendRequest({ type: 'todaySplitAction', action: operation.action,
+            const response = await sendRequest({ type: operation.action === 'save' ? 'savedSplitAction' : 'todaySplitAction', action: operation.action,
                 windowId: operation.windowId, spaceId: operation.spaceId, bookmarkFolderId: operation.bookmarkFolderId,
                 entries: operation.entries.map(({ native: { tabId, url, index, groupId, pinned, splitViewId } }) => ({ tabId, url, index, groupId, pinned, splitViewId })) });
-            if (response?.success === true) report(operation.action === 'create'
+            if (response?.success === true) report(operation.action === 'save' ? 'Split View saved. Reopen it from Saved Split Views.' : operation.action === 'create'
                 ? `Split View created.${response.reordered ? ' The two tabs are now adjacent in Today.' : ''}` : 'Split View ended. Both tabs stay open.');
             else if (response?.success === false) report(response.error || 'Split View could not be changed. Check the tabs before trying again.');
             else report('The Split View result is unknown. Check the tabs before trying again; nothing was retried.');
@@ -181,7 +181,7 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
             const members = entries.filter(entry => entry.native.splitViewId === clicked.native.splitViewId);
             if ((snapshot.entries.length === 1 || snapshot.entries.length === 2 && pair(selected, 'end')) && pair(members, 'end')) {
                 const operation = capture(snapshot, members, 'end');
-                return { end: () => execute(operation) };
+                return { end: () => execute(operation), save: () => execute(capture(snapshot, members, 'save')) };
             }
             return { hint: 'End Split View requires its exact two Today tabs in this Space.' };
         }
