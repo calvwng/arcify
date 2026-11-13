@@ -4,7 +4,7 @@ import { visibleTodayOrder, installTodayOrderTrace, assertTodayOrderInput, readT
 import { assertTodayMoveRejected } from './paired-chrome-today-move.mjs';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { locateFreshDragGeometry } from './paired-chrome-ui.mjs';
+import { locateFreshDragGeometry, clickFreshResult } from './paired-chrome-ui.mjs';
 import { clickBookmarkFixtureRow, finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { favoriteDragInputClient } from './paired-chrome-favorites-marker.mjs';
 import { readTodaySelection, assertTodaySelection } from './paired-chrome-today-selection.mjs';
@@ -293,6 +293,15 @@ export function assertNativeSplitMenuAction(state,name) {
 }
 
 /** Positive actions use trusted input; evaluate is limited to seeding, passive reads and explicit rejection probes. */
+// A sidebar refresh can replace the exact row before Puppeteer scrolls it.
+// Reuse the bounded pre-input classifier; never replay a delivered right click.
+export async function clickNativeSplitMenuRow(page, selector, record = async () => {}) {
+    await clickFreshResult(async timeout => {
+        const row = await page.waitForSelector(selector, { visible: true, timeout });
+        return { click: () => row.click({button:'right'}), dispose: () => row.dispose() };
+    }, record);
+}
+
 export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageForUrl,ui,screenshot,captureNativeWindow,snapshot,poll,fixture,arcifyId,record=async()=>{}}) {
     assert.equal(process.env.GITHUB_ACTIONS,'true');assert.equal(process.env.CI,'true');assert.notEqual(process.getuid?.(),0);
     for(const fn of [newTabPage,pageForUrl,ui,screenshot,captureNativeWindow,snapshot,poll])assert.equal(typeof fn,'function');
@@ -321,7 +330,7 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
     const menu=async(id,keyboard=false)=>ui(sidebar.page,keyboard?'Open Today context menu with Shift+F10':'Open exact Today context menu with right click',async()=>{
         const selector=todayRowSelector(id);await sidebar.page.waitForSelector(selector,{visible:true});
         if(keyboard){const row=await sidebar.page.$(selector);try{await row.focus();await sidebar.page.keyboard.down('Shift');try{await sidebar.page.keyboard.press('F10');}finally{await sidebar.page.keyboard.up('Shift');}}finally{await row.dispose();}}
-        else await sidebar.page.click(selector,{button:'right'});
+        else await clickNativeSplitMenuRow(sidebar.page, selector, observation => checkpoint('native-split-context-input', { tabId: id, ...observation }));
         await sidebar.page.waitForSelector('#tab-context-menu',{visible:true});
     });
     const action=async(name,keyboard=false)=>ui(sidebar.page,`Submit ${name} with ${keyboard?'Enter':'mouse'}`,async()=>{

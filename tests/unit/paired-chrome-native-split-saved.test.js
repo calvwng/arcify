@@ -34,3 +34,30 @@ for (const [name, mutate] of Object.entries({
 })) test(`saved native split acceptance rejects ${name}`, () => {
     const f = fixture(); mutate(f); assert.throws(() => assertSavedSplitReopened(f.before, f.after, f.request));
 });
+
+import { clickNativeSplitMenuRow } from '../../scripts/paired-chrome-native-split.mjs';
+function detachedBeforeInput() {
+    const error = new Error('Node is detached from document');
+    error.stack = 'Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (/puppeteer/api/ElementHandle.js:1314:23)\n    at async CdpElementHandle.scrollIntoView (/puppeteer/cdp/ElementHandle.js:106:13)';
+    return error;
+}
+test('native context menu reacquires exact row only for proven pre-input detach and preserves right button', async () => {
+    let lookups = 0, disposed = 0; const records = [], options = [];
+    const page = { waitForSelector: async (selector, config) => {
+        assert.equal(selector, '.exact-tab-42'); assert.equal(config.visible, true); assert(config.timeout > 0);
+        const attempt = ++lookups;
+        return { click: async value => { options.push(value); if (attempt === 1) throw detachedBeforeInput(); }, dispose: async () => { disposed++; } };
+    } };
+    await clickNativeSplitMenuRow(page, '.exact-tab-42', observation => records.push(observation));
+    assert.equal(lookups, 2); assert.equal(disposed, 2);
+    assert.deepEqual(options, [{ button: 'right' }, { button: 'right' }]);
+    assert.deepEqual(records.map(item => item.status), ['detached-before-input', 'clicked']);
+});
+for (const kind of ['dispatch', 'unknown']) test(`native context menu never replays ${kind} failure`, async () => {
+    let lookups = 0, clicks = 0; const error = detachedBeforeInput();
+    error.stack += kind === 'dispatch' ? '\n    at CdpMouse.click (/puppeteer/Input.js:1:1)' : '';
+    if (kind === 'unknown') error.stack = 'Error: Node is detached from document';
+    const page = { waitForSelector: async () => { lookups++; return { click: async () => { clicks++; throw error; }, dispose: async () => {} }; } };
+    await assert.rejects(clickNativeSplitMenuRow(page, '.exact-tab-42'), actual => actual === error);
+    assert.equal(lookups, 1); assert.equal(clicks, 1);
+});
