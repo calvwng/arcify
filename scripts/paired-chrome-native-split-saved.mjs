@@ -33,6 +33,14 @@ export function assertSavedSplitReopened(before, after, { recipe, spaceId, windo
     return added.map(tab => tab.id);
 }
 
+export function isExactSavedPairFocused(state, pair) {
+    const ids = new Set(pair.map(tab => tab.id));
+    const current = state.tabs.filter(tab => ids.has(tab.id));
+    return current.length === 2 && current.some(tab => tab.active) && current.every(tab =>
+        tab.windowId === pair[0].windowId && tab.splitViewId === pair[0].splitViewId) &&
+        state.tabs.filter(tab => tab.windowId === pair[0].windowId && tab.splitViewId === pair[0].splitViewId).length === 2;
+}
+
 export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, read, poll, windowId, spaceId, sourceId, owned, checkpoint }) {
     const recipes = () => apiPage.evaluate(async () => (await chrome.storage.local.get('savedSplitRecipesV1')).savedSplitRecipesV1 || []);
     const original = await recipes();
@@ -57,7 +65,7 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
     assert.equal(await sidebar.page.$('.saved-splits-panel'), null, 'There must not be a dedicated split section.');
     const beforeFocus = await read();
     await ui(sidebar.page, 'Activate existing pinned pair without duplication', () => sidebar.page.click(selector));
-    await poll(read, state => state.tabs.some(t => t.id === sourcePair[0].id && t.active), 'existing pair focused');
+    await poll(read, state => isExactSavedPairFocused(state, sourcePair), 'existing pair focused');
     assert.equal((await read()).tabs.length, beforeFocus.tabs.length);
     // Explicit loss-of-witness fixture: never infer original tabs from matching
     // URLs. A real close/reopen of the newly created pair is tested below.
