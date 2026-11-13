@@ -156,7 +156,7 @@ test('new job retains the exact existing runner, peer pin, readonly checkouts an
     assert.equal(selected, job('archive-reopen').replaceAll('archive-reopen', 'move-drag')
         .replace('Exercise Spotlight Archive exact entry reopening in an independent fresh profile',
             'Exercise tab menus, native Move and sticky New Tab drag in an independent fresh profile'));
-    assert.match(selected, /ref: 3e187f5031334c80133221963f8148d2d9709a34/);
+    assert.match(selected, /ref: c3e4e4d374136e608d447716c0321b32b2aa8cfb/);
     assert.match(selected, /ARCIFY_TEST_HEAD: \$\{\{ github.event.pull_request.head.sha \|\| github.sha \}\}/);
     assert.match(selected, /ref: \$\{\{ github.event.pull_request.head.sha \|\| github.sha \}\}/);
     assert.equal((selected.match(/persist-credentials: false/g) || []).length, 2);
