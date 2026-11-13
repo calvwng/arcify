@@ -8,7 +8,7 @@ import { readSourceText } from '../source-text.js';
 import { finishBookmarkFixture } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 import { registerFavoriteMessages } from '../../favorite-store.js';
 import { planNativeSidebarSpaceReveal, revealNativeSidebarSpace } from '../../scripts/paired-chrome-sidebar.mjs';
-import { installArchiveSelectionObservation,readArchiveSelectionEvidence,assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
+import { archiveResultReady, installArchiveSelectionObservation,readArchiveSelectionEvidence,assertArchiveTrustedInput, readNativeArchivePopup, assertNativeArchiveToggle, assertNativeArchivePopup, installArchiveButtonObservation, exerciseArchivePopupButtonRoundTrip, assertArchiveOpenRequest, assertArchiveNativeAck,
     assertArchiveReopenRequest, waitForArchiveReopenCompletion, readArchiveDestinationDocument, captureArchiveReopenedDestination, assertArchiveCachedReplay, assertArchiveNoMutation, assertArchiveReopened, installArchiveInputObservation, installArchiveIntentObservation, readArchiveIntentObservation, observeArchiveDisplayWorker, probeArchiveDisplayRegistration, exerciseArchiveExistingPanel, installArchiveStatusObservation, readArchiveActivation, probeArchiveOpenWithoutGesture, assertArchiveNoGestureRejection,
     readArchiveDocumentStatus, collectArchiveOpenFailure, readArchiveReopenJournal, collectArchiveReopenFailure, withArchiveFailureEvidence,
     readArchiveFixtureSource, assertArchiveFixtureSource, sendArchiveFixtureRequest, installArchiveFixtureMessageObservation, assertArchiveFixtureSender,
@@ -1114,4 +1114,31 @@ test('Archive readiness retains hard default Enter assertion and captures eviden
  assert.match(source,/archive-selection-before-default-Enter-assertion[\s\S]*?if \(!entryId\) assertMatchedActionFirst/);
  assert.match(source,/finally \{[\s\S]*?archive-selection-before-cleanup[\s\S]*?finishBookmarkFixture/);
  assert.doesNotMatch(installArchiveSelectionObservation.toString(),/sendMessage|dispatchEvent|\.focus\(|\.click\(|selectedIndex\s*=/);
+});
+
+
+test('Archive readiness requires one atomic identity/rank/selection sample across token retirement', () => {
+    const action = {type:ARCHIVE_OPEN_TYPE,title:'Open Archive',entryId:null,selected:true,visible:true};
+    const folder = {type:'bookmark-folder-action',title:'Browse Archive Selected',entryId:null,selected:false,visible:true};
+    const search = {type:'search-query',title:'Search for "open archive"',entryId:null,selected:false,visible:true};
+    const ready = [action,folder,search];
+    assert.equal(archiveResultReady(ready),true);
+    // Hosted evidence: action was first/selected at 263.4ms, then retired
+    // at 268.8ms with every remaining row unselected. This is not misranking.
+    assert.equal(archiveResultReady([folder,search]),false);
+    assert.equal(archiveResultReady([{...folder,selected:true},action,search]),false);
+    assert.equal(archiveResultReady([{...action,selected:false},folder,search]),false);
+    assert.equal(archiveResultReady([{...action,visible:false},folder,search]),false);
+    assert.equal(archiveResultReady([action,action,folder,search]),false);
+    assert.equal(archiveResultReady([action,folder]),false);
+    assert.equal(archiveResultReady(ready),true);
+});
+test('Archive readiness never substitutes a different selected entry or selects one itself', () => {
+    const rows = [{type:ARCHIVE_ENTRY_TYPE,title:'Reopen original',entryId:'chosen',selected:false,visible:true},
+        {type:ARCHIVE_ENTRY_TYPE,title:'Reopen other',entryId:'other',selected:true,visible:true}];
+    const before = copy(rows);
+    assert.equal(archiveResultReady(rows,{type:ARCHIVE_ENTRY_TYPE,title:'Reopen original',entryId:'chosen'}),false);
+    assert.deepEqual(rows,before);
+    rows[0].selected=true;rows[1].selected=false;
+    assert.equal(archiveResultReady(rows,{type:ARCHIVE_ENTRY_TYPE,title:'Reopen original',entryId:'chosen'}),true);
 });

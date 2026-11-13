@@ -348,6 +348,18 @@ test('shared appearance prerequisite owns its fixtures and persists defaults thr
 // A later deliberate change must be reviewed before updating its receipt.
 function originalFavoriteLookupBytes(definition) {
     if (definition.caseIndex !== 26) return definition.callback;
+    // These exact additive blocks retain failed-gesture evidence; arbitrary
+    // callback changes must still fail the reviewed preservation receipt.
+    const diagnosticBlock = "            const diagnostic = { label, sourceSelector, allowed, geometry };\n            (report.favoriteDropActions ||= []).push(diagnostic);\n            const observe = () => page.evaluate(({sourceSelector}) => {\n                const source = document.querySelector(sourceSelector), strip = document.getElementById('pinnedFavicons');\n                const dragging = document.querySelector('.dragging');\n                return { sourceConnected: Boolean(source?.isConnected), sourceRect: source?.getBoundingClientRect().toJSON(),\n                    targetRect: strip?.getBoundingClientRect().toJSON(), draggingBookmarkId: dragging?.dataset.bookmarkId || null,\n                    draggingKind: dragging?.className || null, status: document.getElementById('favoritesDropStatus')?.textContent,\n                    highlighted: strip?.classList.contains('drag-over'), operation: strip?.dataset.dropOperation,\n                    state: strip?.dataset.dropState, busy: strip?.getAttribute('aria-busy') };\n            }, {sourceSelector});\n";
+    const failureBlock = "            } catch (error) {\n                diagnostic.error = error.message;\n                try { diagnostic.failureBeforeCleanup = await observe(); } catch (readError) { diagnostic.readError = readError.message; }\n                throw error;\n";
+    assert.equal(definition.callback.split(diagnosticBlock).length - 1, 1);
+    assert.equal(definition.callback.split(failureBlock).length - 1, 1);
+    definition = { ...definition, callback: definition.callback
+        .replace(',stableGeometry:true', '')
+        .replace(diagnosticBlock, '')
+        .replace('await page.mouse.move(x+12,y,{steps:5});\n                diagnostic.afterStart = await observe();\n                await page.mouse.move(tx,ty,{steps:20});',
+            'await page.mouse.move(x+12,y,{steps:5}); await page.mouse.move(tx,ty,{steps:20});')
+        .replace(failureBlock, '') };
     // Normalize only the approved pre-input exact-row lookup repair. The real
     // gesture, acceptance assertions and every other callback remain hashed.
     return definition.callback.replace(`            let source,target,mouseDown = false;

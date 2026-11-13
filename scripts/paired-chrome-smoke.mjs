@@ -2105,18 +2105,31 @@ try {
             await page.waitForSelector(sourceSelector);
             let source,target,mouseDown = false;
             const geometry = [];
+            const diagnostic = { label, sourceSelector, allowed, geometry };
+            (report.favoriteDropActions ||= []).push(diagnostic);
+            const observe = () => page.evaluate(({sourceSelector}) => {
+                const source = document.querySelector(sourceSelector), strip = document.getElementById('pinnedFavicons');
+                const dragging = document.querySelector('.dragging');
+                return { sourceConnected: Boolean(source?.isConnected), sourceRect: source?.getBoundingClientRect().toJSON(),
+                    targetRect: strip?.getBoundingClientRect().toJSON(), draggingBookmarkId: dragging?.dataset.bookmarkId || null,
+                    draggingKind: dragging?.className || null, status: document.getElementById('favoritesDropStatus')?.textContent,
+                    highlighted: strip?.classList.contains('drag-over'), operation: strip?.dataset.dropOperation,
+                    state: strip?.dataset.dropState, busy: strip?.getAttribute('aria-busy') };
+            }, {sourceSelector});
             const operationBefore = await page.$eval('#pinnedFavicons',element => Number(element.dataset.dropOperation || 0));
             try {
                 // Only pre-input lookup may reacquire an exact row replaced by
                 // the preceding drop. The real gesture below is never replayed.
                 const located = await locateFreshDragGeometry(page,sourceSelector,'#pinnedFavicons',
-                    observation => geometry.push(observation),{scrollSource:true});
+                    observation => geometry.push(observation),{scrollSource:true,stableGeometry:true});
                 ({source,target} = located);
                 const {from,to} = located;
                 const x = from.x+Math.min(40,from.width/2),y = from.y+from.height/2;
                 const tx = to.x+Math.min(35,to.width/2),ty = to.y+to.height/2;
                 await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
-                await page.mouse.move(x+12,y,{steps:5}); await page.mouse.move(tx,ty,{steps:20});
+                await page.mouse.move(x+12,y,{steps:5});
+                diagnostic.afterStart = await observe();
+                await page.mouse.move(tx,ty,{steps:20});
                 await page.waitForFunction(({allowed}) => {
                     const status = document.getElementById('favoritesDropStatus');
                     const text = status?.textContent || '';
@@ -2138,6 +2151,10 @@ try {
                 const completed = await page.evaluate(() => ({status:document.getElementById('favoritesDropStatus')?.textContent,
                     operation:document.getElementById('pinnedFavicons').dataset.dropOperation,state:document.getElementById('pinnedFavicons').dataset.dropState}));
                 observations.push({label,hover,completed,sourceRect:from,targetRect:to,geometry});
+            } catch (error) {
+                diagnostic.error = error.message;
+                try { diagnostic.failureBeforeCleanup = await observe(); } catch (readError) { diagnostic.readError = readError.message; }
+                throw error;
             } finally {
                 if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
                 await source?.dispose(); await target?.dispose();
