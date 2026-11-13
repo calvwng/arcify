@@ -20,6 +20,12 @@ export function folderBrowseReady(panel, title) {
         (panel.heading === title || panel.heading?.endsWith(` / ${title}`)) && panel.buttons.includes('Back to search'));
 }
 
+export function assertOwnedEmptySpace(space, rootId, closedHelperId) {
+    assert.equal(space.bookmarkFolderId, rootId, 'Cleanup requires exact fixture Space root.');
+    assert([...space.spaceBookmarks, ...space.temporaryTabs].every(id => id === closedHelperId),
+        'Cleanup refuses Space deletion with unowned tab membership.');
+}
+
 export function assertOwnedFolderTree(nodes, ownedIds) {
     const allowed = new Set(ownedIds);
     for (const node of nodes) {
@@ -137,7 +143,27 @@ export async function exerciseSpotlightFolders({ apiPage, newTabPage, ui, screen
         await finishBookmarkFixture([
             async () => { if (helper) await apiPage.evaluate(async id => { if ((await chrome.tabs.query({})).some(t => t.id === id)) await chrome.tabs.remove(id); }, helper.tab.id); },
             () => local({ action: 'activate', windowId, spaceId: initial.activeSpaceId }),
-            async () => { for (const id of roots) { const tree = await apiPage.evaluate(id => chrome.bookmarks.getSubTree(id), id); assertOwnedFolderTree(tree, owned); await apiPage.evaluate(id => chrome.bookmarks.removeTree(id), id); } await local({ action: 'get' }); },
+            async () => {
+                for (const id of roots) {
+                    const tree = await apiPage.evaluate(id => chrome.bookmarks.getSubTree(id), id);
+                    assertOwnedFolderTree(tree, owned);
+                    const discovered = await local({ action: 'get' });
+                    const matches = discovered.spaces.filter(space => space.bookmarkFolderId === id);
+                    assert(matches.length <= 1, 'Cleanup refuses ambiguous fixture Space ownership.');
+                    if (matches.length) {
+                        assertOwnedEmptySpace(matches[0], id, helper?.tab.id);
+                        // Use the normal writer so its model and registry are removed too.
+                        // Deleting only the bookmark tree leaves empty Spaces in snapshots.
+                        await local({ action: 'delete', spaceId: matches[0].id });
+                    } else {
+                        // Partial setup may have made a root before discovery completed.
+                        await apiPage.evaluate(id => chrome.bookmarks.removeTree(id), id);
+                    }
+                }
+                const remaining = await local({ action: 'get' });
+                assert.deepEqual(remaining.spaces.map(space => space.id).sort(), initial.spaces.map(space => space.id).sort(),
+                    'Cleanup must remove fixture Space models, not merely their bookmark roots.');
+            },
             () => option(Boolean(before.sync.syncTabGroups)),
             () => apiPage.evaluate(async original => { if (!Object.hasOwn(original, 'syncTabGroups')) await chrome.storage.sync.remove('syncTabGroups'); }, before.sync),
             async () => { for (const t of before.tabs.filter(t => t.active)) await apiPage.evaluate(id => chrome.tabs.update(id, { active: true }), t.id); for (const [id, spaceId] of Object.entries(before.active.activeSpaces || {})) await local({ action: 'activate', windowId: Number(id), spaceId }); const focused = before.windows.find(w => w.focused); if (focused) await apiPage.evaluate(id => chrome.windows.update(id, { focused: true }), focused.id); },

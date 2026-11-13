@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { assertOwnedFolderTree, folderBrowseReady, SPOTLIGHT_FOLDER_CASE_NAME } from '../../scripts/paired-chrome-spotlight-folders.mjs';
+import { assertOwnedFolderTree, assertOwnedEmptySpace, folderBrowseReady, SPOTLIGHT_FOLDER_CASE_NAME } from '../../scripts/paired-chrome-spotlight-folders.mjs';
 import { createPairedChromeRunReport, beginPairedChromeCase, assertPairedChromeRunPassed } from '../../scripts/paired-chrome-run-plan.mjs';
 const smoke = readFileSync(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url), 'utf8');
 const fixture = readFileSync(new URL('../../scripts/paired-chrome-spotlight-folders.mjs', import.meta.url), 'utf8');
@@ -39,4 +39,15 @@ test('browse readiness rejects previous parent and in-place management prompts',
     assert.equal(folderBrowseReady(null, 'Created nonce'), false);
     assert.match(fixture, /await button\(`▸ \$\{childTitle\}`\);[\s\S]*?await waitBrowse\(childTitle\);[\s\S]*?await button\('Rename folder…'\)/);
     assert.match(fixture, /await checkpoint\('failure-before-cleanup'\)/);
+});
+
+test('Space cleanup authorizes only exact fixture root with empty or already-closed helper membership', () => {
+    const fixtureSpace = { bookmarkFolderId: 'root', spaceBookmarks: [], temporaryTabs: [] };
+    assertOwnedEmptySpace(fixtureSpace, 'root', 42);
+    assertOwnedEmptySpace({ ...fixtureSpace, temporaryTabs: [42] }, 'root', 42);
+    assert.throws(() => assertOwnedEmptySpace(fixtureSpace, 'different', 42), /exact fixture/);
+    assert.throws(() => assertOwnedEmptySpace({ ...fixtureSpace, temporaryTabs: [43] }, 'root', 42), /unowned/);
+    assert.throws(() => assertOwnedEmptySpace({ ...fixtureSpace, spaceBookmarks: [43] }, 'root', 42), /unowned/);
+    assert.match(fixture, /await local\(\{ action: 'delete', spaceId: matches\[0\]\.id \}\)/);
+    assert.match(fixture, /remaining\.spaces\.map/);
 });
