@@ -1,3 +1,4 @@
+import { exerciseSavedSplitReopen } from './paired-chrome-native-split-saved.mjs';
 /** CI-only native Split View proof. Importing this module never launches Chrome. */
 import { visibleTodayOrder, installTodayOrderTrace, assertTodayOrderInput, readTodayOrderSidebar } from './paired-chrome-today-order.mjs';
 import { assertTodayMoveRejected } from './paired-chrome-today-move.mjs';
@@ -466,6 +467,7 @@ export async function exerciseNativeTodaySplit({browser,apiPage,newTabPage,pageF
         await select(request.tabIds);await menu(seed[0],true);const beforeKeyboard=await read();await action('createSplitView',true);const keyboardCreated=await awaitPair(request);const keyboardPair=assertNativeSplitCreated(beforeKeyboard,keyboardCreated,request);await badges(request.tabIds);await focusRetained(seed[0]);await checkpoint('native-split-keyboard-created',{before:beforeKeyboard,after:keyboardCreated,pair:keyboardPair});
         const keyboardTrace=await sidebar.page.evaluate(()=>globalThis.__nativeSplitInputTrace.filter(event=>event.type==='keydown'));
         assertNativeSplitKeyboardTrace(keyboardTrace,{tabId:seed[0],actions:['createSplitView']});await checkpoint('native-split-trusted-keyboard-input',{keyboardTrace});
+        await exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, read, poll, windowId, spaceId, sourceId: seed[0], owned, checkpoint });
         await menu(seed[0],true);const beforeKeyboardEnd=await read();await action('endSplitView',true);
         const afterKeyboardEndInput=await sidebar.page.evaluate(readNativeSplitSidebarState);
         await checkpoint('native-split-keyboard-end-submitted',{sidebar:afterKeyboardEndInput});

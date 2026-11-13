@@ -1,8 +1,45 @@
-.private-sidebar { padding: 16px; font-family: system-ui, sans-serif; height: 100%; box-sizing: border-box; overflow-y: auto; }
-.private-sidebar h1 { font: 600 18px system-ui, sans-serif; }
-.private-sidebar p { font-size: 12px; line-height: 1.5; }
-.private-sidebar button { color: inherit; background: transparent; border: 1px solid currentColor; border-radius: 8px; padding: 8px; cursor: pointer; }
+/* Private presentation is deliberately self-contained: no stored theme settings. */
+.private-sidebar {
+    color-scheme: light dark;
+    --private-background: #f7f7f9;
+    --private-foreground: #25252a;
+    --private-muted: #60606c;
+    --private-border: #d0d0d8;
+    --private-hover: #e9e9ef;
+    --private-active: #e1e8f8;
+    color: var(--private-foreground);
+    background: var(--private-background);
+    padding: 16px;
+    font-family: system-ui, sans-serif;
+    height: 100%;
+    box-sizing: border-box;
+    overflow-y: auto;
+}
+@media (prefers-color-scheme: dark) {
+    .private-sidebar {
+        --private-background: #202024;
+        --private-foreground: #ededf2;
+        --private-muted: #b6b6c3;
+        --private-border: #555561;
+        --private-hover: #34343d;
+        --private-active: #344260;
+    }
+}
+.private-sidebar h1 { font: 600 18px system-ui, sans-serif; margin-bottom: 8px; }
+.private-sidebar p { color: var(--private-muted); font-size: 12px; line-height: 1.5; margin-bottom: 12px; }
+.private-sidebar [role="status"]:empty { display: none; }
+.private-sidebar [role="status"] { margin-top: 12px; }
+.private-sidebar button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--private-border); border-radius: 8px; padding: 8px; min-height: 36px; cursor: pointer; }
+.private-sidebar button:hover:not(:disabled) { background: var(--private-hover); }
+.private-sidebar button:disabled { opacity: 0.5; cursor: default; }
 .private-tab { display: flex; gap: 6px; margin-top: 8px; }
 .private-tab button:first-child { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.private-tab [aria-pressed="true"] { font-weight: bold; background: #80808030; }
+.private-tab [data-action="close"] { flex: 0 0 36px; }
+.private-tab [aria-pressed="true"] { font-weight: bold; background: var(--private-active); }
 .private-sidebar button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+@media (forced-colors: active) {
+    .private-sidebar { color: CanvasText; background: Canvas; }
+    .private-sidebar p { color: CanvasText; }
+    .private-sidebar button { border-color: ButtonText; }
+    .private-tab [aria-pressed="true"] { outline: 2px solid Highlight; outline-offset: -3px; }
+}
