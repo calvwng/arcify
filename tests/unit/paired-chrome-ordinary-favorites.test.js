@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { serveOrdinaryFavoriteFixture, assertOrdinaryFavoriteState, assertOnlyNativeFavoriteClosed,
-    assertOrdinaryFavoriteReopened, assertCommittedFavoriteWitness, assertSameBrowserFavoriteContinuity, assertReloadGroupContinuity,
+    assertOrdinaryFavoriteReopened, assertCommittedFavoriteWitness, assertSameBrowserFavoriteContinuity, assertReloadGroupContinuity, assertPostReloadGroupObservation,
     readOrdinaryFavoriteRender, observedOwnershipFingerprint, summarizeFavoriteOwnership,
     seedFocusedReloadSpacePins, assertFocusedReloadSpacePins } from '../../scripts/paired-chrome-ordinary-favorites.mjs';
 
@@ -525,4 +525,143 @@ test('a changed stale selected-Space value is not normalized', () => {
     const before = groupedReloadState(); before.groupState.activeSpaces[999] = 'work';
     const after = renumberGroups(structuredClone(before)); after.groupState.activeSpaces[999] = 'personal';
     assert.throws(() => assertSameBrowserFavoriteContinuity(before, after, ids), /stale selected Space/);
+});
+
+function ungroupedFixtureReloadPair(ungroupedIds = [81, 83]) {
+    const value = fixtureReloadPair();
+    for (const id of ungroupedIds) value.after.tabs.find(tab => tab.id === id).groupId = -1;
+    const groupedIds = [60, 81, 83].filter(id => !ungroupedIds.includes(id));
+    [...groupedIds, ...ungroupedIds].forEach((id, index) => { value.after.tabs.find(tab => tab.id === id).index = index + 2; });
+    return value;
+}
+const checkPostReloadObservation = ({ before, after, fixtureReload }) => assertPostReloadGroupObservation(before, after, { ids, fixtureReload });
+
+for (const ungroupedIds of [[81], [83], [81, 83]]) {
+    test('only actually ungrouped receipt-proven Spotlight replacements are omitted: ' + ungroupedIds.join(','), () => {
+        const value = ungroupedFixtureReloadPair(ungroupedIds), original = structuredClone(value);
+        assert.doesNotThrow(() => checkPostReloadObservation(value));
+        assert.doesNotThrow(() => checkFixturePair(value));
+        assert.throws(() => assertReloadGroupContinuity(value.after, value.after, { ids }), /remain grouped/);
+        assert.deepEqual(value, original, 'Validation must not rewrite observations or receipts');
+    });
+}
+
+test('grouped replacement helpers remain part of the exact native partition', () => {
+    const value = ungroupedFixtureReloadPair([83]);
+    [60, 81].forEach((id, index) => { value.after.tabs.find(tab => tab.id === id).index = 3 - index; });
+    assert.throws(() => checkPostReloadObservation(value), /ordered Space/);
+    assert.throws(() => checkFixturePair(value), /ordered Space/);
+});
+
+for (const [label, mutate] of [
+    ['missing reload receipt', value => { delete value.fixtureReload; }],
+    ['missing creation receipt', value => { delete value.fixtureReload.nativeEvents.created; }],
+    ['malformed creation receipt', value => { value.fixtureReload.nativeEvents.created = {}; }],
+    ['missing options creation', value => { value.fixtureReload.nativeEvents.created.shift(); }],
+    ['missing onboarding creation', value => { value.fixtureReload.nativeEvents.created.pop(); }],
+    ['duplicate creation', value => { value.fixtureReload.nativeEvents.created.push({ ...value.fixtureReload.nativeEvents.created[0] }); }],
+    ['creation in wrong window', value => { value.fixtureReload.nativeEvents.created[0].windowId = 20; }],
+    ['malformed created ID', value => { value.fixtureReload.nativeEvents.created[0].id = '81'; }],
+    ['wrong onboarding origin', value => { value.fixtureReload.nativeEvents.created[1].url = 'about:blank'; }],
+    ['missing removal receipt', value => { delete value.fixtureReload.nativeEvents.removed; }],
+    ['malformed removal receipt', value => { value.fixtureReload.nativeEvents.removed = {}; }],
+    ['missing options removal', value => { value.fixtureReload.nativeEvents.removed.shift(); }],
+    ['missing onboarding removal', value => { value.fixtureReload.nativeEvents.removed.pop(); }],
+    ['duplicate removal', value => { value.fixtureReload.nativeEvents.removed.push({ ...value.fixtureReload.nativeEvents.removed[0] }); }],
+    ['removal in wrong window', value => { value.fixtureReload.nativeEvents.removed[0].windowId = 20; }],
+    ['window-closing removal', value => { value.fixtureReload.nativeEvents.removed[0].isWindowClosing = true; }],
+    ['unchanged worker target', value => { value.fixtureReload.lifecycle.replacement.targetId = 'old-worker'; }],
+    ['source realm never invalidated', value => { value.fixtureReload.lifecycle.view.closed = false; }],
+    ['ordinary control member ungrouped', value => { value.after.tabs.find(tab => tab.id === 60).groupId = -1; }],
+    ['ordinary test member ungrouped', value => { value.after.tabs.find(tab => tab.id === 41).groupId = -1; }],
+    ['helper in wrong native group', value => { value.after.tabs.find(tab => tab.id === 81).groupId = 80; }],
+    ['helper in unobserved native group', value => { value.after.tabs.find(tab => tab.id === 81).groupId = 999; }],
+    ['helper pinned', value => { value.after.tabs.find(tab => tab.id === 81).pinned = true; }],
+    ['control native title changed', value => { value.after.groupState.groups.at(-1).title += ' changed'; }],
+    ['control native color changed', value => { value.after.groupState.groups.at(-1).color = 'blue'; }],
+    ['control native collapse changed', value => { value.after.groupState.groups.at(-1).collapsed = true; }],
+    ['ordinary member order changed', value => { value.after.tabs.find(tab => tab.id === 41).index = 2; value.after.tabs.find(tab => tab.id === 42).index = 1; }],
+    ['ordinary group order changed', value => { value.after.tabs.find(tab => tab.id === 43).index = 1; value.after.tabs.find(tab => tab.id === 41).index = 2; value.after.tabs.find(tab => tab.id === 42).index = 3; }],
+    ['selected Space changed without collapse', value => { value.after.groupState.activeSpaces[10] = 'personal'; }],
+    ['control selected Space changed', value => { value.after.groupState.activeSpaces[30] = 'personal'; }],
+]) {
+    test('receipt-backed ungrouped helper exception rejects ' + label, () => {
+        const value = ungroupedFixtureReloadPair(); mutate(value);
+        assert.throws(() => checkPostReloadObservation(value));
+        assert.throws(() => checkFixturePair(value));
+    });
+}
+
+test('an ordinary extension URL is never an ungrouped fixture exception', () => {
+    const value = ungroupedFixtureReloadPair();
+    for (const state of [value.before, value.after]) {
+        state.tabs.push({ ...state.tabs.find(tab => tab.id === 60), id: 64, index: 5, groupId: -1,
+            url: 'chrome-extension://' + spotlightId + '/newtab.html' });
+        state.groupState.spaces.at(-1).temporaryTabs.push(64);
+    }
+    assert.throws(() => checkPostReloadObservation(value), /remain grouped/);
+    assert.throws(() => checkFixturePair(value), /remain grouped/);
+});
+
+test('unaffected peer helpers get no ungrouped exception from an Arcify reload receipt', () => {
+    const value = fixtureReloadPair('arcify');
+    value.after.tabs.find(tab => tab.id === 71).groupId = -1;
+    assert.throws(() => checkPostReloadObservation(value), /remain grouped/);
+    assert.throws(() => checkFixturePair(value), /remain grouped/);
+});
+
+test('a receipt cannot excuse a preexisting ungrouped source helper', () => {
+    const value = ungroupedFixtureReloadPair();
+    for (const id of [71, 73]) value.before.tabs.find(tab => tab.id === id).groupId = -1;
+    assert.throws(() => assertReloadGroupContinuity(value.before, value.before, { ids }), /remain grouped/);
+    assert.throws(() => checkFixturePair(value), /remain grouped/);
+});
+
+for (const ungrouped of [false, true]) test('helper-only control partitions cannot make continuity vacuous: ' + ungrouped, () => {
+    const value = ungrouped ? ungroupedFixtureReloadPair() : fixtureReloadPair();
+    for (const state of [value.before, value.after]) {
+        state.tabs = state.tabs.filter(tab => tab.id !== 60);
+        state.groupState.spaces.at(-1).temporaryTabs = state.groupState.spaces.at(-1).temporaryTabs.filter(id => id !== 60);
+    }
+    if (ungrouped) value.after.groupState.groups.pop();
+    assert.throws(() => checkPostReloadObservation(value), /non-helper control Space member/);
+    assert.throws(() => checkFixturePair(value), /non-helper control Space member/);
+});
+
+for (const [label, mutate] of [
+    ['consistent title change', after => { after.groupState.spaces[0].name = 'Changed'; after.groupState.groups.find(group => group.id === 80).title = 'Changed'; }],
+    ['consistent color change', after => { after.groupState.spaces[0].color = 'green'; after.groupState.groups.find(group => group.id === 80).color = 'green'; }],
+    ['consistent section change', after => { after.groupState.spaces[0].spaceBookmarks = []; after.groupState.spaces[0].temporaryTabs = [41, 42]; }],
+    ['consistent member order change', after => { after.groupState.spaces[0].spaceBookmarks = [42]; after.groupState.spaces[0].temporaryTabs = [41]; after.tabs.find(tab => tab.id === 42).index = 1; after.tabs.find(tab => tab.id === 41).index = 2; }],
+    ['consistent Space order change', after => { after.groupState.spaces.reverse(); after.tabs.find(tab => tab.id === 43).index = 1; after.tabs.find(tab => tab.id === 41).index = 2; after.tabs.find(tab => tab.id === 42).index = 3; }],
+    ['consistent live selection change', after => { after.groupState.activeSpaces[10] = 'personal'; after.groupState.groups.find(group => group.id === 80).collapsed = true; after.groupState.groups.find(group => group.id === 81).collapsed = false; }],
+    ['published snapshot membership change', after => { after.snapshot.spaces[0].tabIds.pop(); }],
+    ['published snapshot selection change', after => { after.snapshot.activeSpaceId = 'personal'; }],
+]) {
+    test('poll accepts current consistency but final continuity rejects ' + label, () => {
+        const value = ungroupedFixtureReloadPair(); mutate(value.after);
+        assert.doesNotThrow(() => checkPostReloadObservation(value));
+        assert.throws(() => checkFixturePair(value));
+    });
+}
+
+test('a substituted ordinary control member cannot satisfy final continuity', () => {
+    const value = ungroupedFixtureReloadPair();
+    value.after.tabs.find(tab => tab.id === 60).id = 64;
+    value.after.groupState.spaces.at(-1).temporaryTabs[0] = 64;
+    assert.doesNotThrow(() => checkPostReloadObservation(value), 'Current consistency alone must not poll away a continuity mismatch');
+    assert.throws(() => checkFixturePair(value), /section membership/);
+});
+
+test('post-reload poll derives provenance from original before and leaves continuity outside polling', () => {
+    const source = readFileSync(new URL('../../scripts/paired-chrome-ordinary-favorites.mjs', import.meta.url), 'utf8');
+    const loop = source.slice(source.indexOf("for (const [name, reload] of [['arcify'"));
+    const afterStart = loop.indexOf('const after = await poll(');
+    const afterEnd = loop.indexOf('// Persist both raw observations', afterStart);
+    assert.match(loop.slice(0, afterStart), /assertReloadGroupContinuity\(value, value, \{ ids \}\)/);
+    const polling = loop.slice(afterStart, afterEnd);
+    assert(polling.includes('fixtureReload.nativeEvents = await observerPage.evaluate'));
+    assert(polling.includes('assertPostReloadGroupObservation(before, value, { ids, fixtureReload })'));
+    assert.doesNotMatch(polling, /assertReloadGroupContinuity|assertSameBrowserFavoriteContinuity/);
+    assert(loop.indexOf('assertSameBrowserFavoriteContinuity(before, after', afterEnd) > afterEnd);
 });

@@ -10,8 +10,10 @@ const source = readSourceText(new URL('../e2e/spaces.test.js', import.meta.url))
 const expression = "btn.querySelector('.space-switcher-name').textContent.trim()";
 const readName = runInNewContext(`(btn) => ${expression}`);
 
-test('all six legacy Space name lookups use the dedicated name node', () => {
-    assert.equal(source.split(expression).length - 1, 6);
+test('retained inline Space name lookups and shared switch helper preserve name-node assertions', () => {
+    assert.equal(source.split(expression).length - 1, 4);
+    assert.match(source, /await clickSpaceOnce\(sidebarPage, firstSpaceName\)/);
+    assert.match(source, /await clickSpaceOnce\(sidebarPage, 'Switch Target'\)/);
     assert.doesNotMatch(source, /btn\.textContent\.trim\(\)/);
     assert.match(source, /expect\(visibleSpaceName\)\.toBe\(firstSpaceName\)/);
     assert.match(source, /expect\(switchedBackName\)\.toBe\('Switch Target'\)/);
@@ -40,4 +42,49 @@ for (const hideNames of [false, true]) test(`real rendered switcher names exclud
 test('a missing real name node fails instead of falling back to icon or arbitrary button text', () => {
     const { document } = parseHTML('<html><body><button>Switch Target</button></body></html>');
     assert.throws(() => readName(document.querySelector('button')));
+});
+
+
+// Execute the actual browser callbacks rather than counting duplicated helpers.
+const clickHelperSource = source.slice(source.indexOf('async function clickSpaceOnce('), source.indexOf("describe('Space Management'"));
+const settleHelperSource = source.slice(source.indexOf('async function waitForActiveSpace('), source.indexOf('async function clickSpaceOnce('));
+
+test('shared switch helper clicks only the unique real name and waits for that target', async () => {
+    const { document } = parseHTML('<html><body><button class="space-switcher-name">unused</button><div class="space-switcher"><button>Icon<span class="space-switcher-name">Switch Target</span></button><button>Switch Target<span class="space-switcher-name">Other</span></button></div></body></html>');
+    const buttons = [...document.querySelectorAll('.space-switcher button')];
+    const clicks = [];
+    buttons.forEach((button, index) => { button.click = () => clicks.push(index); });
+    const settled = [];
+    const page = { evaluate: async (callback, target) => callback(target) };
+    const clickSpaceOnce = runInNewContext(`${clickHelperSource}; clickSpaceOnce`, {
+        document, expect: actual => ({ toBe: expected => assert.equal(actual, expected) }),
+        waitForActiveSpace: async (actualPage, target) => { assert.equal(actualPage, page); settled.push(target); },
+    });
+    await clickSpaceOnce(page, 'Switch Target');
+    assert.deepEqual(clicks, [0]);
+    assert.deepEqual(settled, ['Switch Target']);
+    await assert.rejects(clickSpaceOnce(page, 'Missing'));
+    buttons[1].querySelector('.space-switcher-name').textContent = 'Switch Target';
+    await assert.rejects(clickSpaceOnce(page, 'Switch Target'));
+    assert.deepEqual(clicks, [0]);
+    assert.deepEqual(settled, ['Switch Target']);
+});
+
+test('shared settling helper requires exactly one active name node and matching visible Space', async () => {
+    const { document } = parseHTML('<html><body><div class="space-switcher"><button class="active">Icon<span class="space-switcher-name">Switch Target</span></button><button><span class="space-switcher-name">Other</span></button></div><div class="space"><input class="space-name" value="Switch Target"></div><div class="space" style="display:none"><input class="space-name" value="Other"></div></body></html>');
+    let predicate;
+    const waitForActiveSpace = runInNewContext(`${settleHelperSource}; waitForActiveSpace`, { document });
+    await waitForActiveSpace({ waitForFunction: async (callback, options, name) => {
+        assert.equal(options.polling, 50); assert.equal(options.timeout, 10000); assert.equal(name, 'Switch Target'); predicate = () => callback(name);
+    } }, 'Switch Target');
+    assert.equal(predicate(), true);
+    const buttons = [...document.querySelectorAll('.space-switcher button')];
+    buttons[1].classList.add('active'); assert.equal(predicate(), false);
+    buttons[1].classList.remove('active');
+    const spaces = [...document.querySelectorAll('.space')];
+    spaces[1].style.display = ''; assert.equal(predicate(), false);
+    spaces[1].style.display = 'none';
+    spaces[0].querySelector('.space-name').value = 'Other'; assert.equal(predicate(), false);
+    spaces[0].querySelector('.space-name').value = 'Switch Target';
+    buttons[0].querySelector('.space-switcher-name').remove(); assert.equal(predicate(), false);
 });

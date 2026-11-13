@@ -3,7 +3,7 @@ import { exerciseSpotlightSplit, serveSpotlightSplitFixture, SPOTLIGHT_SPLIT_CAS
 import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
 import { exerciseManagementScroll } from './paired-chrome-management-scroll.mjs';
-import { exerciseTodayCreationOrder, serveTodayOrderFixture } from './paired-chrome-today-order.mjs';
+import { exerciseTodayCreationOrder, serveTodayOrderFixture, observeTodayOrderGroupConsole } from './paired-chrome-today-order.mjs';
 import { exerciseTodayMove, serveTodayMoveFixture } from './paired-chrome-today-move.mjs';
 import { exerciseSavedMove, serveSavedMoveFixture } from './paired-chrome-saved-move.mjs';
 import { exerciseNativeNewTabRow, recordNewTabRowEvidence } from './paired-chrome-newtab-row.mjs';
@@ -23,6 +23,7 @@ import { exerciseSpotlightTabCommands, serveSpotlightTabFixture, SPOTLIGHT_TAB_C
 import { exerciseSpotlightArchiveOpen, exerciseSpotlightArchiveReopen, serveSpotlightArchiveFixture, SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, SPOTLIGHT_ARCHIVE_REOPEN_CASE_NAME } from './paired-chrome-spotlight-archive.mjs';
 import { exerciseLittleArc, serveLittleArcFixture, LITTLE_ARC_CASE_NAME } from './paired-chrome-little-arc.mjs';
 import { readLittleArcAcceptanceContext } from './paired-chrome-little-arc-context.mjs';
+import {readLittleArcUxContext,UX_SPOTLIGHT_HEAD} from './paired-chrome-little-arc-ux-context.mjs';
 import { randomBytes } from 'node:crypto';
 import { exerciseSpaceTheme } from './paired-chrome-space-theme.mjs';
 import { exerciseSpotlightOptionsAppearance } from './paired-chrome-spotlight-appearance.mjs';
@@ -61,6 +62,21 @@ import { waitForExtensionWorkerIdentity, assertNoWorkerExceptions, findExactWork
 import { installColdSetupObserver, readColdSetupObserver, stopColdSetupObserver, waitForColdSetupQuiescence } from './paired-chrome-cold-setup.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from './paired-chrome-sandbox.mjs';
+
+// BEGIN passive Today-order console adapter
+async function observeTodayOrderConsole() {
+    const matches = browser.targets().filter(target => target.type() === 'service_worker' && target.url() === `chrome-extension://${arcifyId}/background.js`);
+    // Only reuse the exact existing network-observation session. No new target,
+    // debugger attachment, worker wake/replacement or network policy change.
+    const target = matches.length === 1 ? matches[0] : null;
+    const observer = await observeTodayOrderGroupConsole(target ? networkTargets.get(target) : null);
+    return { close: observer.close, snapshot: () => {
+        const current = browser.targets().filter(item => item.type() === 'service_worker' && item.url() === `chrome-extension://${arcifyId}/background.js`);
+        return { ...observer.snapshot(), initialMatchingWorkers: matches.length, finalMatchingWorkers: current.length,
+            workerChangeGap: !target || current.length !== 1 || current[0] !== target };
+    } };
+}
+// END passive Today-order console adapter
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.CI !== 'true') {
     throw new Error('This browser fixture is restricted to its dedicated GitHub Actions job. Do not run it locally.');
@@ -151,7 +167,7 @@ const report = {
         'Little Arc supplemental coverage proves only its selected extension-reload scenario; it is not full-browser restart, missing-marker recovery, Helium or full-suite acceptance.',
         'Space theme and Spotlight options require real hosted input, screenshots and passive first-paint evidence. System preference changes use Chrome rendering-media emulation; native OS color picker, physical OS appearance changes and Helium remain manual.',
         'Space emoji proof uses trusted Chrome text input and genuine Ctrl+V from the disposable fixture clipboard; OS emoji picker, IME candidate windows/composition, physical typing and Helium remain manual. Icon-only names retain native title and accessibility labels with real hover/focus; browser-chrome tooltip painting is not captured by page screenshots.',
-        'Outside-focus menu checks use ordinary sidebar.html tabs and a separate disposable localhost browser window with trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; actual native-panel external focus and Helium remain manual.',
+        'Tab and saved-folder outside-focus menu checks use the native SIDE_PANEL; Space-menu checks use a regular sidebar.html tab. A separate disposable localhost window receives trusted mouse/key input. Passive lifecycle evidence distinguishes visible-window blur from hidden-document dismissal; Helium remains manual.',
         'General workspace rendering regressions use sidebar.html in a regular tab. Command, Today Move, Space theme and unified New Tab row checks separately require native SIDE_PANEL contexts, onOpened events and rendered panel content; browser-chrome docking and Helium behavior remain manual.',
         'Startup suggestion delivery is exercised with an authenticated offer to an existing new-tab page. Full browser onStartup scheduling/session restore and initial omnibox focus are not exercised; Enter tests explicitly focus Spotlight.',
         'Case 13 reads command registration only. Case 48 separately requires one guarded native XTEST Alt+T per recovery scenario, real browser command dispatch, reload invalidation and cold-worker target ordering. Physical keyboard hardware and Helium shortcut dispatch remain untested.',
@@ -589,11 +605,54 @@ async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
         chrome.sidePanel.onClosed.addListener(info => globalThis.__pairedSidebarEvents.push({ type: 'closed', ...info }));
     });
     const helper = await newTabPage('chrome://newtab/');
+    let eventCount = null, panelOwned = false, cleanupPromise;
+    const removeLauncher = async () => {
+        await arcifyOptions.evaluate(async id => {
+            const exists = (await chrome.tabs.query({})).some(tab => tab.id === id);
+            if (exists) await chrome.tabs.remove(id);
+        }, helper.tab.id);
+        return { tabId: helper.tab.id, windowId: helper.tab.windowId };
+    };
+    const cleanup = primaryError => cleanupPromise ||= (async () => {
+        const errors = [];
+        try {
+            // A failed/uncertain open must not close a pre-existing or foreign
+            // panel. Require this invocation's fresh receipt and exact host.
+            if (!panelOwned && eventCount !== null) {
+                const state = await nativePanelState();
+                if (state.events.slice(eventCount).some(event => event.type === 'opened' &&
+                    event.windowId === fixture.windowA && ['sidebar.html', '/sidebar.html'].includes(event.path))) {
+                    assertNativeSidebarEvidence(state.contexts, state.events, { extensionId: arcifyId,
+                        windowId: fixture.windowA, afterEvent: eventCount });
+                    const { hosting } = await resolveNativeSidebarTarget();
+                    assert.equal(hosting.tab, null); assert.equal(hosting.windowId, fixture.windowA);
+                    panelOwned = true;
+                }
+            }
+            if (panelOwned) await closeNativeSidebar();
+        } catch (error) { errors.push(error); }
+        // Launcher cleanup is independent of panel-state lookup/close. An
+        // already-absent owned launcher is complete, not an action to replay.
+        try {
+            await removeLauncher();
+        } catch (error) { errors.push(error); }
+        if (errors.length) {
+            const diagnostic = { type: 'native-sidebar-fixture-cleanup', helperTabId: helper.tab.id,
+                windowId: helper.tab.windowId, primaryError: primaryError?.message || null, errors: errors.map(error => error.message) };
+            report.diagnostics.push(diagnostic);
+            try { await saveReport(); } catch (error) { errors.push(error); diagnostic.errors.push(`Report: ${error.message}`); }
+            // Never mutate or replace a primary Error, including frozen ones.
+            if (!primaryError) throw new AggregateError(errors, 'Native sidebar fixture cleanup failed.');
+        }
+    })();
     try {
         await waitSidebarCommand(helper.page);
         await search(helper.page, 'Open Arcify sidebar');
         await helper.page.waitForSelector(`${sidebarSelector}.selected`);
-        const eventCount = (await nativePanelState()).events.length;
+        const beforeOpen = await nativePanelState();
+        assert(!beforeOpen.contexts.some(context => context.documentUrl === `chrome-extension://${arcifyId}/sidebar.html`),
+            'Native fixture must not adopt a pre-existing Arcify panel.');
+        eventCount = beforeOpen.events.length;
         await sidebarEnter(helper.page, 'Open genuine native panel for Today Move');
         await waitSidebarSuccess(helper.page);
         if (revealSpaceId !== null) {
@@ -602,16 +661,16 @@ async function nativeTodayMoveSidebar({ revealSpaceId = null } = {}) {
             (report.nativeSidebarReveals ||= []).push(reveal); await saveReport();
         }
         const evidence = await captureNativeSidebar(eventCount, 'today-move-native-panel-host-proof');
+        panelOwned = true;
         const { page } = await resolveNativeSidebarTarget();
         return { page: await observePage(page), evidence,
+            removeLauncher: async () => { assert(panelOwned, 'Only a proved native panel may release its launcher early.'); return removeLauncher(); },
             close: async () => {
-                await closeNativeSidebar();
-                await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id);
+                await cleanup();
                 return { tabId: helper.tab.id, windowId: helper.tab.windowId };
             } };
     } catch (error) {
-        if ((await nativePanelState()).contexts.length) await closeNativeSidebar().catch(cleanup => { error.cleanupError = cleanup.message; });
-        await arcifyOptions.evaluate(id => chrome.tabs.remove(id), helper.tab.id).catch(cleanup => { error.cleanupError = cleanup.message; });
+        await cleanup(error);
         throw error;
     }
 }
@@ -839,10 +898,10 @@ await mkdir(OUTPUT, { recursive: true });
 try {
     report.environment.arcifyHead = head(ROOT);
     report.environment.spotlightHead = head(COMPANION);
-    report.environment.expectedSpotlightHead = report.runMode === 'little-arc' ? PINNED_LITTLE_ARC_SPOTLIGHT : PINNED_SPOTLIGHT;
+    report.environment.expectedSpotlightHead = report.runMode === 'little-arc' ? (process.env.ARCIFY_LITTLE_ARC_UX === '1' ? UX_SPOTLIGHT_HEAD : PINNED_LITTLE_ARC_SPOTLIGHT) : PINNED_SPOTLIGHT;
     if ('little-arc' === report.runMode) {
-        report.environment.acceptanceContext = readLittleArcAcceptanceContext(process.env, report.environment.arcifyHead);
-        assert.equal(process.env.ARCIFY_SPOTLIGHT_HEAD, PINNED_LITTLE_ARC_SPOTLIGHT, 'Little Arc job must declare the reviewed companion pin.');
+        report.environment.acceptanceContext = process.env.ARCIFY_LITTLE_ARC_UX === '1' ? readLittleArcUxContext(process.env,report.environment.arcifyHead) : readLittleArcAcceptanceContext(process.env, report.environment.arcifyHead);
+        assert.equal(process.env.ARCIFY_SPOTLIGHT_HEAD, report.environment.expectedSpotlightHead, 'Little Arc job must declare the reviewed companion pin.');
     }
     assert.equal(report.environment.spotlightHead, report.environment.expectedSpotlightHead, 'Companion must match the reviewed pinned commit for this run mode.');
     if (process.env.ARCIFY_TEST_HEAD) assert.equal(report.environment.arcifyHead, process.env.ARCIFY_TEST_HEAD);
@@ -2323,7 +2382,7 @@ try {
     // appearance, recovery or Little Arc case is a prerequisite.
     if (report.runMode === 'full' || report.runMode === 'move-drag') {
     await step(stepNames[38], async () => {
-        await exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,
+        await exerciseTabMenuActions({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,
             snapshot,poll,fixture,arcifyId,spotlightId,search,
             record:async observation => { report.tabMenus = observation; await saveReport(); } });
         return exerciseMoveToNewWindow({apiPage:arcifyOptions,newTabPage,pageForUrl,nativeSidebar:nativeMoveWindowSidebar,
@@ -2340,10 +2399,10 @@ try {
         snapshot,poll,fixture,arcifyId,spotlightId,search,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayMoveSyncOn = observation; await saveReport(); } }));
     await step(stepNames[42], () => exerciseTodayCreationOrder({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,pageForUrl,ui,screenshot,
-        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
+        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:false,observeGroupConsole:observeTodayOrderConsole,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayOrderSyncOff = observation; await saveReport(); } }));
     await step(stepNames[43], () => exerciseTodayCreationOrder({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,pageForUrl,ui,screenshot,
-        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:true,reloadArcify:()=>reloadPairedExtension('arcify'),
+        snapshot,bridge,poll,fixture,arcifyId,spotlightId,peerPage:spotlightOptions,groupSync:true,observeGroupConsole:observeTodayOrderConsole,reloadArcify:()=>reloadPairedExtension('arcify'),
         record:async observation => { report.todayOrderSyncOn = observation; await saveReport(); } }));
     await step(stepNames[44], () => exerciseSavedMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,ui,screenshot,
         snapshot,bridge,poll,fixture,arcifyId,spotlightId,search,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),
@@ -2427,6 +2486,7 @@ try {
     if (report.runMode === 'little-arc') {
     await step(stepNames[55], () => exerciseLittleArc({ browser, observePage, apiPage:arcifyOptions, spotlightOptions, ui, screenshot,
         snapshot, external, poll, fixture, arcifyId, spotlightId, search,
+        ux: report.environment?.acceptanceContext?.scope === 'little-arc-ux',
         reloadArcify:async () => {
             const reloaded = await reloadPairedExtension('arcify');
             return { apiPage:reloaded.arcifyOptions, evidence:reloaded.evidence };

@@ -420,7 +420,7 @@ export class ArchiveStore {
                 || tab.pendingUrl && tab.pendingUrl !== url || tab.incognito || tab.pinned
                 || this.store.isGlobalTab(tab) || isStartupLauncherTab(tab) || owners.length !== 1 || owners[0].space.id !== spaceId) stale();
             assertNotNativeSplit(tab);
-            if (automatic && (tab.active || tab.audible || owners[0].section === 'spaceBookmarks' || bindings[tabId]?.bookmarkId
+            if (automatic && (this.store.favoriteStore?.recovery?.protects(tab) || tab.active || tab.audible || owners[0].section === 'spaceBookmarks' || bindings[tabId]?.bookmarkId
                 || [tab.url, tab.pendingUrl].some(value => value && protectedUrlKeys.has(Utils.getPinnedUrlKey(value))))) stale();
             return tab;
         };

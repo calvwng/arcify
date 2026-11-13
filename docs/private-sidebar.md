@@ -11,3 +11,5 @@ No new permissions, incognito mode conversion, permission enablement, historical
 Tests use synthetic private markers and cover context isolation, exact targets, stale/wrong-window rejection, event refresh and disposal, stale query ordering, and storage/messaging tripwires. Real-profile incognito access and browser automation are not changed or used by this work.
 
 Integration coverage imports the real HTML entry with mixed native windows, exercises rendered controls after native identity changes, and records forbidden Chrome/Web Storage and messaging access even if an error is caught. Normal sidebar fixtures traverse the context boundary both before and after DOM readiness and compare their real rows and stored state.
+
+Refresh on main (November 13): lifecycle cancellation is also checked after asynchronous native validation and immediately before each mutation. Closing/unloading the private panel while validation is pending cannot complete a queued activate, close, or create action. This does not cancel native calls already dispatched.

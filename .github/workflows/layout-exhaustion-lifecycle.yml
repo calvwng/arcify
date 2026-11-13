@@ -1,0 +1,70 @@
+name: Packaged final-cohort lifecycle
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/layout-exhaustion-lifecycle.yml'
+      - 'scripts/packaged-layout-exhaustion*.mjs'
+      - 'tests/unit/packaged-layout-exhaustion.test.js'
+      - 'scripts/paired-chrome-runtime/**'
+      - 'scripts/paired-chrome-browser-restart.mjs'
+      - 'scripts/paired-chrome-worker.mjs'
+      - 'scripts/paired-chrome-extensions.mjs'
+      - 'scripts/paired-chrome-sandbox.mjs'
+      - 'durable-today-layout.js'
+      - 'space-store.js'
+      - 'explicit-today-ownership.js'
+      - 'current-layout-authority.js'
+      - 'proven-context-repair.js'
+      - 'today-move-store.js'
+      - 'background.js'
+      - 'manifest.json'
+      - 'package*.json'
+      - 'vite.config.js'
+permissions:
+  contents: read
+jobs:
+  final-cohort:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CI: 'true'
+      ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            scripts/paired-chrome-runtime/package-lock.json
+      - name: Install existing locked dependencies without downloading a browser
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci
+          npm ci --prefix scripts/paired-chrome-runtime
+      - name: Validate fixture contract and build exact production package
+        run: |
+          npm test --prefix scripts/paired-chrome-runtime
+          node --test tests/unit/packaged-layout-exhaustion.test.js
+          npm run build
+      - name: Actual packaged final-close and restart lifecycle
+        # Installed stable Chrome, ordinary runner user, existing namespace sandbox.
+        # Never repair runner policy or retry a denied launch with weaker flags.
+        run: |
+          set -o pipefail
+          mkdir -p test-results/layout-exhaustion
+          xvfb-run --auto-servernum node scripts/packaged-layout-exhaustion.mjs 2>&1 | tee test-results/layout-exhaustion/runner.log
+      - name: Preserve synthetic success or failure evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layout-exhaustion-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/layout-exhaustion/
+          if-no-files-found: warn
+          retention-days: 7

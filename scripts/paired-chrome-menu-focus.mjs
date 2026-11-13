@@ -61,9 +61,9 @@ export function assertExternalMenuDismissed({ before, source, destinationBefore,
 }
 
 /** The caller has already right-clicked the real menu, and owns fixture cleanup. */
-export async function exerciseExternalMenuDismissal({ sidebar, destination, menuSelector, label, ui, screenshot, poll, record = async () => {} }) {
+export async function exerciseExternalMenuDismissal({ sidebar, destination, menuSelector, label, ui, screenshot, poll, record = async () => {}, nativePanel = false }) {
     assert.notEqual(sidebar, destination, 'External dismissal needs a separate browser page.');
-    const evidence = { surface: 'regular sidebar.html tab', nativePanel: false, label, menuSelector,
+    const evidence = { surface: nativePanel ? 'native Arcify SIDE_PANEL' : 'regular sidebar.html tab', nativePanel, label, menuSelector,
         input: 'Real browser page foreground, one trusted mouse click and one trusted ArrowLeft', screenshots: [] };
     const read = async () => ({ before: evidence.before, destinationBefore: evidence.destinationBefore,
         source: await sidebar.evaluate(readExternalMenuFocus), destination: await destination.evaluate(readExternalMenuFocus) });

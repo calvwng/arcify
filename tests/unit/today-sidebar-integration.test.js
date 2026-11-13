@@ -7,6 +7,7 @@ import { applySpacePatch, SpaceStore } from '../../space-store.js';
 import { saveTodayTabsInNewFolder } from '../../today-folder-store.js';
 import { runTabMenuAction } from '../../tab-menu-actions.js';
 import { runTodaySplitAction } from '../../today-split-action.js';
+import { moveTodayTabsToSpace } from '../../today-move-store.js';
 
 // The real sidebar, Chrome listeners, close buttons and refresh coordinator are
 // exercised together. Only Chrome persistence and DOM layout/focus are fakes.
@@ -177,6 +178,50 @@ const clear = () => event(document.body, 'keydown', { key: 'Escape' });
 async function context(id) { event(live(id), 'contextmenu', { pageX: 30, pageY: 60 }); await wait(30); }
 function dialog() { event(document.getElementById('saveTodayTabsInNewFolder'), 'click'); }
 
+const returnProbeInitial=structuredClone({tabs,storedSpaces,bookmarks,folders,local,session,settings});
+test.beforeEach(async t=>{
+ if(!t.name.startsWith('return '))return;
+ clear();beforeTodayMoveRequest=null;beforeGetTab=null;
+ tabs.splice(0,tabs.length,...structuredClone(returnProbeInitial.tabs));
+ storedSpaces=structuredClone(returnProbeInitial.storedSpaces);
+ bookmarks.splice(0,bookmarks.length,...structuredClone(returnProbeInitial.bookmarks));
+ folders.splice(0,folders.length,...structuredClone(returnProbeInitial.folders));
+ for(const [target,source]of [[local,returnProbeInitial.local],[session,returnProbeInitial.session],[settings,returnProbeInitial.settings]]){
+  for(const key of Object.keys(target))delete target[key];Object.assign(target,structuredClone(source));
+ }
+ storedSpaces.push({id:'probe-other',name:'Probe other',color:'green',bookmarkFolderId:'probe-other-root',temporaryTabs:[],spaceBookmarks:[]});
+ folders.push({id:'probe-other-root',parentId:'root',title:'Probe other'});
+ store.spaces=storedSpaces;store.active=session.activeSpaces;
+ await publishSpaces();await refresh();
+ event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'),'click');await wait(100);await refresh();
+});
+
+test('built-in diagnostic captures plain-click batch through real sidebar menu without recovery writes',async()=>{
+ const original=chrome.runtime.sendMessage,requests=[];let respond;
+ chrome.runtime.sendMessage=message=>{
+  if(message.type!=='arcifySelectedRecoveryDiagnostic')return original(message);
+  requests.push(structuredClone(message));return new Promise(resolve=>{respond=resolve;});
+ };
+ const before=structuredClone(storedSpaces),native=structuredClone(tabs),effects=mutations.length;
+ try{
+  event(live(3),'click');await activate(3);event(live(4),'click',{ctrlKey:true});await context(4);
+  event(document.querySelector('[data-action="explainTodayRecovery"]'),'click');await wait(20);
+  assert.equal(document.getElementById('tab-context-menu'),null);assert(document.getElementById('selectedRecoveryDiagnosticDialog'));
+  assert.deepEqual(requests[0].entries.map(e=>e.tabId),[3,4]);
+  const {REASON_KEYS}=await import('../../selected-recovery-diagnostics.js');
+  respond({success:true,report:{schema:'arcify-selected-recovery-diagnostic-v1',status:'stable',selectedCount:2,
+   counts:{...Object.fromEntries(REASON_KEYS.map(key=>[key,0])),otherSpace:1,blockedSelected:1,recoveryFlagged:1}}});await wait(20);
+  const panel=document.getElementById('selectedRecoveryDiagnosticDialog');assert.match(panel.textContent,/Saved record belongs to another Space: 1/);
+  assert.match(panel.textContent,/Normal Move to Space/);assert.doesNotMatch(panel.textContent,/https:/);
+  event(panel.querySelectorAll('button')[1],'click');await wait(120);
+  assert.equal(document.getElementById('selectedRecoveryDiagnosticDialog'),null);
+  assert.equal(saveRequests.length,0);assert.equal(todayMoveRequests.length,0);
+  assert.deepEqual(storedSpaces[0].temporaryTabs,before[0].temporaryTabs);
+  assert.deepEqual(tabs.map(t=>[t.id,t.url]),native.map(t=>[t.id,t.url]));
+  assert(mutations.slice(effects).every(([kind,,properties])=>kind==='tab-update'&&properties.active || kind==='window-update'), 'Only initial user activation may have native effects');
+ }finally{chrome.runtime.sendMessage=original;clear();await activate(1);}
+});
+
 test('real sidebar registers Today modifier selection without activation, and refuses silent single-row batch drag', async () => {
     const before = mutations.length;
     event(live(3), 'click', { ctrlKey: true }); event(live(5), 'click', { shiftKey: true });
@@ -219,7 +264,8 @@ test('dragging an unselected Today row keeps ordinary singleton drag semantics',
 
 test('real context menu retains a selected batch, switches unselected singleton, and Cancel performs no save', async () => {
     await context(4); assert.match(document.getElementById('saveTodayTabsInNewFolder').textContent, /Save 3 tabs/);
-    assert.equal(document.querySelectorAll('#tab-context-menu  .context-menu-item:not([data-action="reviewTodayRecovery"]):not([data-action="closeSelectedTabs"])').length, 1, 'Batch menu must not imply singular mutations affect the entire selection');
+    assert.equal(document.querySelectorAll('#tab-context-menu  .context-menu-item:not([data-action="reviewTodayRecovery"]):not([data-action="explainTodayRecovery"]):not([data-action="closeSelectedTabs"])').length, 1, 'Batch menu must not imply singular mutations affect the entire selection');
+    assert.equal(document.querySelectorAll('#tab-context-menu [data-action="explainTodayRecovery"]').length,1);
     assert.equal(document.querySelectorAll('#tab-context-menu [data-action="reviewTodayRecovery"]').length,1);
     const before = structuredClone(mutations);
     dialog(); assert(document.getElementById('todayFolderDialog'));
@@ -951,4 +997,223 @@ test('plain activation then Ctrl-click keeps both Today rows through refresh for
         else event(live(ids[1]),'keydown',{key:'Delete'});
         await wait(300);assert.equal(closeRequests.length,before+1);assert.deepEqual(closeRequests.at(-1).entries.map(e=>e.tabId),ids);
     }
+});
+
+test('batch-size probe real sidebar plain click then Ctrl/Shift sends two or seven exact Today tabs', async () => {
+    const destination = { id: 'batch-probe', name: 'Batch probe', color: 'green', bookmarkFolderId: 'batch-probe-folder', temporaryTabs: [], spaceBookmarks: [] };
+    storedSpaces.push(destination); folders.push({id:destination.bookmarkFolderId,parentId:'root',title:destination.name});
+    const allIds = Array.from({length:7},(_,i)=>701+i);
+    for (const id of allIds) { tabs.push({id,index:tabs.length,windowId:10,active:false,pinned:false,incognito:false,groupId:-1,splitViewId:-1,title:'Batch probe',url:'https://batch.test/same'}); storedSpaces[0].temporaryTabs.push(id); }
+    await publishSpaces();
+    try {
+        for (const count of [2,7]) for (const modifier of ['ctrlKey','shiftKey']) for (const sameUrl of [false,true]) {
+            clear(); for(const id of allIds) tabs.find(tab=>tab.id===id).url=`https://batch.test/${sameUrl?'same':id}`;
+            await refresh(); const ids=allIds.slice(0,count);
+            event(live(ids[0]),'click');await activate(ids[0]);
+            if(modifier==='ctrlKey') for(const id of ids.slice(1)) event(live(id),'click',{ctrlKey:true});
+            else event(live(ids.at(-1)),'click',{shiftKey:true});
+            assert.deepEqual(selected(),ids);await context(ids.at(-1));
+            event(menuItem('moveTodayTabsToSpace'),'click');
+            assert.match(document.querySelector('.today-move-hint').textContent,new RegExp(`Move ${count} tabs`));
+            const before=todayMoveRequests.length;
+            beforeTodayMoveRequest=async message=>({success:true,batch:{total:count,completed:ids,remaining:[],uncertain:false,destinationSpaceId:message.destinationSpaceId}});
+            const choice=document.querySelector('[data-action="moveTodayToDestination"][data-space-id="batch-probe"]');
+            for(const type of ['pointerdown','mousedown','mouseup','click']) event(choice,type);
+            await wait(260);assert.equal(todayMoveRequests.length,before+1);
+            assert.deepEqual(todayMoveRequests.at(-1).entries.map(entry=>entry.tabId),ids);
+            assert.match(document.getElementById('favoritesDropStatus').textContent,new RegExp(`Moved ${count} tabs`));
+        }
+    } finally {beforeTodayMoveRequest=null;clear();}
+});
+
+test('plain Today activation then Ctrl/Shift selection reaches the destination click with a pending native callback', async () => {
+    const originalGetCurrent = chrome.windows.getCurrent;
+    for (const modifier of ['ctrlKey', 'shiftKey']) for (const delayed of [false, true]) {
+        clear(); await refresh();
+        const rows = [...content().querySelectorAll('[data-tab-type="temporary"] .tab[data-tab-id]')];
+        const ids = rows.slice(0, 2).map(node => Number(node.dataset.tabId));
+        let pendingCallback;
+        try {
+            event(rows[0], 'click'); await wait(30);
+            chrome.windows.getCurrent = (options, callback) => {
+                if (callback && delayed) { pendingCallback = callback; return Promise.resolve({ id: 10 }); }
+                return originalGetCurrent(options, callback);
+            };
+            await activate(ids[0]);
+            event(live(ids[1]), 'click', { [modifier]: true });
+            await openMovePicker(ids[1]);
+            if (delayed) { assert(pendingCallback); await pendingCallback({ id: 10 }); }
+            chrome.windows.getCurrent = originalGetCurrent;
+            await chrome.tabs.onUpdated.emit(ids[0], { status: 'complete' }, structuredClone(tabs.find(tab => tab.id === ids[0])));
+            await wait(160);
+            assert.deepEqual(selected(), ids);
+            const count = todayMoveRequests.length;
+            beforeTodayMoveRequest = async message => ({ success: true, batch: {
+                total: message.entries.length, completed: message.entries.map(entry => entry.tabId), remaining: [],
+                uncertain: false, destinationSpaceId: message.destinationSpaceId
+            } });
+            const choice = moveTarget();
+            for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) event(choice, type);
+            await wait(300);
+            assert.equal(todayMoveRequests.length, count + 1);
+            assert.deepEqual(todayMoveRequests.at(-1).entries.map(entry => entry.tabId), ids);
+            assert.equal(session.activeSpaces[10], 'alpha');
+            assert.equal(document.getElementById('favoritesDropNotice').hidden, false);
+            assert.match(document.getElementById('favoritesDropStatus').textContent, /Moved 2 tabs/);
+        } finally {
+            chrome.windows.getCurrent = originalGetCurrent;
+            beforeTodayMoveRequest = null;
+            clear();
+        }
+    }
+});
+
+test('Today destination click exposes recovery, stale-row and transport failures in the real sidebar', async () => {
+    for (const failure of ['recovery', 'stale-row', 'late-activation', 'transport']) {
+        clear(); await refresh();
+        const rows = [...content().querySelectorAll('[data-tab-type="temporary"] .tab[data-tab-id]')];
+        const ids = rows.slice(0, 2).map(node => Number(node.dataset.tabId));
+        event(rows[0], 'click'); await activate(ids[0]);
+        event(live(ids[1]), 'click', { ctrlKey: true });
+        await openMovePicker(ids[1]);
+        const count = todayMoveRequests.length;
+        beforeTodayMoveRequest = async message => {
+            if (failure === 'transport') throw new Error('Disconnected');
+            return { success: false, code: 'TODAY_RECOVERY_PENDING',
+                error: 'Some selected tabs are still being matched to their saved Spaces.',
+                batch: { total: message.entries.length, completed: [], remaining: ids,
+                    uncertain: false, destinationSpaceId: message.destinationSpaceId } };
+        };
+        try {
+            if (failure === 'stale-row') live(ids[0]).dataset.url = 'https://changed.test/';
+            if (failure === 'late-activation') await activate(ids[0]);
+            event(moveTarget(), 'click'); await wait(300);
+            assert.equal(todayMoveRequests.length, count + (['stale-row', 'late-activation'].includes(failure) ? 0 : 1));
+            assert.equal(document.getElementById('favoritesDropNotice').hidden, false);
+            const text = document.getElementById('favoritesDropStatus').textContent;
+            assert.match(text, failure === 'recovery' ? /Nothing was moved.*still being matched/
+                : ['stale-row', 'late-activation'].includes(failure) ? /selection changed.*Nothing was moved/ : /result is unknown.*nothing was retried/);
+            assert.equal(session.activeSpaces[10], 'alpha');
+        } finally { beforeTodayMoveRequest = null; clear(); }
+    }
+});
+
+ test('real first-click Ctrl/Shift seven-tab move commits explicit ownership through production store', async()=>{
+    const savedLocal=structuredClone(local),savedSession=structuredClone(session),savedTabs=structuredClone(tabs),savedSpaces=structuredClone(storedSpaces);
+    const ids=[801,802,803,804,805,806,807],target={id:'explicit-target',name:'Explicit target',bookmarkFolderId:'explicit-root',color:'blue',temporaryTabs:[],spaceBookmarks:[]};
+    folders.push({id:'explicit-root',parentId:'root',title:'Explicit target'});
+    try {
+        for(const modifier of ['ctrlKey','shiftKey']) {
+            clear();tabs.splice(0,tabs.length,...structuredClone(savedTabs));
+            storedSpaces=structuredClone(savedSpaces);storedSpaces.push(structuredClone(target));
+            const source=storedSpaces.find(s=>s.id==='alpha');source.temporaryTabs.push(...ids);
+            for(const id of ids)tabs.push({id,index:tabs.length,windowId:10,url:`https://explicit.test/${id}`,title:'Explicit test',pinned:false,incognito:false,splitViewId:-1,active:false});
+            local.todayOrderRepresentation={version:1,inverted:false};session.activeSpaces[10]='alpha';
+            await publishSpaces();await refresh();event(live(ids[0]),'click');await activate(ids[0]);
+            if(modifier==='ctrlKey')for(const id of ids.slice(1))event(live(id),'click',{ctrlKey:true});
+            else event(live(ids.at(-1)),'click',{shiftKey:true});
+            assert.deepEqual(selected(),ids);
+            const backend=new SpaceStore();Object.assign(backend,{initialized:true,spaces:structuredClone(storedSpaces),active:structuredClone(session.activeSpaces),
+                liveTabs:new Map(tabs.map(t=>[t.id,t])),snapshotByTab:new Map(),provisional:new Set(),recoveryCandidates:new Set(ids),savedWindows:[],
+                windowKeys:new Map([[10,'current'],[20,'other']]),restoreWindowKeys:new Map([[10,'current']]),restoredMetadata:[],restoredRanks:new Map(),
+                restoreQueue:ids.flatMap((id,i)=>Array.from({length:i<5?2:1},(_,j)=>({tabId:id,url:`https://explicit.test/${id}`,spaceId:i<6?target.id:'alpha',section:'temporaryTabs',windowKey:`old-${i}-${j}`,order:i})))});
+            backend.isGlobalTab=()=>false;const history=structuredClone(backend.restoreQueue);let result;
+            beforeTodayMoveRequest=async message=>{
+                try {result=await moveTodayTabsToSpace(backend,message);storedSpaces=structuredClone(backend.spaces);await onChanged.emit({spaces:{newValue:storedSpaces}},'local');return {success:true,batch:result};}
+                catch(error){return {success:false,error:error.message,batch:error.batch};}
+            };
+            await context(ids.at(-1));event(menuItem('moveTodayTabsToSpace'),'click');
+            const choice=document.querySelector('[data-action="moveTodayToDestination"][data-space-id="explicit-target"]');assert(choice);
+            for(const type of ['pointerdown','mousedown','mouseup','click'])event(choice,type);
+            await wait(600);assert.deepEqual(result?.completed,ids,document.getElementById('favoritesDropStatus').textContent);
+            assert.deepEqual(backend.restoreQueue,history);assert.equal(backend.recoveryCandidates.size,0);
+            assert.equal(session.activeSpaces[10],'alpha');assert.equal(document.getElementById('todayRecoveryDialog'),null);
+            for(const id of ids)assert(local.spaces.find(s=>s.id===target.id).temporaryTabs.includes(id));
+        }
+    } finally {
+        beforeTodayMoveRequest=null;clear();tabs.splice(0,tabs.length,...savedTabs);storedSpaces=savedSpaces;
+        for(const key of Object.keys(local))delete local[key];Object.assign(local,savedLocal);
+        for(const key of Object.keys(session))delete session[key];Object.assign(session,savedSession);
+        folders.splice(folders.findIndex(f=>f.id==='explicit-root'),1);await publishSpaces();await refresh();
+    }
+ });
+test('return probe real sidebar sends both tabs back from an otherwise empty interim Space',async()=>{
+ const ids=[3,4],destination={id:'return-probe',name:'Return probe',color:'green',bookmarkFolderId:'return-root',temporaryTabs:[],spaceBookmarks:[]};
+ storedSpaces.push(destination);folders.push({id:'return-root',parentId:'root',title:'Return probe'});await publishSpaces();await refresh();
+ beforeTodayMoveRequest=async message=>{
+  const source=storedSpaces.find(s=>s.id===message.spaceId),target=storedSpaces.find(s=>s.id===message.destinationSpaceId),moved=message.entries.map(e=>e.tabId);
+  source.temporaryTabs=source.temporaryTabs.filter(id=>!moved.includes(id));target.temporaryTabs.push(...moved);
+  await publishSpaces();
+  return {success:true,batch:{total:moved.length,completed:moved,remaining:[],uncertain:false,destinationSpaceId:target.id}};
+ };
+ try{
+  for(const modifier of ['ctrlKey','shiftKey'])for(const [from,to]of [['alpha','return-probe'],['return-probe','alpha']]){
+   event(document.querySelector(`#spaceSwitcher button[data-space-id="${from}"]`),'click');await wait(300);await refresh();
+   if(from==='return-probe')assert.deepEqual(storedSpaces.find(s=>s.id===from).temporaryTabs,ids);
+   event(live(ids[0]),'click');await activate(ids[0]);event(live(ids[1]),'click',{[modifier]:true});await refresh();
+   assert.deepEqual(selected(),ids);await context(ids[1]);event(menuItem('moveTodayTabsToSpace'),'click');
+   assert.match(document.querySelector('.today-move-hint').textContent,/Move 2 tabs/);
+   const prior=todayMoveRequests.length,choice=document.querySelector(`[data-action="moveTodayToDestination"][data-space-id="${to}"]`);
+   for(const type of ['pointerdown','mousedown','mouseup','click'])event(choice,type);await wait(300);
+   assert.equal(todayMoveRequests.length,prior+1);assert.deepEqual(todayMoveRequests.at(-1).entries.map(e=>e.tabId),ids);
+   assert.match(document.getElementById('favoritesDropStatus').textContent,/Moved 2 tabs/);
+   if(from==='return-probe')assert.deepEqual(storedSpaces.find(s=>s.id===from).temporaryTabs,[]);
+  }
+ }finally{beforeTodayMoveRequest=null;clear();}
+});
+
+test('return probe focus loss before opening menu reduces a prior batch to the context row',async()=>{
+ clear();event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'),'click');await wait(300);await refresh();event(live(3),'click');await activate(3);event(live(4),'click',{ctrlKey:true});assert.deepEqual(selected(),[3,4]);
+ window.dispatchEvent(new window.Event('blur'));assert.deepEqual(selected(),[]);
+ await context(4);event(menuItem('moveTodayTabsToSpace'),'click');assert.match(document.querySelector('.today-move-hint').textContent,/Move 1 tab/);clear();
+});
+
+test('return lifecycle owned late native activation preserves the two-row menu',async()=>{
+ if(storedSpaces.length===1){storedSpaces.push({id:'late-target',name:'Late target',color:'green',bookmarkFolderId:'late-root',temporaryTabs:[],spaceBookmarks:[]});folders.push({id:'late-root',parentId:'root',title:'Late target'});await publishSpaces();}
+ clear();event(document.querySelector('#spaceSwitcher button[data-space-id="alpha"]'),'click');await wait(300);await refresh();
+ event(live(3),'click');event(live(4),'click',{ctrlKey:true});assert.deepEqual(selected(),[3,4]);
+ await wait(30);await activate(3);assert.deepEqual(selected(),[3,4]);
+ await context(4);event(menuItem('moveTodayTabsToSpace'),'click');assert.match(document.querySelector('.today-move-hint').textContent,/Move 2 tabs/);clear();
+});
+
+test('return activation Space switch preserves fresh Ctrl selection when its native event first arrives late',async()=>{
+ const savedSpaces=structuredClone(storedSpaces),originalUpdate=chrome.tabs.update;
+ const target={id:'activation-target',name:'Activation target',color:'green',bookmarkFolderId:'activation-root',temporaryTabs:[3,4],spaceBookmarks:[]};
+ for(const s of storedSpaces)s.temporaryTabs=s.temporaryTabs.filter(id=>![3,4].includes(id));
+ storedSpaces.push(target);folders.push({id:'activation-root',parentId:'root',title:'Activation target'});await publishSpaces();await refresh();
+ let release,deliver;
+ chrome.tabs.update=async(id,props)=>{
+  const result=await originalUpdate.call(chrome.tabs,id,props);
+  if(props.active&&[3,4].includes(id))await new Promise(resolve=>{release=resolve;deliver=()=>activate(id);});
+  return result;
+ };
+ try{
+  clear();event(document.querySelector('#spaceSwitcher button[data-space-id="activation-target"]'),'click');
+  for(let i=0;i<50&&!deliver;i++)await wait(5);assert(deliver,'Native activation request must be pending');
+  assert(live(3)&&live(4));event(live(3),'click',{ctrlKey:true});event(live(4),'click',{ctrlKey:true});assert.deepEqual(selected(),[3,4]);
+  await deliver();release();await wait(30);assert.deepEqual(selected(),[3,4]);
+  await context(4);event(menuItem('moveTodayTabsToSpace'),'click');assert.match(document.querySelector('.today-move-hint').textContent,/Move 2 tabs/);clear();
+  event(live(3),'click',{ctrlKey:true});event(live(4),'click',{ctrlKey:true});await activate(5);assert.deepEqual(selected(),[],'Unrelated native activation still clears selection');
+ }finally{
+  release?.();chrome.tabs.update=originalUpdate;storedSpaces=savedSpaces;folders.splice(folders.findIndex(f=>f.id==='activation-root'),1);await publishSpaces();await refresh();clear();
+ }
+});
+
+test('return activation held read from Space A cannot activate after switching to B',async()=>{
+ const savedSpaces=structuredClone(storedSpaces),added=[];let release,held=false;
+ for(const [id,tabId] of [['race-a',3],['race-b',4]]){
+  for(const s of storedSpaces)s.temporaryTabs=s.temporaryTabs.filter(x=>x!==tabId);
+  storedSpaces.push({id,name:id,color:'green',bookmarkFolderId:id+'-root',temporaryTabs:[tabId],spaceBookmarks:[]});folders.push({id:id+'-root',parentId:'root',title:id});added.push(id+'-root');
+ }
+ await publishSpaces();await refresh();const start=mutations.length;
+ beforeGetTab=async id=>{if(id===3&&!held){held=true;await new Promise(r=>{release=r;});}};
+ try{
+  event(document.querySelector('#spaceSwitcher button[data-space-id="race-a"]'),'click');
+  for(let i=0;i<80&&!held;i++)await wait(5);assert(held);
+  event(document.querySelector('#spaceSwitcher button[data-space-id="race-b"]'),'click');
+  for(let i=0;i<80&&!mutations.slice(start).some(m=>m[0]==='tab-update'&&m[1]===4&&m[2].active);i++)await wait(5);
+  assert(mutations.slice(start).some(m=>m[0]==='tab-update'&&m[1]===4&&m[2].active));
+  release();await wait(100);assert(!mutations.slice(start).some(m=>m[0]==='tab-update'&&m[1]===3&&m[2].active));
+  assert.equal(document.querySelector('.space.active').dataset.spaceId,'race-b');
+ }finally{release?.();beforeGetTab=null;storedSpaces=savedSpaces;for(const id of added)folders.splice(folders.findIndex(f=>f.id===id),1);await publishSpaces();await refresh();clear();}
 });

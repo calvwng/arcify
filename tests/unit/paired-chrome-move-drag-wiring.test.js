@@ -27,7 +27,7 @@ test('move-drag selects only fresh setup and the unchanged full-suite case 38', 
 });
 
 async function runSharedCase({ mode = 'move-drag', failAt = null } = {}) {
-    const dependencies = Object.fromEntries(['arcifyOptions', 'newTabPage', 'pageForUrl', 'nativeMoveWindowSidebar',
+    const dependencies = Object.fromEntries(['arcifyOptions', 'newTabPage', 'pageForUrl', 'nativeMoveWindowSidebar', 'nativeTodayMoveSidebar',
         'ui', 'screenshot', 'snapshot', 'poll', 'fixture', 'arcifyId', 'spotlightId', 'search'].map(name => [name, { name }]));
     const report = { runMode: mode }, calls = [], saves = [], failure = new Error('exact failed acceptance');
     let result, steps = 0;
@@ -35,7 +35,7 @@ async function runSharedCase({ mode = 'move-drag', failAt = null } = {}) {
         calls.push(kind);
         assert.deepEqual(Object.keys(adapters).sort(), [...keys, 'record'].sort());
         for (const key of keys) assert.equal(adapters[key], dependencies[
-            key === 'apiPage' ? 'arcifyOptions' : key === 'nativeSidebar' ? 'nativeMoveWindowSidebar' : key], key);
+            key === 'apiPage' ? 'arcifyOptions' : key === 'nativeSidebar' ? (kind === 'menus' ? 'nativeTodayMoveSidebar' : 'nativeMoveWindowSidebar') : key], key);
         const evidence = { kind, complete: false };
         await adapters.record(evidence);
         assert.equal(report[field], evidence);
@@ -51,7 +51,7 @@ async function runSharedCase({ mode = 'move-drag', failAt = null } = {}) {
             assert.deepEqual(options, [], 'Shared case must retain all common isolation/error gates.');
             result = await callback();
         },
-        exerciseTabMenuActions: exercise('menus', ['apiPage', 'newTabPage', 'pageForUrl', 'ui', 'screenshot',
+        exerciseTabMenuActions: exercise('menus', ['apiPage', 'nativeSidebar', 'newTabPage', 'pageForUrl', 'ui', 'screenshot',
             'snapshot', 'poll', 'fixture', 'arcifyId', 'spotlightId', 'search'], 'tabMenus'),
         exerciseMoveToNewWindow: exercise('move', ['apiPage', 'newTabPage', 'pageForUrl', 'nativeSidebar',
             'ui', 'screenshot', 'snapshot', 'poll', 'fixture', 'arcifyId'], 'moveWindow'),

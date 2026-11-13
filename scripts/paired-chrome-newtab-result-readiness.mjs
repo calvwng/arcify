@@ -77,6 +77,18 @@ export async function locateRemainingNewTabResult(page, timeout, record = async 
             assert(element, 'Require the exact remaining New Tab element.');
             const before = await observe(element, 'before-scroll');
             if (!inspect(before, false)) continue;
+            // A previous result refresh can still be moving this connected row.
+            // Let that geometry settle before competing with it via driver scroll.
+            // This is observation only; all post-scroll hit/clip checks remain strict.
+            let prior = before, preScrollPaints = 0, replaced = false;
+            while (preScrollPaints < 2) {
+                await page.evaluate(waitForNewTabResultPaint, remaining());
+                const current = await observe(element, 'before-scroll-paint');
+                if (!inspect(current, false, before.identity)) { replaced = true; break; }
+                preScrollPaints = JSON.stringify(current.rect) === JSON.stringify(prior.rect) ? preScrollPaints + 1 : 0;
+                prior = current;
+            }
+            if (replaced) continue;
             try { remaining(); await element.scrollIntoView(); }
             catch (error) {
                 if (!detachedDuringScroll(error)) throw error;

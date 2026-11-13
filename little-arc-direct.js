@@ -7,6 +7,7 @@ export function createLittleArcDirectService(store, api, {sourceRecord, destinat
  const grants=new Map();
  const enabled=async()=> (await api.storage.local.get(DIRECT_MODE_KEY))[DIRECT_MODE_KEY]===true;
  const revoke=connection=>{for(const [key,g] of grants)if(g.connection===connection)grants.delete(key);};
+ const revokeRecord=token=>{for(const [key,g] of grants)if(g.token===token)grants.delete(key);};
  async function prepare(source,target,connection,peerId,generation,beforeMutation){
   revoke(connection);
   if(!await enabled())fail('DIRECT_DISABLED','Enable direct placement in the trusted controls first.');
@@ -17,7 +18,7 @@ export function createLittleArcDirectService(store, api, {sourceRecord, destinat
   await beforeMutation();if(!await enabled())fail('DIRECT_DISABLED','Direct placement was disabled.');
   const authorization=crypto.randomUUID();
   if(grants.size>=128)grants.delete(grants.keys().next().value);
-  grants.set(authorization,{source:structuredClone(source),target:structuredClone(target),connection,peerId,generation,token:record.token,expires:now()+ttl});
+  grants.set(authorization,{source:structuredClone(source),target:structuredClone(target),connection,peerId,generation,token:record.token,controllerTabId:record.controllerTabId,expires:now()+ttl});
   return {authorization,expiresInMs:ttl};
  }
  async function place(source,authorization,connection,peerId,generation,beforeMutation){
@@ -38,13 +39,13 @@ export function createLittleArcDirectService(store, api, {sourceRecord, destinat
    if(g.expires<=now()||changed)fail('STALE_DIRECT_AUTHORITY','Direct choice or source changed during validation.');
   };
   try{await check();const record=await sourceRecord(source);
-  if(!record||record.token!==g.token)fail('STALE_HEADER','The temporary page changed.');
+  if(!record||record.token!==g.token||record.controllerTabId!==g.controllerTabId)fail('STALE_HEADER','The temporary page or controller changed.');
   await destination(g.target);
   const result=await store.transientWindows.promoteUnlocked({token:g.token,tabId:source.tabId,...g.target},{beforeMutation:check,commitOwnership:createTransientOwnershipCommit(store)});
   return await finishLittleArcPlacement(api,record,result);
   }finally{removers.forEach(remove=>remove());}
  }
- return {enabled,prepare,place,revoke};
+ return {enabled,prepare,place,revoke,revokeRecord};
 }
 // Cleanup is ancillary to an already journaled and read-back committed transfer.
 // Never remove a window: closing its exact controller leaves unrelated pages intact.

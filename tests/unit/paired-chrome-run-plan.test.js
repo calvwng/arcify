@@ -372,6 +372,70 @@ function originalFavoriteLookupBytes(definition) {
         .replace('await source?.dispose(); await target?.dispose();',
             'await source.dispose(); await target.dispose();');
 }
+
+function originalNativeMenuCallback(definition) {
+    assert.equal(definition.caseIndex, 38, 'Only the reviewed case 38 host injection may be normalized.');
+    const current = 'exerciseTabMenuActions({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,';
+    const previous = 'exerciseTabMenuActions({ apiPage:arcifyOptions,newTabPage,pageForUrl,ui,screenshot,';
+    assert.equal(definition.callback.split(current).length - 1, 1,
+        'Case 38 requires exactly one menu call with the reviewed nativeTodayMoveSidebar adapter.');
+    return definition.callback.replace(current, previous);
+}
+
+function originalTodayOrderDiagnosticCallback(definition) {
+    if (![42, 43].includes(definition.caseIndex)) return definition.callback;
+    const current = `peerPage:spotlightOptions,groupSync:${definition.caseIndex === 43},observeGroupConsole:observeTodayOrderConsole,reloadArcify:`;
+    const previous = `peerPage:spotlightOptions,groupSync:${definition.caseIndex === 43},reloadArcify:`;
+    assert.equal(definition.callback.split('observeGroupConsole:').length - 1, 1,
+        'Each reviewed Today-order callback must have exactly one passive console observer.');
+    assert.equal(definition.callback.split(current).length - 1, 1,
+        'Only the exact reviewed observer name, position and sync mode may be normalized.');
+    return definition.callback.replace(current, previous);
+}
+
+function originalCallbackBytes(item) {
+    // Exact inverse of the two reviewed passive diagnostic properties only.
+    // Every original callback byte and all existing digest literals stay guarded.
+    item = { ...item, callback: originalTodayOrderDiagnosticCallback(item) };
+    return (item.caseIndex === 38 ? originalNativeMenuCallback(item).replace(/^async \(\) => \{\n        await (exerciseTabMenuActions\([\s\S]*?\}\));\n        return exerciseMoveToNewWindow\([\s\S]*?\);\n    \}$/, (_, original) => '() => ' + original.replaceAll('\n            ', '\n        ')) : originalFavoriteLookupBytes(item)).replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
+            .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
+            .replace('            if (serveSpotlightSplitFixture(request, response)) return;\n', '')
+            .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
+            .replace('            if (serveLittleArcFixture(request, response)) return;\n', '')
+            // Preserve the old callback receipt except this exact current-label + semantic-focus assertion.
+            .replace("                assert.deepEqual(await surface.evaluate(() => ({\n                    label: document.activeElement.textContent,\n                    isSettingsButton: document.activeElement.matches('.arcify-bridge-status > button[type=\"button\"]')\n                })),{label:'Spotlight settings',isSettingsButton:true});", "                assert.equal(await surface.evaluate(() => document.activeElement.textContent),'Connection settings');")
+            // Only the exact additive case 7 route is normalized; its original callback bytes remain guarded.
+            .replace("        await exerciseBookmarkFallback({apiPage:arcifyOptions,spotlightOptions,arcifyOptions,newTabPage,ui,screenshot,poll,fixture,\n            spotlightId,arcifyId,search,sidebarInput,typeUI,clickUI,snapshot,\n            record:async observation=>{report.bookmarkFallback=observation;await saveReport();}});\n", '')
+            .replace('        helperNavigation:true,\n', '');
+}
+
+for (const caseIndex of [42, 43]) test(`case ${caseIndex} diagnostic inverse rejects missing, renamed, duplicate, moved or wrong-mode injection`, async () => {
+    const definitions = []; await runOrchestration('full', null, definitions);
+    const original = definitions.find(item => item.caseIndex === caseIndex), injection = 'observeGroupConsole:observeTodayOrderConsole,';
+    for (const mutate of [
+        text => text.replace(injection, ''),
+        text => text.replace(injection, 'observeGroupConsole:unreviewedObserver,'),
+        text => text.replace(injection, injection + injection),
+        text => text.replace(`groupSync:${caseIndex === 43},${injection}`, `${injection}groupSync:${caseIndex === 43},`),
+        text => text.replace(`groupSync:${caseIndex === 43},`, `groupSync:${caseIndex !== 43},`)
+    ]) assert.throws(() => originalCallbackBytes({ ...original, callback: mutate(original.callback) }));
+});
+
+for (const caseIndex of [42, 43]) test(`case ${caseIndex} diagnostic inverse does not hide extra behavior, changed action, evidence sink, or foreign-case injection`, async () => {
+    const definitions = []; await runOrchestration('full', null, definitions);
+    const original = definitions.find(item => item.caseIndex === caseIndex);
+    const receipt = item => digest({ ...item, callback: originalCallbackBytes(item) }), expected = receipt(original);
+    for (const mutate of [
+        text => text.replace('record:async', 'extraBehavior:()=>chrome.tabs.create({}),record:async'),
+        text => text.replace('exerciseTodayCreationOrder', 'skipTodayCreationOrder'),
+        text => text.replace(caseIndex === 43 ? 'report.todayOrderSyncOn' : 'report.todayOrderSyncOff', 'report.ignored')
+    ]) assert.notEqual(receipt({ ...original, callback: mutate(original.callback) }), expected);
+    const foreign = { ...original, caseIndex: 41 };
+    assert(originalCallbackBytes(foreign).includes('observeGroupConsole:observeTodayOrderConsole,'));
+    const baseline = definitions.find(item => item.callback.includes('assert.'));
+    assert(baseline); assert.notEqual(receipt({ ...baseline, callback: baseline.callback.replace('assert.', 'ignoredAssertion.') }), receipt(baseline));
+});
+
 test('existing callbacks retain their reviewed bytes except exact additive routes and peer helper compatibility', async () => {
     const definitions = new Map();
     for (const [mode] of allPlans) {
@@ -388,23 +452,33 @@ test('existing callbacks retain their reviewed bytes except exact additive route
     // Case 20's reviewed viewport/paint readiness is retained in this receipt;
     // its original refresh and exact native-identity gates are still required.
     const preserved = [...definitions].filter(([index]) => index < 50).sort(([a], [b]) => a - b).map(([, item]) => ({ ...item,
-        callback: (item.caseIndex === 38 ? item.callback.replace(/^async \(\) => \{\n        await (exerciseTabMenuActions\([\s\S]*?\}\));\n        return exerciseMoveToNewWindow\([\s\S]*?\);\n    \}$/, (_, original) => '() => ' + original.replaceAll('\n            ', '\n        ')) : originalFavoriteLookupBytes(item)).replace('            if (serveSpotlightNavigationFixture(request, response)) return;\n', '')
-            .replace('            if (serveSpotlightTabFixture(request, response)) return;\n', '')
-            .replace('            if (serveSpotlightSplitFixture(request, response)) return;\n', '')
-            .replace('            if (serveSpotlightArchiveFixture(request, response)) return;\n', '')
-            .replace('            if (serveLittleArcFixture(request, response)) return;\n', '')
-            // Preserve the old callback receipt except this exact current-label + semantic-focus assertion.
-            .replace("                assert.deepEqual(await surface.evaluate(() => ({\n                    label: document.activeElement.textContent,\n                    isSettingsButton: document.activeElement.matches('.arcify-bridge-status > button[type=\"button\"]')\n                })),{label:'Spotlight settings',isSettingsButton:true});", "                assert.equal(await surface.evaluate(() => document.activeElement.textContent),'Connection settings');")
-            // Only the exact additive case 7 route is normalized; its original callback bytes remain guarded.
-            .replace("        await exerciseBookmarkFallback({apiPage:arcifyOptions,spotlightOptions,arcifyOptions,newTabPage,ui,screenshot,poll,fixture,\n            spotlightId,arcifyId,search,sidebarInput,typeUI,clickUI,snapshot,\n            record:async observation=>{report.bookmarkFallback=observation;await saveReport();}});\n", '')
-            .replace('        helperNavigation:true,\n', '') }));
+        callback: originalCallbackBytes(item) }));
     assert.equal(digest(preserved), '78ad712cf32595be32920d118d0bd7206a85713620a140afe1f83ce468ca0088');
     // Supplemental callbacks 50–53 are unchanged from a56bd14; reopening shares the exact case 53 definition.
     assert.equal(digest([...definitions].filter(([index]) => index >= 50 && index < 54).sort(([a], [b]) => a - b).map(([, item]) => item)), '8f9a8a9f702230caf28fedeaf95b84cbbbc18ae15294506eb8eaf3c2f7ca0bef');
     assert.equal(digest(names.slice(0, 50)), '82b76b57d9a4a3fcefa59ea4db2f52af9664a1d5693b2efff89405c32827c36c');
 });
 
-test('all five original workflow jobs retain reviewed bytes and order except exact peer-pin and manual Little Arc gate additions', () => {
+
+// Exact inverse of the reviewed 99c44c7 native-host watch additions only.
+// Validate their presence, uniqueness and location before preserving old bytes.
+function originalNativeMenuWatchBytes(text) {
+    const jobs = text.indexOf('jobs:');
+    assert(jobs > 0);
+    for (const [previous, added] of [
+        ['scripts/paired-chrome-tab-menu.mjs', 'scripts/paired-chrome-tab-menu-host.mjs'],
+        ['tests/unit/paired-chrome-tab-menu.test.js', 'tests/unit/paired-chrome-tab-menu-host.test.js']
+    ]) {
+        const line = "      - '" + added + "'\n", preceding = "      - '" + previous + "'\n";
+        assert.equal(text.split(line).length - 1, 1, 'Exactly one reviewed native-host watch path: ' + added);
+        assert(text.includes(preceding + line), 'Native-host watch path retains its reviewed position: ' + added);
+        assert(text.indexOf(line) < text.indexOf('jobs:'), 'Native-host watch paths belong only to the trigger header.');
+        text = text.replace(preceding + line, preceding);
+    }
+    return text;
+}
+
+function assertOriginalWorkflowReceipts(workflow) {
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  (?:[a-z-]+:|#)|$(?![\s\S]))/gm)];
     const receipts = [
         ['paired-chrome', '804ad3202df17883340f7790dadf5d86e73d8120cbe73f6a22c05856b4c40e52'],
@@ -431,13 +505,16 @@ test('all five original workflow jobs retain reviewed bytes and order except exa
         'scripts/paired-chrome-spotlight-split.mjs', 'spotlight-split-actions.js',
         'tests/unit/spotlight-split-actions.test.js', 'tests/unit/paired-chrome-spotlight-split.test.js',
         'tests/unit/paired-chrome-split-wiring.test.js', 'scripts/lib/spotlight-pair-split-*.mjs', 'docs/spotlight-split-actions.md'];
-    const originalEvents = addedWatchPaths.reduce((source, path) => source.replace(`      - '${path}'\n`, ''), workflow.slice(0, workflow.indexOf('jobs:')))
+    const legacyWorkflow = originalNativeMenuWatchBytes(workflow);
+    const originalEvents = addedWatchPaths.reduce((source, path) => source.replace(`      - '${path}'\n`, ''), legacyWorkflow.slice(0, legacyWorkflow.indexOf('jobs:')))
         .replace(/  workflow_dispatch:\n    inputs:[\s\S]*?(?=  pull_request:)/, '  workflow_dispatch:\n');
     assert.equal(digest(originalEvents), '1bc18e330dfd97cfdca18fa5cb05a035dd3061ed1a61e182c82019aee5d1e1d1');
     // Only the explicit manual Little Arc selection may suppress legacy jobs; no other shared gates are permitted.
     assert.equal(workflow.match(/^permissions:\n  contents: read$/gm)?.length, 1);
     assert.doesNotMatch(workflow, /pull_request_target:|\bneeds:|continue-on-error:|fail-fast:|strategy:|secrets\.|permissions:\s*write|concurrency:/);
-});
+}
+
+test('all five original workflow jobs retain reviewed bytes and order except exact peer-pin and manual Little Arc gate additions', () => assertOriginalWorkflowReceipts(workflow));
 
 test('recovery-actions requires exactly setup 0–2 and unchanged recovery 48/actions 49, without theme evidence', () => {
     const report = createPairedChromeRunReport(names, 'recovery-actions');
@@ -550,4 +627,52 @@ test('extended-actions requires exactly setup and both new cases without changin
     assert.deepEqual(JSON.parse(JSON.stringify(report)), report);
     assert.match(report.expectedCases[3].name, /genuine destination pickers/);
     assert.match(report.expectedCases[4].name, /tab commands preserve exact live and saved identities/);
+});
+
+const receiptWorkflowMutations = [
+    ...['scripts/paired-chrome-tab-menu-host.mjs', 'tests/unit/paired-chrome-tab-menu-host.test.js'].flatMap(path => {
+        const line = "      - '" + path + "'\n";
+        return [
+            ['missing ' + path, value => value.replace(line, '')],
+            ['duplicate ' + path, value => value.replace(line, line + line)],
+            ['wrong ' + path, value => value.replace(line, "      - 'unreviewed-host.js'\n")],
+            ['relocated ' + path, value => value.replace(line, '').replace('jobs:', line + 'jobs:')]
+        ];
+    }),
+    ['unrelated added path', value => value.replace('  pull_request:', "  pull_request:\n    paths-ignore:\n      - 'unreviewed.js'")],
+    ['changed event', value => value.replace('  pull_request:', '  pull_request_target:')],
+    ['changed permission', value => value.replace('  contents: read', '  contents: write')],
+    ['changed job runtime', value => value.replace("node-version: '22'", "node-version: '20'")],
+    ['changed job gate', value => value.replace("    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'",
+        "    if: github.event_name != 'workflow_dispatch'")]
+];
+for (const [label, mutate] of receiptWorkflowMutations) {
+    test('run-plan legacy workflow receipts reject ' + label, () => {
+        const changed = mutate(workflow);
+        assert.notEqual(changed, workflow, 'Mutation must alter the actual workflow.');
+        assert.throws(() => assertOriginalWorkflowReceipts(changed));
+    });
+}
+
+test('legacy callback receipts reject missing, duplicate or wrong native menu adapters and unrelated edits', async () => {
+    const definitions = [];
+    await runOrchestration('full', null, definitions);
+    const menu = definitions.find(item => item.caseIndex === 38);
+    const ordinary = definitions.find(item => item.caseIndex === 0);
+    const injection = 'nativeSidebar:nativeTodayMoveSidebar,';
+    for (const replacement of ['', 'nativeSidebar:nativeMoveWindowSidebar,', injection + injection]) {
+        const changed = { ...menu, callback: menu.callback.replace(injection, replacement) };
+        assert.notEqual(changed.callback, menu.callback);
+        assert.throws(() => originalCallbackBytes(changed));
+    }
+    assert.throws(() => originalNativeMenuCallback({ ...menu, caseIndex: 37 }));
+    const receipt = item => digest({ ...item, callback: originalCallbackBytes(item) });
+    for (const [original, changed] of [
+        [menu, { ...menu, callback: menu.callback.replace('report.tabMenus = observation', 'report.tabMenus = null') }],
+        [ordinary, { ...ordinary, callback: ordinary.callback + '\n// Unreviewed callback change.' }],
+        [ordinary, { ...ordinary, options: { windowIsolation: false } }]
+    ]) {
+        assert.notDeepEqual(changed, original);
+        assert.notEqual(receipt(changed), receipt(original), 'Only the exact host argument is excluded from the legacy receipt.');
+    }
 });

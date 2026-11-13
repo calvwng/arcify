@@ -70,6 +70,29 @@ function fixture({ inverted = false, bookmarkInverted = inverted, syncGroups = f
 const writes = f => f.effects.filter(([area, value]) => area === 'local' && value.spaces);
 const owner = (spaces, id) => spaces.find(space => space.temporaryTabs.includes(id));
 
+for (const count of [2, 7]) for (const sameUrl of [false, true]) for (const blocked of [null, 'provisional', 'recoveryCandidates'])
+test(`batch-size probe count=${count} sameUrl=${sameUrl} blocked=${blocked}`, async () => {
+    const f = fixture(), ids = Array.from({ length: count }, (_, i) => 101 + i);
+    for (const id of ids) f.tabs.push({ id, index: f.tabs.length, windowId: 10, url: `https://batch.test/${sameUrl ? 'same' : id}`, pinned: false, active: false, groupId: -1, splitViewId: -1 });
+    f.store.spaces[0].temporaryTabs.push(...ids);
+    f.request.entries = ids.map(tabId => ({ tabId, url: f.tabs.find(tab => tab.id === tabId).url }));
+    const before = structuredClone(f.store.spaces);
+    if (blocked === 'provisional') {
+        f.store[blocked].add(ids.at(-1));
+        await assert.rejects(f.move(), error => {
+            assert.deepEqual(error.batch.completed, []); assert.deepEqual(error.batch.remaining, ids);
+            assert.match(describeTodayMoveOutcome({success:false,error:error.message,batch:error.batch},f.request.entries,{id:'target',name:'Target'}),/Nothing was moved/);
+            return true;
+        });
+        assert.deepEqual(f.store.spaces,before); assert.equal(writes(f).length,0);
+    } else {
+        if (blocked) f.store[blocked].add(ids.at(-1));
+        assert.deepEqual((await f.move()).completed,ids);
+        for (const id of ids) assert.equal(owner(f.local.spaces,id).id,'target');
+        assert.equal(writes(f).length,1);
+    }
+});
+
 for (const inverted of [false, true]) test(`bulk move preserves exact IDs, native activity and destination visible order (inverted=${inverted})`, async () => {
     const f = fixture({ inverted }), beforeTabs = structuredClone(f.tabs), beforeNodes = structuredClone(f.nodes);
     const result = await f.move();
@@ -109,7 +132,6 @@ const invalidations = {
     duplicateOwner: f => f.store.spaces[1].temporaryTabs.push(3),
     duplicateSource: f => f.store.spaces[0].temporaryTabs.push(3),
     provisional: f => f.store.provisional.add(3),
-    unresolvedRestore: f => f.store.recoveryCandidates.add(3),
     wrongOrder: f => f.request.entries.reverse(),
     invertChanged: f => f.local.todayOrderRepresentation.inverted = true,
     activeSpaceChanged: f => f.store.active[10] = 'target',
@@ -432,7 +454,7 @@ test('a later exact duplicate restore clears an earlier exhausted recovery candi
     assert.deepEqual(f.tabs,beforeTabs);assert.deepEqual(f.nodes,beforeNodes);
 });
 
-test('genuinely unresolved equal-URL recovery stays protected after persistence and cannot move as ordinary Today', async () => {
+test('explicit move assigns live ownership without applying genuinely unresolved equal-URL history', async () => {
     const f=fixture(),beforeTabs=structuredClone(f.tabs);
     f.store.recoveryCandidates=new Set([1,3]);
     const pending={spaceId:'target',section:'temporaryTabs',order:3,url:'https://same.test/',windowKey:'unknown-window',tabIndex:0,
@@ -441,9 +463,10 @@ test('genuinely unresolved equal-URL recovery stays protected after persistence 
     await f.store.persist();
     assert.deepEqual(f.store.restoreQueue,[pending]);assert.deepEqual([...f.store.recoveryCandidates],[1,3]);
     assert.equal(f.local.pinnedTabStatesById[1],undefined);assert.equal(f.local.pinnedTabStatesById[3],undefined);
-    const count=writes(f).length,before=structuredClone(f.store.spaces);
-    await assert.rejects(f.move(),error=>error.code==='TODAY_RECOVERY_PENDING'&&error.batch.completed.length===0&&!error.batch.uncertain);
-    assert.equal(writes(f).length,count);assert.deepEqual(f.store.spaces,before);assert.deepEqual(f.tabs,beforeTabs);
+    const count=writes(f).length;
+    assert.deepEqual((await f.move()).completed,[1,3]);
+    assert.equal(writes(f).length,count+1);assert.deepEqual(f.store.restoreQueue,[pending]);assert.deepEqual(f.tabs,beforeTabs);
+    assert.equal(f.local.pinnedTabStatesById[1],undefined);assert.equal(f.local.pinnedTabStatesById[3],undefined);
 });
 
 test('blank provisional recovery remains protected even when the restore queue is empty', async () => {
@@ -454,14 +477,13 @@ test('blank provisional recovery remains protected even when the restore queue i
     await assert.rejects(f.move());
 });
 
-test('registered Today move reports a bounded recovery reason code without exposing tab URLs or titles', async () => {
+test('registered Today move resolves current membership without exposing tab URLs or titles', async () => {
     const f=fixture();f.store.recoveryCandidates.add(3);registerTodayMoveMessages(f.store);
     const listener=f.listeners[0];
     const response=await new Promise(resolve=>listener(f.request,{id:'test',url:'chrome-extension://test/sidebar.html'},resolve));
-    assert.equal(response.success,false);assert.equal(response.code,'TODAY_RECOVERY_PENDING');
-    assert.match(response.error,/being matched to their saved Spaces/);
-    assert.equal(response.batch.uncertain,false);assert.deepEqual(response.batch.completed,[]);
-    assert(!JSON.stringify(response).includes('https://same.test/'));assert.equal(writes(f).length,0);
+    assert.equal(response.success,true);
+    assert.equal(response.batch.uncertain,false);assert.deepEqual(response.batch.completed,[1,3]);
+    assert(!JSON.stringify(response).includes('https://same.test/'));assert.equal(writes(f).length,1);
 });
 
 for (const state of ['closed', 'foreign-window']) test(`a ${state} recovery candidate reports stale selection rather than pending restoration`, async () => {
@@ -472,4 +494,29 @@ for (const state of ['closed', 'foreign-window']) test(`a ${state} recovery cand
     await assert.rejects(f.move(),error=>error.code===undefined&&/Select the tabs again/.test(error.message)&&
         error.batch.completed.length===0&&!error.batch.uncertain);
     assert.deepEqual(f.store.spaces,before);assert.equal(writes(f).length,0);
+});
+
+for(const inverted of [false,true])for(const syncGroups of [false,true])for(const recovered of [false,true])
+test(`return probe empties two-tab interim Space inverted=${inverted} sync=${syncGroups} recovered=${recovered}`,async()=>{
+ const f=fixture({inverted,syncGroups});f.store.spaces[1].temporaryTabs=[];
+ if(recovered)f.store.recoveryCandidates.add(1);
+ const ids=f.request.entries.map(e=>e.tabId);
+ assert.deepEqual((await f.move()).completed,ids);
+ assert.equal(f.store.spaces[1].temporaryTabs.length,2);
+ f.store.active[10]='target';f.session.activeSpaces[10]='target';
+ Object.assign(f.request,{spaceId:'target',bookmarkFolderId:'target-root',destinationSpaceId:'source',destinationBookmarkFolderId:'source-root'});
+ const result=await f.move();assert.deepEqual(result.completed,ids);assert.deepEqual(result.remaining,[]);
+ assert.equal(result.uncertain,false);assert.deepEqual(f.local.spaces.find(s=>s.id==='target').temporaryTabs,[]);
+ for(const id of ids)assert.equal(owner(f.local.spaces,id).id,'source');
+ assert.equal(writes(f).length,2,'One complete membership write per direction');
+});
+for(const blocker of ['provisional','recoveryCandidates'])test(`return probe one ${blocker} cannot silently trim the batch`,async()=>{
+ const f=fixture();f.store.spaces[1].temporaryTabs=[];await f.move();
+ f.store.active[10]='target';f.session.activeSpaces[10]='target';
+ Object.assign(f.request,{spaceId:'target',bookmarkFolderId:'target-root',destinationSpaceId:'source',destinationBookmarkFolderId:'source-root'});
+ f.store[blocker].add(3);
+ if(blocker==='provisional'){
+  await assert.rejects(f.move(),e=>{assert.deepEqual(e.batch.completed,[]);assert.deepEqual(e.batch.remaining,[1,3]);return true;});
+  assert.deepEqual(f.store.spaces[1].temporaryTabs,[1,3]);assert.equal(writes(f).length,1);
+ }else{assert.deepEqual((await f.move()).completed,[1,3]);assert.deepEqual(f.local.spaces[1].temporaryTabs,[]);}
 });

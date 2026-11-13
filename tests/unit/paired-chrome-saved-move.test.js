@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
+import { runInNewContext } from 'node:vm';
+import { CommittedSavedSections, savedSectionSignature } from '../../sidebar-saved-section.js';
 import { readSourceText } from '../source-text.js';
 import { assertSavedMoved, assertSavedMoveUnchanged, assertSavedMoveRejected, assertSavedMoveTrace, assertSavedMoveBookmarkTrace,
     assertSavedMoveReload, savedMoveTree, savedMoveEntry, canonicalSavedMoveBookmarks, installSavedMoveTrace, installSavedMoveBookmarkTrace,
     serveSavedMoveFixture, savedMoveAction, savedMoveDestination, savedMoveSearchMatches, assertSavedMoveUnsupportedCleanup, assertSavedMoveDurableReload,
     rightClickSavedMoveRow, assertSavedMoveOwnedTabsRetired, retireSavedMoveOwnedTabs } from '../../scripts/paired-chrome-saved-move.mjs';
-import { finishBookmarkFixture } from '../../scripts/paired-chrome-bookmark-selection.mjs';
+import { finishBookmarkFixture, clickBookmarkFixtureRow } from '../../scripts/paired-chrome-bookmark-selection.mjs';
 
 test('saved Move retirement requires dead tabs and bindings together without pruning unrelated entries', () => {
     const before = { tabIds: [1, 2, 3], bindings: { 1: { bookmarkId: 'owned' }, 2: { bookmarkId: 'kept' }, 99: { bookmarkId: 'unrelated-stale' } } };
@@ -80,6 +82,80 @@ const savedTriggerDetached = () => {
     error.stack = 'Error: Node is detached from document\n    at CdpElementHandle.assertConnectedElement (/runtime/puppeteer-core/lib/puppeteer/api/ElementHandle.js:1314:23)\n    at async CdpElementHandle.scrollIntoView (/runtime/puppeteer-core/lib/puppeteer/cdp/ElementHandle.js:106:13)';
     return error;
 };
+
+// Execute the actual fixture activation call site. A renderer-approved title
+// refresh replaces its node between Puppeteer's lookup and pre-input scroll.
+// This fails against the former raw page.click call, not just a helper stub.
+async function savedActivationFixture({ replacement = 'same', deliveredError = false, alwaysReplace = false } = {}) {
+    const sourceText = await readSourceText(new URL('../../scripts/paired-chrome-saved-move.mjs', import.meta.url));
+    const start = sourceText.indexOf("await input('Activate exact saved A copy without changing the B page'");
+    const end = sourceText.indexOf('await poll(read,', start);
+    assert(start > 0 && end > start);
+    const { document } = parseHTML('<body><div class="space active" data-space-id="source"><div id="saved"><div class="tab" data-bookmark-id="exact" data-tab-id="101" data-pinned-url="https://same.test/" data-bookmark-title="Saved"></div></div></div></body>');
+    const container = document.getElementById('saved'), cache = new CommittedSavedSections();
+    const space = { id: 'source', spaceBookmarks: [101], temporaryTabs: [] };
+    const tabs = [{ id: 101, windowId: 7, url: 'https://same.test/', title: 'Before', pinned: false, groupId: -1, incognito: false }];
+    const metadata = { pinnedStatesById: { 101: { bookmarkId: 'exact', pinnedUrl: tabs[0].url } } };
+    const signature = () => savedSectionSignature(space, tabs, metadata, false, 0, 0);
+    cache.commit(container, signature(), new Set([101]), true);
+    const calls = [], records = []; let delivered = 0, replacements = 0;
+    const page = {
+        keyboard: { down: async () => assert.fail('No modifier input for activation'), up: async () => assert.fail('No modifier input for activation') },
+        async waitForSelector(selector, options) {
+            calls.push({ selector, options });
+            const row = document.querySelector(selector);
+            if (!row) throw Error('Exact saved activation row is absent');
+            return { dispose: async () => {}, click: async () => {
+                if (!replacements || alwaysReplace) {
+                    tabs[0].title = `Refresh ${++replacements}`;
+                    const plan = cache.planRows(container, signature());
+                    assert.equal(plan.replacements.length, 1);
+                    assert.equal(plan.replacements[0].row, row);
+                    assert.equal(plan.replacements[0].tab.id, 101);
+                    const next = row.cloneNode(true); row.replaceWith(next);
+                    cache.commit(container, signature(), plan.represented, true);
+                    if (replacement === 'bookmark') next.dataset.bookmarkId = 'same-url-decoy';
+                    if (replacement === 'tab') next.dataset.tabId = '202';
+                    if (replacement === 'space') next.closest('.space').dataset.spaceId = 'other';
+                }
+                if (!row.isConnected) throw savedTriggerDetached();
+                delivered++;
+                if (deliveredError) throw Error('Input.dispatchMouseEvent timed out');
+            } };
+        },
+        async click(selector) { const row = await this.waitForSelector(selector); await row.click(); }
+    };
+    const run = () => runInNewContext(`(async () => { ${sourceText.slice(start, end)} })()`, {
+        native: { page }, pins: { active: { id: 'exact' } }, copies: { active: [101, 201] }, source: { id: 'source' },
+        savedRow: id => `.space.active .tab[data-bookmark-id="${id}"]`, clickBookmarkFixtureRow,
+        input: async (label, action) => { assert.equal(label, 'Activate exact saved A copy without changing the B page'); return action(); },
+        checkpoint: async (phase, value) => records.push({ phase, ...value })
+    });
+    return { run, calls, records, get delivered() { return delivered; } };
+}
+
+test('saved activation reacquires the exact row after a renderer-approved pre-input replacement', async () => {
+    const f = await savedActivationFixture(); await f.run();
+    assert.equal(f.delivered, 1);
+    assert.equal(f.calls.length, 2);
+    assert.equal(new Set(f.calls.map(c => c.selector)).size, 1);
+    assert.deepEqual(f.records.map(r => r.observation.status), ['detached-before-input', 'clicked']);
+});
+for (const replacement of ['bookmark', 'tab', 'space']) test(`saved activation refuses a replacement with changed ${replacement} identity`, async () => {
+    const f = await savedActivationFixture({ replacement });
+    await assert.rejects(f.run(), /Exact saved activation row is absent/);
+    assert.equal(f.delivered, 0);
+});
+test('saved activation never reacquires after an uncertain dispatched click', async () => {
+    const f = await savedActivationFixture({ deliveredError: true });
+    await assert.rejects(f.run(), /Input.dispatchMouseEvent timed out/);
+    assert.equal(f.delivered, 1); assert.equal(f.calls.length, 2);
+});
+test('saved activation repeated pre-input replacement is bounded', async () => {
+    const f = await savedActivationFixture({ alwaysReplace: true });
+    await assert.rejects(f.run(), /Node is detached from document/);
+    assert.equal(f.delivered, 0); assert.equal(f.calls.length, 3);
+});
 for (const folder of [false, true]) test(`saved Move right click retains exact identity and source type folder=${folder}`, async () => {
     const f = savedTriggerFixture(); await rightClickSavedMoveRow(f.page, 'fixture-28', folder, f.record);
     assert.equal(f.clicks, 1); assert.equal(f.disposed, 1); assert.equal(f.calls[0].options.visible, true);

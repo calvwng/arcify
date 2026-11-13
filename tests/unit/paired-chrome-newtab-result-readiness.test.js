@@ -54,9 +54,9 @@ function harness({ onLookup = () => {}, onScroll = () => {}, onPaint = () => {},
 
 test('exact below-fold row is scrolled and observed unchanged across two paints before one real click', async () => {
     const h = harness(); await h.click();
-    assert.deepEqual([h.lookups, h.scrolls, h.paints, h.clicks, h.dispatched], [1, 1, 2, 1, 1]);
-    assert.deepEqual(h.records.slice(0, 4).map(item => item.phase), ['before-scroll', 'after-scroll', 'paint', 'paint']);
-    assert.equal(h.records[0].state.inViewport, false); assert.equal(h.records[1].state.inViewport, true);
+    assert.deepEqual([h.lookups, h.scrolls, h.paints, h.clicks, h.dispatched], [1, 1, 4, 1, 1]);
+    assert.deepEqual(h.records.slice(0, 6).map(item => item.phase), ['before-scroll', 'before-scroll-paint', 'before-scroll-paint', 'after-scroll', 'paint', 'paint']);
+    assert.equal(h.records[0].state.inViewport, false); assert.equal(h.records[3].state.inViewport, true);
     assert.deepEqual(h.records.at(-1), { attempt: 1, status: 'clicked' }); assert(h.handles.every(handle => handle.disposed));
 });
 for (const phase of ['lookup', 'scroll', 'paint']) test(`proven same-title replacement during ${phase} is reacquired before input`, async () => {
@@ -92,12 +92,25 @@ for (const [name, change, pattern] of [
     ['identity drift', h => { h.current.dataset.index = '8'; }, /identity changed/],
     ['ambiguous replacement', h => { h.make(); }, /one remaining/]
 ]) test(`connected ${name} fails closed rather than reacquiring`, async () => {
-    const h = harness({ onPaint: (h, paint) => { if (paint === 1) change(h); } });
+    const h = harness({ onPaint: (h, paint) => { if (paint === 3) change(h); } });
     await assert.rejects(h.click(), pattern); assert.equal(h.lookups, 1); assert.equal(h.clicks, 0); assert(h.handles[0].disposed);
 });
 test('a connected row may settle changing geometry without new lookup, scroll, or input', async () => {
-    const h = harness({ onPaint: (h, paint) => { if (paint === 1) h.current.box.y += 1; } });
-    await h.click(); assert.deepEqual([h.lookups, h.scrolls, h.paints, h.dispatched], [1, 1, 3, 1]);
+    const h = harness({ onPaint: (h, paint) => { if (paint === 3) h.current.box.y += 1; } });
+    await h.click(); assert.deepEqual([h.lookups, h.scrolls, h.paints, h.dispatched], [1, 1, 5, 1]);
+});
+
+test('ongoing connected movement settles before driver scroll and preserves strict click readiness',async()=>{
+    const h=harness({onPaint:(h,paint)=>{if(paint<=3)h.current.box.y+=20;},onScroll:h=>assert.equal(h.paints,5)});
+    await h.click();assert.deepEqual([h.lookups,h.scrolls,h.paints,h.dispatched],[1,1,7,1]);
+});
+test('continuous connected pre-scroll movement expires without scrolling or input',async()=>{
+    const h=harness({onPaint:h=>{h.current.box.y+=1;}});
+    await assert.rejects(h.locate(64),/deadline expired/);assert.equal(h.scrolls,0);assert.equal(h.clicks,0);assert(h.handles[0].disposed);
+});
+test('connected identity drift while waiting to scroll is fatal before driver scroll',async()=>{
+    const h=harness({onPaint:h=>{h.current.dataset.index='changed';}});
+    await assert.rejects(h.click(),/identity changed/);assert.equal(h.scrolls,0);assert.equal(h.clicks,0);
 });
 test('ambiguous initial identity is fatal before scrolling', async () => {
     const h = harness(); h.make(); await assert.rejects(h.click(), /ambiguous/);

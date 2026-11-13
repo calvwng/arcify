@@ -1,3 +1,4 @@
+import { observeMenuOpenInput, finishMenuOpenInputObservation } from './paired-chrome-menu-input.mjs';
 /** CI-only real paired Chrome exercise. Importing this module never launches Chrome. */
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
@@ -6,6 +7,7 @@ import { replaceInputText, captureVisibleFailurePage, clickFreshResult } from '.
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { exerciseExternalMenuDismissal, readMenuPreservedState } from './paired-chrome-menu-focus.mjs';
+import { openTabMenuNativeHost, hideTabMenuAliasSearch } from './paired-chrome-tab-menu-host.mjs';
 
 export function assertTabMenuFixtureEnvironment(env = process.env, uid = process.getuid?.()) {
     assert.equal(env.GITHUB_ACTIONS, 'true', 'The real tab-menu fixture is restricted to GitHub Actions.');
@@ -105,6 +107,51 @@ export function assertTabMenuDuplicated(before, after, { sourceId, windowId, spa
     return duplicate.id;
 }
 
+// Passive, action-scoped evidence only. Never intercept a request or response.
+export function installTabMenuDuplicateObservation() {
+    globalThis.__tabMenuDuplicateObservation?.stop();
+    const events = [], status = document.getElementById('favoritesDropStatus'), notice = document.getElementById('favoritesDropNotice');
+    const add = value => events.push({ sequence: events.length, at: performance.now(), ...structuredClone(value) });
+    const sample = () => ({ text: status?.textContent || '', hidden: notice?.hidden ?? null });
+    const mutations = records => {
+        for (const record of records) if (record.type === 'childList' && record.target === status)
+            add({ type: 'status-write', text: [...record.addedNodes].map(node => node.textContent).join('') });
+        if (records.length) add({ type: 'status-observed', ...sample() });
+    };
+    const observer = new MutationObserver(mutations);
+    const click = event => { if (event.target.closest?.('#tab-context-menu [data-action="duplicate"]')) add({ type: 'duplicate-click', trusted: event.isTrusted }); };
+    const created = tab => add({ type: 'tabs.onCreated', tab });
+    const changed = (changes, area) => {
+        if (area !== 'local') return;
+        const relevant = Object.fromEntries(Object.entries(changes).filter(([key]) => ['spaces', 'spaceTabSnapshot'].includes(key)));
+        if (Object.keys(relevant).length) add({ type: 'storage', area, changes: relevant });
+    };
+    let stopped = false;
+    const stop = () => {
+        if (stopped) return; stopped = true;
+        mutations(observer.takeRecords()); observer.disconnect();
+        document.removeEventListener('click', click, true); chrome.tabs.onCreated.removeListener(created); chrome.storage.onChanged.removeListener(changed);
+    };
+    add({ type: 'status-initial', ...sample() });
+    globalThis.__tabMenuDuplicateObservation = { events, stop, read: () => { mutations(observer.takeRecords()); return { events: structuredClone(events), finalStatus: sample() }; } };
+    if (status) observer.observe(status, { childList: true, subtree: true, characterData: true });
+    if (notice) observer.observe(notice, { attributes: true, attributeFilter: ['hidden'] });
+    document.addEventListener('click', click, true); chrome.tabs.onCreated.addListener(created); chrome.storage.onChanged.addListener(changed);
+}
+export function readTabMenuDuplicateObservation({ stop = false } = {}) {
+    if (!globalThis.__tabMenuDuplicateObservation) throw new Error('Duplicate passive observation is missing.');
+    if (stop) globalThis.__tabMenuDuplicateObservation.stop();
+    return globalThis.__tabMenuDuplicateObservation.read();
+}
+export function stopTabMenuDuplicateObservation() {
+    globalThis.__tabMenuDuplicateObservation?.stop(); delete globalThis.__tabMenuDuplicateObservation;
+}
+export function observeTabMenuDuplicateAssertion(before, after, request) {
+    try { return { passed: true, duplicateId: assertTabMenuDuplicated(before, after, request) }; }
+    catch (error) { return { passed: false, assertion: { name: error.name, message: error.message, stack: error.stack,
+        operator: error.operator, expected: error.expected, actual: error.actual } }; }
+}
+
 export function assertTabMenuPinRemoved(before, after, { bookmarkId, tabId, spaceId }) {
     same(before, after, ['tabs', 'favorites', 'activeSpaceId', 'pageStates']);
     const removed = findBookmark(before, bookmarkId); assert.equal(after.bookmarks.some(node => node.id === bookmarkId), false);
@@ -153,15 +200,30 @@ export async function readRenamedTabSearch({ page, ui, poll, query, alias, sourc
 }
 
 /** Reacquire only a proven pre-input stale handle; never replay a menu action. */
-export async function openFreshTabMenu({ page, selector, menuSelector, record = async () => {} }) {
-    await clickFreshResult(async remaining => {
-        const element = await page.waitForSelector(selector, { visible: true, timeout: remaining });
-        assert(element, 'The exact context-menu target must exist.');
-        return { click: () => element.click({ button: 'right' }), dispose: () => element.dispose() };
-    }, record);
-    // Keep the postcondition outside the reacquisition boundary: once genuine
-    // input succeeds, even a missing menu or timeout must fail without a replay.
-    await page.waitForSelector(menuSelector, { visible: true });
+export async function openFreshTabMenu({ page, selector, menuSelector, record = async () => {}, observe = false }) {
+    if (observe) await page.evaluate(observeMenuOpenInput, { selector, menuSelector });
+    let outcome = 'failed';
+    try {
+        await clickFreshResult(async remaining => {
+            const element = await page.waitForSelector(selector, { visible: true, timeout: remaining });
+            assert(element, 'The exact context-menu target must exist.');
+            return { click: () => element.click({ button: 'right' }), dispose: () => element.dispose() };
+        }, record);
+        // Keep the postcondition outside the reacquisition boundary: once genuine
+        // input succeeds, even a missing menu or timeout must fail without a replay.
+        await page.waitForSelector(menuSelector, { visible: true });
+        outcome = 'menu-visible';
+    } finally {
+        if (observe) {
+            // Evidence failure cannot replace the original input/postcondition error.
+            try {
+                const observation = await page.evaluate(finishMenuOpenInputObservation);
+                await record({ status: 'menu-input-observation', outcome, observation });
+            } catch (error) {
+                await Promise.resolve().then(() => record({ status: 'menu-input-observation-failed', outcome, error: error.message })).catch(() => {});
+            }
+        }
+    }
 }
 
 /**
@@ -171,14 +233,14 @@ export async function openFreshTabMenu({ page, selector, menuSelector, record = 
  * tabMenuAction messages. API writes below only seed/clean disposable fixtures or
  * explicitly model an external Bookmark Manager race.
  */
-export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, ui, screenshot, snapshot, poll, fixture, arcifyId, spotlightId, search, record = async () => {} }) {
+export async function exerciseTabMenuActions({ apiPage, nativeSidebar, newTabPage, pageForUrl, ui, screenshot, snapshot, poll, fixture, arcifyId, spotlightId, search, record = async () => {} }) {
     assertTabMenuFixtureEnvironment();
-    for (const fn of [newTabPage, pageForUrl, ui, screenshot, snapshot, poll, search]) assert.equal(typeof fn, 'function');
+    for (const fn of [nativeSidebar, newTabPage, pageForUrl, ui, screenshot, snapshot, poll, search]) assert.equal(typeof fn, 'function');
     const nonce = randomBytes(16).toString('hex'), windowId = fixture.windowA;
     const initial = await snapshot(windowId), space = initial.spaces.find(item => item.id === initial.activeSpaceId);
     assert(space?.bookmarkFolderId);
     const base = `${fixture.base}/tab-menu/${nonce}`, alias = `MenuAlias ${nonce}`, renamedPin = `Saved Menu Pin ${nonce}`;
-    const evidence = { nonce, surface: 'regular sidebar.html tab', nativePanel: false, realMouseKeyboard: true, checkpoints: [], screenshots: [] };
+    const evidence = { nonce, surface: 'native Arcify SIDE_PANEL', nativePanel: true, realMouseKeyboard: true, checkpoints: [], screenshots: [] };
     const ownedTabs = new Set(), pageStates = new Map(); let sidebar, spotlight, folderId, staleBookmarkId, outsideWindow, outsidePage, primaryError;
     const representation = await apiPage.evaluate(async () => (await chrome.storage.local.get('todayOrderRepresentation')).todayOrderRepresentation);
     assert.equal(representation?.version, 1); assert.equal(typeof representation.inverted, 'boolean');
@@ -216,6 +278,8 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
     const menu = async selector => ui(sidebar.page, `Right-click exact row ${selector}`, async () => {
         const priorNotice = await sidebar.page.$eval('#favoritesDropNotice', node => !node.hidden);
         if (priorNotice) {
+            assert.notEqual(await sidebar.page.$eval('#favoritesDropStatus', node => node.textContent), 'Use the Arcify sidebar.',
+                'A native menu fixture must not dismiss an unauthorized-host failure.');
             await sidebar.page.waitForSelector('#favoritesDropDismiss', { visible: true });
             await sidebar.page.click('#favoritesDropDismiss');
             await sidebar.page.waitForFunction(() => document.getElementById('favoritesDropNotice')?.hidden === true, { polling: 50 });
@@ -265,10 +329,12 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             } catch (error) { await chrome.bookmarks.removeTree(root.id); throw error; }
         }, { parentId: space.bookmarkFolderId, base, nonce });
         folderId = seeded.root.id; staleBookmarkId = seeded.stale.id;
-        sidebar = await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`, windowId); ownedTabs.add(sidebar.tab.id);
+        sidebar = await openTabMenuNativeHost({ nativeSidebar, extensionId: arcifyId, windowId, spaceId: space.id, record });
+        evidence.nativeHost = sidebar.evidence;
         spotlight = await newTabPage(`chrome-extension://${spotlightId}/newtab.html`, windowId); ownedTabs.add(spotlight.tab.id);
         await search(spotlight.page, nonce);
         const initialAliasRows = await poll(() => spotlight.page.evaluate(readSpotlightRows), rows => rows.filter(row => row.type === 'open-tab' && row.title === `Tab Menu ordinary ${nonce}`).length === 2 && !rows.some(row => row.title === alias), 'both exact ordinary same-URL sources are already rendered before rename');
+        await hideTabMenuAliasSearch({ ui, backgroundPage: ordinaryPage, searchPage: spotlight.page, query: nonce });
         await ui(sidebar.page, 'Expand only the disposable Space-pin folder', async () => {
             const selector = `.space.active .folder[data-bookmark-id="${folderId}"]`;
             await sidebar.page.waitForSelector(selector);
@@ -285,13 +351,13 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             const open = async () => {
                 if (menuSelector === '#tab-context-menu') return menu(selector);
                 await ui(sidebar.page, 'Right-click exact saved folder', async () => {
-                    await openFreshTabMenu({ page: sidebar.page, selector, menuSelector,
+                    await openFreshTabMenu({ page: sidebar.page, selector, menuSelector, observe: true,
                         record: observation => checkpoint('context-menu-input', { selector, menuSelector, ...observation }) });
                 });
             };
             await open(); const before = await read(), preservedBefore = await apiPage.evaluate(readMenuPreservedState);
             const focus = await exerciseExternalMenuDismissal({ sidebar: sidebar.page, destination: outsidePage,
-                menuSelector, label, ui, screenshot, poll, record });
+                menuSelector, label, ui, screenshot, poll, record, nativePanel: true });
             const after = await read(); assertTabMenuCancelled(before, after);
             const preservedAfter = await apiPage.evaluate(readMenuPreservedState);
             assert.deepEqual(preservedAfter, preservedBefore, 'Outside dismissal preserves full durable and current-session ownership.');
@@ -308,6 +374,7 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
 
         await openEditor(row(ordinary.id), 'rename'); const beforeAlias = await read();
         const searchSurface = await spotlight.page.evaluate(watchTabMenuInvalidation, { windowId, peerId: arcifyId });
+        assert.equal(searchSurface.visibility, 'hidden', 'The original alias query must be hidden before the rename.');
         await edit(alias); await settled();
         const afterAlias = await awaitProof(beforeAlias, assertTabMenuAlias, { tabId: ordinary.id, twinId: twin.id, alias }, 'exact live alias and real paired snapshot');
         await titleRendered(row(ordinary.id), alias); await titleRendered(row(twin.id), beforeAlias.tabs.find(tab => tab.id === twin.id).title);
@@ -390,15 +457,40 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             await capture(`tab-menu-${muted ? 'muted' : 'unmuted'}-ordinary-tab`); await checkpoint(muted ? 'muted' : 'unmuted', { before: beforeMute, after: afterMute });
         }
 
-        await menu(row(ordinary.id)); const beforeDuplicate = await read(); await item('duplicate');
-        const afterDuplicate = await poll(async () => {
-            const value = await read();
-            for (const tab of value.tabs.filter(tab => !beforeDuplicate.tabs.some(old => old.id === tab.id))) {
-                if (tab.url === `${base}/ordinary` && tab.windowId === windowId) ownedTabs.add(tab.id);
-            }
-            return value;
-        }, value => { try { assertTabMenuDuplicated(beforeDuplicate, value, { sourceId: ordinary.id, windowId, spaceId: space.id, inverted: representation.inverted }); return true; } catch { return false; } }, 'one unbound duplicate in the current Today order');
-        const duplicateId = assertTabMenuDuplicated(beforeDuplicate, afterDuplicate, { sourceId: ordinary.id, windowId, spaceId: space.id, inverted: representation.inverted }); ownedTabs.add(duplicateId);
+        await menu(row(ordinary.id)); const beforeDuplicate = await read();
+        const duplicateRequest = { sourceId: ordinary.id, windowId, spaceId: space.id, inverted: representation.inverted };
+        const duplicateDiagnostic = { before: beforeDuplicate, request: duplicateRequest };
+        let afterDuplicate, duplicateId, duplicateError;
+        try {
+            await sidebar.page.evaluate(installTabMenuDuplicateObservation);
+            await checkpoint('duplicate-before-input', duplicateDiagnostic);
+            await item('duplicate');
+            afterDuplicate = await poll(async () => {
+                const value = await read();
+                for (const tab of value.tabs.filter(tab => !beforeDuplicate.tabs.some(old => old.id === tab.id))) {
+                    if (tab.url === `${base}/ordinary` && tab.windowId === windowId) ownedTabs.add(tab.id);
+                }
+                return value;
+            }, value => {
+                const result = observeTabMenuDuplicateAssertion(beforeDuplicate, value, duplicateRequest);
+                duplicateDiagnostic.last = { state: structuredClone(value), result };
+                return result.passed;
+            }, 'one unbound duplicate in the current Today order');
+            duplicateId = assertTabMenuDuplicated(beforeDuplicate, afterDuplicate, duplicateRequest); ownedTabs.add(duplicateId);
+        } catch (error) {
+            duplicateError = error; duplicateDiagnostic.error = { name: error.name, message: error.message, stack: error.stack }; throw error;
+        } finally {
+            await finishBookmarkFixture([
+                async () => {
+                    let observationError;
+                    try { duplicateDiagnostic.observation = await sidebar.page.evaluate(readTabMenuDuplicateObservation, { stop: true }); }
+                    catch (error) { observationError = error; duplicateDiagnostic.observationError = { name: error.name, message: error.message, stack: error.stack }; }
+                    await checkpoint('duplicate-observed-before-cleanup', duplicateDiagnostic);
+                    if (observationError) throw observationError;
+                },
+                () => sidebar.page.evaluate(stopTabMenuDuplicateObservation)
+            ], duplicateError, event => checkpoint('duplicate-observer-cleanup-failed', { errors: event.errors }));
+        }
         await ui(sidebar.page, 'Confirm exact duplicate is a Today row', () => sidebar.page.waitForSelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${duplicateId}"]`, { visible: true }));
         await capture('tab-menu-duplicate-ordinary-identity'); await checkpoint('duplicate', { before: beforeDuplicate, after: afterDuplicate, duplicateId });
 
@@ -438,6 +530,7 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
         throw error;
     } finally {
         await finishBookmarkFixture([
+            async () => { if (sidebar) await sidebar.close(); },
             async () => { if (outsideWindow) await apiPage.evaluate(id => chrome.windows.remove(id), outsideWindow.id); },
             () => apiPage.evaluate(async ids => { const live = new Set((await chrome.tabs.query({})).map(tab => tab.id)); const present = ids.filter(id => live.has(id)); if (present.length) await chrome.tabs.remove(present); }, [...ownedTabs]),
             async () => { if (folderId) await apiPage.evaluate(id => chrome.bookmarks.removeTree(id), folderId); },
@@ -446,6 +539,6 @@ export async function exerciseTabMenuActions({ apiPage, newTabPage, pageForUrl, 
             async () => { if (staleBookmarkId) await apiPage.evaluate(async id => { const exists = await chrome.bookmarks.get(id).catch(() => []); if (exists.length) await chrome.bookmarks.remove(id); }, staleBookmarkId); },
             () => setOption('invertTabOrder', settings.invertTabOrder !== false),
             () => setOption('syncTabGroups', Boolean(settings.syncTabGroups))
-        ], primaryError, record);
+        ], primaryError, event => checkpoint(event.phase, { errors: event.errors }));
     }
 }

@@ -130,6 +130,35 @@ const dispatchInput = `    inputs:
 const jobSource = name => workflow.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z-]+:|$(?![\\s\\S]))`, 'm'))?.[1];
 const littleArcJob = jobSource('little-arc');
 
+
+// Exact inverse of the reviewed 99c44c7 native-host watch additions only.
+// Validate their presence, uniqueness and location before preserving old bytes.
+function originalNativeMenuWatchBytes(text) {
+    const jobs = text.indexOf('jobs:');
+    assert(jobs > 0);
+    for (const [previous, added] of [
+        ['scripts/paired-chrome-tab-menu.mjs', 'scripts/paired-chrome-tab-menu-host.mjs'],
+        ['tests/unit/paired-chrome-tab-menu.test.js', 'tests/unit/paired-chrome-tab-menu-host.test.js']
+    ]) {
+        const line = "      - '" + added + "'\n", preceding = "      - '" + previous + "'\n";
+        assert.equal(text.split(line).length - 1, 1, 'Exactly one reviewed native-host watch path: ' + added);
+        assert(text.includes(preceding + line), 'Native-host watch path retains its reviewed position: ' + added);
+        assert(text.indexOf(line) < text.indexOf('jobs:'), 'Native-host watch paths belong only to the trigger header.');
+        text = text.replace(preceding + line, preceding);
+    }
+    return text;
+}
+
+function originalLittleArcWorkflowBytes(workflow) {
+    const legacy = originalNativeMenuWatchBytes(workflow);
+    const restored = legacy.slice(0, legacy.indexOf('  # Supplemental fresh-profile case 38:'))
+        .replace("      - 'tests/unit/paired-chrome-move-drag-wiring.test.js'\n", '')
+        .replace("      - 'docs/move-drag-paired-ci.md'\n", '')
+        .replace(dispatchInput, '').replaceAll(`    if: ${legacyGate}\n`, '').replace(/\n$/, '')
+        .replaceAll('b8b193c1f803179f86ab2e2397e5f1169256f49d', 'c13511fd36d56358156c10336b8961b7ef95d5bc');
+    return restored;
+}
+
 test('only an explicit manual Little Arc selection gates the eight unchanged legacy jobs', () => {
     assert(workflow.includes(`  workflow_dispatch:
 ${dispatchInput}  pull_request:`));
@@ -147,11 +176,7 @@ ${dispatchInput}  pull_request:`));
         }
     }
     // Exclude only the new supplemental job and its two exact watch paths.
-    const restored = workflow.slice(0, workflow.indexOf('  # Supplemental fresh-profile case 38:'))
-        .replace("      - 'tests/unit/paired-chrome-move-drag-wiring.test.js'\n", '')
-        .replace("      - 'docs/move-drag-paired-ci.md'\n", '')
-        .replace(dispatchInput, '').replaceAll(`    if: ${legacyGate}\n`, '').replace(/\n$/, '')
-        .replaceAll('b8b193c1f803179f86ab2e2397e5f1169256f49d', 'c13511fd36d56358156c10336b8961b7ef95d5bc');
+    const restored = originalLittleArcWorkflowBytes(workflow);
     assert.equal(createHash('sha256').update(restored).digest('hex'),
         'ee6bc1245b90a30d2f4ffa17cbeb961f8ce08e95ea65aa4434316194cfc2ab74',
         'Original events, permissions, job bodies and order remain unchanged apart from the exact gate and reviewed companion-pin upgrade.');
@@ -283,3 +308,29 @@ test('source and build receipts precede the browser and cannot hide head or buil
     assert.equal((littleArcJob.match(/set -euo pipefail/g) || []).length, 2);
     assert.doesNotMatch(littleArcJob, /\|\| true|catch|exit 0|continue-on-error/);
 });
+
+const receiptWorkflowMutations = [
+    ...['scripts/paired-chrome-tab-menu-host.mjs', 'tests/unit/paired-chrome-tab-menu-host.test.js'].flatMap(path => {
+        const line = "      - '" + path + "'\n";
+        return [
+            ['missing ' + path, value => value.replace(line, '')],
+            ['duplicate ' + path, value => value.replace(line, line + line)],
+            ['wrong ' + path, value => value.replace(line, "      - 'unreviewed-host.js'\n")],
+            ['relocated ' + path, value => value.replace(line, '').replace('jobs:', line + 'jobs:')]
+        ];
+    }),
+    ['unrelated added path', value => value.replace('  pull_request:', "  pull_request:\n    paths-ignore:\n      - 'unreviewed.js'")],
+    ['changed event', value => value.replace('  pull_request:', '  pull_request_target:')],
+    ['changed permission', value => value.replace('  contents: read', '  contents: write')],
+    ['changed job runtime', value => value.replace("node-version: '22'", "node-version: '20'")],
+    ['changed job gate', value => value.replace("    if: github.event_name != 'workflow_dispatch' || inputs.acceptance_scope != 'little-arc'",
+        "    if: github.event_name != 'workflow_dispatch'")]
+];
+for (const [label, mutate] of receiptWorkflowMutations) {
+    test('Little Arc legacy receipt rejects ' + label, () => {
+        const changed = mutate(workflow);
+        assert.notEqual(changed, workflow, 'Mutation must alter the actual workflow.');
+        assert.throws(() => assert.equal(createHash('sha256').update(originalLittleArcWorkflowBytes(changed)).digest('hex'),
+            'ee6bc1245b90a30d2f4ffa17cbeb961f8ce08e95ea65aa4434316194cfc2ab74'));
+    });
+}

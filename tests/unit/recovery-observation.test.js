@@ -39,6 +39,12 @@ test('cold capture does not initialize either store or turn persisted IDs into l
     assert.equal(result.scope,'persisted-projection');assert.equal(result.memory.initialized,false);
     assert.equal(store.initialized,false);observer.dispose();
 });
+test('group sync setting is read twice and a changed setting invalidates the observation',async()=>{
+    const {store,api}=fixture();let calls=0;
+    api.storage.sync={get:async key=>{assert.equal(key,'syncTabGroups');return {syncTabGroups:++calls===1};},set:()=>assert.fail('read only')};
+    const observer=createRecoveryObserver(store,api);const result=await observer.capture();
+    assert.equal(calls,2);assert.equal(result.stable,false);observer.dispose();
+});
 test('capture waits for the existing writer and does not enter SpaceStore.run',async()=>{
     const {store,api}=fixture();let release,queried=false;
     store.chain=new Promise(resolve=>{release=resolve;});

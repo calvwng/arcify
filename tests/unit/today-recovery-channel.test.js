@@ -65,8 +65,9 @@ test('disconnect discards preview authority; reconnect must get a fresh preview'
 });
 
 test('queued confirmation after connection loss fails before writes',async()=>{
- const f=await fixture(),channel=f.client();try{const p=await channel.request(f.request);let release;
-  const hold=f.store.run(()=>new Promise(resolve=>{release=resolve;}));await tick();
+ const f=await fixture(),channel=f.client();try{const p=await channel.request(f.request);let release,started;
+  const holding=new Promise(resolve=>{started=resolve;});
+  const hold=f.store.run(()=>new Promise(resolve=>{release=resolve;started();}));await holding;
   const pending=channel.request(confirm(p.preview.token));const rejection=assert.rejects(pending,/connection changed/);await tick();channel.close();release();await hold;await rejection;await f.store.run(async()=>{});
   assert.equal(f.effects.length,0);
  }finally{channel.close();}

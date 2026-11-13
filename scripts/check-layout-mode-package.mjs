@@ -1,0 +1,14 @@
+import { readdir, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+const root=path.resolve(process.argv[2]||'dist'),enabled=process.argv[3]!=='fallback';
+const assets=path.join(root,'assets');
+const files=(await readdir(assets)).filter(name=>/^space-store-.*\.js$/.test(name));
+assert.equal(files.length,1);
+const source=await readFile(path.join(assets,files[0]),'utf8');
+const variable=source.match(/automaticLayoutRestore:\w+=([\w$]+)\}/)?.[1];
+assert(variable,'compiled constructor must retain explicit mode default');
+assert(source.includes(`const ${variable}=!${enabled?'0':'1'}`),'compiled default must match requested restoration mode');
+assert(source.includes('automaticLayoutRestore===!1)return'),'fallback gate must precede automatic restoration');
+assert(source.includes('spaceDurableTodayLayout'),'compatible ledger remains');
+console.log(`Layout package verified: automatic restoration ${enabled?'enabled':'suspended'}, compatible ledger retained`);

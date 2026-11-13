@@ -50,6 +50,18 @@
                     <label for="startupLauncherEnabled" class="toggle-label" aria-hidden="true"></label>
                 </div>
             </div>
+            <div class="options-setting-item options-setting-toggle">
+                <div class="options-setting-copy">
+                    <label for="startupPromptEnabled" class="options-label">Show a focused startup prompt</label>
+                    <p id="startupPromptDescription" class="options-description">At the next browser startup, show a small window with Open Arcify selected. Press Enter to open the sidebar, or Escape to cancel. Off by default. While enabled, this replaces the Spotlight/launcher offer above. It takes focus once and can interrupt navigation begun immediately after launch. Later changes to the page URL, active tab or window, or delayed startup, skip the prompt.</p>
+                </div>
+                <div class="toggle-switch-container">
+                    <input type="checkbox" id="startupPromptEnabled" class="ios-toggle" role="switch" aria-describedby="startupPromptDescription">
+                    <label for="startupPromptEnabled" class="toggle-label" aria-hidden="true"></label>
+                </div>
+            </div>
+            <button type="button" id="startupPromptReadStatus">Read startup prompt status</button>
+            <p id="startupPromptStatus" role="status">No startup status read requested.</p>
         </section>
 
         <section class="options-section" aria-labelledby="recoveryStatusHeading">
@@ -58,6 +70,12 @@
             <button type="button" id="recovery-status-refresh" class="appearance-reset">Read recovery status</button>
             <p id="recovery-status-notice" class="options-description" role="status" aria-live="polite">No status read requested.</p>
             <div id="recovery-status-output" aria-label="Recovery observation"></div>
+            <h3>Favorite restart diagnostic</h3>
+            <p class="options-description">Read the saved diagnostic from the last captured startup, the checkpoint saved before it, and the latest checkpoint. This is historical, not live status or proof of successful recovery. Only counts, timestamps and stage statuses are shown; no page URLs, titles, identifiers or error details. Nothing is read or copied until you request it.</p>
+            <button type="button" id="favorite-restart-diagnostic-read" class="appearance-reset">Read Favorite restart diagnostic</button>
+            <button type="button" id="favorite-restart-diagnostic-copy" class="appearance-reset" disabled>Copy diagnostic</button>
+            <p id="favorite-restart-diagnostic-notice" class="options-description" role="status" aria-live="polite">No diagnostic read requested.</p>
+            <div id="favorite-restart-diagnostic-output" aria-label="Historical Favorite restart diagnostic"></div>
         </section>
 
         <section class="options-section" aria-labelledby="tabsHeading">

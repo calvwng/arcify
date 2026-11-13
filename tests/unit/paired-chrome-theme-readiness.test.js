@@ -1,5 +1,6 @@
 // Pure mocked fixture scheduling tests. Never launches a browser.
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 import assert from 'node:assert/strict';
 import { readSourceText } from '../source-text.js';
 import { appearanceSaveComplete, waitForAppearanceControlSaved, setAppearanceControl, assertAppearanceSelectTrace } from '../../scripts/paired-chrome-sidebar-appearance.mjs';
@@ -90,7 +91,7 @@ test('legacy cleanup restores exact original key presence and preserves every un
     const prior = globalThis.chrome, f = syncFixture(); globalThis.chrome = f.api;
     try { await restoreThemeLegacySync({ evaluate: (fn, args) => fn(args) }, f.original, f.receipt);
         assert.deepEqual(f.current, f.original); assert.deepEqual(f.calls[0], ['set', { syncTabGroups: false }]);
-        assert.equal(f.calls[1][1].length, 10); assert(!f.calls[1][1].includes('untouched'));
+        assert.equal(f.calls[1][1].length, 11); assert(!f.calls[1][1].includes('untouched'));
     } finally { globalThis.chrome = prior; }
 });
 test('legacy cleanup refuses an unowned concurrent change without overwriting or removing anything', async () => {
@@ -194,4 +195,31 @@ test('a no-op request cannot hide keys still consumed outside the page', async (
     await withSelectPage({ id: 'themeMode', initial: 'system', choices: ['system', 'light', 'dark'], swallowKeys: true }, async ({ page }) => {
         await assert.rejects(chooseThemeMode(page, 'system'), /native trusted input/);
     });
+});
+
+// Exercise the real form serializer, rather than synthesizing its writes from
+// THEME_LEGACY_SYNC_KEYS: that circular fixture hid new options keys from cleanup.
+test('theme cleanup restores sparse sync after the actual Settings form save', async () => {
+    const original = { syncTabGroups: false, unrelatedSavedSetting: 'keep me' };
+    let current = structuredClone(original);
+    const api = { storage: { sync: {
+        get: async () => structuredClone(current),
+        set: async patch => Object.assign(current, structuredClone(patch)),
+        remove: async keys => { for (const key of keys) delete current[key]; }
+    } }, runtime: { sendMessage: async () => ({ success: true }) } };
+    const context = { DEFAULT_SPACE_COLORS: {}, setSpaceColorOverrides() {},
+        document: { getElementById: id => id === 'syncTabGroups' ? { checked: true } : null, addEventListener() {} },
+        Utils: { getTodayOrderInverted: async () => false },
+        Logger: { log() {}, error(error) { throw error; } }, chrome: api };
+    const source = readSourceText(new URL('../../options.js', import.meta.url)).replace(/^import .*;\s*$/gm, '');
+    runInNewContext(source, context);
+    await context.saveOptions();
+    assert.equal(current.syncTabGroups, true);
+    const receipt = { wrote: true, trace: [{ type: 'change', trusted: true }], sync: structuredClone(current) };
+    const previous = globalThis.chrome;
+    globalThis.chrome = api;
+    try {
+        await restoreThemeLegacySync({ evaluate: (fn, args) => fn(args) }, original, receipt);
+        assert.deepEqual(current, original);
+    } finally { globalThis.chrome = previous; }
 });

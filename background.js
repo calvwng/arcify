@@ -1,12 +1,15 @@
 import { registerSelectedTabClose } from './selected-tab-close.js';
 import { registerPeek } from './peek.js';
 import { registerRecoveryObservation } from './recovery-observation.js';
+import { registerSelectedRecoveryDiagnostics } from './selected-recovery-diagnostics.js';
+import { selectedRecoveryDiagnosticsEnabled } from './recovery-diagnostics-config.js';
 import { summarizeRecoveryObservation } from './recovery-report-adapter.js';
 import { registerLittleArcLinkMenu } from './little-arc-link-menu.js';
 import { registerLittleArcHeader } from './little-arc-header.js';
 import { registerSharedToday } from './shared-today.js';
 import { registerTourMessages } from './tour-state.js';
 import { registerStartupLauncher } from './startup-launcher.js';
+import { registerStartupPrompt } from './startup-prompt.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
 registerTourMessages();
 /**
@@ -39,12 +42,14 @@ import { registerMoveTabWindowMessages } from './move-tab-new-window.js';
 import { registerTodaySplitMessages } from './today-split-action.js';
 import { createNativeSplitWriteGuard } from './native-split-safety.js';
 import { createLittleArcWindowGeometry } from './little-arc-window-geometry.js';
+import {registerDimmingPreferences} from './little-arc-dimming-preferences.js';
 import { createTransientWindowStore } from './transient-window-store.js';
 import { registerTransientControlMessages } from './transient-window-actions.js';
 
 const spaceStore = new SpaceStore();
 const windowGeometry = createLittleArcWindowGeometry({readRecord: token => spaceStore.transientWindows?.geometryRecord(token)});
 spaceStore.transientWindows = createTransientWindowStore({geometry:windowGeometry});
+registerDimmingPreferences(spaceStore);
 registerSharedToday(spaceStore);
 registerLittleArcHeader(spaceStore);
 registerPeek(spaceStore);
@@ -61,6 +66,8 @@ spaceStore.install();
 registerTransientControlMessages(spaceStore);
 registerStartupLauncher(chrome, { beforeWindowRead: () => spaceStore.transientWindows.initialize(),
     isExcludedWindow: id => spaceStore.isTransientWindow(id) });
+registerStartupPrompt(chrome, { prepareWindowEligibility: () => spaceStore.transientWindows.initialize(),
+    isExcludedWindow: id => spaceStore.isTransientWindow(id) });
 registerArchiveMessages(spaceStore);
 registerTodayFolderMessages(spaceStore);
 registerTodayMoveMessages(spaceStore);
@@ -76,6 +83,7 @@ registerFavoriteMessages(favoriteStore);
 registerMoveTabWindowMessages(spaceStore, favoriteStore);
 const spotlightInvalidation = registerSpotlightBridge(spaceStore);
 registerRecoveryObservation(spaceStore, chrome, summarizeRecoveryObservation);
+if (selectedRecoveryDiagnosticsEnabled) registerSelectedRecoveryDiagnostics(spaceStore, chrome);
 registerBookmarkListeners(() => spotlightInvalidation.invalidateAll());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type !== 'spaceStore') return;
@@ -329,7 +337,7 @@ async function runAutoArchiveCheck() {
                 const currentProtectedIds = new Set(spaceStore.spaces.flatMap(space => space.spaceBookmarks));
                 if (!spaceId || current.windowId !== tab.windowId || current.incognito || current.active || current.audible
                     || isStartupLauncherTab(current) || spaceStore.isGlobalTab(current) || spaceStore.isTransientTab(current)
-                    || isProtectedFavorite(current, currentProtectedIds, await Utils.getPinnedTabStates(), protectedUrlKeys)) return;
+                    || isProtectedFavorite(current, currentProtectedIds, await Utils.getPinnedTabStates(), protectedUrlKeys, favoriteStore)) return;
                 const space = spaceStore.spaces.find(space => space.id === spaceId);
                 await spaceStore.archiveStore.archiveUnlocked({ tabId: current.id, windowId: current.windowId,
                     spaceId, bookmarkFolderId: space.bookmarkFolderId, url: current.url }, { automatic: true, protectedUrlKeys });

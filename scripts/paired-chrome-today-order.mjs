@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { finishBookmarkFixture } from './paired-chrome-bookmark-selection.mjs';
 import { cleanupNewTabFixtureSpace, readTodayNewTabRow, assertTodayNewTabRow } from './paired-chrome-newtab-row.mjs';
 import { openFreshTabMenu } from './paired-chrome-tab-menu.mjs';
-import { locateFreshDragGeometry } from './paired-chrome-ui.mjs';
+import { clickFreshResult, locateFreshDragGeometry } from './paired-chrome-ui.mjs';
 import { readFixturePageIdentity, assertFixturePageObservation, assertReloadFixtureProvenance } from './paired-chrome-reload-fixtures.mjs';
 import { assertReloadWindowSelection } from './paired-chrome-ordinary-favorites.mjs';
 import { waitForTodayMoveHelperCleanup } from './paired-chrome-today-move.mjs';
@@ -18,6 +18,144 @@ const same = (before, after, fields) => { for (const key of fields) assert.deepE
 const space = (state, id) => { const matches = state.spaces.filter(item => item.id === id); assert.equal(matches.length, 1); return matches[0]; };
 const identity = ({ id, windowId, url, pendingUrl, pinned, incognito, splitViewId }) => ({ id, windowId, url, pendingUrl, pinned, incognito, splitViewId });
 export const visibleTodayOrder = (ids, inverted) => inverted ? [...ids].reverse() : [...ids];
+
+export async function clickTodayOrderSpace(page, spaceId, record = async () => {}) {
+    const selector = `#spaceSwitcher button[data-space-id="${spaceId}"]`;
+    // Launcher cleanup can replace the switcher before input. Reacquire only
+    // for the shared helper's proven pre-input failures, never uncertain clicks.
+    await clickFreshResult(timeout => page.waitForSelector(selector, { visible: true, timeout }),
+        observation => record({ selector, ...observation }));
+}
+
+
+// Evaluated only in the disposable paired-run profile. These are persisted
+// inputs, NOT the worker's actual layoutPending/projection decision. No broad
+// storage read, pairing credentials, native mutation or recovery request.
+export async function readTodayOrderProjectionInputs() {
+    const startedAt = Date.now();
+    const localKeys = ['spaceDurableTodayLayout', 'spaceTabSnapshot', 'spaceRankCheckpoint', 'spaceExplicitTodayCheckpoint'];
+    const sessionKeys = ['spaceExplicitTodayEpoch', 'spaceRecoveryCandidates', 'spaceGroupSplitDeferrals'];
+    const syncKeys = ['syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop'];
+    const [local, session, sync] = await Promise.all([
+        chrome.storage.local.get(localKeys), chrome.storage.session.get(sessionKeys), chrome.storage.sync.get(syncKeys)
+    ]);
+    const epoch = { kind: true, epoch: true, generation: true };
+    const witness = { version: true, epoch, incarnation: true, transaction: true, windowId: true, spaceId: true, bookmarkFolderId: true };
+    const cohort = { id: true, contextSubset: true, explicitOnly: true, choiceRevision: true,
+        signature: [{ index: true, url: true, pinned: true }], placements: [{ index: true, spaceId: true, bookmarkFolderId: true, order: true }],
+        binding: { epoch, windowId: true, tabIds: [true] }, overrides: [{ tabId: true, incarnation: true, epoch }], blockedBy: [true] };
+    const schemas = {
+        spaceDurableTodayLayout: { version: true, revision: true, fingerprint: true, snapshotProof: { liveCount: true, rankFingerprint: true }, cohorts: [cohort],
+            retirements: [{ cohortId: true, cohortFingerprint: true, reason: true, revision: true, closed: [{ index: true, tabId: true, witness }] }] },
+        spaceTabSnapshot: [{ tabId: true, tabIndex: true, url: true, spaceId: true, section: true, order: true, windowKey: true, currentOwnership: witness,
+            pinnedState: { bookmarkId: true, pinnedUrl: true }, nameOverride: { name: true, originalDomain: true } }],
+        spaceRankCheckpoint: { version: true, ranks: [[true]], fingerprint: true },
+        spaceExplicitTodayCheckpoint: { version: true, liveCount: true, rankFingerprint: true, fingerprint: true },
+        spaceExplicitTodayEpoch: true, spaceRecoveryCandidates: [true], spaceGroupSplitDeferrals: [{ spaceId: true, windowId: true, reason: true }],
+        syncTabGroups: true, invertTabOrder: true, todayNewTabsAtTop: true
+    };
+    const limits = { nodes: 16384, arrayItems: 256, stringLength: 2048, bytes: 262144 };
+    let nodes = 0, truncated = 0, unknownFields = 0;
+    const clean = (value, schema) => {
+        if (++nodes > limits.nodes) { truncated++; return { omitted: 'node-budget' }; }
+        if (value === null) return null;
+        if (schema === true) {
+            if (typeof value === 'string') { if (value.length > limits.stringLength) truncated++; return value.slice(0, limits.stringLength); }
+            if (typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value)) return value;
+            unknownFields++; return { omitted: 'unexpected-type' };
+        }
+        if (Array.isArray(schema)) {
+            if (!Array.isArray(value)) { unknownFields++; return { omitted: 'unexpected-type' }; }
+            if (value.length > limits.arrayItems) truncated++;
+            return value.slice(0, limits.arrayItems).map(item => clean(item, schema[0]));
+        }
+        if (!value || typeof value !== 'object' || Array.isArray(value)) { unknownFields++; return { omitted: 'unexpected-type' }; }
+        // Unknown field names and contents are not copied into evidence.
+        for (const key in value) if (Object.hasOwn(value, key) && !Object.hasOwn(schema, key)) { unknownFields++; break; }
+        return Object.fromEntries(Object.keys(schema).filter(key => Object.hasOwn(value, key)).map(key => [key, clean(value[key], schema[key])]));
+    };
+    const data = Object.fromEntries([['local', local, localKeys], ['session', session, sessionKeys], ['sync', sync, syncKeys]].map(([area, values, keys]) =>
+        [area, Object.fromEntries(keys.map(key => [key, Object.hasOwn(values, key) ? { present: true, value: clean(values[key], schemas[key]) } : { present: false }]))]));
+    const bytes = new TextEncoder().encode(JSON.stringify(data)).length, overBudget = bytes > limits.bytes;
+    return { schemaVersion: 1, source: 'persisted-inputs-only', atomic: false, startedAt, finishedAt: Date.now(), limits,
+        complete: !truncated && !unknownFields && !overBudget, truncated, unknownFields, measuredBytes: bytes,
+        data: overBudget ? { omitted: 'byte-budget' } : data,
+        unavailable: ['runtime layoutPending', 'runtime explicitToday/provisional maps', 'actual native projection decision'] };
+}
+
+const diagnosticError = error => ({ name: String(error?.name || 'Error').slice(0, 80), message: String(error?.message || error).slice(0, 1024) });
+async function passiveCapture(read, timeout = 1000) {
+    let timer;
+    try { return await Promise.race([Promise.resolve().then(read), new Promise((_, reject) => { timer = setTimeout(() => reject(Error('Passive diagnostic deadline exceeded')), timeout); })]); }
+    catch (error) { return { unavailable: diagnosticError(error) }; }
+    finally { clearTimeout(timer); }
+}
+
+// Reuse an already-attached harness session. Never create/attach/wake a worker,
+// fetch remote object properties, wrap Chrome mutations, or change product state.
+export async function observeTodayOrderGroupConsole(existingSession) {
+    const evidence = { source: 'existing-worker-console', warnings: [], dropped: 0, status: 'unavailable', absenceIsNotProof: true, startedAt: Date.now() };
+    const session = await passiveCapture(() => existingSession);
+    if (session?.unavailable) { evidence.error = session.unavailable; return { snapshot: () => structuredClone(evidence), close: () => {} }; }
+    if (!session) return { snapshot: () => structuredClone(evidence), close: () => {} };
+    let closed = false;
+    const listener = event => {
+        if (closed || event.type !== 'warning' || event.args?.[0]?.value !== 'Tab group sync deferred:'
+            || !Number.isFinite(event.timestamp) || event.timestamp < evidence.startedAt) return;
+        if (evidence.warnings.length >= 20) { evidence.dropped = Math.min(evidence.dropped + 1, 1000000); return; }
+        const error = event.args?.[1];
+        evidence.warnings.push({ observedAt: Date.now(), protocolTimestamp: event.timestamp, type: 'Tab group sync deferred:',
+            errorClass: typeof error?.className === 'string' ? error.className.slice(0, 80) : null,
+            description: typeof error?.description === 'string' ? error.description.slice(0, 1024) : null });
+    };
+    const close = () => { if (!closed) { closed = true; evidence.listenerClosed = true; try { session.off('Runtime.consoleAPICalled', listener); } catch (error) { evidence.closeError = diagnosticError(error); } } };
+    try {
+        session.on('Runtime.consoleAPICalled', listener);
+        const enabled = await passiveCapture(() => session.send('Runtime.enable'));
+        if (enabled?.unavailable) { evidence.error = enabled.unavailable; close(); }
+        else evidence.status = 'listening';
+    } catch (error) { evidence.error = diagnosticError(error); close(); }
+    return { snapshot: () => structuredClone({ ...evidence, sessionDetached: session.detached === true }), close };
+}
+
+export async function observeTodayOrderCreation({ phase, before, read, action, poll, assertCreated, onResult, onObservation,
+    captureInputs, observeConsole, record }) {
+    const attempt = { phase, before: structuredClone(before), source: 'passive-creation-diagnostic', observations: 0 };
+    let consoleObserver;
+    const emit = async stage => { try { await record(stage, structuredClone(attempt)); } catch (error) { attempt.recordError = diagnosticError(error); } };
+    try {
+        try { consoleObserver = await observeConsole(); } catch (error) { attempt.consoleUnavailable = diagnosticError(error); }
+        attempt.inputsBefore = await passiveCapture(captureInputs);
+        await emit('creation-attempt-started');
+        const result = await action(); onResult(result);
+        // Reuse the original poll reads: snapshot() may enter the controller.
+        // Diagnostics must not add another command that could drive convergence.
+        const after = await poll(async () => {
+            const state = await read();
+            onObservation(state);
+            if (!attempt.afterAction) {
+                attempt.afterAction = structuredClone(state);
+                attempt.inputsAfterAction = await passiveCapture(captureInputs);
+            }
+            return state;
+        }, state => {
+            attempt.observations++; attempt.last = { state: structuredClone(state) };
+            try { assertCreated(state); attempt.last.passed = true; return true; }
+            catch (error) {
+                attempt.last.passed = false; attempt.last.assertion = diagnosticError(error);
+                attempt.firstFailure ||= { observation: attempt.observations, assertion: structuredClone(attempt.last.assertion) };
+                return false;
+            }
+        }, `${phase}: one exact created identity at its required visible position`);
+        attempt.outcome = 'passed'; return after;
+    } catch (error) { attempt.outcome = 'failed'; attempt.error = diagnosticError(error); throw error; }
+    finally {
+        attempt.inputsAfter = await passiveCapture(captureInputs);
+        try { consoleObserver?.close(); attempt.console = consoleObserver?.snapshot(); }
+        catch (error) { attempt.consoleUnavailable = diagnosticError(error); }
+        await emit('creation-attempt-finished');
+    }
+}
 
 export function serveTodayOrderFixture(request, response) {
     const match = /^\/today-order\/([a-f0-9]{32})\/([a-z][a-z0-9-]*)$/.exec(new URL(request.url, 'http://127.0.0.1').pathname);
@@ -132,16 +270,39 @@ export function assertTodayOrderInput(events, { type, tabId = null, action = nul
     return matches[0];
 }
 
+// Keep each original reload contract unchanged, but retain the exact assertion
+// that prevented convergence instead of reducing every failure to false.
+export function observeTodayReloadAssertions(beforeReload, state, ids, proof) {
+    let stage = 'fixture-provenance';
+    try {
+        const controls = assertReloadFixtureProvenance(beforeReload, state, ids, proof);
+        stage = 'logical-state';
+        same(beforeReload, state, ['spaces', 'bookmarks', 'bindings', 'aliases', 'favorites', 'representation']);
+        stage = 'window-selection';
+        assertReloadWindowSelection(beforeReload, state);
+        stage = 'native-identities';
+        assert.deepEqual(state.tabs.filter(tab => !controls.after.has(tab.id)).map(identity), beforeReload.tabs.filter(tab => !controls.before.has(tab.id)).map(identity));
+        return { passed: true, controls };
+    } catch (error) {
+        return { passed: false, stage, assertion: { name: error.name, message: error.message, stack: error.stack,
+            operator: error.operator, expected: error.expected, actual: error.actual } };
+    }
+}
+export async function appendTodayOrderEvidence(evidence, phase, data, record) {
+    evidence.checkpoints.push({ phase, ...data });
+    await record(structuredClone(evidence));
+}
+
 /** Browser is supplied by the approved sandboxed CI runner, never launched here. */
 export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageForUrl, ui, screenshot, snapshot, bridge, poll,
-    fixture, arcifyId, spotlightId, peerPage, reloadArcify, groupSync, record = async () => {} }) {
+    fixture, arcifyId, spotlightId, peerPage, reloadArcify, groupSync, observeGroupConsole = () => observeTodayOrderGroupConsole(null), record = async () => {} }) {
     assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.env.CI, 'true'); assert.notEqual(process.getuid?.(), 0);
     const nonce = randomBytes(16).toString('hex'), windowId = fixture.windowA, base = `${fixture.base}/today-order/${nonce}`;
     const settings = await apiPage.evaluate(() => chrome.storage.sync.get(['syncTabGroups', 'invertTabOrder', 'todayNewTabsAtTop']));
     const representation = await apiPage.evaluate(async () => (await chrome.storage.local.get('todayOrderRepresentation')).todayOrderRepresentation);
     assert.equal(representation?.version, 1); assert.equal(typeof representation.inverted, 'boolean'); const inverted = representation.inverted;
     const evidence = { nonce, groupSync, inverted, nativePanel: true, checkpoints: [] }, owned = new Set();
-    let native, folder, sourcePage, sourceId, primaryError, reloadReceipt = null, disconnected = false;
+    let native, folder, sourcePage, sourceId, primaryError, reloadReceipt = null, reloadDiagnostic = null, disconnected = false;
     const initialControl = await apiPage.evaluate(readFixturePageIdentity), controlWindowId = initialControl.tab.windowId;
     assert.notEqual(controlWindowId, windowId);
     const controlState = async state => {
@@ -153,17 +314,18 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
         state.groupState = { spaces: state.spaces, activeSpaces: state.activeSpaces, windows: state.windows }; state.fixturePages = { controlWindowId, pages };
         return state;
     };
-    const checkpoint = async (phase, data) => { evidence.checkpoints.push({ phase, ...data }); await record(structuredClone(evidence)); };
+    const checkpoint = (phase, data) => appendTodayOrderEvidence(evidence, phase, data, record);
     const read = async () => {
         const state = await apiPage.evaluate(async () => {
-            const local = await chrome.storage.local.get(['spaces', 'todayOrderRepresentation', 'pinnedTabStatesById', 'tabNameOverridesById', 'persistentFavorites']);
-            const session = await chrome.storage.session.get(['activeSpaces', 'spaceGroupProjection']);
+            const local = await chrome.storage.local.get(['spaces', 'todayOrderRepresentation', 'pinnedTabStatesById', 'tabNameOverridesById', 'persistentFavorites', 'favoriteContinuity']);
+            const session = await chrome.storage.session.get(['activeSpaces', 'spaceGroupProjection', 'favoriteContinuityReceipt']);
             const node = ({ id, parentId, index, title, url, children }) => ({ id, parentId, index, title, ...(url === undefined ? {} : { url }), ...(children ? { children: children.map(node) } : {}) });
             return { tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, pinned, incognito, active, groupId, splitViewId, openerTabId, status }) =>
                 ({ id, windowId, index, url, pendingUrl: pendingUrl || null, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1, openerTabId: openerTabId ?? null, status })).sort((a, b) => a.id - b.id),
                 spaces: (local.spaces || []).map(({ id, bookmarkFolderId, spaceBookmarks, temporaryTabs }) => ({ id, bookmarkFolderId, spaceBookmarks, temporaryTabs })),
                 bookmarks: (await chrome.bookmarks.getTree()).map(node), representation: local.todayOrderRepresentation,
                 bindings: local.pinnedTabStatesById || {}, aliases: local.tabNameOverridesById || {}, favorites: local.persistentFavorites || [],
+                selectionRecovery: { continuity: local.favoriteContinuity ?? null, receipt: session.favoriteContinuityReceipt ?? null },
                 activeSpaces: session.activeSpaces || {}, projection: session.spaceGroupProjection || {}, groups: await chrome.tabGroups.query({}),
                 windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, state }) => ({ id, type, incognito, focused, state })).sort((a, b) => a.id - b.id) };
         });
@@ -180,7 +342,7 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
         await checkpoint('native-input', { label, hosting }); return action();
     };
     const select = async () => {
-        await input('Select exact disposable Today-order Space', () => native.page.click(`#spaceSwitcher button[data-space-id="${folder.spaceId}"]`));
+        await input('Select exact disposable Today-order Space', () => clickTodayOrderSpace(native.page, folder.spaceId, observation => checkpoint('space-selection-input', observation)));
         if (disconnected) await poll(async () => ({ active: (await apiPage.evaluate(() => chrome.storage.session.get('activeSpaces'))).activeSpaces?.[windowId], rendered: await native.page.evaluate(readTodayOrderSidebar) }), value => value.active === folder.spaceId && value.rendered.spaceId === folder.spaceId, 'native and canonical fixture Space selected while deliberately unpaired');
         else await poll(read, value => value.snapshot.activeSpaceId === folder.spaceId && value.rendered.spaceId === folder.spaceId, 'native and authenticated fixture Space selected');
     };
@@ -191,12 +353,13 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
     };
     const settle = async expectedVisible => poll(read, state => { try { assertTodayOrderState(state, { ...request(), expectedVisible }); return true; } catch { return false; } }, 'exact native rendered, canonical and authenticated Today order');
     const created = async (phase, action, { atTop = true, afterTabId = null, requireOpener = false, activate = false, expectedUrl } = {}) => {
-        const before = await read(), result = await action();
-        if (Number.isInteger(result?.id || result?.tabId)) owned.add(result.id || result.tabId);
-        const after = await poll(read, state => {
-            for (const tab of state.tabs.filter(tab => !before.tabs.some(old => old.id === tab.id))) owned.add(tab.id);
-            try { assertTodayCreated(before, state, { ...request(), atTop, afterTabId, requireOpener, activate, expectedUrl }); return true; } catch { return false; }
-        }, `${phase}: one exact created identity at its required visible position`);
+        const before = await read();
+        const after = await observeTodayOrderCreation({ phase, before, read, action, poll,
+            captureInputs: () => apiPage.evaluate(readTodayOrderProjectionInputs),
+            observeConsole: groupSync ? observeGroupConsole : () => observeTodayOrderGroupConsole(null), record: checkpoint,
+            onResult: result => { if (Number.isInteger(result?.id || result?.tabId)) owned.add(result.id || result.tabId); },
+            onObservation: state => { for (const tab of state.tabs.filter(tab => !before.tabs.some(old => old.id === tab.id))) owned.add(tab.id); },
+            assertCreated: state => assertTodayCreated(before, state, { ...request(), atTop, afterTabId, requireOpener, activate, expectedUrl }) });
         const proof = assertTodayCreated(before, after, { ...request(), atTop, afterTabId, requireOpener, activate, expectedUrl });
         assertTodayNewTabRow(after.newTabRow, { spaceId: folder.spaceId, inverted, requiredTabId: proof.expectedVisible[0] });
         await checkpoint(phase, { before, after, proof }); return proof.tabId;
@@ -218,7 +381,14 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
             const matches = result.spaces.filter(space => space.bookmarkFolderId === folder.id); if (matches.length !== 1) throw new Error('Fixture Space not reconciled.');
             return { folderId: folder.id, spaceId: matches[0].id, savedIds: [one.id, nested.id, two.id] };
         }, { nonce, base });
-        native = await nativeSidebar(); await select(); await native.page.evaluate(installTodayOrderTrace); await settle([]);
+        native = await nativeSidebar();
+        // The owned New Tab launcher is setup, not a creation-order fixture.
+        // Remove its exact identity before selecting/baselining the disposable
+        // Space; retired New Tab history must not defer this window's projection.
+        const removedLauncher = await native.removeLauncher();
+        await select();
+        await waitForTodayMoveHelperCleanup({ read, poll, closedHelper: removedLauncher });
+        await native.page.evaluate(installTodayOrderTrace); await settle([]);
         sourceId = await created('browser-api-standalone-top', () => apiPage.evaluate(options => chrome.tabs.create(options), { windowId, url: `${base}/source`, active: false }), { expectedUrl: `${base}/source` });
         sourcePage = await pageForUrl(`${base}/source`); await sourcePage.waitForSelector('#today-order-child');
         const second = await created('second-browser-standalone-top', () => apiPage.evaluate(options => chrome.tabs.create(options), { windowId, url: `${base}/second`, active: false }), { expectedUrl: `${base}/second` });
@@ -312,6 +482,8 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
         const closedHelper = await native.close(); native = null;
         const beforeReload = await controlState(await waitForTodayMoveHelperCleanup({ read, poll, closedHelper }));
         const observerBefore = await peerPage.evaluate(readFixturePageIdentity);
+        reloadDiagnostic = { before: structuredClone(beforeReload), observerBefore };
+        await checkpoint('witnessed-reload-baseline', reloadDiagnostic);
         await peerPage.evaluate(() => {
             const trace = globalThis.__todayOrderReloadEvents = { created: [], removed: [] };
             const created = tab => trace.created.push({ id: tab.id, windowId: tab.windowId, url: tab.url, pendingUrl: tab.pendingUrl });
@@ -321,19 +493,19 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
         });
         const reloaded = await reloadArcify(); apiPage = reloaded.arcifyOptions;
         const observerAfter = await peerPage.evaluate(readFixturePageIdentity);
+        reloadDiagnostic.proof = { name: 'arcify', controlWindowId, lifecycle: reloaded.evidence, observerBefore, observerAfter };
         const afterReload = await poll(async () => {
             const state = await controlState(await read());
             state.nativeEvents = await peerPage.evaluate(() => globalThis.__todayOrderReloadEvents); return state;
         }, state => {
-            try {
-                const proof = { name: 'arcify', controlWindowId, lifecycle: reloaded.evidence, observerBefore, observerAfter, nativeEvents: state.nativeEvents };
-                const controls = assertReloadFixtureProvenance(beforeReload, state, { arcifyId, spotlightId }, proof);
-                same(beforeReload, state, ['spaces', 'bookmarks', 'bindings', 'aliases', 'favorites', 'representation']);
-                assertReloadWindowSelection(beforeReload, state);
-                assert.deepEqual(state.tabs.filter(tab => !controls.after.has(tab.id)).map(identity), beforeReload.tabs.filter(tab => !controls.before.has(tab.id)).map(identity));
-                reloadReceipt = { proof, beforeIds: [...controls.before], afterIds: [...controls.after], beforePages: beforeReload.fixturePages.pages, afterPages: state.fixturePages.pages };
-                return true;
-            } catch { return false; }
+            const proof = { ...reloadDiagnostic.proof, nativeEvents: state.nativeEvents };
+            const result = observeTodayReloadAssertions(beforeReload, state, { arcifyId, spotlightId }, proof);
+            reloadDiagnostic.last = { state: structuredClone(state), proof: structuredClone(proof),
+                passed: result.passed, ...(result.passed ? {} : { stage: result.stage, assertion: result.assertion }) };
+            if (!result.passed) return false;
+            const controls = result.controls;
+            reloadReceipt = { proof, beforeIds: [...controls.before], afterIds: [...controls.after], beforePages: beforeReload.fixturePages.pages, afterPages: state.fixturePages.pages };
+            return true;
         }, 'same exact content identities survive witnessed reload with only proven control-page replacements');
         await peerPage.evaluate(() => globalThis.__stopTodayOrderReloadEvents());
         // A remounted switcher can leave its already-selected chip offscreen.
@@ -347,7 +519,7 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
         await checkpoint('witnessed-reload-preserves-manual-and-created-order', { lifecycle: reloaded.evidence, controlReplacement: reloadReceipt, before: beforeReload, after: afterReload, rendered: (await read()).rendered, helperId: newHelper[0].id });
         return evidence;
     } catch (error) {
-        primaryError = error; await checkpoint('today-order-failed', { error: { message: error.message, stack: error.stack }, owned: [...owned] }).catch(() => {});
+        primaryError = error; await checkpoint('today-order-failed', { error: { message: error.message, stack: error.stack }, owned: [...owned], reloadDiagnostic }).catch(() => {});
         if (native?.page) await screenshot(native.page, `today-order-sync-${groupSync}-failure`, false).catch(() => {}); throw error;
     } finally {
         await finishBookmarkFixture([
@@ -375,6 +547,6 @@ export async function exerciseTodayCreationOrder({ apiPage, nativeSidebar, pageF
                 } catch { return false; } }, 'fixture cleanup restores every original content identity, bookmark order, Space and window focus');
                 await checkpoint('fixture-isolation-restored', { initialSpaceId, state: restored });
             }
-        ], primaryError, record);
+        ], primaryError, event => checkpoint(event.phase, { errors: event.errors }));
     }
 }

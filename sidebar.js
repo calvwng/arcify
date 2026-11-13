@@ -1,3 +1,4 @@
+import { createSidebarActivationSelection } from './sidebar-activation-selection.js';
 import { createSelectedTabClose, installSelectionCloseKeys } from './selected-tab-close-ui.js';
 import { CommittedSavedSections, observeSavedSectionChanges, savedSectionSignature } from './sidebar-saved-section.js';
 import { sharedTodayRequest, createRemoteTodayRow } from './shared-today-ui.js';
@@ -125,6 +126,15 @@ const bookmarkOrderBaselines = new Map();
 const favoritesContext = () => ({ spaces, activeSpaceId, pendingActiveSpaceId, windowId: currentWindow?.id });
 const bookmarkSelection = createBookmarkSelection({ document, getContext: favoritesContext, onGesture: () => todaySelection.clear() });
 const todaySelection = createTodayTabSelection({ document, getContext: favoritesContext, onGesture: () => bookmarkSelection.clear() });
+const todayActivationSelection = createSidebarActivationSelection({
+    capture: () => todaySelection.captureActivation(),
+    getContext: () => ({ windowId: currentWindow?.id, spaceId: activeSpaceId }),
+    readTab: id => chrome.tabs.get(id)
+});
+window.addEventListener('blur', () => todayActivationSelection.clear());
+window.addEventListener('pagehide', () => todayActivationSelection.clear());
+document.addEventListener('visibilitychange', () => { if (document.hidden) todayActivationSelection.clear(); });
+
 const selectedTabClose = createSelectedTabClose({
     sendRequest: message => chrome.runtime.sendMessage(message), showStatus: showFavoritesStatus,
     begin: () => { pendingMutationCount++; },
@@ -1282,6 +1292,7 @@ function clearFolderOpenTimer() {
 async function setActiveSpace(spaceId, updateTab = true) {
     const space = spaces.find(s => s.id === spaceId);
     if (!space) return false;
+    const activateSelection = todayActivationSelection.begin({ windowId: currentWindow?.id, spaceId });
     if (activeSpaceId && activeSpaceId !== spaceId) {
         tabContextMenuRequest++; closeTabContextMenu();
         bookmarkSelection.clear();
@@ -1303,7 +1314,7 @@ async function setActiveSpace(spaceId, updateTab = true) {
         if (activeSpaceId !== spaceId) return false;
         const tab = tabs.find(t => t.id === space.lastTab) || tabs[tabs.length - 1];
         if (tab) {
-            await chrome.tabs.update(tab.id, { active: true });
+            if (!await activateSelection(tab.id, () => chrome.tabs.update(tab.id, { active: true }))) return false;
             activateTabInDOM(tab.id);
             activeTabReveal.request(tab.id);
         }
@@ -2815,6 +2826,9 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false, d
         } else if (event.button === MOUSE_BUTTON.LEFT) {
             // Don't activate tab when clicking close button
             if (event.target === actionButton) return;
+            const activateSelection = !isPinned && !isBookmarkOnly
+                ? todayActivationSelection.begin({ windowId: currentWindow?.id, spaceId: activeSpaceId })
+                : async (_id, activate) => { await activate(); return true; };
 
             // Remove active class from all tabs and favicons
             clearAllActiveStates();
@@ -2917,7 +2931,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false, d
             } else {
                 // It's a regular tab, just activate it
                 tabElement.classList.add('active');
-                await Utils.focusTab(tab.id);
+                if (!await activateSelection(tab.id, () => Utils.focusTab(tab.id))) return;
                 // Store last active tab for the space
                 const space = ownerOf(spaces, tab.id);
                 if (space) {
@@ -3293,6 +3307,7 @@ function handleTabUpdate(tabId, changeInfo, tab) {
 }
 
 async function handleTabRemove(tabId) {
+    todayActivationSelection.remove(tabId);
     Logger.log('Tab removed:', tabId);
     editorSessions.dispose('tab', tabId);
     await Utils.removePinnedTabState(tabId);
@@ -3364,7 +3379,7 @@ function handleTabActivated(activeInfo) {
         return;
     }
     const completeSelectionActivation = bookmarkSelection.captureActivation();
-    const completeTodayActivation = todaySelection.captureActivation();
+    const completeTodayActivation = todayActivationSelection.consume(activeInfo) || todaySelection.captureActivation();
     chrome.windows.getCurrent({ populate: false }, async (currentWindow) => {
         if (activeInfo.windowId !== currentWindow.id
             || activationSequence !== activationSequenceByWindow.get(activeInfo.windowId)

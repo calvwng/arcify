@@ -1,0 +1,10 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; padding: 22px; background: Canvas; color: CanvasText; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+p { font-size: 14px; line-height: 1.45; }
+.actions { display: flex; gap: 10px; margin-top: 18px; }
+button { font: inherit; font-size: 14px; padding: 10px 13px; border-radius: 7px; border: 1px solid GrayText; cursor: pointer; }
+button:focus-visible { outline: 3px solid Highlight; outline-offset: 3px; }
+#openSidebar { background: Highlight; color: HighlightText; }
+button:disabled { opacity: .55; cursor: default; }
+#promptStatus { margin-bottom: 0; font-size: 12px; }

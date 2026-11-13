@@ -46,3 +46,9 @@ tests/e2e/screenshots/
 coverage/
 .nyc_output/
 junit.xml
+__pycache__/
+*.pyc
+disposable-layout-*/
+packaged-layout-*/
+arcify-source-layout-*/
+arcify-packaged-layout-*/

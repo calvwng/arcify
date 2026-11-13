@@ -213,3 +213,20 @@ test('removed plain-click anchor never substitutes an equal-URL row', () => {
 test('opposite section gesture consumes pending plain-click seed', () => {
     const f=fixture();f.click(1);f.event(f.document.querySelector('[data-bookmark-id="pin"]'),'click',{ctrlKey:true});f.click(2,{ctrlKey:true});assert.deepEqual(f.ids(),[2]);
 });
+
+for(const mode of ['ctrl-selected-first','ctrl-selected-second','shift-selected','unselected-context','plain-reclick','blur','rerender','late-activation','earlier-activation','space-switch-ctrl','space-switch-shift'])
+test(`return lifecycle ${mode}`,()=>{
+ const f=fixture();f.click(1);const early=f.selection.captureActivation();f.click(2,{[mode==='shift-selected'?'shiftKey':'ctrlKey']:true});
+ assert.deepEqual(f.ids(),[1,2]);let target=mode==='ctrl-selected-first'?1:2,expected=[1,2];
+ if(mode==='unselected-context'){target=3;expected=[3];}
+ if(mode==='plain-reclick'){f.click(2);expected=[2];}
+ if(mode==='blur'){f.event(f.window,'blur');expected=[2];}
+ if(mode==='rerender'){const old=f.row(1),replacement=old.cloneNode(true);f.selection.register(replacement);old.replaceWith(replacement);f.selection.reconcile();}
+ if(mode==='late-activation'){f.selection.captureActivation()();expected=[2];}
+ if(mode==='earlier-activation')early();
+ if(mode.startsWith('space-switch')){
+  f.context.activeSpaceId='other';f.selection.reconcile();f.context.activeSpaceId='s';f.selection.reconcile();
+  f.click(2,{[mode.endsWith('ctrl')?'ctrlKey':'shiftKey']:true});expected=[2];
+ }
+ assert.deepEqual(f.selection.freeze(f.row(target)).entries.map(e=>e.tabId),expected);
+});

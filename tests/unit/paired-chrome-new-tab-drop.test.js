@@ -93,3 +93,39 @@ test('failure diagnostics precede cleanup, strict mutation oracles remain and ph
  assert.match(source,/Mouse release after cancellation must not deliver a late drop/);assert.match(source,/physicalEscapeAsserted:false/);
  const docs=await readFile(new URL('../../docs/move-to-new-window.md',import.meta.url),'utf8');assert.match(docs,/Physical Escape.*manual/);
 });
+
+function readyFixture(){return {geometry:{hosting:{tab:null,windowId:10},activeSpaceId:'s',activeSpaceIds:['s'],renderedTodayIds:[99,7,8],scrollHeight:700,clientHeight:400,row:{height:40}},raw:{tabs:[{id:7,windowId:10},{id:8,windowId:10}],spaces:[{id:'s',spaceBookmarks:[],temporaryTabs:[99,7,8]}]}};}
+const readyRequest={ids:[7,8],spaceId:'s',windowId:10};
+test('sticky readiness waits for asynchronous rendering without replaying fixture creation',async()=>{
+ const {waitForStickyFixtureReady,assertStickyFixtureReady}=await import('../../scripts/paired-chrome-new-tab-drop.mjs');
+ const delayed=readyFixture();delayed.geometry.renderedTodayIds=[99,7];
+ const samples=[delayed,readyFixture()],observed=[];let reads=0;
+ const result=await waitForStickyFixtureReady({read:async()=>samples[reads++],request:readyRequest,observe:s=>observed.push(s),
+  poll:async(read,accept)=>{const first=await read();assert.equal(accept(first),false);const second=await read();assert.equal(accept(second),true);return second;}});
+ assert.equal(reads,2);assert.equal(observed.length,2);assert.equal(assertStickyFixtureReady(result,readyRequest),result);
+});
+for(const [name,change] of [
+ ['wrong Space',s=>s.geometry.activeSpaceId='other'],['multiple active Spaces',s=>s.geometry.activeSpaceIds.push('other')],
+ ['wrong native host',s=>s.geometry.hosting.windowId=20],['tab-hosted page',s=>s.geometry.hosting.tab={id:55}],
+ ['missing owned row',s=>s.geometry.renderedTodayIds.pop()],['duplicate owned row',s=>s.geometry.renderedTodayIds.push(7)],
+ ['wrong native window',s=>s.raw.tabs[0].windowId=20],['wrong logical owner',s=>s.raw.spaces[0].id='other'],
+ ['duplicate membership',s=>s.raw.spaces[0].temporaryTabs.push(7)],['saved rather than Today',s=>s.raw.spaces[0].spaceBookmarks.push(7)],
+ ['insufficient overflow',s=>s.geometry.scrollHeight=480]
+])test(`sticky readiness rejects ${name}`,async()=>{
+ const {assertStickyFixtureReady,waitForStickyFixtureReady}=await import('../../scripts/paired-chrome-new-tab-drop.mjs');
+ const sample=readyFixture();change(sample);assert.throws(()=>assertStickyFixtureReady(sample,readyRequest));let observed;
+ await assert.rejects(waitForStickyFixtureReady({read:async()=>sample,request:readyRequest,observe:s=>{observed=s;},poll:async(read,accept)=>{assert.equal(accept(await read()),false);throw Error('bounded timeout');}}),/bounded timeout/);
+ assert.equal(observed,sample,'Failed readiness retains the raw sample for pre-cleanup evidence');
+});
+test('sticky setup samples geometry once per observation and records original error before cleanup',async()=>{
+ const source=await readFile(new URL('../../scripts/paired-chrome-new-tab-drop.mjs',import.meta.url),'utf8');
+ assert.match(source,/for\(let i=0;i<36;i\+\+\)/);
+ assert.doesNotMatch(source,/\(await geometry\(\)\)\.scrollHeight/);
+ assert.match(source,/geometry:await geometry\(\),raw:await raw\(\)/);
+ assert.match(source,/await checkpoint\('sticky-fixture-ready-before-validation'/);
+ const failure=source.indexOf("checkpoint('sticky-fixture-failed-before-cleanup'");
+ assert(failure>0&&failure<source.indexOf('finally{',failure));
+ assert.match(source,/error:\{name:error.name,message:error.message,stack:error.stack\}/);
+ assert.match(source,/failure.raw=await raw\(\)/);assert.match(source,/failure.geometry=await geometry\(\)/);
+ assert.match(source,/request:\{ids,spaceId:space.id,windowId:sourceId\}/);
+});

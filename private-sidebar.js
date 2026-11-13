@@ -1,14 +1,18 @@
-export function createPrivateTabs(chrome, windowId) {
+export function createPrivateTabs(chrome, windowId, isActive = () => true) {
     if (!Number.isInteger(windowId) || windowId < 0) throw new Error('Private window unavailable');
     const valid = tab => Number.isInteger(tab?.id) && tab.id >= 0 && tab.windowId === windowId && tab.incognito === true;
+    function assertActive() { if (!isActive()) throw new Error('Private sidebar unavailable'); }
     async function windowExists() {
+        assertActive();
         const owner = await chrome.windows.get(windowId);
+        assertActive();
         if (owner.id !== windowId || owner.incognito !== true) throw new Error('Private window unavailable');
     }
     async function exactTab(id) {
         if (!Number.isInteger(id) || id < 0) throw new Error('Private tab unavailable');
         await windowExists();
         const tab = await chrome.tabs.get(id);
+        assertActive();
         if (!valid(tab) || tab.id !== id) throw new Error('Private tab unavailable');
         return tab;
     }
@@ -17,14 +21,15 @@ export function createPrivateTabs(chrome, windowId) {
             await windowExists();
             return (await chrome.tabs.query({ windowId })).filter(valid).sort((a, b) => a.index - b.index);
         },
-        async activate(id) { await exactTab(id); await chrome.tabs.update(id, { active: true }); },
-        async close(id) { await exactTab(id); await chrome.tabs.remove(id); },
-        async create() { await windowExists(); await chrome.tabs.create({ windowId, active: true, url: 'chrome://newtab/' }); }
+        async activate(id) { await exactTab(id); assertActive(); await chrome.tabs.update(id, { active: true }); },
+        async close(id) { await exactTab(id); assertActive(); await chrome.tabs.remove(id); },
+        async create() { await windowExists(); assertActive(); await chrome.tabs.create({ windowId, active: true, url: 'chrome://newtab/' }); }
     };
 }
 
 export async function mountPrivateSidebar({ chrome, document, windowId }) {
-    const api = createPrivateTabs(chrome, windowId);
+    let revision = 0, stopped = false;
+    const api = createPrivateTabs(chrome, windowId, () => !stopped);
     const root = document.createElement('main');
     root.className = 'private-sidebar';
     const heading = document.createElement('h1');
@@ -39,7 +44,6 @@ export async function mountPrivateSidebar({ chrome, document, windowId }) {
     list.setAttribute('aria-label', 'Private tabs');
     root.append(heading, note, add, status, list);
     document.body.replaceChildren(root);
-    let revision = 0, stopped = false;
     const subscriptions = [];
     function dispose() {
         stopped = true;

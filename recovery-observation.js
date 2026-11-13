@@ -1,9 +1,10 @@
 import { encodeFavoriteContinuityState as encode } from './favorite-continuity.js';
+import { explicitTodayEpochs } from './explicit-today-ownership.js';
 import { RECOVERY_OBSERVATION_TYPE, validateRecoveryReport } from './recovery-report-protocol.js';
 
 export { RECOVERY_OBSERVATION_TYPE } from './recovery-report-protocol.js';
-const LOCAL_KEYS = ['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'persistentFavorites', 'spaceSavedMoveJournal', 'archiveReopenClaims'];
-const SESSION_KEYS = ['spaceSession', 'spaceRestoreQueue', 'spaceRecoveryCandidates', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'favoriteSession'];
+const LOCAL_KEYS = ['spaces', 'spaceModelVersion', 'spaceTabSnapshot', 'spaceWindowSnapshot', 'persistentFavorites', 'spaceSavedMoveJournal', 'archiveReopenClaims', 'spaceDurableTodayLayout'];
+const SESSION_KEYS = ['spaceSession', 'activeSpaces', 'spaceRestoreQueue', 'spaceRecoveryCandidates', 'spaceWindowKeys', 'spaceRestoreWindowKeys', 'favoriteSession'];
 const clone = value => structuredClone(value);
 const array = value => Array.isArray(value) ? value : [];
 const unavailable = () => Object.assign(new Error('Recovery status is unavailable. No recovery action was requested.'), { code: 'RECOVERY_STATUS_UNAVAILABLE' });
@@ -11,42 +12,70 @@ const unavailable = () => Object.assign(new Error('Recovery status is unavailabl
 // This observer never initializes/reconciles the stores, calls their queryTabs
 // wrapper, invokes the matcher, persists a checkpoint, or writes browser data.
 // Its in-memory counter measures observed events, not a durable model revision.
-export function createRecoveryObserver(store, api = chrome, { now = Date.now, monotonicNow = () => Math.floor(performance.now()), workerId = crypto.randomUUID() } = {}) {
+export function createRecoveryObserver(store, api = chrome, { now = Date.now, monotonicNow = () => Math.floor(performance.now()), workerId = crypto.randomUUID(), layoutDetails = false } = {}) {
     let revision = 0, sequence = 0, disposed = false;
     const listeners = [];
     const changed = () => { revision++; };
     for (const event of [api.tabs?.onCreated, api.tabs?.onRemoved, api.tabs?.onUpdated, api.tabs?.onMoved,
         api.tabs?.onDetached, api.tabs?.onAttached, api.tabs?.onReplaced, api.windows?.onCreated,
-        api.windows?.onRemoved, api.storage?.onChanged]) {
+        api.windows?.onRemoved, api.storage?.onChanged,
+        ...(layoutDetails ? [api.bookmarks?.onMoved, api.bookmarks?.onRemoved, api.bookmarks?.onChanged, api.bookmarks?.onCreated] : [])]) {
         if (event?.addListener) { event.addListener(changed); listeners.push(() => event.removeListener(changed)); }
     }
     function memory() {
-        return clone({ initialized: store.initialized === true, spaces: array(store.spaces),
+        return clone({ initialized: store.initialized === true, spaces: array(store.spaces), active: store.active || {},
             restoreQueue: array(store.restoreQueue), recoveryCandidates: [...(store.recoveryCandidates || [])],
             provisional: [...(store.provisional || [])], restoredRanks: [...(store.restoredRanks || [])],
             windowKeys: [...(store.windowKeys || [])], restoreWindowKeys: [...(store.restoreWindowKeys || [])],
             snapshotByTab: [...(store.snapshotByTab || [])],
             pendingCreations: [...(store.pendingCreations || [])], archivePending: [...(store.archiveStore?.pendingCreatedIds || [])],
+            durableLayout: store.durableLayout || null, layoutPending: [...(store.layoutPending || [])],
+            ...(layoutDetails ? { automaticLayoutRestore: store.automaticLayoutRestore !== false,
+                explicitToday: [...(store.explicitToday || [])], explicitTodayEpoch: store.explicitTodayEpoch || null,
+                explicitTodayEpochs: store.explicitTodayEpochs || null,
+                favoriteRecovery: { active: store.favoriteStore?.recovery?.active === true,
+                    entries: array(store.favoriteStore?.recovery?.entries).map(({tabId,windowId,phase})=>({tabId,windowId,phase})) } } : {}),
             favoriteInitialized: store.favoriteStore?.initialized === true,
             favoriteDirty: store.favoriteStore?.persistenceDirty === true,
             favorites: array(store.favoriteStore?.items), favoriteState: store.favoriteStore?.state ?? null,
             transient: store.transientWindows?.observationState?.() ?? null });
     }
+    // Only the selected layout report needs these extra read-only checks. The
+    // aggregate reader retains its existing read surface. No epoch is created.
+    const bookmarkRoots = async () => {
+        const ids = [...new Set(array(store.spaces).map(s=>s.bookmarkFolderId).filter(id=>typeof id==='string'&&id.length))];
+        if (ids.length > 200 || !api.bookmarks?.get || !api.bookmarks?.search
+            || [api.bookmarks.onMoved,api.bookmarks.onRemoved,api.bookmarks.onChanged,api.bookmarks.onCreated].some(event=>!event?.addListener||!event?.removeListener)) return null;
+        const root = (await api.bookmarks.search({title:'Arcify'})).find(node=>!node.url);
+        return Promise.all(ids.map(async id=>{
+            try { const [folder] = await api.bookmarks.get(id);
+                return [id, Boolean(folder && !folder.url && root && String(folder.parentId)===String(root.id))];
+            } catch { return [id, false]; }
+        }));
+    };
     const reads = async () => {
-        const [local, session, tabs, windows] = await Promise.all([
-            api.storage.local.get(LOCAL_KEYS), api.storage.session.get(SESSION_KEYS),
-            api.tabs.query({}), api.windows.getAll({ populate: false })
+        const [local, session, tabs, windows, groupSyncSetting] = await Promise.all([
+            api.storage.local.get(layoutDetails ? [...LOCAL_KEYS,'pinnedTabStatesById'] : LOCAL_KEYS), api.storage.session.get(SESSION_KEYS),
+            api.tabs.query({}), api.windows.getAll({ populate: false }),
+            api.storage.sync?.get ? api.storage.sync.get('syncTabGroups') : Promise.resolve(null)
         ]);
+        const decorate = tab => ({ ...tab, knownTransient: store.transientWindows?.isKnownExcluded?.(tab) === true,
+            ...(layoutDetails ? {knownGlobal: Boolean(store.isGlobalTab?.(tab)), knownGlobalId: Boolean(store.isGlobalTab?.(tab.id)), effectiveTransient: Boolean(store.isTransientTab?.(tab))} : {}) });
+        const layoutChecks = layoutDetails ? { currentEpochs: await explicitTodayEpochs(store, api), bookmarkRoots: await bookmarkRoots(),
+            tabs: array(tabs).filter(tab=>tab.incognito===false).map(decorate),
+            windows: array(windows).filter(w=>w.incognito===false).map(({id,type,incognito})=>({id,type,incognito})) } : null;
         // Keep private-window data out of the policy input as well as the output.
         const eligibleWindows = array(windows).filter(w => w.type === 'normal' && w.incognito === false);
         const ids = new Set(eligibleWindows.map(w => w.id));
-        return { local, session, tabs: array(tabs).filter(t => t.incognito === false && ids.has(t.windowId))
-            .map(tab => ({ ...tab, knownTransient: store.transientWindows?.isKnownExcluded?.(tab) === true })),
+        return { local, session, ...(layoutDetails ? {layoutChecks} : {}), groupSyncEnabled:groupSyncSetting===null?null:typeof groupSyncSetting.syncTabGroups==='boolean'
+            ?groupSyncSetting.syncTabGroups:groupSyncSetting.syncTabGroups===undefined?false:null,
+            tabs: array(tabs).filter(t => t.incognito === false && ids.has(t.windowId))
+            .map(decorate),
             windows: eligibleWindows.map(({ id, type, incognito }) => ({ id, type, incognito })) };
     };
     const comparable = input => ({ ...input,
-        tabs: input.tabs.map(({ id, windowId, index, url, pendingUrl, pinned, groupId, splitViewId, knownTransient }) =>
-            ({ id, windowId, index, url, pendingUrl, pinned, groupId, splitViewId, knownTransient })).sort((a,b) => a.id-b.id),
+        tabs: input.tabs.map(({ id, windowId, index, url, pendingUrl, pinned, groupId, splitViewId, knownTransient, knownGlobal, knownGlobalId, effectiveTransient }) =>
+            ({ id, windowId, index, url, pendingUrl, pinned, groupId, splitViewId, knownTransient, knownGlobal, knownGlobalId, effectiveTransient })).sort((a,b) => a.id-b.id),
         windows: [...input.windows].sort((a,b) => a.id-b.id) });
     async function capture() {
         if (disposed) throw unavailable();

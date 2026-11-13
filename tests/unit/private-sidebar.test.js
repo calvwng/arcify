@@ -192,3 +192,32 @@ test('refresh preserves keyboard focus by exact tab and action, closed target re
         ui.dispose();
     } finally { prototype.focus = original; }
 });
+
+test('disposal during native validation cancels a queued private mutation', async () => {
+    for (const action of ['activate', 'close', 'create']) {
+        const f = fixture();
+        const ui = await mountPrivateSidebar({ ...f, windowId: 7 });
+        let release;
+        f.chrome.windows.get = () => new Promise(resolve => { release = resolve; });
+        const selector = action === 'create' ? '.private-sidebar > button' : `[data-action="${action}"]`;
+        f.document.querySelector(selector).click();
+        ui.dispose();
+        release({ id: 7, incognito: true });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(f.mutations, [], action);
+        assert.equal(f.document.querySelectorAll('.private-tab').length, 0);
+    }
+});
+
+test('disposal during tab validation cancels pending activation', async () => {
+    const f = fixture();
+    const ui = await mountPrivateSidebar({ ...f, windowId: 7 });
+    let release;
+    f.chrome.tabs.get = () => new Promise(resolve => { release = resolve; });
+    f.document.querySelector('[data-action="activate"]').click();
+    await new Promise(resolve => setImmediate(resolve));
+    ui.dispose();
+    release({ id: 1, windowId: 7, incognito: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.mutations, []);
+});

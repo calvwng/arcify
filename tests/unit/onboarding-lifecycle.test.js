@@ -23,14 +23,14 @@ function background(completed = false, onboardingVersion = undefined, version = 
         tabs: { onCreated: event, create: async tab => opened.push(tab), onActivated: event, onUpdated: event, onRemoved: event }
     };
     runInNewContext(source, {
-        chrome, console, registerTourMessages() {}, registerStartupLauncher() {},
+        chrome, console, registerTourMessages() {}, registerStartupLauncher() {}, registerStartupPrompt() {},
         registerBookmarkListeners() {},
         registerSpotlightBridge() {},
         enqueueBookmarkOrder: async () => [],
         createLittleArcWindowGeometry: () => ({}), createTransientWindowStore: () => ({ initialize: async () => {}, observe() {}, observeRemoved() {}, observeWindowRemoved() {},
             observeReplacement() {}, observeDetached() {}, flushObservedUnlocked: async () => {}, isExcluded: () => false, isTransientWindow: () => false }),
-        registerTransientControlMessages() {},
-        registerPeek() {}, registerRecoveryObservation() {}, summarizeRecoveryObservation() {},
+        registerTransientControlMessages() {}, registerDimmingPreferences() {},
+        registerPeek() {}, registerRecoveryObservation() {}, selectedRecoveryDiagnosticsEnabled: true, registerSelectedRecoveryDiagnostics() {}, summarizeRecoveryObservation() {},
         createFavoriteContinuity: () => ({}), FavoriteStore: class { install() {} }, registerFavoriteMessages() {}, registerTodayFolderMessages() {}, registerTodayMoveMessages() {}, registerTodayRecoveryMessages() {}, registerSharedToday() {}, registerLittleArcHeader() {}, registerLittleArcLinkMenu() {}, registerSavedMoveMessages() {}, registerSelectedTabClose() {}, registerTabMenuMessages() {}, registerTodaySplitMessages() {}, registerMoveTabWindowMessages() {}, registerArchiveMessages() {},
         SpaceStore: class { isTransientTab() { return false; } isTransientWindow() { return false; } install() {} async dispatch() { return [{ id: 'home' }]; } },
         Utils: { getSettings: async () => ({ autoArchiveEnabled: false }) },

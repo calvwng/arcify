@@ -148,7 +148,7 @@ export function createTodayTabSelection({ document, getContext, onGesture = () =
         return () => { if (started === interaction) { clear({ keepAnchor: true }); reconcile(); } };
     }
     document.addEventListener('click', event => {
-        if (event.target.closest?.('#tab-context-menu, #todayFolderDialog, #todayRecoveryDialog, #favoritesDropNotice')) return;
+        if (event.target.closest?.('#tab-context-menu, #todayFolderDialog, #todayRecoveryDialog, #selectedRecoveryDiagnosticDialog, #favoritesDropNotice')) return;
         const row = event.target.closest?.(ROW);
         if (!row || !descriptor(row, context())) clear();
     }, true);

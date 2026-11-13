@@ -21,12 +21,13 @@ beforeEach(() => {
     const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); }, removeListener(fn) { this.listeners = this.listeners.filter(listener => listener !== fn); }, emit(...args) { this.listeners.forEach(fn => fn(...args)); } });
     globalThis.chrome = {
         runtime: { getURL: path => `chrome-extension://arcify/${path}` },
+        windows: { get: async id => ({id,type:'normal',incognito:false}) },
         storage: { local: area(local), session: area(session), sync: area(sync), onChanged: event() },
         tabs: { onCreated: event(), onUpdated: event(), onRemoved: event(), onReplaced: event(), onActivated: event(), onMoved: event(), query: async query => structuredClone(tabs.filter(t => query.groupId === undefined || query.groupId === t.groupId)),
             group: async args => { mutations.push(['group', args]); const id = args.groupId ?? 100 + groups.length; if (!groups.some(g => g.id === id)) groups.push({ id, windowId: 1 }); tabs.filter(t => args.tabIds.includes(t.id)).forEach(t => t.groupId = id); return id; },
             move: async (...args) => mutations.push(['move', ...args]) },
         tabGroups: { move: async (...args) => mutations.push(['groupMove', ...args]), onRemoved: event(), onUpdated: event(), query: async () => groups, update: async (id, attrs) => { mutations.push(['update', id, attrs]); Object.assign(groups.find(g => g.id === id), attrs); } },
-        bookmarks: { onMoved: event(), onRemoved: event(), onChanged: event(), search: async () => [{ id: 'root' }], getChildren: async () => [], create: async ({ title }) => ({ id: title, title }) }
+        bookmarks: { onMoved: event(), onRemoved: event(), onChanged: event(), search: async () => [{ id: 'root' }], get: async id => [{id,parentId:'root',title:id}], getChildren: async () => [], create: async ({ title }) => ({ id: title, title }) }
     };
 });
 test('independent default ignores group identity and order and retains empty spaces', async () => {
@@ -754,7 +755,7 @@ const visibleToday = (store, id = 'a') => {
     const ids = [...store.spaces.find(space => space.id === id).temporaryTabs];
     return store.todayOrderInverted ? ids.reverse() : ids;
 };
-for (const inverted of [false, true]) for (const top of [false, true]) test(`new Today insertion is prospective and visible-order aware inverted=${inverted} top=${top}`, async () => {
+for (const observed of [false, true]) for (const inverted of [false, true]) for (const top of [false, true]) test(`new Today insertion is prospective and visible-order aware observed=${observed} inverted=${inverted} top=${top}`, async () => {
     sync.invertTabOrder = inverted; sync.todayNewTabsAtTop = top;
     local.spaces = [space('a', [1, 2])];
     const store = new SpaceStore(); store.install(); await store.run(() => {});
@@ -763,9 +764,11 @@ for (const inverted of [false, true]) for (const top of [false, true]) test(`new
     // The legacy Pinned-only option no longer changes Today representation.
     sync.invertTabOrder = !inverted;
     const standalone = { id: 3, windowId: 1, url: 'https://new.test/' };
+    if(observed) store.layoutObservedCreations.set(3,{windowId:1,worker:store.currentLayoutWorker,token:'observed-3'});
     tabs.push(standalone); chrome.tabs.onCreated.emit(standalone); await store.run(() => {});
     assert.deepEqual(visibleToday(store), top ? [3, ...oldVisible] : [...oldVisible, 3]);
     const child = { id: 4, windowId: 1, openerTabId: 1, url: 'https://child.test/' };
+    if(observed) store.layoutObservedCreations.set(4,{windowId:1,worker:store.currentLayoutWorker,token:'observed-4'});
     tabs.push(child); chrome.tabs.onCreated.emit(child); await store.run(() => {});
     const visible = visibleToday(store); assert.equal(visible[visible.indexOf(1) + 1], 4);
     const before = [...store.spaces[0].temporaryTabs];

@@ -1,5 +1,7 @@
 import { createTodayRecoveryAction, appendTodayRecoveryChoice } from './today-recovery-ui.js';
 import { createTodayRecoveryChannel } from './today-recovery-channel.js';
+import { selectedRecoveryDiagnosticsEnabled } from './recovery-diagnostics-config.js';
+import { createSelectedRecoveryDiagnosticAction, appendSelectedRecoveryDiagnostic } from './selected-recovery-diagnostics-ui.js';
 const STALE = 'The Today selection changed. Select the tabs again. Nothing was moved.';
 const UNKNOWN = 'The move result is unknown. Check both Spaces before trying again; nothing was retried.';
 
@@ -41,11 +43,12 @@ export function createTodaySpaceMoveAction({ document, selection, getContext, se
     begin = () => {}, end = () => {}, refresh = async () => {},
     openRecoveryChannel = snapshot => createTodayRecoveryChannel({ api: globalThis.chrome, document, windowId: snapshot.windowId }) }) {
     let pending = false;
+    const diagnose=selectedRecoveryDiagnosticsEnabled&&document?createSelectedRecoveryDiagnosticAction({document,selection,sendRequest,showStatus,begin,end}):null;
     const recover=document?createTodayRecoveryAction({document,selection,sendRequest,showStatus,begin,end,refresh,openChannel:openRecoveryChannel}):null;
     return snapshot => {
         if (!snapshot || snapshot.error) return null;
         const destinations = Object.freeze(todayMoveDestinations(getContext().spaces, snapshot.spaceId));
-        return { count: snapshot.entries.length, destinations, ...(recover?{recover:()=>recover(snapshot)}:{}), move: async destination => {
+        return { count: snapshot.entries.length, destinations, ...(diagnose?{diagnose:()=>diagnose(snapshot)}:{}), ...(recover?{recover:()=>recover(snapshot)}:{}), move: async destination => {
             if (pending) return;
             if (!selection.validate(snapshot)) { showStatus(STALE); return; }
             const current = todayMoveDestinations(getContext().spaces, snapshot.spaceId);
@@ -79,6 +82,7 @@ export function createTodaySpaceMoveAction({ document, selection, getContext, se
 export function appendTodayMovePicker(options) {
     const count = options.actions?.count;
     appendTodayRecoveryChoice(options);
+    if(selectedRecoveryDiagnosticsEnabled)appendSelectedRecoveryDiagnostic(options);
     return appendSpaceMovePicker({ ...options, labels: {
         action: 'moveTodayTabsToSpace', destinationAction: 'moveTodayToDestination',
         hint: `Move ${count} tab${count === 1 ? '' : 's'} to Today. Stay in the current Space.`,
