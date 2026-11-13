@@ -78,6 +78,7 @@ export function runSavedSplitAction(store, request) {
         }
         if (!nativeSplitAvailable()) throw new Error('Native Split View is unavailable in this browser.');
         const created = [];
+        let phase = 'creating blank tabs';
         try {
             // Create blank pages first: no asynchronous navigation can make an
             // unrelated page authoritative during split creation. No old tab is reused.
@@ -88,21 +89,25 @@ export function runSavedSplitAction(store, request) {
                 created.push(tab.id);
                 const space = await context();
                 const actual = await chrome.tabs.get(tab.id);
-                if (actual.windowId !== request.windowId || actual.incognito || actual.pinned || actual.url !== 'about:blank' || actual.pendingUrl) throw changed();
+                if (actual.windowId !== request.windowId || actual.incognito || actual.pinned || actual.url !== 'about:blank' || actual.pendingUrl && actual.pendingUrl !== 'about:blank') throw changed();
                 if (store.spaces.some(s => [...(s.temporaryTabs || []), ...(s.spaceBookmarks || [])].includes(tab.id))) throw changed();
                 store.insertCreatedToday(space, actual);
             }
+            phase = 'saving new tab placement';
             await context();
             await store.persist({ skipGroupSync: true });
+            phase = 'checking new blank tabs';
             const live = await chrome.tabs.query({ windowId: request.windowId });
             const entries = created.map(id => {
                 const tab = live.find(tab => tab.id === id);
-                if (!tab || tab.url !== 'about:blank' || tab.pendingUrl) throw changed();
+                if (!tab || tab.url !== 'about:blank' || tab.pendingUrl && tab.pendingUrl !== 'about:blank') throw changed();
                 return { tabId: id, url: tab.url, index: tab.index, groupId: tab.groupId, pinned: tab.pinned,
                     splitViewId: Number.isSafeInteger(tab.splitViewId) ? tab.splitViewId : -1 };
             });
+            phase = 'creating the native split';
             const transition = {};
             await runTodaySplitActionCore(store, { action: 'create', windowId: request.windowId, spaceId: request.spaceId, bookmarkFolderId: request.bookmarkFolderId, entries }, { transition });
+            phase = 'opening saved pages';
             for (let i = 0; i < created.length; i++) {
                 const space = await context();
                 const peers = await chrome.tabs.query({ windowId: request.windowId });
@@ -116,12 +121,12 @@ export function runSavedSplitAction(store, request) {
                 await context();
                 const tab = await chrome.tabs.get(created[i]);
                 if (store.active[request.windowId] !== space.id || !store.spaces.includes(space) || tab.splitViewId !== transition.receipt.splitViewId ||
-                    tab.windowId !== request.windowId || tab.incognito || tab.pinned || tab.url !== 'about:blank' || tab.pendingUrl || !space.temporaryTabs.includes(tab.id)) throw changed();
+                    tab.windowId !== request.windowId || tab.incognito || tab.pinned || tab.url !== 'about:blank' || tab.pendingUrl && tab.pendingUrl !== 'about:blank' || !space.temporaryTabs.includes(tab.id)) throw changed();
                 await chrome.tabs.update(tab.id, { url: recipe.pages[i].url, ...(i === 0 ? { active: true } : {}) });
             }
             return { tabIds: created };
         } catch (error) {
-            throw new Error(`${error.message}${created.length ? ' Newly opened tabs were left open. Check them before retrying; nothing was closed or retried.' : ''}`);
+            throw new Error(`${error.message} Stopped while ${phase}.${created.length ? ' Newly opened tabs were left open. Check them before retrying; nothing was closed or retried.' : ''}`);
         }
     });
 }

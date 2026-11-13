@@ -21,7 +21,7 @@ function fixture() {
         } },
         tabs: {
             async query({ windowId }) { await hooks.query?.(); return copy(tabs.filter(t => t.windowId === windowId)); },
-            async get(id) { return copy(tabs.find(t => t.id === id)); },
+            async get(id) { await hooks.get?.(id); return copy(tabs.find(t => t.id === id)); },
             async create(options) { effects.push(['create', options]); await hooks.create?.(); const tab = { ...copy(tabs[0]), id: tabs.length + 1, index: tabs.length, url: options.url, splitViewId: -1 }; tabs.push(tab); return copy(tab); },
             async update(id, update) { effects.push(['update', id, update]); await hooks.update?.(); Object.assign(tabs.find(t => t.id === id), update); },
             async createSplit(ids) { effects.push(['split', ids]); for (const id of ids) tabs.find(t => t.id === id).splitViewId = 80; return 80; },
@@ -143,4 +143,29 @@ for (const failPersistence of [false, true]) {
         f.store.spaces[0].temporaryTabs = [1, 2];
         assert.throws(() => takeGeneralUndo(f.store, token, 10), /no longer available/);
     });
+}
+
+for (const phase of ['creation', 'snapshot', 'navigation']) {
+    for (const pendingUrl of ['about:blank', 'https://new-choice.test/']) {
+        test(`blank staging ${phase} handles pending destination ${pendingUrl} without overwriting unrelated navigation`, async () => {
+            const f = fixture(); const { recipe } = await f.run();
+            const setPending = () => { for (const tab of f.tabs.slice(2)) tab.pendingUrl = pendingUrl; };
+            if (phase === 'creation') f.hooks.get = id => { if (id > 2) setPending(); };
+            if (phase === 'snapshot') f.hooks.persist = setPending;
+            if (phase === 'navigation') {
+                let afterNativeReads = 0;
+                f.hooks.query = () => {
+                    if (f.tabs.length === 4 && f.tabs[2].splitViewId === 80 && ++afterNativeReads === 2) setPending();
+                };
+            }
+            if (pendingUrl === 'about:blank') {
+                await f.run({ action: 'open', recipeId: recipe.id });
+                assert.deepEqual(f.tabs.slice(2).map(t => t.url), recipe.pages.map(p => p.url));
+            } else {
+                await assert.rejects(f.run({ action: 'open', recipeId: recipe.id }), /left open/);
+                assert.ok(!f.effects.some(e => e[0] === 'update'));
+                if (phase !== 'navigation') assert.ok(!f.effects.some(e => e[0] === 'split'));
+            }
+        });
+    }
 }

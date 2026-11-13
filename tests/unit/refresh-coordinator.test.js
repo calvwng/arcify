@@ -334,3 +334,32 @@ test('destroy cancels prompt and stale callbacks and fences an outstanding rende
     await stale(); release(); await running; f.coordinator.invalidateActiveView(); f.coordinator.retrySupersededRender();
     assert.equal(commits, 0); assert.equal(f.jobs.size, 0);
 });
+
+test('deferred repaint renders an unchanged model without requesting active-tab navigation', async () => {
+    const views = [];
+    const coordinator = new RefreshCoordinator({ readSpaces: async () => [], adoptSpaces: () => false,
+        render: async ({ activeViewChanged }) => views.push(activeViewChanged), schedule: () => 1, cancel });
+    coordinator.invalidateRender();
+    await coordinator.drain();
+    assert.deepEqual(views, [false]);
+    assert.equal(coordinator.hasWork(), false);
+});
+
+test('a deferred repaint during an in-flight render is not swallowed by its completion', async () => {
+    let release, renders = 0;
+    const coordinator = new RefreshCoordinator({ readSpaces: async () => [], adoptSpaces: () => false,
+        render: async ({ isCurrent }) => {
+            renders++;
+            if (renders === 1) await new Promise(resolve => { release = resolve; });
+            return isCurrent();
+        }, schedule: () => 1, cancel });
+    coordinator.invalidateRender();
+    const first = coordinator.drain();
+    await flush();
+    coordinator.invalidateRender();
+    release(); await first;
+    assert.equal(coordinator.hasWork(), true);
+    await coordinator.drain();
+    assert.equal(renders, 2);
+    assert.equal(coordinator.hasWork(), false);
+});

@@ -2558,7 +2558,9 @@ async function refreshActiveSpaceUI({ force = false, canCommit = () => true } = 
     const isCurrent = () => activeSpaceId === spaceId && canCommit() &&
         (force || (!editorSessions.isActive() && !isDraggingTab && !isDraggingSpace && pendingMutationCount === 0));
     if (!isCurrent()) {
-        refreshCoordinator.invalidateSpaces();
+        // The model may already have been adopted by a mutation refresh. A
+        // spaces-only invalidation can then see no diff and skip the repaint.
+        refreshCoordinator.invalidateRender();
         return false;
     }
     try {
