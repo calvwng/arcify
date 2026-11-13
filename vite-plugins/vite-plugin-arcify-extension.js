@@ -7,6 +7,7 @@ import fs from 'fs-extra';
 function getExtensionInputs() {
   return {
     sidebar: resolve(process.cwd(), 'sidebar.html'),
+    'saved-split': resolve(process.cwd(), 'saved-split.html'),
     'transient-window': resolve(process.cwd(), 'transient-window.html'),
     'startup-launcher': resolve(process.cwd(), 'startup-launcher.html'),
     'startup-prompt': resolve(process.cwd(), 'startup-prompt.html'),

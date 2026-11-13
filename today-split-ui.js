@@ -151,10 +151,10 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
             selection.clear();
             report(operation.action === 'save' ? 'Saving Split View…' : operation.action === 'create' ? 'Creating Split View…' : 'Ending Split View…', false, false);
             attempted = true;
-            const response = await sendRequest({ type: operation.action === 'save' ? 'savedSplitAction' : 'todaySplitAction', action: operation.action,
+            const response = await sendRequest({ type: operation.action === 'save' ? 'splitPinAction' : 'todaySplitAction', action: operation.action === 'save' ? 'pin' : operation.action,
                 windowId: operation.windowId, spaceId: operation.spaceId, bookmarkFolderId: operation.bookmarkFolderId,
                 entries: operation.entries.map(({ native: { tabId, url, index, groupId, pinned, splitViewId } }) => ({ tabId, url, index, groupId, pinned, splitViewId })) });
-            if (response?.success === true) report(operation.action === 'save' ? 'Split View saved. Reopen it from Saved Split Views.' : operation.action === 'create'
+            if (response?.success === true) report(operation.action === 'save' ? 'Split View pinned. Reopen it from Pinned.' : operation.action === 'create'
                 ? `Split View created.${response.reordered ? ' The two tabs are now adjacent in Today.' : ''}` : 'Split View ended. Both tabs stay open.');
             else if (response?.success === false) report(response.error || 'Split View could not be changed. Check the tabs before trying again.');
             else report('The Split View result is unknown. Check the tabs before trying again; nothing was retried.');

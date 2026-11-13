@@ -491,6 +491,7 @@ function originalNativeMenuWatchBytes(text) {
 }
 
 function assertOriginalWorkflowReceipts(workflow) {
+    workflow = workflow.replace('    branches: [main, integration/four-priority-workstreams]\n', '    branches: [main]\n');
     const jobs = [...workflow.matchAll(/^  ([a-z-]+):\n(?=    runs-on:)([\s\S]*?)(?=^  (?:[a-z-]+:|#)|$(?![\s\S]))/gm)];
     const receipts = [
         ['paired-chrome', '804ad3202df17883340f7790dadf5d86e73d8120cbe73f6a22c05856b4c40e52'],

@@ -48,27 +48,52 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
     const recipe = saved.find(item => !original.some(old => old.id === item.id)); assert(recipe);
     assert.deepEqual(Object.keys(recipe).sort(), ['id', 'name', 'pages']);
     assert.deepEqual(recipe.pages.map(page => page.url), sourcePair.map(tab => tab.url), 'Saved recipe must describe the exact original native pair in order.');
-    await ui(sidebar.page, 'Expand saved pairs', async () => {
-        if (!await sidebar.page.$eval('.saved-splits-panel', node => node.open)) await sidebar.page.click('.saved-splits-panel summary');
-    });
-    await sidebar.page.waitForFunction(id => Array.from(document.querySelectorAll('.saved-splits-panel option')).some(option => option.value === id), {}, recipe.id);
-    await ui(sidebar.page, 'Select exact saved pair', () => sidebar.page.select('.saved-splits-panel select', recipe.id));
-    await sidebar.page.waitForFunction(id => { const panel = document.querySelector('.saved-splits-panel'); return panel?.querySelector('select')?.value === id && panel.querySelector('button:first-of-type')?.disabled === false; }, {}, recipe.id);
+    const pin = await poll(() => apiPage.evaluate(async id => {
+        const state = (await chrome.storage.local.get('splitPinsV1')).splitPinsV1;
+        return state?.pins.find(p => p.recipeId === id && p.phase === 'committed');
+    }, recipe.id), value => value?.bookmarkId, 'one bookmark-backed pin');
+    const selector = `.split-pin[data-bookmark-id="${pin.bookmarkId}"]`;
+    await sidebar.page.waitForSelector(selector, { visible: true });
+    assert.equal(await sidebar.page.$('.saved-splits-panel'), null, 'There must not be a dedicated split section.');
+    const beforeFocus = await read();
+    await ui(sidebar.page, 'Activate existing pinned pair without duplication', () => sidebar.page.click(selector));
+    await poll(read, state => state.tabs.some(t => t.id === sourcePair[0].id && t.active), 'existing pair focused');
+    assert.equal((await read()).tabs.length, beforeFocus.tabs.length);
+    // Explicit loss-of-witness fixture: never infer original tabs from matching
+    // URLs. A real close/reopen of the newly created pair is tested below.
+    await apiPage.evaluate(async ({ windowId, bookmarkId }) => {
+        const data = (await chrome.storage.session.get('splitPinInstancesV1')).splitPinInstancesV1 || {};
+        delete data[`${windowId}:${bookmarkId}`];
+        await chrome.storage.session.set({ splitPinInstancesV1: data });
+    }, { windowId, bookmarkId: pin.bookmarkId });
+    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'false', {}, selector);
     const before = await read();
-    await ui(sidebar.page, 'Open saved pair with original native split still present', () => sidebar.page.click('.saved-splits-panel button:first-of-type'));
+    await ui(sidebar.page, 'Open exact pinned pair without guessing equal URLs', () => sidebar.page.click(selector));
     const after = await poll(read, state => {
         try { assertSavedSplitReopened(before, state, { recipe, spaceId, windowId }); return true; } catch { return false; }
     }, 'new native pair with exact saved URLs and original pages preserved');
     const ids = assertSavedSplitReopened(before, after, { recipe, spaceId, windowId }); owned.push(...ids);
-    await checkpoint('saved-split-native-reopened', { before, after, recipe, newTabIds: ids });
-    await sidebar.page.waitForFunction(id => { const panel = document.querySelector('.saved-splits-panel'); return panel?.querySelector('select')?.value === id && panel.querySelector('button:last-of-type')?.disabled === false; }, {}, recipe.id);
-    await ui(sidebar.page, 'Remove saved recipe without closing either pair', () => sidebar.page.click('.saved-splits-panel button:last-of-type'));
-    await poll(recipes, items => !items.some(item => item.id === recipe.id), 'saved recipe removed');
-    assertSavedSplitReopened(before, await read(), { recipe, spaceId, windowId });
-    // Only these exact fixture-created tabs are closed; the source pair remains.
-    await apiPage.evaluate(ids => chrome.tabs.remove(ids), ids);
-    await poll(read, state => ids.every(id => !state.tabs.some(tab => tab.id === id)) && state.spaces.every(space => ids.every(id => !space.temporaryTabs.includes(id))), 'reopened fixture pair cleaned up');
-    await checkpoint('saved-split-recipe-remove-preserved-pages', { newTabIds: ids });
+    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'true', {}, selector);
+    await ui(sidebar.page, 'Close live pinned pair while retaining its pin', () => sidebar.page.click(`${selector} .tab-close`));
+    await poll(read, state => ids.every(id => !state.tabs.some(t => t.id === id)), 'exact pinned pair closed');
+    assert(await apiPage.evaluate(async id => (await chrome.bookmarks.get(id)).length === 1, pin.bookmarkId));
+    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'false', {}, selector);
+    const beforeReopen = await read();
+    await ui(sidebar.page, 'Reopen same named pin after close', () => sidebar.page.click(selector));
+    const reopened = await poll(read, state => {
+        try { assertSavedSplitReopened(beforeReopen, state, { recipe, spaceId, windowId }); return true; } catch { return false; }
+    }, 'pinned pair reopened after close');
+    const reopenedIds = assertSavedSplitReopened(beforeReopen, reopened, { recipe, spaceId, windowId }); owned.push(...reopenedIds);
+    await checkpoint('saved-split-native-reopened', { before, after, recipe, newTabIds: ids, reopenedIds });
+    await ui(sidebar.page, 'Open ordinary pin context menu', () => sidebar.page.click(selector, { button: 'right' }));
+    await sidebar.page.waitForSelector('#tab-context-menu [data-action="removePin"]', { visible: true });
+    await ui(sidebar.page, 'Unpin pair without closing its pages', () => sidebar.page.click('#tab-context-menu [data-action="removePin"]'));
+    await sidebar.page.waitForFunction(selector => !document.querySelector(selector), {}, selector);
+    const unpinned = await read();
+    for (const id of [...sourcePair.map(t => t.id), ...reopenedIds]) assert(unpinned.tabs.some(t => t.id === id));
+    await apiPage.evaluate(ids => chrome.tabs.remove(ids), reopenedIds);
+    await poll(read, state => reopenedIds.every(id => !state.tabs.some(tab => tab.id === id)) && state.spaces.every(space => reopenedIds.every(id => !space.temporaryTabs.includes(id))), 'reopened fixture pair cleaned up');
+    await checkpoint('saved-split-recipe-remove-preserved-pages', { newTabIds: ids, reopenedIds });
     } catch (error) {
         // Do not guess which tabs a failed action owns. Preserve them in this
         // disposable profile and capture identities before outer fixture teardown.

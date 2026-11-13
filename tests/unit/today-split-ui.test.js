@@ -238,8 +238,8 @@ test('stale native drag projection hides targets before any refused drop', async
 test('saving a native pair sends explicit recipe request, not a native split mutation', async () => {
     const f = fixture({ overrides: { 1: { splitViewId: 40 }, 2: { splitViewId: 40 } } });
     f.select([1]); assert.equal(typeof f.actions(1).save, 'function');
-    await f.actions(1).save(); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].type, 'savedSplitAction');
-    assert.equal(f.calls[0].action, 'save'); assert.equal(f.calls[0].entries.length, 2); assert.match(f.statuses.at(-1), /saved/);
+    await f.actions(1).save(); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].type, 'splitPinAction');
+    assert.equal(f.calls[0].action, 'pin'); assert.equal(f.calls[0].entries.length, 2); assert.match(f.statuses.at(-1), /pinned/);
 });
 test('stale save selection does not reach the recipe writer', async () => {
     const f = fixture({ overrides: { 1: { splitViewId: 40 }, 2: { splitViewId: 40 } } });

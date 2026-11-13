@@ -42,6 +42,11 @@ globalThis.chrome = {
     runtime: {
         onMessage: listeners(), getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'splitPinAction') {
+                if (message.action === 'migrate') return { success: true, migrated: 0 };
+                if (workerData.splitPinsUnavailable) throw new Error('Temporary metadata failure');
+                return { success: true, pins: workerData.splitPins || [] };
+            }
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: tabs.filter(tab => tab.pinned) };
             if (message.type === 'sidebarTour') return { success: true, state: null };
             assert.equal(message.type, 'spaceStore');
@@ -120,6 +125,10 @@ if (workerData.handoffTabId) {
 }
 parentPort.postMessage({
     handoffObserved, handoffBefore,
+    splitPresentation: { panelCount: document.querySelectorAll('.saved-splits-panel').length,
+        pins: [...document.querySelectorAll('.space.active .split-pin')].map(row => ({ bookmarkId: row.dataset.bookmarkId,
+            live: row.dataset.splitLive, closeControl: Boolean(row.querySelector('.tab-close')), actionHidden: row.querySelector('.tab-close, .tab-remove')?.hidden,
+            title: row.querySelector('.tab-title-display')?.textContent })) },
     local, session, patches, bookmarkWrites, warnings,
     rows: [...document.querySelectorAll('.space.active .tab')].map(row => ({
         tabId: row.dataset.tabId ? Number(row.dataset.tabId) : null,
