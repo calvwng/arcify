@@ -74,18 +74,18 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
         delete data[`${windowId}:${bookmarkId}`];
         await chrome.storage.session.set({ splitPinInstancesV1: data });
     }, { windowId, bookmarkId: pin.bookmarkId });
-    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'false', {}, selector);
+    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'false', { polling: 50 }, selector);
     const before = await read();
     await ui(sidebar.page, 'Open exact pinned pair without guessing equal URLs', () => sidebar.page.click(selector));
     const after = await poll(read, state => {
         try { assertSavedSplitReopened(before, state, { recipe, spaceId, windowId }); return true; } catch { return false; }
     }, 'new native pair with exact saved URLs and original pages preserved');
     const ids = assertSavedSplitReopened(before, after, { recipe, spaceId, windowId }); owned.push(...ids);
-    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'true', {}, selector);
+    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'true', { polling: 50 }, selector);
     await ui(sidebar.page, 'Close live pinned pair while retaining its pin', () => sidebar.page.click(`${selector} .tab-close`));
     await poll(read, state => ids.every(id => !state.tabs.some(t => t.id === id)), 'exact pinned pair closed');
     assert(await apiPage.evaluate(async id => (await chrome.bookmarks.get(id)).length === 1, pin.bookmarkId));
-    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'false', {}, selector);
+    await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'false', { polling: 50 }, selector);
     const beforeReopen = await read();
     await ui(sidebar.page, 'Reopen same named pin after close', () => sidebar.page.click(selector));
     const reopened = await poll(read, state => {
@@ -96,7 +96,7 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
     await ui(sidebar.page, 'Open ordinary pin context menu', () => sidebar.page.click(selector, { button: 'right' }));
     await sidebar.page.waitForSelector('#tab-context-menu [data-action="removePin"]', { visible: true });
     await ui(sidebar.page, 'Unpin pair without closing its pages', () => sidebar.page.click('#tab-context-menu [data-action="removePin"]'));
-    await sidebar.page.waitForFunction(selector => !document.querySelector(selector), {}, selector);
+    await sidebar.page.waitForFunction(selector => !document.querySelector(selector), { polling: 50 }, selector);
     const unpinned = await read();
     for (const id of [...sourcePair.map(t => t.id), ...reopenedIds]) assert(unpinned.tabs.some(t => t.id === id));
     await apiPage.evaluate(ids => chrome.tabs.remove(ids), reopenedIds);
