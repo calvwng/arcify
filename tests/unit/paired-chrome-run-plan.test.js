@@ -488,7 +488,7 @@ function assertOriginalWorkflowReceipts(workflow) {
         ['recovery-actions', 'ef0ee6ab8d6275b1509f56446bc011c1e10b99c968b459ec8997f2f0ab328c5f']
     ];
     // Only this exact reviewed companion upgrade is excluded from legacy bytes.
-    const legacyPinBytes = source => withoutLittleArcGate(source).replaceAll('f6e0557030620e037e332a5c3c86fb4cff3fcc46', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
+    const legacyPinBytes = source => withoutLittleArcGate(source).replaceAll('3e187f5031334c80133221963f8148d2d9709a34', '9c4462fb0f3cbfe2585757c43f34398e9c906fde');
     assert.deepEqual(jobs.slice(0, 5).map(match => [match[1], digest(legacyPinBytes(match[0].trimEnd()))]), receipts);
     assert.equal(jobs[5][1], 'extended-actions');
     assert.equal(jobs[6][1], 'archive-actions');
@@ -497,7 +497,7 @@ function assertOriginalWorkflowReceipts(workflow) {
     assert.equal(jobs[8][1], 'move-drag');
     assert.equal(jobs[9][1], 'little-arc');
     // Existing supplemental jobs retain a56bd14 bytes except this exact peer-pin upgrade.
-    const archivePinBytes = source => withoutLittleArcGate(source).replaceAll('f6e0557030620e037e332a5c3c86fb4cff3fcc46', 'b510b3dbe8cfae6441fbc55a23ce19de30805a6d');
+    const archivePinBytes = source => withoutLittleArcGate(source).replaceAll('3e187f5031334c80133221963f8148d2d9709a34', 'b510b3dbe8cfae6441fbc55a23ce19de30805a6d');
     assert.equal(digest(archivePinBytes(jobs[5][0].trimEnd())), '0d01f7440c701db284e286566d4acbd7ba3d590e52e01c8e54435a14aa92875c');
     assert.equal(digest(archivePinBytes(jobs[6][0].trimEnd())), 'aefdebbb6af8c3c11e312ecb716bb5d7c172117a9cffd0df638e3002216b6cdc');
     // Normalize only the reviewed additive Split/display watch paths; event/security configuration is unchanged.
