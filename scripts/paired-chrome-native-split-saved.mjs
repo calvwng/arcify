@@ -93,6 +93,40 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
     }, 'pinned pair reopened after close');
     const reopenedIds = assertSavedSplitReopened(beforeReopen, reopened, { recipe, spaceId, windowId }); owned.push(...reopenedIds);
     await checkpoint('saved-split-native-reopened', { before, after, recipe, newTabIds: ids, reopenedIds });
+    // Simulate a worker interruption after native marker creation but before
+    // receipt persistence. Recovery must require an explicit exact selection,
+    // must not reconstruct a live witness, and must leave every page untouched.
+    const beforeRecovery = await read();
+    await apiPage.evaluate(async ({ bookmarkId, windowId }) => {
+        const { splitPinsV1 } = await chrome.storage.local.get('splitPinsV1');
+        const pin = splitPinsV1.pins.find(p => p.bookmarkId === bookmarkId);
+        pin.phase = 'pending'; pin.bookmarkId = null;
+        const { splitPinInstancesV1 = {} } = await chrome.storage.session.get('splitPinInstancesV1');
+        delete splitPinInstancesV1[`${windowId}:${bookmarkId}`];
+        await chrome.storage.session.set({ splitPinInstancesV1 });
+        await chrome.storage.local.set({ splitPinsV1 });
+    }, { bookmarkId: pin.bookmarkId, windowId });
+    await ui(sidebar.page, 'Review interrupted pin creation', async () => {
+        await sidebar.page.waitForSelector('#splitPinRecovery', { visible: true });
+        await sidebar.page.click('#splitPinRecovery');
+        await sidebar.page.waitForSelector('.split-pin-recovery-dialog[open]', { visible: true });
+    });
+    const beforeChoice = await apiPage.evaluate(async () => (await chrome.storage.local.get('splitPinsV1')).splitPinsV1);
+    assert(beforeChoice.pins.some(p => p.recipeId === recipe.id && p.phase === 'pending'), 'Opening review must not adopt a marker.');
+    await ui(sidebar.page, 'Explicitly associate exact interrupted bookmark', async () => {
+        const choices = await sidebar.page.$$('.split-pin-recovery-dialog fieldset button');
+        let selected;
+        for (const choice of choices) if (await choice.evaluate((node, id) => node.textContent.startsWith('Use this bookmark:') && node.textContent.endsWith(`ID ${id}`), pin.bookmarkId)) {
+            assert.equal(selected, undefined); selected = choice;
+        }
+        assert(selected); await selected.click();
+    });
+    await sidebar.page.waitForFunction(() => !document.querySelector('.split-pin-recovery-dialog'), { polling: 50 });
+    const afterRecovery = await read();
+    assert.deepEqual(afterRecovery.tabs.map(({ active, ...tab }) => tab), beforeRecovery.tabs.map(({ active, ...tab }) => tab));
+    for (const key of ['bookmarks', 'bindings', 'favorites', 'spaces', 'pageStates']) assert.deepEqual(afterRecovery[key], beforeRecovery[key]);
+    assert.equal(await apiPage.evaluate(async ({ bookmarkId, windowId }) => !!(await chrome.storage.session.get('splitPinInstancesV1')).splitPinInstancesV1?.[`${windowId}:${bookmarkId}`], { bookmarkId: pin.bookmarkId, windowId }), false);
+    await checkpoint('saved-split-explicit-recovery-preserved-pages', { bookmarkId: pin.bookmarkId });
     await ui(sidebar.page, 'Open ordinary pin context menu', () => sidebar.page.click(selector, { button: 'right' }));
     await ui(sidebar.page, 'Unpin pair without closing its pages', async () => {
         await sidebar.page.waitForSelector('#tab-context-menu', { visible: true });

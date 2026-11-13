@@ -1,3 +1,4 @@
+import { createSplitPinRecoveryUI } from './split-pin-recovery-ui.js';
 import { createGeneralUndoUI } from './general-undo-ui.js';
 import { isSplitPinUrl } from './split-pin-identity.js';
 import { createSidebarActivationSelection } from './sidebar-activation-selection.js';
@@ -204,6 +205,9 @@ function showFavoritesStatus(message, preview = false, dismissible = true) {
     favoritesPreview = preview;
     favoritesStatus.show(message, { preview, dismissible });
 }
+const splitPinRecoveryUI = createSplitPinRecoveryUI({ document, sendRequest: message => chrome.runtime.sendMessage(message),
+    context: () => ({ windowId: currentWindow?.id, spaceId: activeSpaceId, bookmarkFolderId: spaces.find(s => s.id === activeSpaceId)?.bookmarkFolderId }),
+    refresh: () => refreshCoordinator.invalidateBookmarks(), showStatus: showFavoritesStatus });
 function clearFavoritesPreview() {
     favoritesPreview = false;
     favoritesStatus.clearPreview();
@@ -2279,6 +2283,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
     const displayMetadata = await readRowDisplayMetadata();
     displayMetadata.splitPins = [];
     const splitData = await chrome.storage.local.get(['splitPinsV1', 'savedSplitRecipesV1']);
+    splitPinRecoveryUI.update(splitData.splitPinsV1);
     if (splitData.splitPinsV1 || splitData.savedSplitRecipesV1?.length) {
         if (!splitMigrationAttempted) {
             splitMigrationAttempted = true;

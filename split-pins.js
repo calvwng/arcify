@@ -21,7 +21,7 @@ export function validSplitPinState(value) {
     return exact(value, ['version', 'destination', 'pins']) && value.version === 1 && id(value.destination) && Array.isArray(value.pins) && value.pins.length <= 100 &&
         new Set(value.pins.map(p => p.recipeId)).size === value.pins.length && value.pins.every(p =>
             exact(p, ['recipeId', 'parentId', 'bookmarkId', 'phase']) && id(p.recipeId) && id(p.parentId) &&
-            (p.phase === 'pending' && p.bookmarkId === null || p.phase === 'committed' && id(p.bookmarkId)));
+            (['pending', 'deferred'].includes(p.phase) && p.bookmarkId === null || p.phase === 'committed' && id(p.bookmarkId)));
 }
 async function readState() {
     const state = (await chrome.storage.local.get(SPLIT_PINS_KEY))[SPLIT_PINS_KEY];
@@ -82,7 +82,7 @@ async function remember(store, request, target, tabIds, expectedSplitId) {
 // authorize binding; unreceipted markers stay unclaimed.
 async function ensureBookmark(store, request, state, recipe, parentId) {
     let pin = state.pins.find(p => p.recipeId === recipe.id);
-    if (pin?.phase === 'committed') return pin; // Removed pins are never resurrected.
+    if (pin?.phase === 'committed' || pin?.phase === 'deferred') return pin; // Removed pins are never resurrected.
     if (pin) throw new Error('A prior Split View pin creation is unconfirmed. Saved recipes are retained. No bookmark was retried or adopted.');
     if ((await chrome.bookmarks.search({ url: splitPinUrl(recipe.id) })).length) throw new Error('An existing Split View marker has no trusted creation receipt. No bookmark was adopted.');
     const owner = store.spaces.find(s => s.bookmarkFolderId === parentId);
@@ -125,11 +125,74 @@ async function ensureBookmark(store, request, state, recipe, parentId) {
 }
 export function runSplitPinAction(store, request) {
     return store.run(async () => {
-        if (!exact(request, ['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'bookmarkId', 'entries']) || request.type !== 'splitPinAction' ||
-            !['migrate', 'list', 'pin', 'activate', 'close'].includes(request.action) || !Number.isSafeInteger(request.windowId) || request.windowId <= 0 || !id(request.spaceId) || !id(request.bookmarkFolderId)) throw stale();
+        if (!exact(request, ['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'bookmarkId', 'entries', 'recipe', 'candidate']) || request.type !== 'splitPinAction' ||
+            !['migrate', 'list', 'pin', 'activate', 'close', 'recoveryList', 'recover', 'defer'].includes(request.action) || !Number.isSafeInteger(request.windowId) || request.windowId <= 0 || !id(request.spaceId) || !id(request.bookmarkFolderId)) throw stale();
         const space = await context(store, request);
         let state = await readState();
         let recipes = await readSavedSplitRecipes();
+        // Recovery is an explicit association chosen in a review dialog, never
+        // automatic adoption based on a matching marker URL. No tabs are reused.
+        if (request.action === 'recoveryList') {
+            const items = [];
+            for (const pin of state?.pins || []) {
+                if (!['pending', 'deferred'].includes(pin.phase)) continue;
+                const recipe = recipes.find(r => r.id === pin.recipeId);
+                if (!recipe) continue;
+                const candidates = [];
+                for (const match of await chrome.bookmarks.search({ url: splitPinUrl(recipe.id) })) {
+                    if (state.pins.some(p => p.phase === 'committed' && p.bookmarkId === match.id)) continue;
+                    for (const owner of store.spaces) {
+                        if (!owner.bookmarkFolderId) continue;
+                        const bookmark = await getSpaceBookmarkById(owner, match.id);
+                        if (!bookmark || bookmark.url !== splitPinUrl(recipe.id)) continue;
+                        const [parent] = await chrome.bookmarks.get(bookmark.parentId);
+                        candidates.push({ bookmarkId: bookmark.id, parentId: bookmark.parentId, title: bookmark.title,
+                            spaceId: owner.id, bookmarkFolderId: owner.bookmarkFolderId, spaceName: owner.name || parent?.title || owner.id,
+                            parentName: parent?.title || bookmark.parentId });
+                    }
+                }
+                items.push({ recipe, phase: pin.phase, candidates });
+            }
+            await context(store, request);
+            return { items };
+        }
+        if (['recover', 'defer'].includes(request.action)) {
+            const recipe = recipes.find(r => r.id === request.recipe?.id);
+            const pin = state?.pins.find(p => p.recipeId === recipe?.id && ['pending', 'deferred'].includes(p.phase));
+            if (!recipe || !pin || JSON.stringify(recipe) !== JSON.stringify(request.recipe)) throw stale();
+            const before = structuredClone(state);
+            const priorBackup = await chrome.storage.local.get('splitPinRecoveryBeforeV1');
+            const persistRecovery = () => chrome.storage.local.set({ [SPLIT_PINS_KEY]: state,
+                ...(!priorBackup.splitPinRecoveryBeforeV1 ? { splitPinRecoveryBeforeV1: { pins: before, recipes } } : {}) });
+            if (request.action === 'defer') {
+                await context(store, request);
+                pin.phase = 'deferred';
+                await persistRecovery();
+                return { deferred: true };
+            }
+            const selected = request.candidate;
+            if (!exact(selected, ['bookmarkId', 'parentId', 'title', 'spaceId', 'bookmarkFolderId', 'spaceName', 'parentName'])) throw stale();
+            const owner = store.spaces.find(s => s.id === selected.spaceId && s.bookmarkFolderId === selected.bookmarkFolderId);
+            if (!owner || state.pins.some(p => p.phase === 'committed' && p.bookmarkId === selected.bookmarkId)) throw stale();
+            const validate = async () => {
+                await context(store, request);
+                if (!store.spaces.includes(owner)) throw stale();
+                const bookmark = await getSpaceBookmarkById(owner, selected.bookmarkId);
+                if (!bookmark || bookmark.url !== splitPinUrl(recipe.id) || bookmark.title !== selected.title || bookmark.parentId !== selected.parentId) throw stale();
+                const [parent] = await chrome.bookmarks.get(bookmark.parentId);
+                if (parent?.title !== selected.parentName || (owner.name || parent?.title || owner.id) !== selected.spaceName) throw stale();
+                const sessions = (await chrome.storage.session.get(SPLIT_PIN_SESSION_KEY))[SPLIT_PIN_SESSION_KEY] || {};
+                if (Object.values(sessions).some(item => item?.bookmarkId === selected.bookmarkId)) throw stale();
+                return bookmark;
+            };
+            await validate();
+            // Revalidate immediately before the sole durable mutation. Selection
+            // authorizes this exact bookmark; duplicates are left untouched.
+            const bookmark = await validate();
+            pin.bookmarkId = bookmark.id; pin.parentId = bookmark.parentId; pin.phase = 'committed';
+            await persistRecovery();
+            return { bookmarkId: bookmark.id };
+        }
         if (state && ['migrate', 'pin'].includes(request.action)) {
             const removed = [];
             for (const pin of state.pins.filter(p => p.phase === 'committed')) {

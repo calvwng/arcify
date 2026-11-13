@@ -17,7 +17,7 @@ function fixture() {
         windows: { async get(id) { return { id, type: 'normal', incognito: false, ...hooks.window }; } },
         storage: { local: {
             async get(key) { effects.push(['read', key]); return { [key]: key === 'pinnedTabStatesById' ? hooks.bindings || {} : copy(data[key]) }; },
-            async set(values) { effects.push('save'); Object.assign(data, copy(values)); }
+            async set(values) { effects.push('save'); Object.assign(data, copy(values)); await hooks.localSet?.(values); }
         } },
         tabs: {
             async query({ windowId }) { await hooks.query?.(); return copy(tabs.filter(t => t.windowId === windowId)); },
@@ -162,4 +162,70 @@ test('known pre-write bookmark conflict removes only the failed new recipe and p
     await assert.rejects(f.run(), /Bookmark order changed/);
     assert.deepEqual(f.data[SAVED_SPLITS_KEY], []); assert.deepEqual(f.data[SPLIT_PINS_KEY].pins, []);
     const result = await f.run(); assert.ok(result.bookmarkId); assert.equal(f.data[SAVED_SPLITS_KEY].length, 1);
+});
+
+async function interruptedFixture() {
+    const f = fixture(); f.hooks.bookmarkCreate = () => { throw new Error('Reply lost after native create'); };
+    await assert.rejects(f.run()); f.hooks.bookmarkCreate = null;
+    assert.equal(f.data[SPLIT_PINS_KEY].pins[0].phase, 'pending');
+    return f;
+}
+test('interrupted creation lists candidates but adopts none without explicit exact selection', async () => {
+    const f = await interruptedFixture();
+    const item = (await f.run({ action: 'recoveryList' })).items[0];
+    assert.equal(item.candidates.length, 1); assert.equal(f.data[SPLIT_PINS_KEY].pins[0].phase, 'pending');
+    const before = structuredClone(f.nodes); const tabs = structuredClone(f.tabs);
+    await f.run({ action: 'recover', recipe: item.recipe, candidate: item.candidates[0] });
+    assert.equal(f.data[SPLIT_PINS_KEY].pins[0].phase, 'committed');
+    assert.deepEqual(f.nodes, before); assert.deepEqual(f.tabs, tabs); assert.deepEqual(f.session, {});
+    assert.equal((await f.run({ action: 'recoveryList' })).items.length, 0);
+});
+for (const mutation of ['rename', 'move', 'url', 'recipe', 'space', 'witness', 'parent-name', 'space-name']) test(`recovery refuses changed ${mutation} without adopting or mutating pages`, async () => {
+    const f = await interruptedFixture(); const item = (await f.run({ action: 'recoveryList' })).items[0];
+    const node = f.nodes.find(n => n.id === item.candidates[0].bookmarkId);
+    if (mutation === 'rename') node.title += '!';
+    if (mutation === 'parent-name') f.nodes.find(n => n.id === node.parentId).title += '!';
+    if (mutation === 'space-name') f.store.spaces[0].name = 'Renamed';
+    if (mutation === 'move') node.parentId = 'elsewhere';
+    if (mutation === 'url') node.url = 'https://unrelated.test';
+    if (mutation === 'recipe') f.data[SAVED_SPLITS_KEY][0].name += '!';
+    if (mutation === 'space') f.store.active[10] = 'different';
+    if (mutation === 'witness') f.session[SPLIT_PIN_SESSION_KEY] = { old: { bookmarkId: node.id } };
+    const tabs = structuredClone(f.tabs);
+    await assert.rejects(f.run({ action: 'recover', recipe: item.recipe, candidate: item.candidates[0] }));
+    assert.equal(f.data[SPLIT_PINS_KEY].pins[0].phase, 'pending'); assert.deepEqual(f.tabs, tabs);
+});
+test('multiple copied markers require exact chosen identity and leave extras untouched', async () => {
+    const f = await interruptedFixture(); const node = f.nodes.find(n => n.url?.includes('saved-split.html'));
+    f.nodes.push({ ...node, id: 'copy' });
+    const item = (await f.run({ action: 'recoveryList' })).items[0]; assert.equal(item.candidates.length, 2);
+    await f.run({ action: 'recover', recipe: item.recipe, candidate: item.candidates.find(c => c.bookmarkId === 'copy') });
+    assert.equal(f.data[SPLIT_PINS_KEY].pins[0].bookmarkId, 'copy'); assert.ok(f.nodes.some(n => n.id === node.id));
+});
+test('zero-candidate defer retains recipe, permits other pins, survives migration and allows later explicit recovery', async () => {
+    const f = await interruptedFixture(); const index = f.nodes.findIndex(n => n.url?.includes('saved-split.html'));
+    const late = f.nodes.splice(index, 1)[0];
+    const item = (await f.run({ action: 'recoveryList' })).items[0]; assert.deepEqual(item.candidates, []);
+    const original = structuredClone(item.recipe);
+    await f.run({ action: 'defer', recipe: item.recipe });
+    assert.ok(validSplitPinState(f.data[SPLIT_PINS_KEY])); assert.equal(f.data[SPLIT_PINS_KEY].pins[0].phase, 'deferred');
+    await f.run({ action: 'migrate' }); assert.equal(f.nodes.filter(n => n.url?.includes('saved-split.html')).length, 0);
+    await f.run(); assert.equal(f.data[SAVED_SPLITS_KEY].length, 2); assert.deepEqual(f.data[SAVED_SPLITS_KEY][0], original);
+    f.nodes.push(late);
+    const again = (await f.run({ action: 'recoveryList' })).items[0];
+    await f.run({ action: 'recover', recipe: again.recipe, candidate: again.candidates[0] });
+    assert.equal(f.data[SPLIT_PINS_KEY].pins[0].bookmarkId, late.id);
+});
+
+test('lost recovery write response preserves committed receipt and backup; stale second dialog cannot retry it', async () => {
+    const f = await interruptedFixture(); const item = (await f.run({ action: 'recoveryList' })).items[0];
+    f.hooks.localSet = value => { if (value[SPLIT_PINS_KEY]?.pins[0].phase === 'committed') throw new Error('Response lost'); };
+    await assert.rejects(f.run({ action: 'recover', recipe: item.recipe, candidate: item.candidates[0] }));
+    assert.equal(f.data[SPLIT_PINS_KEY].pins[0].phase, 'committed');
+    assert.equal(f.data.splitPinRecoveryBeforeV1.pins.pins[0].phase, 'pending');
+    assert.deepEqual(f.data.splitPinRecoveryBeforeV1.recipes, [item.recipe]);
+    f.hooks.localSet = null; const state = structuredClone(f.data);
+    await assert.rejects(f.run({ action: 'recover', recipe: item.recipe, candidate: item.candidates[0] }));
+    await assert.rejects(f.run({ action: 'defer', recipe: item.recipe }));
+    assert.deepEqual(f.data, state);
 });

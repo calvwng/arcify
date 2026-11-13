@@ -37,11 +37,11 @@ stable Space ID once and persists its destination, announces it in the existing
 status area, and preserves a one-time legacy backup. Migration opens no tabs.
 Users can move resulting closed pins normally. Each bookmark creation uses the
 shared canonical bookmark writer and a durable intent. Only a returned creation
-ID is authoritative. Known no-write failures remove the intent so later explicit
+ID or an explicit recovery choice authorizes association. Known no-write failures remove the intent so later explicit
 attempts may retry; an unknown actual create is not retried or adopted by URL.
 Independent recipes still migrate, and the status area reports retained failures.
-Unconfirmed intents currently require manual diagnostic reconciliation; no
-one-click repair UI is claimed.
+Unconfirmed intents expose the bounded explicit review described below; no
+automatic retry or identity inference is performed.
 
 Intentional removal reclaims the recipe and pin record atomically on the next
 pin/migration action, so removed pins do not reappear or permanently consume the
@@ -58,3 +58,11 @@ plus the full unit suite and `npm run build`.
 The native paired Chrome fixture exercises the ordinary pin row: focus without
 duplication, missing-witness behavior without URL guesses, close retaining its
 pin, reopen, and unpin retaining live pages. Helium acceptance remains separate.
+
+## Interrupted creation review
+
+A compact **Review saved pair recovery** button appears only for pending/deferred pin receipts. Opening it does not adopt anything. **Use this bookmark** explicitly associates the selected exact marker (ID, title, Space and folder shown) with the displayed saved pair after fresh validation. Matching URLs alone never confer ownership. Other copied markers are untouched, and recovery neither opens tabs nor reconstructs live witnesses.
+
+If no marker is visible, **Keep recipe for later** retains the recipe and marks its receipt deferred. This releases the global pending-save block without retrying creation; later migration also skips it. The review remains available if a late marker appears. Recipes count toward the existing 100-pair safety limit. Creating a replacement when the old marker is permanently missing remains a separate, unimplemented explicit flow; no uncertain creation is silently replayed.
+
+The first recovery/defer mutation atomically keeps a one-time `splitPinRecoveryBeforeV1` snapshot of pin metadata and recipes. The new deferred phase is not understood by earlier experimental #86 builds; those builds reject this metadata instead of changing it. Rollback after deferral therefore requires a compatible build or a deliberately restored, verified pre-recovery backup. Do not simply downgrade to an earlier #86 build and expect pending/deferred operations to work.

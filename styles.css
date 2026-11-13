@@ -2533,6 +2533,12 @@ select:focus-visible,
 
 /* Explicit saved recipes, distinct from native live Split View identities. */
 
+#splitPinRecovery { margin: 4px 8px; font: inherit; text-align: left; }
+.split-pin-recovery-dialog { max-width: min(540px, 90vw); max-height: 80vh; overflow: auto; color: inherit; background: var(--sidebar-bg, #fff); border-radius: 12px; }
+.split-pin-recovery-dialog fieldset { margin: 12px 0; min-width: 0; }
+.split-pin-recovery-dialog p, .split-pin-recovery-dialog button { overflow-wrap: anywhere; }
+.split-pin-recovery-dialog button { display: block; margin: 8px 0; max-width: 100%; }
+
 /* Bottom Space switcher: every chip owns its tint; the strip and + keep theirs. */
 :root[data-theme] #spaceSwitcher.space-switcher button[data-space-id] {
     background: var(--space-chip-bg, var(--sidebar-secondary-bg));
