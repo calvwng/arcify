@@ -735,6 +735,29 @@ test('visible Today, saved/live pin and folder menus dismiss across external foc
     assert.deepEqual(mutations, before);
 });
 
+test('saved pin menu holds exact row through delayed bookmark preparation and releases queued refresh on dismissal', async () => {
+    clear(); const before = structuredClone(mutations);
+    for (const id of ['b10', 'b0']) {
+        let release, entered = false;
+        const waiting = new Promise(resolve => { release = resolve; });
+        const original = row(id);
+        beforeGetBookmarks = ids => { if (Array.isArray(ids)) { entered = true; return waiting; } };
+        try {
+            event(original, 'contextmenu', { pageX: 20, pageY: 40 }); await wait(20);
+            assert(entered); assert.equal(document.getElementById('tab-context-menu'), null);
+            void chrome.bookmarks.onChanged.emit(id, { title: 'refresh-only-invalidation' });
+            void onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+            assert(row(id) === original, 'Pending menu must hold its exact trusted input row before asynchronous validation finishes');
+            beforeGetBookmarks = null; release(); await wait(60);
+            assert(document.getElementById('tab-context-menu')); assert(row(id) === original);
+            clear(); await wait(180);
+            assert(row(id) !== original, 'Dismissal must release the queued refresh');
+            assert.equal(document.getElementById('tab-context-menu'), null);
+        } finally { beforeGetBookmarks = null; release(); clear(); await refresh(); }
+    }
+    assert.deepEqual(mutations, before);
+});
+
 test('async Today/live-pin/closed-pin menu preparations cannot reopen after leaving the sidebar', async () => {
     clear(); const before = structuredClone(mutations);
     for (const kind of ['today', 'live-pin', 'closed-pin']) for (const exit of ['blur', 'hidden', 'pagehide', 'pointerdown', 'Escape']) {

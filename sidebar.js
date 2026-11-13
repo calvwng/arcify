@@ -3045,6 +3045,13 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false, d
                 !todaySnapshot.entries.some(entry => todaySplit.isSplitRow(entry.element)) ? moveTodaySelection(todaySnapshot) : null;
             if (isPinned || isBookmarkOnly) todaySelection.clear();
             if (pinSnapshot?.error) { showFavoritesStatus(pinSnapshot.error); return; }
+            // Freeze exact saved rows before asynchronous bookmark/Space reads,
+            // just as Today rows are held before native reads above. Otherwise a
+            // refresh can detach the trusted right-click target before attachment.
+            if (pinSnapshot) {
+                const interaction = editorSessions.begin('bookmark', tabElement.dataset.bookmarkId);
+                menuSession.onClose(() => { void editorSessions.complete(interaction); });
+            }
             if (todaySnapshot?.error) { showFavoritesStatus(todaySnapshot.error); return; }
             if (todaySnapshot && !todaySelection.validate(todaySnapshot)) return;
             let savedMove = null;
@@ -3099,7 +3106,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false, d
                     ...(!moveActions ? { moveHint: 'End Split View before moving these selected tabs to another Space. Nothing was moved.' } : {}) } : null,
                 { ...actions, report: showFavoritesStatus, closeSelection: selectedTabClose(pinSnapshot || todaySnapshot, pinSnapshot ? bookmarkSelection : todaySelection) },
                 { ...splitActions, keyboard,
-                    ...(!todaySnapshot && (splitActions?.create || splitActions?.end || savedMove?.destinations.length) ? { beginInteraction: () => {
+                    ...(!todaySnapshot && !pinSnapshot && (splitActions?.create || splitActions?.end || savedMove?.destinations.length) ? { beginInteraction: () => {
                         const session = editorSessions.begin(pinSnapshot ? 'bookmark' : 'tab', pinSnapshot ? tabElement.dataset.bookmarkId : tab.id);
                         return () => { void editorSessions.complete(session); };
                     } } : {})
