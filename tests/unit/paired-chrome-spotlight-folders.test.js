@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { assertOwnedFolderTree, SPOTLIGHT_FOLDER_CASE_NAME } from '../../scripts/paired-chrome-spotlight-folders.mjs';
+import { assertOwnedFolderTree, folderBrowseReady, SPOTLIGHT_FOLDER_CASE_NAME } from '../../scripts/paired-chrome-spotlight-folders.mjs';
 import { createPairedChromeRunReport, beginPairedChromeCase, assertPairedChromeRunPassed } from '../../scripts/paired-chrome-run-plan.mjs';
 const smoke = readFileSync(new URL('../../scripts/paired-chrome-smoke.mjs', import.meta.url), 'utf8');
 const fixture = readFileSync(new URL('../../scripts/paired-chrome-spotlight-folders.mjs', import.meta.url), 'utf8');
@@ -28,4 +28,15 @@ test('actual operations use visible trusted controls, real bookmark readback and
     assert.match(fixture, /assertOwnedFolderTree\(tree, owned\)/);
     assert.doesNotMatch(fixture, /chrome\.bookmarks\.(?:move|update)\(/);
     assert.doesNotMatch(fixture, /dispatchEvent|\.select\(|no-sandbox|puppeteer\.launch/);
+});
+
+test('browse readiness rejects previous parent and in-place management prompts', () => {
+    const child = { visible: true, label: 'Browse Created nonce', heading: 'Bookmarks / Projects nonce / Created nonce', buttons: ['Back to search', 'Rename folder…'] };
+    assert.equal(folderBrowseReady(child, 'Created nonce'), true);
+    assert.equal(folderBrowseReady({ ...child, label: 'Browse Projects nonce', heading: 'Bookmarks / Projects nonce' }, 'Created nonce'), false);
+    assert.equal(folderBrowseReady({ ...child, heading: 'Rename folder', buttons: ['Cancel', 'Save'] }, 'Created nonce'), false);
+    assert.equal(folderBrowseReady({ ...child, visible: false }, 'Created nonce'), false);
+    assert.equal(folderBrowseReady(null, 'Created nonce'), false);
+    assert.match(fixture, /await button\(`▸ \$\{childTitle\}`\);[\s\S]*?await waitBrowse\(childTitle\);[\s\S]*?await button\('Rename folder…'\)/);
+    assert.match(fixture, /await checkpoint\('failure-before-cleanup'\)/);
 });
