@@ -94,8 +94,16 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
     const reopenedIds = assertSavedSplitReopened(beforeReopen, reopened, { recipe, spaceId, windowId }); owned.push(...reopenedIds);
     await checkpoint('saved-split-native-reopened', { before, after, recipe, newTabIds: ids, reopenedIds });
     await ui(sidebar.page, 'Open ordinary pin context menu', () => sidebar.page.click(selector, { button: 'right' }));
-    await sidebar.page.waitForSelector('#tab-context-menu [data-action="removePin"]', { visible: true });
-    await ui(sidebar.page, 'Unpin pair without closing its pages', () => sidebar.page.click('#tab-context-menu [data-action="removePin"]'));
+    await ui(sidebar.page, 'Unpin pair without closing its pages', async () => {
+        await sidebar.page.waitForSelector('#tab-context-menu', { visible: true });
+        const items = await sidebar.page.$$('#tab-context-menu .context-menu-item');
+        let exact;
+        for (const item of items) if (await item.evaluate(node => node.textContent === 'Remove Pin')) {
+            assert.equal(exact, undefined, 'Only one ordinary Remove Pin action is expected.'); exact = item;
+        }
+        assert(exact, 'The shared pin menu must provide Remove Pin.');
+        await exact.click();
+    });
     await sidebar.page.waitForFunction(selector => !document.querySelector(selector), { polling: 50 }, selector);
     const unpinned = await read();
     for (const id of [...sourcePair.map(t => t.id), ...reopenedIds]) assert(unpinned.tabs.some(t => t.id === id));
