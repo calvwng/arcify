@@ -155,7 +155,7 @@ function originalLittleArcWorkflowBytes(workflow) {
         .replace("      - 'tests/unit/paired-chrome-move-drag-wiring.test.js'\n", '')
         .replace("      - 'docs/move-drag-paired-ci.md'\n", '')
         .replace(dispatchInput, '').replaceAll(`    if: ${legacyGate}\n`, '').replace(/\n$/, '')
-        .replaceAll('b8b193c1f803179f86ab2e2397e5f1169256f49d', 'c13511fd36d56358156c10336b8961b7ef95d5bc');
+        .replaceAll('f6e0557030620e037e332a5c3c86fb4cff3fcc46', 'c13511fd36d56358156c10336b8961b7ef95d5bc');
     return restored;
 }
 
@@ -211,7 +211,7 @@ test('all paired scopes use the same exact reconciled companion pin and retain a
     const littleArcPin = source.match(/const PINNED_LITTLE_ARC_SPOTLIGHT = '([0-9a-f]{40})';/)?.[1];
     assert(littleArcPin, 'Little Arc must have a reviewed literal full commit ID, never a placeholder or a mutable branch.');
     assert.equal(littleArcPin, legacyPin);
-    assert.equal(legacyPin, 'b8b193c1f803179f86ab2e2397e5f1169256f49d');
+    assert.equal(legacyPin, 'f6e0557030620e037e332a5c3c86fb4cff3fcc46');
     for (const name of legacyJobNames) {
         assert.equal(jobSource(name).match(/repository: calvwng\/arcify-spotlight\n          ref: (.*)/)?.[1], legacyPin);
         assert(jobSource(name).includes(littleArcPin));
