@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { exerciseSpotlightFolders, SPOTLIGHT_FOLDER_CASE_NAME } from './paired-chrome-spotlight-folders.mjs';
 import { exerciseSpotlightSplit, serveSpotlightSplitFixture, SPOTLIGHT_SPLIT_CASE_NAME } from './paired-chrome-spotlight-split.mjs';
 import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
 import { captureNativeSplitWindow } from './paired-chrome-native-split-capture.mjs';
@@ -85,9 +86,9 @@ if (process.getuid?.() === 0) throw new Error('Run as the ordinary runner user; 
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
-const PINNED_SPOTLIGHT = 'b8b193c1f803179f86ab2e2397e5f1169256f49d';
+const PINNED_SPOTLIGHT = 'c3e4e4d374136e608d447716c0321b32b2aa8cfb';
 // Every scope qualifies the same reconciled companion; retain scope-specific provenance checks.
-const PINNED_LITTLE_ARC_SPOTLIGHT = 'b8b193c1f803179f86ab2e2397e5f1169256f49d';
+const PINNED_LITTLE_ARC_SPOTLIGHT = 'c3e4e4d374136e608d447716c0321b32b2aa8cfb';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
     'Unpaired rejection and options-UI pairing',
@@ -144,9 +145,11 @@ const stepNames = [
     'Spotlight Open Archive requires trusted input and the existing popup in the native Side Panel',
     'Spotlight Archive reopens exact same-address entries in their original Space and source window without replay',
     'Spotlight Split and End Split keep exact left and right source panes and original documents',
-    'Little Arc trusted launch and same-tab transfer preserve documents with missing-controller reload fallback'
+    'Little Arc trusted launch and same-tab transfer preserve documents with missing-controller reload fallback',
+    'Spotlight nested folders support fuzzy browse and trusted create rename empty-delete cross-Space move'
 ];
 assert.equal(stepNames[49], SPOTLIGHT_ACTION_CASE_NAME, 'Initial Spotlight action case must retain its reviewed identity.');
+assert.equal(stepNames[56], SPOTLIGHT_FOLDER_CASE_NAME);
 assert.equal(stepNames[50], SPOTLIGHT_NAVIGATION_CASE_NAME, 'Spotlight navigation case must retain its reviewed identity.');
 assert.equal(stepNames[51], SPOTLIGHT_TAB_CASE_NAME, 'Spotlight tab-command case must retain its reviewed identity.');
 assert.equal(stepNames[52], SPOTLIGHT_ARCHIVE_OPEN_CASE_NAME, 'Spotlight Archive opening case must retain its identity.');
@@ -180,7 +183,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'move-drag' ? 'test-results/paired-chrome-move-drag' : report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode === 'folder-actions' ? 'test-results/paired-chrome-folder-actions' : report.runMode === 'move-drag' ? 'test-results/paired-chrome-move-drag' : report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -2102,18 +2105,31 @@ try {
             await page.waitForSelector(sourceSelector);
             let source,target,mouseDown = false;
             const geometry = [];
+            const diagnostic = { label, sourceSelector, allowed, geometry };
+            (report.favoriteDropActions ||= []).push(diagnostic);
+            const observe = () => page.evaluate(({sourceSelector}) => {
+                const source = document.querySelector(sourceSelector), strip = document.getElementById('pinnedFavicons');
+                const dragging = document.querySelector('.dragging');
+                return { sourceConnected: Boolean(source?.isConnected), sourceRect: source?.getBoundingClientRect().toJSON(),
+                    targetRect: strip?.getBoundingClientRect().toJSON(), draggingBookmarkId: dragging?.dataset.bookmarkId || null,
+                    draggingKind: dragging?.className || null, status: document.getElementById('favoritesDropStatus')?.textContent,
+                    highlighted: strip?.classList.contains('drag-over'), operation: strip?.dataset.dropOperation,
+                    state: strip?.dataset.dropState, busy: strip?.getAttribute('aria-busy') };
+            }, {sourceSelector});
             const operationBefore = await page.$eval('#pinnedFavicons',element => Number(element.dataset.dropOperation || 0));
             try {
                 // Only pre-input lookup may reacquire an exact row replaced by
                 // the preceding drop. The real gesture below is never replayed.
                 const located = await locateFreshDragGeometry(page,sourceSelector,'#pinnedFavicons',
-                    observation => geometry.push(observation),{scrollSource:true});
+                    observation => geometry.push(observation),{scrollSource:true,stableGeometry:true});
                 ({source,target} = located);
                 const {from,to} = located;
                 const x = from.x+Math.min(40,from.width/2),y = from.y+from.height/2;
                 const tx = to.x+Math.min(35,to.width/2),ty = to.y+to.height/2;
                 await page.mouse.move(x,y); await page.mouse.down(); mouseDown = true;
-                await page.mouse.move(x+12,y,{steps:5}); await page.mouse.move(tx,ty,{steps:20});
+                await page.mouse.move(x+12,y,{steps:5});
+                diagnostic.afterStart = await observe();
+                await page.mouse.move(tx,ty,{steps:20});
                 await page.waitForFunction(({allowed}) => {
                     const status = document.getElementById('favoritesDropStatus');
                     const text = status?.textContent || '';
@@ -2135,6 +2151,10 @@ try {
                 const completed = await page.evaluate(() => ({status:document.getElementById('favoritesDropStatus')?.textContent,
                     operation:document.getElementById('pinnedFavicons').dataset.dropOperation,state:document.getElementById('pinnedFavicons').dataset.dropState}));
                 observations.push({label,hover,completed,sourceRect:from,targetRect:to,geometry});
+            } catch (error) {
+                diagnostic.error = error.message;
+                try { diagnostic.failureBeforeCleanup = await observe(); } catch (readError) { diagnostic.readError = readError.message; }
+                throw error;
             } finally {
                 if (mouseDown) { await page.keyboard.press('Escape').catch(() => {}); await page.mouse.up().catch(() => {}); }
                 await source?.dispose(); await target?.dispose();
@@ -2440,6 +2460,11 @@ try {
 
     // These isolated modules own their fixtures, selected Spaces and settings.
     // They cannot replace or extend the evidence scope of any existing run mode.
+    if (report.runMode === 'folder-actions') {
+        await step(stepNames[56], () => exerciseSpotlightFolders({ apiPage: arcifyOptions, newTabPage, ui, screenshot, snapshot, poll, fixture, spotlightId, search,
+            record: async evidence => { report.spotlightFolders = evidence; await saveReport(); } }));
+    }
+
     if (report.runMode === 'extended-actions') {
     await step(stepNames[50], () => exerciseSpotlightNavigation({ browser,observePage,apiPage:arcifyOptions,spotlightOptions,newTabPage,openSavedPage:openSavedMovePage,pageForUrl,
         ui,screenshot,snapshot,bridge,external,poll,fixture,arcifyId,spotlightId,search,

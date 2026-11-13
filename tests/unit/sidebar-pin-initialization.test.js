@@ -77,6 +77,16 @@ test('real sidebar reload retains reversed exact URL twins, nested bindings, ali
     assert.deepEqual(reopened.patches, [], 'A second fresh sidebar module must also leave ordered ownership untouched');
 });
 
+test('normal entry after DOMContentLoaded retains the same real sidebar rows and state as early entry', async () => {
+    const data = fixture();
+    const early = await initialize(data);
+    const late = await initialize({ ...data, readyState: 'complete' });
+    assert.deepEqual(late.rows, early.rows);
+    assert.deepEqual(late.local, early.local);
+    assert.deepEqual(late.session, early.session);
+    assert.deepEqual(late.patches, early.patches);
+});
+
 test('native title change after initial fragment commit and before handler installation is not lost', async () => {
     const data = fixture(); data.handoffTabId = 9;
     const result = await initialize(data);

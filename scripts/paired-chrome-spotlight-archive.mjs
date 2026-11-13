@@ -231,6 +231,16 @@ export function readArchiveRows() {
         entryId: row.dataset.archiveEntryId || null, title: row.querySelector('.arcify-spotlight-result-title')?.textContent,
         selected: row.classList.contains('selected'), visible: row.getClientRects().length > 0 && getComputedStyle(row).visibility !== 'hidden' }));
 }
+/** One DOM sample must prove both identity and readiness. A refresh may safely
+ * retire the action between browser evaluations; never assert old presence
+ * against newer rows or repair selection to make this predicate pass. */
+export function archiveResultReady(rows, { type = ARCHIVE_OPEN_TYPE, title = ARCHIVE_OPEN_TITLE, entryId = null, query = OPEN_QUERY } = {}) {
+    const exact = rows.filter(row => row.type === type && row.title === title && row.entryId === entryId && row.visible);
+    if (exact.length !== 1 || !exact[0].selected) return false;
+    if (entryId !== null) return true;
+    try { assertMatchedActionFirst(rows, { type, title, query }); return true; }
+    catch { return false; }
+}
 /** Passive selection timeline; never invokes controllers, sends messages or repairs selection. */
 export function installArchiveSelectionObservation() {
     globalThis.__archiveSelectionObservation?.stop();
@@ -698,9 +708,11 @@ async function archiveFixture(adapters, run) {
         await checkpoint('archive-selection-before-typing',{query,entryId,title,selection:await surface.evaluate(readArchiveSelectionEvidence)});
         await search(page,query);
         const type = entryId ? ARCHIVE_ENTRY_TYPE : ARCHIVE_OPEN_TYPE;
-        const rows = await poll(() => surface.evaluate(readArchiveRows), rows => rows.some(row => row.type === type && row.entryId === entryId && row.title === title && row.visible), 'exact visible Archive action result');
-        await checkpoint('archive-selection-before-default-Enter-assertion',{query,entryId,title,selection:await surface.evaluate(readArchiveSelectionEvidence)});
-        if (!entryId) assertMatchedActionFirst(await surface.evaluate(readSpotlightRows), { type, title, query: OPEN_QUERY });
+        const rows = await poll(() => surface.evaluate(readArchiveRows), rows => entryId
+            ? rows.some(row => row.type === type && row.entryId === entryId && row.title === title && row.visible)
+            : archiveResultReady(rows, { type, title, entryId, query }), 'exact visible and default-selected Archive action result');
+        await checkpoint('archive-selection-before-default-Enter-assertion',{query,entryId,title,readyRows:rows,selection:await surface.evaluate(readArchiveSelectionEvidence)});
+        if (!entryId) assertMatchedActionFirst(rows, { type, title, query: OPEN_QUERY });
         else {
             const input = await surface.$('[data-testid="spotlight-input"]'); assert(input);
             try { await selectResultWithKeyboard(input, () => surface.evaluate(readArchiveRows), row => row.type === type && row.entryId === entryId); } finally { await input.dispose(); }
@@ -710,7 +722,11 @@ async function archiveFixture(adapters, run) {
     };
     const invoke = async (current, method) => {
         const { surface, type, title, entryId } = current;
-        if (method === 'Enter') { const input = await surface.$('[data-testid="spotlight-input"]'); assert(input); try { await input.press('Enter'); } finally { await input.dispose(); } }
+        if (method === 'Enter') {
+            // Other evidence collection may rotate the token after ready(). Wait
+            // for the genuine default to return, without selecting or replaying.
+            await poll(() => surface.evaluate(readArchiveRows), rows => archiveResultReady(rows, { type, title, entryId }), 'exact selected Archive action immediately before Enter');
+            const input = await surface.$('[data-testid="spotlight-input"]'); assert(input); try { await input.press('Enter'); } finally { await input.dispose(); } }
         else await clickFreshResult(async timeout => {
             await surface.waitForSelector(`[data-result-type="${type}"]`, { visible: true, timeout });
             const handle = await surface.evaluateHandle(({ type, title, entryId }) => {

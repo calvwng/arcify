@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readSourceText } from '../source-text.js';
-import { assertTodayNewTabRow, assertRowDraftPreserved, assertOrdinaryRowFallback, cleanupNewTabFixtureSpace, recordNewTabRowEvidence, assertNonemptyDraftSelection, assertFrozenTodayRowOrder } from '../../scripts/paired-chrome-newtab-row.mjs';
+import { restoreNewTabFixtureSpace, assertTodayNewTabRow, assertRowDraftPreserved, assertOrdinaryRowFallback, cleanupNewTabFixtureSpace, recordNewTabRowEvidence, assertNonemptyDraftSelection, assertFrozenTodayRowOrder } from '../../scripts/paired-chrome-newtab-row.mjs';
 const id = 'a'.repeat(32);
 const row = () => ({ count: 1, buttons: 1, obsolete: 0, activeSpaceId: 'space', rowSpaceId: 'space', tag: 'BUTTON', text: '+ New Tab',
     visible: true, disabled: false, insideSortable: false, draggable: false, immediatelyAfterHeader: true, immediatelyBeforeList: true,
@@ -184,4 +184,38 @@ for (const inverted of [false, true]) test(`saved-order toggles cannot change fr
     assertFrozenTodayRowOrder(state, structuredClone(state), inverted);
     assert.throws(() => assertFrozenTodayRowOrder(state, { ...state, todayIds: [3, 8, 5] }, inverted));
     assert.throws(() => assertFrozenTodayRowOrder(state, { ...state, inverted: String(!inverted) }, inverted));
+});
+
+
+test('row cleanup observes already restored Space without clicking a repainting chip', async () => {
+    let inputs = 0, reads = 0;
+    const snapshot = async () => { reads++; return { activeSpaceId: 'original' }; };
+    const result = await restoreNewTabFixtureSpace({ snapshot, spaceId: 'original',
+        select: async () => { inputs++; throw new Error('Node is either not clickable or not an Element'); },
+        poll: async (read, accept) => { const state = await read(); assert(accept(state)); return state; } });
+    assert.equal(inputs, 0); assert.equal(reads, 2);
+    assert.deepEqual(result, { spaceId: 'original', alreadyActive: true, activeSpaceId: 'original' });
+});
+test('row cleanup selects a different Space once and verifies authoritative restoration', async () => {
+    let activeSpaceId = 'fixture', inputs = 0;
+    const result = await restoreNewTabFixtureSpace({ snapshot: async () => ({ activeSpaceId }), spaceId: 'original',
+        select: async () => { inputs++; activeSpaceId = 'original'; },
+        poll: async (read, accept) => { const state = await read(); assert(accept(state)); return state; } });
+    assert.equal(inputs, 1); assert.equal(result.alreadyActive, false); assert.equal(result.activeSpaceId, 'original');
+});
+test('row cleanup never retries uncertain input or hides final authoritative mismatch', async () => {
+    let inputs = 0, polled = false;
+    await assert.rejects(restoreNewTabFixtureSpace({ snapshot: async () => ({ activeSpaceId: 'fixture' }), spaceId: 'original',
+        select: async () => { inputs++; throw new Error('uncertain click'); }, poll: async () => { polled = true; } }), /uncertain click/);
+    assert.equal(inputs, 1); assert.equal(polled, false);
+    await assert.rejects(restoreNewTabFixtureSpace({ snapshot: async () => ({ activeSpaceId: 'original' }), spaceId: 'original',
+        select: async () => assert.fail('no input for already restored Space'),
+        poll: async (_read, accept) => { assert.equal(accept({ activeSpaceId: 'other' }), false); throw new Error('restoration changed'); } }), /restoration changed/);
+});
+test('row cleanup reports which stage failed without weakening native visibility or final removal', () => {
+    const source = readSourceText(new URL('../../scripts/paired-chrome-newtab-row.mjs', import.meta.url));
+    assert.match(source, /errors.push\(`\$\{label\}: \$\{error.message\}`\)/);
+    assert.match(source, /await page.waitForSelector\(selector, \{ visible: true \}\)/);
+    assert.match(source, /await input\('Restore initial Space after row proof'/);
+    assert.match(source, /evidence.cleanup = await cleanupNewTabFixtureSpace/);
 });

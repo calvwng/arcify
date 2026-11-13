@@ -10,12 +10,13 @@ function dragGeometryHarness(states = [{}]) {
         const state = states[Math.min(attempt, states.length - 1)];
         calls.push([attempt, side, 'lookup']);
         if (state.missing === side) return null;
+        let measurements = 0;
         const handle = {
             async scrollIntoView() { calls.push([attempt,side,'scroll']); if (state.error) throw state.error; },
             async boundingBox() {
                 calls.push([attempt,side,'measure']);
                 if (state.measureError) throw state.measureError;
-                return state.hidden === side ? null : {x:1,y:2,width:100,height:32};
+                return state.hidden === side ? null : {x:1,y:state.moveOnSecond === side && ++measurements > 1 ? 5 : 2,width:100,height:32};
             },
             async evaluate(predicate, actualSelector) {
                 assert.equal(actualSelector,selector);
@@ -550,4 +551,29 @@ test('manual web search remains reachable below multiple matched Arcify command 
     assert.deepEqual(keys, ['Home', 'ArrowDown', 'ArrowDown', 'ArrowDown']);
     assert.equal(result.after[3].selected, true);
     assert(!keys.includes('Enter'), 'Choosing the manual result never executes a command or web search.');
+});
+
+
+test('opt-in geometry stability rechecks exact rows after a read-only settling interval', async () => {
+    const h = dragGeometryHarness();
+    const result = await locateFreshDragGeometry(h.page, '#source', '#target', h.record, { stableGeometry: true, pause: h.pause });
+    assert.equal(result.source, h.handles[0]); assert.equal(h.records[1].phase, 'settled-geometry'); assert.equal(h.records[1].stable, true);
+    assert.deepEqual(h.calls.filter(item => item[0] === 'pause'), [['pause', 50]]);
+});
+for (const side of ['source', 'target']) test(`moving ${side} geometry is reacquired before any gesture`, async () => {
+    const h = dragGeometryHarness([{ moveOnSecond: side }, {}]);
+    const result = await locateFreshDragGeometry(h.page, '#source', '#target', h.record, { stableGeometry: true, pause: h.pause });
+    assert.equal(result.source, h.handles[2]); assert.equal(h.records[1].stable, false); assert.equal(h.records[3].stable, true);
+    assert.equal(h.calls.filter(item => item.includes('dispose')).length, 2);
+});
+test('perpetually moving geometry fails boundedly without mouse input', async () => {
+    const h = dragGeometryHarness([{ moveOnSecond: 'source' }]);
+    await assert.rejects(locateFreshDragGeometry(h.page, '#source', '#target', h.record, { stableGeometry: true, pause: h.pause }), /layout kept changing before input/);
+    assert.equal(h.handles.length, 6); assert.equal(h.calls.filter(item => item.includes('dispose')).length, 6);
+});
+test('source replacement during settling reacquires its current identity before input', async () => {
+    const first = {}, h = dragGeometryHarness([first, {}]); let paused = false;
+    const result = await locateFreshDragGeometry(h.page, '#source', '#target', h.record, { stableGeometry: true,
+        pause: async ms => { await h.pause(ms); if (!paused) { first.replaced = 'source'; paused = true; } } });
+    assert.equal(result.source, h.handles[2]); assert.equal(h.records[1].sourceCurrent, false); assert.equal(h.records[3].stable, true);
 });

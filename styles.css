@@ -1874,6 +1874,13 @@ h3 {
 .favorites-drop-dismiss:hover { background: var(--hover-bg, rgba(127, 127, 127, 0.15)); }
 .favorites-drop-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
+/* Last confirmed Space/Today operation; never intercept text-editor Undo. */
+#generalUndo { flex: 0 0 auto; padding: 4px 8px; border: 1px solid currentColor;
+    border-radius: 4px; background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
+#generalUndo[hidden] { display: none; }
+#generalUndo:hover { background: var(--hover-bg, rgba(127, 127, 127, 0.15)); }
+#generalUndo:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+
 .pinned-placeholder-container {
     padding: 8px 16px;
     text-align: center;
@@ -2524,6 +2531,13 @@ select:focus-visible,
 .favorite-recovery-card button { margin: 0 6px 0 0; padding: 6px 10px; border: 1px solid var(--theme-panel-muted, #555); border-radius: 6px; background: var(--theme-input-bg, #fff); color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
 .favorite-recovery-card button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 
+/* Explicit saved recipes, distinct from native live Split View identities. */
+.saved-splits-panel { margin: 6px 8px; font-size: 12px; }
+.saved-splits-panel summary { cursor: pointer; padding: 5px 0; }
+.saved-splits-panel select { display: block; width: 100%; max-width: 100%; margin: 4px 0; }
+.saved-splits-panel button { margin: 3px 4px 3px 0; }
+.saved-splits-panel p { opacity: .75; margin: 5px 0; }
+
 /* Bottom Space switcher: every chip owns its tint; the strip and + keep theirs. */
 :root[data-theme] #spaceSwitcher.space-switcher button[data-space-id] {
     background: var(--space-chip-bg, var(--sidebar-secondary-bg));
@@ -2540,3 +2554,4 @@ select:focus-visible,
 :root[data-theme] #spaceSwitcher.space-switcher button[data-space-id]:focus-visible {
     outline-color: var(--space-chip-marker, currentColor);
 }
+
