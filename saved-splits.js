@@ -87,10 +87,23 @@ export function runSavedSplitAction(store, request) {
                 const tab = await chrome.tabs.create({ windowId: request.windowId, url: 'about:blank', active: false });
                 if (!tab || !Number.isSafeInteger(tab.id) || created.includes(tab.id)) throw changed();
                 created.push(tab.id);
+                let actual;
+                // tabs.create resolves before the initial about:blank commit on
+                // some Chromium builds. Only read our fresh ID while it settles;
+                // never retry creation or navigate an uncertain tab.
+                for (let attempt = 0; attempt < 21; attempt++) {
+                    await context();
+                    actual = await chrome.tabs.get(tab.id);
+                    if (actual.windowId !== request.windowId || actual.incognito || actual.pinned)
+                        throw new Error('The new tab changed window or tab type.');
+                    if (actual.pendingUrl && actual.pendingUrl !== 'about:blank' || actual.url && actual.url !== 'about:blank')
+                        throw new Error('The new tab started a different navigation.');
+                    if (actual.url === 'about:blank') break;
+                    if (attempt === 20) throw new Error('The new blank tab did not finish initializing.');
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                }
                 const space = await context();
-                const actual = await chrome.tabs.get(tab.id);
-                if (actual.windowId !== request.windowId || actual.incognito || actual.pinned || actual.url !== 'about:blank' || actual.pendingUrl && actual.pendingUrl !== 'about:blank') throw changed();
-                if (store.spaces.some(s => [...(s.temporaryTabs || []), ...(s.spaceBookmarks || [])].includes(tab.id))) throw changed();
+                if (store.spaces.some(s => [...(s.temporaryTabs || []), ...(s.spaceBookmarks || [])].includes(tab.id))) throw new Error('The new blank tab already has a Space owner.');
                 store.insertCreatedToday(space, actual);
             }
             phase = 'saving new tab placement';

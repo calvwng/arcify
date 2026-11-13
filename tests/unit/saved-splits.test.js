@@ -169,3 +169,43 @@ for (const phase of ['creation', 'snapshot', 'navigation']) {
         });
     }
 }
+
+test('fresh blank tab may have an empty committed URL until its initial navigation settles', async () => {
+    const f = fixture(); const { recipe } = await f.run(); const reads = new Map();
+    f.hooks.get = id => {
+        if (id <= 2) return;
+        const count = (reads.get(id) || 0) + 1; reads.set(id, count);
+        const tab = f.tabs.find(t => t.id === id);
+        if (count === 1) { tab.url = ''; tab.pendingUrl = 'about:blank'; }
+        if (count === 2) { tab.url = 'about:blank'; delete tab.pendingUrl; }
+    };
+    await f.run({ action: 'open', recipeId: recipe.id });
+    assert.equal(f.effects.filter(e => e[0] === 'create').length, 2);
+    assert.deepEqual(f.tabs.slice(2).map(t => t.url), recipe.pages.map(p => p.url));
+});
+test('navigation during initial blank readiness is preserved without split or updates', async () => {
+    const f = fixture(); const { recipe } = await f.run(); let reads = 0;
+    f.hooks.get = id => {
+        if (id <= 2) return;
+        const tab = f.tabs.find(t => t.id === id);
+        tab.url = ''; tab.pendingUrl = ++reads === 1 ? 'about:blank' : 'https://new-choice.test/';
+    };
+    await assert.rejects(f.run({ action: 'open', recipeId: recipe.id }), /different navigation/);
+    assert.equal(f.effects.filter(e => e[0] === 'create').length, 1);
+    assert.ok(!f.effects.some(e => e[0] === 'split' || e[0] === 'update'));
+});
+test('initial blank readiness expires without native or navigation mutation', async () => {
+    const f = fixture(); const { recipe } = await f.run(); let reads = 0;
+    f.hooks.get = id => { if (id > 2) { reads++; const tab = f.tabs.find(t => t.id === id); tab.url = ''; tab.pendingUrl = 'about:blank'; } };
+    await assert.rejects(f.run({ action: 'open', recipeId: recipe.id }), /did not finish initializing/);
+    assert.equal(reads, 21);
+    assert.equal(f.effects.filter(e => e[0] === 'create').length, 1);
+    assert.ok(!f.effects.some(e => e[0] === 'split' || e[0] === 'update'));
+});
+test('Space changes while waiting for blank readiness abort without adopting or navigating', async () => {
+    const f = fixture(); const { recipe } = await f.run();
+    f.hooks.get = id => { if (id > 2) { const tab = f.tabs.find(t => t.id === id); tab.url = ''; f.store.active[10] = 'other'; } };
+    await assert.rejects(f.run({ action: 'open', recipeId: recipe.id }), /Space/);
+    assert.deepEqual(f.store.spaces[0].temporaryTabs, [1, 2]);
+    assert.ok(!f.effects.some(e => e[0] === 'split' || e[0] === 'update'));
+});
