@@ -108,24 +108,39 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
                 globalThis.__splitPinFolderDrag.push({ type, trusted: event.isTrusted, bookmarkId: row?.dataset.bookmarkId, x: event.clientX, y: event.clientY, effectAllowed: event.dataTransfer?.effectAllowed, dropEffect: event.dataTransfer?.dropEffect, dragging: document.querySelector('.dragging')?.dataset.bookmarkId, connected: row?.isConnected });
             }, true);
         }, pin.bookmarkId);
-        const dragTo = async (targetSelector, fraction) => {
-            const source = await sidebar.page.$(selector), target = await sidebar.page.$(targetSelector);
-            const from = await source.boundingBox(), to = await target.boundingBox();
-            assert(from && to);
-            await sidebar.page.evaluate(geometry => { globalThis.__splitPinDragGeometry = geometry; }, { from, to, targetSelector, fraction });
+        const dragTo = async (targetSelector, placement) => {
+            const source = await sidebar.page.$(selector);
+            const from = await source.boundingBox();
+            assert(from);
             await sidebar.page.mouse.move(from.x + 55, from.y + from.height / 2);
             await sidebar.page.mouse.down();
             try {
                 await sidebar.page.mouse.move(from.x + 67, from.y + from.height / 2, { steps: 6 });
                 await poll(() => sidebar.page.evaluate(selector => document.querySelector(selector)?.classList.contains('dragging'), selector), Boolean, 'closed split genuine dragstart');
-                await sidebar.page.mouse.move(to.x + 55, to.y + to.height * fraction, { steps: 15 });
+                // Starting a drag can reflow the row/folder. Read the current
+                // header only after trusted dragstart, not the pre-drag layout.
+                const to = await (await sidebar.page.$(targetSelector)).boundingBox();
+                assert(to);
+                const point = { x: to.x + 55, y: placement === 'after' ? to.y + to.height - 4 : to.y + to.height / 2 };
+                await sidebar.page.evaluate(geometry => { globalThis.__splitPinDragGeometry = geometry; }, { from, to, targetSelector, placement, point });
+                await sidebar.page.mouse.move(point.x, point.y, { steps: 15 });
                 await new Promise(resolve => setTimeout(resolve, 350));
+                const hit = await sidebar.page.evaluate(({ point, targetSelector }) => {
+                    const target = document.querySelector(targetSelector), actual = document.elementFromPoint(point.x, point.y);
+                    const anchor = document.querySelector('.sidebar-drop-anchor');
+                    const result = { targetConnected: target?.isConnected, hitTarget: Boolean(target && actual && (target === actual || target.contains(actual))), hitBookmarkId: actual?.closest('[data-bookmark-id]')?.dataset.bookmarkId, status: document.querySelector('.sidebar-drop-status')?.textContent, anchorVisible: anchor?.hidden === false, anchorPlacement: anchor?.dataset.placement, inside: target?.classList.contains('sidebar-drop-inside') };
+                    globalThis.__splitPinDragGeometry.hit = result;
+                    return result;
+                }, { point, targetSelector });
+                assert(hit.targetConnected && hit.hitTarget, 'Release must hit the current folder header, never the source row');
+                if (placement === 'after') assert(hit.anchorVisible && hit.anchorPlacement === 'after', 'Root return must advertise the after-folder insertion');
+                else assert(hit.inside, 'Inbound drop must advertise folder containment');
             } finally { await sidebar.page.mouse.up(); }
         };
-        await dragTo(`${folderSelector} > .folder-header`, 0.5);
+        await dragTo(`${folderSelector} > .folder-header`, 'inside');
         await poll(() => apiPage.evaluate(async id => (await chrome.bookmarks.get(id))[0].parentId, pin.bookmarkId), id => id === dragFolder.id, 'same marker nested in folder');
         await sidebar.page.waitForSelector(`${folderSelector} ${selector}`, { visible: true });
-        await dragTo(`${folderSelector} > .folder-header`, 0.98);
+        await dragTo(`${folderSelector} > .folder-header`, 'after');
         await poll(() => apiPage.evaluate(async id => (await chrome.bookmarks.get(id))[0].parentId, pin.bookmarkId), id => id === dragFolder.parentId, 'same marker restored to root');
         const trace = await sidebar.page.evaluate(() => globalThis.__splitPinFolderDrag);
         for (const type of ['dragstart', 'drop', 'dragend']) assert.equal(trace.filter(event => event.type === type && event.trusted).length, 2, `Two trusted ${type} events required`);
