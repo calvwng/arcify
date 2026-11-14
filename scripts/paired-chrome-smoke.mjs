@@ -917,7 +917,9 @@ try {
         // precondition without running unrelated menu/lifecycle scenarios.
         const current = await snapshot(fixture.windowA);
         const source = current.spaces.find(space => space.id === current.activeSpaceId);
-        report.todayMoveDiagnosticFavorite = await arcifyOptions.evaluate(async ({ source, windowId, url }) => {
+        const setupSidebar = await newTabPage(`chrome-extension://${arcifyId}/sidebar.html`, fixture.windowA);
+        try {
+        report.todayMoveDiagnosticFavorite = await setupSidebar.page.evaluate(async ({ source, windowId, url }) => {
             const bookmark = await chrome.bookmarks.create({ parentId: source.bookmarkFolderId, title: 'Diagnostic Favorite exclusion', url });
             const reply = await chrome.runtime.sendMessage({ type: 'favoriteStore', action: 'addBookmark', windowId,
                 spaceId: source.id, bookmarkFolderId: source.bookmarkFolderId, bookmarkId: bookmark.id, parentId: bookmark.parentId });
@@ -926,6 +928,7 @@ try {
             if (!favorite?.tabId) throw new Error('Diagnostic Favorite native instance missing');
             return { bookmarkId: bookmark.id, favoriteId: favorite.id, tabId: favorite.tabId };
         }, { source, windowId: fixture.windowA, url: `${fixture.base}/favorite-persistent` });
+        } finally { await arcifyOptions.evaluate(id => chrome.tabs.remove(id), setupSidebar.tab.id); }
         await saveReport();
     }
 
