@@ -233,13 +233,27 @@ async function exerciseSplitSectionDrag({ apiPage, sidebar, ui, read, poll, spac
     const drag = async (sourceSelector, targetSelector, edge) => ui(sidebar.page, 'Drag exact live Split View across sections', async () => {
         await sidebar.page.waitForSelector(sourceSelector, { visible: true });
         await sidebar.page.waitForSelector(targetSelector, { visible: true });
-        await sidebar.page.evaluate(() => {
-            globalThis.__compoundDragTrace = [];
+        await sidebar.page.evaluate(targetSelector => {
+            globalThis.__compoundDragTrace = []; globalThis.__compoundDragHit = null;
+            globalThis.__compoundExpectedTarget = targetSelector;
             if (!globalThis.__compoundDragObserved) {
                 globalThis.__compoundDragObserved = true;
-                for (const type of ['dragstart', 'drop', 'dragend']) document.addEventListener(type, event => globalThis.__compoundDragTrace.push({ type, trusted: event.isTrusted, tabId: event.target.closest?.('[data-tab-id]')?.dataset.tabId, bookmarkId: event.target.closest?.('[data-bookmark-id]')?.dataset.bookmarkId }), true);
+                document.addEventListener('dragover', event => {
+                    const target = document.querySelector(globalThis.__compoundExpectedTarget);
+                    globalThis.__compoundDragTrace.push({ type: 'dragover', phase: 'capture', trusted: event.isTrusted,
+                        x: event.clientX, y: event.clientY, targetDelivered: Boolean(target && (target === event.target || target.contains(event.target))) });
+                }, true);
+                for (const type of ['dragstart', 'dragover', 'drop', 'dragend']) document.addEventListener(type, event => {
+                    const target = document.querySelector(globalThis.__compoundExpectedTarget), dragging = document.querySelector('.dragging');
+                    globalThis.__compoundDragTrace.push({ type, phase: type === 'dragover' ? 'bubble' : 'capture', trusted: event.isTrusted, x: event.clientX, y: event.clientY,
+                        targetDelivered: Boolean(target && (target === event.target || target.contains(event.target))),
+                        prevented: event.defaultPrevented, dropEffect: event.dataTransfer?.dropEffect,
+                        tabId: event.target.closest?.('[data-tab-id]')?.dataset.tabId, bookmarkId: event.target.closest?.('[data-bookmark-id]')?.dataset.bookmarkId,
+                        dragging: dragging ? { connected: dragging.isConnected, tabId: dragging.dataset.tabId, bookmarkId: dragging.dataset.bookmarkId, split: dragging.classList.contains('today-native-split') } : null,
+                        status: document.querySelector('.sidebar-drop-status')?.textContent });
+                }, type !== 'dragover'); // Dragover bubble phase observes handler acceptance; dragstart may stop propagation.
             }
-        });
+        }, targetSelector);
         const from = await (await sidebar.page.$(sourceSelector)).boundingBox(); assert(from);
         await sidebar.page.mouse.move(from.x + 55, from.y + from.height / 2); await sidebar.page.mouse.down();
         try {
@@ -248,6 +262,14 @@ async function exerciseSplitSectionDrag({ apiPage, sidebar, ui, read, poll, spac
             const to = await (await sidebar.page.$(targetSelector)).boundingBox(); assert(to);
             const point = { x: to.x + 55, y: to.y + (edge ? 4 : to.height / 2) };
             await sidebar.page.mouse.move(point.x, point.y, { steps: 15 });
+            // A coalesced final mouse move can update hit-testing without
+            // delivering a native dragover to the header. Settle this one
+            // continuous gesture inside the target before considering release.
+            await new Promise(resolve => setTimeout(resolve, 100));
+            await sidebar.page.mouse.move(point.x + 3, point.y, { steps: 3 });
+            await new Promise(resolve => setTimeout(resolve, 100));
+            await sidebar.page.mouse.move(point.x, point.y, { steps: 3 });
+            await poll(() => sidebar.page.evaluate(() => globalThis.__compoundDragTrace.some(event => event.type === 'dragover' && event.trusted && event.targetDelivered)), Boolean, 'trusted compound dragover delivered to exact destination');
             await new Promise(resolve => setTimeout(resolve, 350));
             const hit = await sidebar.page.evaluate(({ targetSelector, point }) => {
                 const target = document.querySelector(targetSelector), actual = document.elementFromPoint(point.x, point.y), anchor = document.querySelector('.sidebar-drop-anchor');
