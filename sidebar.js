@@ -2050,6 +2050,12 @@ async function applySplitSectionDrop(compound, destination, spaceElement) {
         request.today = { expectedCanonicalIds: [...space.temporaryTabs], beforeId: anchor?.dataset.tabId ? Number(anchor.dataset.tabId) : null };
     }
     const response = await chrome.runtime.sendMessage(request);
+    // The worker changed canonical Today order. A storage notification may be
+    // deferred by this drag's mutation gate, so a forced repaint alone would
+    // render the old sidebar model. Adopt the authoritative snapshot first,
+    // including acknowledged partial outcomes, before the caller repaints.
+    await pendingSpaceSaves;
+    await adoptStoredSpaces(await spaceRequest('get'), { render: false });
     if (!response?.success) throw new Error(response?.error || 'The Split View drag could not be confirmed.');
 }
 

@@ -839,3 +839,28 @@ test('compound pin uses frozen displayed inversion when preference changes durin
         assert.deepEqual(writes, []); assert.deepEqual(alerts, []);
     } finally { hooks = {}; tabs.splice(0, tabs.length, ...original); await reset(); }
 });
+
+for (const inverted of [false, true]) for (const partial of [false, true]) test(`compound release adopts acknowledged Today order before refresh without storage event (inverted=${inverted}, partial=${partial})`, async () => {
+    await reset({ empty: true, todayInverted: inverted });
+    const recipeId = '12345678-1234-4123-8123-123456789abc';
+    getNode('p').children.push({ id: 'pair', title: 'Pair', url: chrome.runtime.getURL(`saved-split.html#${recipeId}`) });
+    local.splitPinsV1 = { version: 1, destination: 'p', pins: [{ recipeId, bookmarkId: 'pair', parentId: 'p', phase: 'committed' }] };
+    const entries = [1, 2].map((tabId, index) => ({ tabId, index, url: tabs[index].url, groupId: -1, pinned: false, splitViewId: 7 }));
+    let released = false;
+    hooks.splitAction = message => {
+        if (message.action === 'release') {
+            assert.deepEqual(message.today, { expectedCanonicalIds: [1, 2, 3], beforeId: null });
+            storedSpaces = structuredClone(storedSpaces); storedSpaces[0].temporaryTabs = [3, 1, 2];
+            local.spaces = structuredClone(storedSpaces); getNode('p').children = []; local.splitPinsV1.pins = []; released = true;
+        }
+        return { success: !(partial && message.action === 'release'), error: partial ? 'Metadata cleanup incomplete' : undefined, pins: released ? [] : [{ bookmarkId: 'pair', tabIds: [1, 2], entries, splitViewId: 7 }] };
+    };
+    try {
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        const target = temporary().querySelector('[data-tab-id="3"]'); rect(target, 100);
+        await drop(row('pair'), target, inverted ? 101 : 127);
+        assert.equal(released, true); assert.equal(row('pair'), null);
+        assert.deepEqual([...temporary().querySelectorAll('.tab[data-tab-id]')].map(node => Number(node.dataset.tabId)), inverted ? [2, 1, 3] : [3, 1, 2]);
+        assert.deepEqual(alerts, partial ? ['Metadata cleanup incomplete'] : []); assert.deepEqual(writes, []);
+    } finally { hooks = {}; delete local.splitPinsV1; await reset(); }
+});
