@@ -910,6 +910,25 @@ try {
     if (process.env.ARCIFY_TEST_HEAD) assert.equal(report.environment.arcifyHead, process.env.ARCIFY_TEST_HEAD);
     report.environment.puppeteer = JSON.parse(await readFile(resolve(ROOT, 'scripts/paired-chrome-runtime/node_modules/puppeteer-core/package.json'), 'utf8')).version;
     assert.equal(report.environment.puppeteer, '25.12.0', 'Paired CI must use its isolated, reviewed browser driver.');
+    async function seedDiagnosticMoveFavorite() {
+        if (!report.runMode.startsWith('today-move-') || report.todayMoveDiagnosticFavorite) return;
+        // The unchanged Today fixture tests global Favorite exclusion. The full
+        // suite supplies one in case28; isolated diagnostics seed the same API
+        // precondition without running unrelated menu/lifecycle scenarios.
+        const current = await snapshot(fixture.windowA);
+        const source = current.spaces.find(space => space.id === current.activeSpaceId);
+        report.todayMoveDiagnosticFavorite = await arcifyOptions.evaluate(async ({ source, windowId, url }) => {
+            const bookmark = await chrome.bookmarks.create({ parentId: source.bookmarkFolderId, title: 'Diagnostic Favorite exclusion', url });
+            const reply = await chrome.runtime.sendMessage({ type: 'favoriteStore', action: 'addBookmark', windowId,
+                spaceId: source.id, bookmarkFolderId: source.bookmarkFolderId, bookmarkId: bookmark.id, parentId: bookmark.parentId });
+            if (!reply?.success) throw new Error(reply?.error || 'Diagnostic Favorite setup failed');
+            const favorite = reply.favorites.find(item => item.sourceBookmarkId === bookmark.id);
+            if (!favorite?.tabId) throw new Error('Diagnostic Favorite native instance missing');
+            return { bookmarkId: bookmark.id, favoriteId: favorite.id, tabId: favorite.tabId };
+        }, { source, windowId: fixture.windowA, url: `${fixture.base}/favorite-persistent` });
+        await saveReport();
+    }
+
     await step(stepNames[0], async () => {
         validateNamespaceLaunchEnvironment(process.env, process.getuid?.());
         const chromeExecutable = await puppeteer.executablePath('chrome');
@@ -2411,6 +2430,7 @@ try {
     });
     } // Shared tab-menu and Move/drag case 38.
 
+    if (report.runMode.startsWith('today-move-')) await seedDiagnosticMoveFavorite();
     if (report.runMode === 'full' || report.runMode === 'today-move-diagnostic') {
     await step(stepNames[40], () => exerciseTodayMove({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,pageForUrl,ui,screenshot,
         snapshot,poll,fixture,arcifyId,spotlightId,search,groupSync:false,reloadArcify:()=>reloadPairedExtension('arcify'),

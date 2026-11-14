@@ -193,6 +193,7 @@ async function runOrchestration(mode, failAt = null, definitions = []) {
     let preparations = 0;
     const execute = new vm.Script(`(async () => { ${orchestration} })()`).runInNewContext({
         report, stepNames: names, NATIVE_SPLIT_CASE_NAME: names[39],
+        seedDiagnosticMoveFavorite: async () => {},
         prepareRecoverySidebarObservation: async () => {
             preparations++;
             const order = allPlans.find(([plan]) => plan === mode)[1];
