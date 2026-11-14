@@ -66,3 +66,23 @@ A compact **Review saved pair recovery** button appears only for pending/deferre
 If no marker is visible, **Keep recipe for later** retains the recipe and marks its receipt deferred. This releases the global pending-save block without retrying creation; later migration also skips it. The review remains available if a late marker appears. Recipes count toward the existing 100-pair safety limit. Creating a replacement when the old marker is permanently missing remains a separate, unimplemented explicit flow; no uncertain creation is silently replayed.
 
 The first recovery/defer mutation atomically keeps a one-time `splitPinRecoveryBeforeV1` snapshot of pin metadata and recipes. The new deferred phase is not understood by earlier experimental #86 builds; those builds reject this metadata instead of changing it. Rollback after deferral therefore requires a compatible build or a deliberately restored, verified pre-recovery backup. Do not simply downgrade to an earlier #86 build and expect pending/deferred operations to work.
+
+## Dragging live pairs between Pinned and Today
+
+Drag either member of an intact adjacent Today split into a Pinned root or folder
+slot to save one named pin. This preserves both original panes and their native
+split; ordinary Rename remains optional. The displayed destination order is
+validated against the canonical bookmark order before creating the marker.
+
+Drag a live compound pin into Today to remove that saved pin while keeping both
+panes open as one adjacent Today block. This is permanent unpinning, not a second
+closed shortcut. A closed pin has no Today drop. Another window's surviving
+instance blocks this action; close that instance first. The action cannot insert
+between another native pair's members. Cross-Space live moves and cold witness
+reconstruction remain outside this feature.
+
+These operations recheck exact pane snapshots, ownership, native partition and
+destination order. Uncertain bookmark or storage outcomes stop without opening,
+closing, or recreating panes. A reported partial result requires refresh, not an
+automatic retry. Hosted acceptance uses trusted drag events and verifies current
+hit-testing before release; it does not substitute synthetic drops for input.

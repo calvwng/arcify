@@ -75,10 +75,10 @@ for (const change of ['url', 'id', 'membership', 'space', 'root', 'window', 'inv
     await action(); assert.deepEqual(f.calls, []); assert.match(f.statuses.at(-1), /changed/);
 });
 
-test('existing split badges refuse dragging and End gathers only the exact registered Today pair', async () => {
+test('existing split badges allow exact compound dragging and End gathers only the exact registered Today pair', async () => {
     const f = fixture({ overrides: { 1: { splitViewId: 0 }, 2: { splitViewId: 0 } } });
     assert.equal(f.row(1).querySelector('.today-split-badge').textContent, 'Split View 1'); assert.equal(f.target(1), null);
-    assert.equal(f.event(f.row(1), 'dragstart').defaultPrevented, true); assert.match(f.statuses.at(-1), /End Split View/);
+    assert.equal(f.event(f.row(1), 'dragstart').defaultPrevented, false); assert.deepEqual(f.ui.capturePinPair(f.row(2)).map(e => e.tabId), [1, 2]);
     const action = f.actions(1); assert.equal(action.create, undefined); await action.end();
     assert.equal(f.calls.length, 1); assert.equal(f.calls[0].action, 'end'); assert.deepEqual(f.calls[0].entries.map(entry => entry.tabId), [1, 2]);
     assert(f.calls[0].entries.every(entry => entry.splitViewId === 0)); assert.match(f.statuses.at(-1), /Both tabs stay open/);
@@ -244,4 +244,17 @@ test('saving a native pair sends explicit recipe request, not a native split mut
 test('stale save selection does not reach the recipe writer', async () => {
     const f = fixture({ overrides: { 1: { splitViewId: 40 }, 2: { splitViewId: 40 } } });
     f.select([1]); const save = f.actions(1).save; f.context.activeSpaceId = 'different'; await save(); assert.deepEqual(f.calls, []);
+});
+
+for (const change of ['hidden', 'nonadjacent', 'three-members', 'ordinary-binding', 'batch']) test(`compound drag cannot capture ${change} pair`, () => {
+    const overrides = { 1: { splitViewId: 9 }, 2: { splitViewId: 9 } };
+    if (change === 'nonadjacent') overrides[2].index = 5;
+    if (change === 'three-members') overrides[3] = { splitViewId: 9 };
+    const f = fixture({ overrides });
+    if (change === 'hidden') f.row(2).hidden = true;
+    if (change === 'ordinary-binding') f.row(2).dataset.bookmarkId = 'pin';
+    if (change === 'batch') f.select([1, 2]);
+    assert.equal(f.ui.capturePinPair(f.row(1)), null);
+    assert.equal(f.event(f.row(1), 'dragstart').defaultPrevented, true);
+    assert.deepEqual(f.calls, []);
 });

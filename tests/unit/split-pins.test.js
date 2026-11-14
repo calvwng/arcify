@@ -11,7 +11,7 @@ function fixture() {
     const store = { spaces: [{ id: 's', bookmarkFolderId: 'root', temporaryTabs: [1, 2], spaceBookmarks: [] }], active: { 10: 's' },
         run: fn => fn(), isGlobalTab: id => hooks.global === id,
         insertCreatedToday(space, tab) { space.temporaryTabs.push(tab.id); }, rebaseSectionRanks() {},
-        async persist() { effects.push('persist'); await hooks.persist?.(); } };
+        async persist(options = {}) { effects.push('persist'); await hooks.persist?.(); await options.beforeWrite?.(); effects.push('persistCommitted'); } };
     globalThis.chrome = {
         runtime: { id: 'test', getURL: p => `chrome-extension://test/${p}`, onMessage: { addListener: fn => listeners.push(fn) } },
         windows: { async get(id) { return { id, type: 'normal', incognito: false, ...hooks.window }; } },
@@ -20,7 +20,7 @@ function fixture() {
             async set(values) { effects.push('save'); Object.assign(data, copy(values)); await hooks.localSet?.(values); }
         } },
         tabs: {
-            async query({ windowId }) { await hooks.query?.(); return copy(tabs.filter(t => t.windowId === windowId)); },
+            async query({ windowId } = {}) { await hooks.query?.(); return copy(tabs.filter(t => windowId === undefined || t.windowId === windowId)); },
             async get(id) { await hooks.get?.(id); return copy(tabs.find(t => t.id === id)); },
             async create(options) { effects.push(['create', options]); await hooks.create?.(); const tab = { ...copy(tabs[0]), id: Math.max(...tabs.map(t => t.id)) + 1, index: tabs.length, url: options.url, splitViewId: -1 }; tabs.push(tab); return copy(tab); },
             async update(id, update) { effects.push(['update', id, update]); await hooks.update?.(); Object.assign(tabs.find(t => t.id === id), update); },
@@ -34,8 +34,11 @@ function fixture() {
         async get(id) { return nodes.filter(n => [].concat(id).includes(n.id)).map(copy); },
         async getChildren(id) { return nodes.filter(n => n.parentId === id).map(copy); },
         async search(q) { return nodes.filter(n => Object.entries(q).every(([k,v]) => n[k] === v)).map(copy); },
-        async create(input) { effects.push(['bookmark', input]); const item = { id: String(next++), ...input }; nodes.push(item); await hooks.bookmarkCreate?.(); return copy(item); }
+        async create(input) { effects.push(['bookmark', input]); const item = { id: String(next++), ...input }; const siblings = nodes.filter(n => n.parentId === input.parentId); const before = siblings[input.index]; nodes.splice(before ? nodes.indexOf(before) : nodes.length, 0, item); await hooks.bookmarkCreate?.(); return copy(item); }
     };
+    const events = () => ({ callbacks: [], addListener(fn) { this.callbacks.push(fn); }, removeListener(fn) { this.callbacks = this.callbacks.filter(f => f !== fn); } });
+    for (const key of ['onMoved', 'onRemoved', 'onChanged']) chrome.bookmarks[key] = events();
+    chrome.bookmarks.remove = async id => { await hooks.beforeRemove?.(); const at = nodes.findIndex(n => n.id === id); if (at < 0) throw new Error('Missing bookmark'); nodes.splice(at, 1); effects.push(['bookmarkRemove', id]); await hooks.afterRemove?.(); };
     const session = {};
     chrome.storage.session = { async get(key) { return { [key]: copy(session[key]) }; }, async set(value) { Object.assign(session, copy(value)); } };
     chrome.tabs.remove = async ids => { effects.push(['remove', ids]); for (const id of [].concat(ids)) { const i = tabs.findIndex(t => t.id === id); if (i >= 0) tabs.splice(i, 1); } };
@@ -228,4 +231,89 @@ test('lost recovery write response preserves committed receipt and backup; stale
     await assert.rejects(f.run({ action: 'recover', recipe: item.recipe, candidate: item.candidates[0] }));
     await assert.rejects(f.run({ action: 'defer', recipe: item.recipe }));
     assert.deepEqual(f.data, state);
+});
+
+const releaseRequest = (f, bookmarkId, beforeId = null) => ({ action: 'release', bookmarkId,
+    bookmark: Object.fromEntries(['parentId','url','title'].map(k => [k, f.nodes.find(n => n.id === bookmarkId)[k]])),
+    today: { expectedCanonicalIds: [...f.store.spaces[0].temporaryTabs], beforeId } });
+test('drag pin creates one marker at exact nested insertion without changing either live page', async () => {
+    const f = fixture(); f.nodes.push({ id: 'folder', parentId: 'root', title: 'Areas' }, { id: 'a', parentId: 'folder', title: 'A', url: 'https://a.test/' });
+    const before = structuredClone(f.tabs);
+    const result = await f.run({ destination: { parentId: 'folder', expectedCanonicalIds: ['a'], beforeId: 'a' } });
+    assert.deepEqual((await chrome.bookmarks.getChildren('folder')).map(n => n.id), [result.bookmarkId, 'a']);
+    assert.deepEqual(f.tabs, before); assert.deepEqual(f.store.spaces[0].temporaryTabs, [1,2]);
+    assert.equal((await f.run({ action:'list' })).pins[0].entries.length, 2);
+});
+for (const staleCase of ['order', 'pair']) test(`drag pin rejects stale ${staleCase} before creation`, async () => {
+    const f = fixture();
+    const destination = { parentId:'root', expectedCanonicalIds: staleCase === 'order' ? ['missing'] : [], beforeId:null };
+    if (staleCase === 'pair') f.tabs[1].splitViewId = 77;
+    await assert.rejects(f.run({ destination }));
+    assert.equal(f.effects.filter(e => e[0] === 'bookmark').length, 0); assert.equal(f.data[SAVED_SPLITS_KEY]?.length || 0, 0);
+});
+test('release unpins complete live pair and moves its Today block without native mutations', async () => {
+    const f = fixture(); const { bookmarkId } = await f.run();
+    f.tabs.push({ ...f.tabs[0], id:3, index:2, splitViewId:-1 }); f.store.spaces[0].temporaryTabs.push(3);
+    const before = structuredClone(f.tabs);
+    await f.run(releaseRequest(f, bookmarkId));
+    assert.deepEqual(f.store.spaces[0].temporaryTabs, [3,1,2]); assert.deepEqual(f.tabs, before);
+    assert(!f.nodes.some(n => n.id === bookmarkId)); assert.deepEqual(f.data[SAVED_SPLITS_KEY], []); assert.deepEqual(f.data[SPLIT_PINS_KEY].pins, []);
+    assert.deepEqual(f.session[SPLIT_PIN_SESSION_KEY], {});
+    assert.equal(f.effects.filter(e => Array.isArray(e) && ['remove','update','create','split'].includes(e[0])).length, 0);
+});
+for (const reason of ['other-window', 'closed', 'stale-order', 'bookmark-changed', 'interleaved']) test(`release rejects ${reason} without removing saved pin`, async () => {
+    const f = fixture(); const { bookmarkId } = await f.run(); const req = releaseRequest(f, bookmarkId);
+    if (reason === 'other-window') { f.tabs.push({ ...f.tabs[0], id:9, windowId:20 }); f.session[SPLIT_PIN_SESSION_KEY][`20:${bookmarkId}`] = { bookmarkId, windowId:20, tabIds:[9,10] }; }
+    if (reason === 'closed') f.tabs.pop();
+    if (reason === 'stale-order') req.today.expectedCanonicalIds = [2,1];
+    if (reason === 'bookmark-changed') req.bookmark.title = 'stale';
+    if (reason === 'interleaved') { f.tabs.push({ ...f.tabs[0], id:3, index:2, splitViewId:-1 }); f.store.spaces[0].temporaryTabs = [1,3,2]; req.today.expectedCanonicalIds = [1,3,2]; }
+    await assert.rejects(f.run(req)); assert(f.nodes.some(n => n.id === bookmarkId));
+});
+test('release lost removal response preserves panes and never recreates marker', async () => {
+    const f = fixture(); const { bookmarkId } = await f.run(); const req = releaseRequest(f, bookmarkId); const before = structuredClone(f.tabs);
+    f.hooks.afterRemove = () => { throw new Error('lost response'); };
+    await assert.rejects(f.run(req), /removal could not be confirmed/); assert.deepEqual(f.tabs, before);
+    await assert.rejects(f.run(req)); assert.equal(f.effects.filter(e => e[0] === 'bookmark').length, 1);
+});
+
+test('pair change after drag creation intent prevents bookmark write and cleans only new recipe', async () => {
+    const f = fixture(); f.hooks.localSet = values => { if (values[SPLIT_PINS_KEY]?.pins.some(p => p.phase === 'pending')) f.tabs[1].splitViewId = 77; };
+    await assert.rejects(f.run({ destination: { parentId:'root', expectedCanonicalIds:[], beforeId:null } }));
+    assert.equal(f.effects.filter(e => e[0] === 'bookmark').length, 0); assert.deepEqual(f.data[SAVED_SPLITS_KEY], []);
+});
+test('release pair changes during order persistence retains exact pin and never deletes pages', async () => {
+    const f = fixture(); const { bookmarkId } = await f.run();
+    f.tabs.push({ ...f.tabs[0], id:3, index:2, splitViewId:-1 }); f.store.spaces[0].temporaryTabs.push(3);
+    f.hooks.persist = () => { f.tabs[1].splitViewId = 77; };
+    await assert.rejects(f.run(releaseRequest(f, bookmarkId)), /placement could not be confirmed/);
+    assert(f.nodes.some(n => n.id === bookmarkId)); assert.equal(f.tabs.length,3);
+    assert.equal(f.effects.filter(e => e[0] === 'bookmarkRemove').length,0);
+});
+test('stale duplicate drag pin never creates a second recipe or claims a new destination', async () => {
+    const f = fixture(); await f.run();
+    await assert.rejects(f.run({ destination:{ parentId:'root', expectedCanonicalIds:[], beforeId:null } }), /already pinned/);
+    assert.equal(f.data[SAVED_SPLITS_KEY].length,1); assert.equal(f.effects.filter(e => e[0] === 'bookmark').length,1);
+});
+
+test('list suppresses release for another-window surviving instance while retaining exact live entries', async () => {
+    const f = fixture(); const { bookmarkId } = await f.run();
+    let queries = 0; f.hooks.query = () => queries++;
+    let result = await f.run({ action:'list' }); assert.equal(result.pins[0].releaseAllowed,true); assert.equal(queries,1);
+    f.session[SPLIT_PIN_SESSION_KEY][`20:${bookmarkId}`] = { bookmarkId, windowId:20, tabIds:[9,10] };
+    f.tabs.push({ ...f.tabs[0], id:9, windowId:20 }); queries=0;
+    result = await f.run({ action:'list' }); assert.equal(result.pins[0].releaseAllowed,false); assert.equal(result.pins[0].entries.length,2); assert.equal(queries,2);
+    f.tabs.pop(); queries=0; result = await f.run({ action:'list' }); assert.equal(result.pins[0].releaseAllowed,true); assert.equal(queries,2);
+});
+
+test('release rechecks a destination pair formed during persistence before committing or deleting', async () => {
+    const f = fixture(); const { bookmarkId } = await f.run();
+    f.tabs.push({ ...f.tabs[0], id:3, index:2, splitViewId:-1 }, { ...f.tabs[0], id:4, index:3, splitViewId:-1 });
+    f.store.spaces[0].temporaryTabs = [1,2,3,4];
+    f.hooks.persist = () => { for (const tab of f.tabs.filter(t => t.id >= 3)) tab.splitViewId = 90; };
+    await assert.rejects(f.run(releaseRequest(f, bookmarkId,4)), /placement could not be confirmed/);
+    assert(f.nodes.some(n => n.id === bookmarkId)); assert.equal(f.store.initialized,false);
+    assert(!f.effects.includes('persistCommitted'));
+    assert.equal(f.effects.filter(e => e[0] === 'bookmarkRemove').length,0);
+    assert.deepEqual(f.tabs.map(t => t.id), [1,2,3,4]);
 });

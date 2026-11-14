@@ -5,7 +5,7 @@ const ROW = '#spacesList .tab[data-tab-id]:not([data-bookmark-id])';
 const TARGET = '.today-split-target';
 const DEFERRALS = 'spaceGroupSplitDeferrals';
 const DEFERRED_MESSAGE = 'End Split View to apply pending tab-group changes in this Space.';
-const BADGE_GUIDANCE = 'End Split View before moving or pinning these tabs or applying pending group layout changes.';
+const BADGE_GUIDANCE = 'Drag either pane to Pinned to save the pair. End Split View before moving individual tabs or applying pending group layout changes.';
 const STALE = 'The Today tabs changed. Select them again before creating or ending Split View.';
 export const SPLIT_UNAVAILABLE = 'Split View is unavailable in this Chrome version. Both native create and end APIs are required.';
 const sameContext = (a, b) => a && b && ['windowId', 'spaceId', 'bookmarkFolderId', 'inverted'].every(key => a[key] === b[key]);
@@ -197,6 +197,14 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
             target.removeAttribute('data-split-eligible');
         }
     }
+    function capturePinPair(element) {
+        if (!supported()) return null;
+        const current = context(), entries = visible(current), source = entries.find(entry => entry.element === element);
+        if (!source || !hasNativeSplit(source.native) || selection.isBatch()) return null;
+        const members = entries.filter(entry => entry.native.splitViewId === source.native.splitViewId).sort((a, b) => a.native.index - b.native.index);
+        if (!pair(members, 'end') || members[1].native.index !== members[0].native.index + 1) return null;
+        return Object.freeze(members.map(({ native: { tabId, url, index, groupId, pinned, splitViewId } }) => Object.freeze({ tabId, url, index, groupId, pinned, splitViewId })));
+    }
     function startDrag(element) {
         clearDrag();
         if (!supported() || selection.isBatch()) return;
@@ -236,6 +244,7 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
             if (today) element.querySelector('.tab-details')?.append(badge);
             // Keep the row draggable so a refused gesture can explain the action.
             element.addEventListener('dragstart', event => {
+                if (today && capturePinPair(element)) return;
                 event.preventDefault(); event.stopImmediatePropagation(); clearDrag(); showStatus(NATIVE_SPLIT_MOVE_ERROR);
             }, true);
         } else if (today && supported() && eligible(native)) {
@@ -277,6 +286,7 @@ export function createTodaySplitUI({ document, selection, getContext, api = glob
     document.addEventListener('dragend', clearDrag, true);
     document.addEventListener('keydown', event => { if (event.key === 'Escape') clearDrag(); }, true);
     document.defaultView.addEventListener('blur', clearDrag);
-    return { register, actionsFor, startDrag, clearDrag, supported,
+    return { register, actionsFor, startDrag, clearDrag, supported, capturePinPair,
+        splitIdFor: element => registered.get(element)?.splitViewId ?? -1,
         isSplitRow: element => hasNativeSplit(registered.get(element)) };
 }

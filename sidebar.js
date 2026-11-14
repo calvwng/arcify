@@ -16,7 +16,7 @@ import { createSpaceContextMenu, spaceDeleteMessage } from './space-context-menu
 import { getSpaceIcon } from './space-icons.js';
 import { projectSpaceOrder } from './space-order.js';
 import { createSpaceSwitcher } from './space-switcher.js';
-import { resolveSidebarDrop, insertAtSidebarDrop } from './sidebar-drop-target.js';
+import { resolveSidebarDrop, insertAtSidebarDrop, sidebarDropChildren } from './sidebar-drop-target.js';
 import { createSidebarDropFeedback } from './sidebar-drop-feedback.js';
 import { createFavoritesDragSource, createSavedBookmarkFavoriteDrop, releaseCompletedFavoriteReceipt, describeBookmarkBatchOutcome } from './favorites-drop.js';
 import { createBookmarkSelection } from './bookmark-selection.js';
@@ -1166,6 +1166,8 @@ async function reorderSpace(operation) {
     }
 }
 
+const splitPinDragMetadata = new WeakMap();
+let splitSectionDrag = null;
 function setupTabDragHandlers(tabElement, handle = tabElement) {
     handle.draggable = true;
     if (tabElement.matches('.folder')) {
@@ -1185,6 +1187,11 @@ function setupTabDragHandlers(tabElement, handle = tabElement) {
             return;
         }
         if (!tabElement.dataset.bookmarkId) todaySelection.clear();
+        const splitEntries = todaySplit.capturePinPair(tabElement);
+        const pinMetadata = splitPinDragMetadata.get(tabElement);
+        splitSectionDrag = splitEntries ? { element: tabElement, action: 'pin', entries: splitEntries }
+            : pinMetadata?.entries?.length === 2 && pinMetadata.releaseAllowed !== false ? { element: tabElement, action: 'release', ...structuredClone(pinMetadata) } : null;
+        if (splitSectionDrag) Object.assign(splitSectionDrag, { windowId: currentWindow.id, spaceId: activeSpaceId, bookmarkFolderId: spaces.find(s => s.id === activeSpaceId)?.bookmarkFolderId, savedInverted: tabElement.closest('.space')?.querySelector('[data-tab-type="pinned"]')?.dataset.savedOrderInverted === 'true', todayInverted: tabElement.closest('.space')?.querySelector('[data-tab-type="temporary"]')?.dataset.todayOrderInverted === 'true' });
         todaySplit.startDrag(tabElement);
         event.stopPropagation();
         sidebarDropFeedback.clear();
@@ -1211,6 +1218,7 @@ function setupTabDragHandlers(tabElement, handle = tabElement) {
         sidebarDropFeedback.clear();
         isDraggingTab = false;
         tabElement.classList.remove('dragging');
+        splitSectionDrag = null;
         dragSourceFolderElement = null;
         refreshCoordinator.schedule();
     });
@@ -1223,7 +1231,19 @@ let dragSourceFolderElement = null;
 let maxDragFolderDepth = 1;
 const sidebarDropFeedback = createSidebarDropFeedback({
     document,
-    resolve: point => favoritesDragSource.isBatch() ? null : resolveSidebarDrop({ ...point, dragging: document.querySelector('.dragging'), maxFolderDepth: maxDragFolderDepth }),
+    resolve: point => {
+        if (favoritesDragSource.isBatch()) return null;
+        const dragging = document.querySelector('.dragging');
+        if (todaySplit.isSplitRow(dragging) && (point.section.dataset.tabType !== 'pinned' || splitSectionDrag?.action !== 'pin')) return null;
+        const destination = resolveSidebarDrop({ ...point, dragging, maxFolderDepth: maxDragFolderDepth,
+            allowLiveSplitPin: splitSectionDrag?.element === dragging && splitSectionDrag.action === 'release' });
+        if (destination && splitSectionDrag?.action === 'release' && point.section.dataset.tabType === 'temporary') {
+            const rows = sidebarDropChildren(destination.container), index = destination.before ? rows.indexOf(destination.before) : rows.length;
+            const left = todaySplit.splitIdFor(rows[index - 1]), right = todaySplit.splitIdFor(rows[index]);
+            if (left >= 0 && left === right) return null; // Never advertise splitting another native pair's Today block.
+        }
+        return destination;
+    },
     onTarget: destination => {
         const folder = destination?.placement === 'inside' ? destination.folder : null;
         if (folder?.classList.contains('collapsed')) {
@@ -2006,6 +2026,33 @@ async function handleArcifyOrderChangeAfterDropByTabId(tabId, container) {
     await persistSpaceTabOrder(spaceId, { source: 'arcify', movedTabId: tabId });
 }
 
+async function applySplitSectionDrop(compound, destination, spaceElement) {
+    const space = spaces.find(s => s.id === spaceElement.dataset.spaceId);
+    if (!space || space.id !== activeSpaceId || compound.windowId !== currentWindow.id || compound.spaceId !== space.id || compound.bookmarkFolderId !== space.bookmarkFolderId) throw new Error('The active Space changed.');
+    const request = { type: 'splitPinAction', action: compound.action, windowId: currentWindow.id,
+        spaceId: space.id, bookmarkFolderId: space.bookmarkFolderId, entries: compound.entries };
+    const children = sidebarDropChildren(destination.container);
+    const insertion = destination.before ? children.indexOf(destination.before) : children.length;
+    if (insertion < 0) throw new Error('The drop destination changed.');
+    if (compound.action === 'pin') {
+        const parentId = bookmarkParentIdForContent(destination.container, space.bookmarkFolderId);
+        const expectedCanonicalIds = bookmarkOrderBaselines.get(parentId);
+        if (!expectedCanonicalIds) throw new Error('The bookmark order is unavailable.');
+        const inverted = destination.section.dataset.savedOrderInverted === 'true';
+        if (inverted !== compound.savedInverted) throw new Error('The displayed bookmark order changed during dragging.');
+        const anchor = children[inverted ? insertion - 1 : insertion];
+        request.destination = { parentId, expectedCanonicalIds: [...expectedCanonicalIds], beforeId: anchor?.dataset.bookmarkId || null };
+    } else {
+        const inverted = destination.section.dataset.todayOrderInverted === 'true';
+        if (inverted !== compound.todayInverted) throw new Error('The displayed Today order changed during dragging.');
+        const anchor = children[inverted ? insertion - 1 : insertion];
+        request.bookmarkId = compound.bookmarkId; request.bookmark = compound.bookmark;
+        request.today = { expectedCanonicalIds: [...space.temporaryTabs], beforeId: anchor?.dataset.tabId ? Number(anchor.dataset.tabId) : null };
+    }
+    const response = await chrome.runtime.sendMessage(request);
+    if (!response?.success) throw new Error(response?.error || 'The Split View drag could not be confirmed.');
+}
+
 async function setupDragAndDrop(pinnedContainer, tempContainer) {
     Logger.log('Setting up drag and drop handlers...');
     pinnedContainer.setAttribute('role', 'tree'); pinnedContainer.setAttribute('aria-label', 'Saved bookmarks');
@@ -2038,6 +2085,12 @@ async function setupDragAndDrop(pinnedContainer, tempContainer) {
                 pendingMutationCount++;
                 try {
                 const spaceElement = container.closest('.space');
+                const compound = splitSectionDrag?.element === draggingElement ? splitSectionDrag : null;
+                if (compound && (compound.action === 'pin' && container.dataset.tabType === 'pinned' || compound.action === 'release' && container.dataset.tabType === 'temporary')) {
+                    await applySplitSectionDrop(compound, destination, spaceElement);
+                    await refreshActiveSpaceUI({ force: true });
+                    return;
+                }
                 const originalContent = draggingElement.parentElement;
                 const sourceFolderElement = dragSourceFolderElement;
                 const sourceContent = sourceFolderElement?.querySelector(':scope > .folder-content');
@@ -2445,7 +2498,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
                                     favIconUrl: null,
                                     spaceName: space.name,
                                     pinnedUrl: item.url,
-                                    bookmarkId: item.id
+                                    bookmarkId: item.id, bookmarkParentId: item.parentId
                                 };
                                 Logger.log('Creating UI element for inactive bookmark:', item);
                                 const tabElement = await createTabElement(bookmarkTab, true, true, displayMetadata);
@@ -2678,6 +2731,12 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false, d
     const splitPin = isBookmarkOnly && isSplitPinUrl(tab.url);
     const splitLive = splitPin && displayMetadata?.splitPins?.find(p => p.bookmarkId === tab.bookmarkId)?.tabIds.length === 2;
     if (splitPin) { tabElement.classList.add('split-pin'); tabElement.dataset.splitLive = String(Boolean(splitLive)); }
+    if (splitLive) {
+        const live = displayMetadata.splitPins.find(p => p.bookmarkId === tab.bookmarkId);
+        splitPinDragMetadata.set(tabElement, { bookmarkId: tab.bookmarkId,
+            bookmark: { parentId: tab.bookmarkParentId, url: tab.url, title: tab.bookmarkTitle || tab.title },
+            entries: live.entries, releaseAllowed: live.releaseAllowed, witness: { tabIds: live.tabIds, splitViewId: live.splitViewId } });
+    }
     // Set up the tab element properties
     tabElement.draggable = true; // Enable dragging for all tabs (regular and bookmark-only)
 

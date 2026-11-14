@@ -211,12 +211,89 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
     await apiPage.evaluate(ids => chrome.tabs.remove(ids), reopenedIds);
     await poll(read, state => reopenedIds.every(id => !state.tabs.some(tab => tab.id === id)) && state.spaces.every(space => reopenedIds.every(id => !space.temporaryTabs.includes(id))), 'reopened fixture pair cleaned up');
     await checkpoint('saved-split-recipe-remove-preserved-pages', { newTabIds: ids, reopenedIds });
+    await exerciseSplitSectionDrag({ apiPage, sidebar, ui, read, poll, spaceId, sourcePair, checkpoint });
     } catch (error) {
         // Do not guess which tabs a failed action owns. Preserve them in this
         // disposable profile and capture identities before outer fixture teardown.
         try {
-            await checkpoint('saved-split-failure-preserved', { error: error.message, source, observed: await read(), recipes: await recipes(), dragEvidence: await sidebar.page.evaluate(() => ({ trace: globalThis.__splitPinFolderDrag || [], geometry: globalThis.__splitPinDragGeometry || null })), cleanup: 'Unverified tabs and recipe preserved in disposable test profile; no retry.' });
+            await checkpoint('saved-split-failure-preserved', { error: error.message, source, observed: await read(), recipes: await recipes(), dragEvidence: await sidebar.page.evaluate(() => ({ trace: globalThis.__splitPinFolderDrag || [], geometry: globalThis.__splitPinDragGeometry || null, compound: globalThis.__compoundDragTrace || [], compoundHit: globalThis.__compoundDragHit || null })), cleanup: 'Unverified tabs and recipe preserved in disposable test profile; no retry.' });
         } catch { /* Diagnostic failure must not replace the action failure. */ }
         throw error;
     }
+}
+
+async function exerciseSplitSectionDrag({ apiPage, sidebar, ui, read, poll, spaceId, sourcePair, checkpoint }) {
+    const baseline = await read();
+    const folder = await apiPage.evaluate(async spaceId => {
+        const { spaces } = await chrome.storage.local.get('spaces');
+        return chrome.bookmarks.create({ parentId: spaces.find(s => s.id === spaceId).bookmarkFolderId, title: 'Compound drag fixture' });
+    }, spaceId);
+    const sourceSelector = `.space.active [data-tab-type="temporary"] .tab[data-tab-id="${sourcePair[1].id}"]`;
+    const folderSelector = `.folder[data-bookmark-id="${folder.id}"] > .folder-header`;
+    const drag = async (sourceSelector, targetSelector, edge) => ui(sidebar.page, 'Drag exact live Split View across sections', async () => {
+        await sidebar.page.waitForSelector(sourceSelector, { visible: true });
+        await sidebar.page.waitForSelector(targetSelector, { visible: true });
+        await sidebar.page.evaluate(() => {
+            globalThis.__compoundDragTrace = [];
+            if (!globalThis.__compoundDragObserved) {
+                globalThis.__compoundDragObserved = true;
+                for (const type of ['dragstart', 'drop', 'dragend']) document.addEventListener(type, event => globalThis.__compoundDragTrace.push({ type, trusted: event.isTrusted, tabId: event.target.closest?.('[data-tab-id]')?.dataset.tabId, bookmarkId: event.target.closest?.('[data-bookmark-id]')?.dataset.bookmarkId }), true);
+            }
+        });
+        const from = await (await sidebar.page.$(sourceSelector)).boundingBox(); assert(from);
+        await sidebar.page.mouse.move(from.x + 55, from.y + from.height / 2); await sidebar.page.mouse.down();
+        try {
+            await sidebar.page.mouse.move(from.x + 67, from.y + from.height / 2, { steps: 6 });
+            await poll(() => sidebar.page.$eval(sourceSelector, node => node.classList.contains('dragging')), Boolean, 'compound dragstart');
+            const to = await (await sidebar.page.$(targetSelector)).boundingBox(); assert(to);
+            const point = { x: to.x + 55, y: to.y + (edge ? 4 : to.height / 2) };
+            await sidebar.page.mouse.move(point.x, point.y, { steps: 15 });
+            await new Promise(resolve => setTimeout(resolve, 350));
+            const hit = await sidebar.page.evaluate(({ targetSelector, point }) => {
+                const target = document.querySelector(targetSelector), actual = document.elementFromPoint(point.x, point.y), anchor = document.querySelector('.sidebar-drop-anchor');
+                const result = { target: !!target && !!actual && (target === actual || target.contains(actual)), inside: target?.classList.contains('sidebar-drop-inside'), anchor: anchor?.hidden === false && anchor.dataset.placement === 'before' };
+                globalThis.__compoundDragHit = { targetSelector, point, result }; return result;
+            }, { targetSelector, point });
+            assert(hit.target && (edge ? hit.anchor : hit.inside), 'Compound drop must hit a verified advertised destination');
+        } finally { await sidebar.page.mouse.up(); }
+        const trace = await sidebar.page.evaluate(() => globalThis.__compoundDragTrace);
+        for (const type of ['dragstart', 'drop', 'dragend']) assert.equal(trace.filter(e => e.type === type && e.trusted).length, 1);
+        await checkpoint('compound-drag-input', { trace });
+    });
+    await drag(sourceSelector, folderSelector, false);
+    const pins = await poll(() => apiPage.evaluate(async folderId => chrome.bookmarks.getChildren(folderId), folder.id), children => children.length === 1, 'one compound pin at intended folder');
+    const pin = pins[0], selector = `.split-pin[data-bookmark-id="${pin.id}"]`;
+    await sidebar.page.waitForSelector(selector, { visible: true });
+    const pinned = await read();
+    for (const key of ['tabs', 'bindings', 'favorites', 'spaces', 'pageStates']) assert.deepEqual(pinned[key], baseline[key], `Compound pin must preserve ${key}`);
+    const target = await sidebar.page.$eval('.space.active [data-tab-type="temporary"] .tab[data-tab-id]', node => node.dataset.tabId);
+    const inverted = await sidebar.page.$eval('.space.active [data-tab-type="temporary"]', node => node.dataset.todayOrderInverted === 'true');
+    await drag(selector, `.space.active [data-tab-type="temporary"] .tab[data-tab-id="${target}"]`, true);
+    await poll(() => apiPage.evaluate(async folderId => chrome.bookmarks.getChildren(folderId), folder.id), children => children.length === 0, 'compound pin removed');
+    await poll(() => apiPage.evaluate(async bookmarkId => {
+        const { splitPinsV1 } = await chrome.storage.local.get('splitPinsV1');
+        const { splitPinInstancesV1 = {} } = await chrome.storage.session.get('splitPinInstancesV1');
+        return !splitPinsV1.pins.some(p => p.bookmarkId === bookmarkId) && !Object.values(splitPinInstancesV1).some(p => p.bookmarkId === bookmarkId);
+    }, pin.id), Boolean, 'compound release metadata cleanup confirmed');
+    for (const pane of sourcePair) await sidebar.page.waitForSelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${pane.id}"]`, { visible: true });
+    const released = await read();
+    for (const key of ['tabs', 'bindings', 'favorites', 'pageStates']) assert.deepEqual(released[key], pinned[key], `Compound release must preserve ${key}`);
+    const pairIds = sourcePair.map(t => t.id);
+    const withoutPair = spaces => spaces.map(s => ({ ...s, temporaryTabs: s.temporaryTabs.filter(id => !pairIds.includes(id)) }));
+    assert.deepEqual(withoutPair(released.spaces), withoutPair(pinned.spaces), 'Compound release preserves unrelated ownership and relative Today order');
+    const owner = released.spaces.find(s => s.id === spaceId), positions = pairIds.map(id => owner.temporaryTabs.indexOf(id));
+    assert(positions.every(i => i >= 0) && Math.abs(positions[0] - positions[1]) === 1, 'Both panes surface as one adjacent Today block');
+    for (const pane of sourcePair) await sidebar.page.waitForSelector(`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${pane.id}"]`, { visible: true });
+    const visibleOrder = await sidebar.page.$$eval('.space.active [data-tab-type="temporary"] .tab[data-tab-id]', rows => rows.map(row => Number(row.dataset.tabId)));
+    const priorPairOrder = pinned.spaces.find(s => s.id === spaceId).temporaryTabs.filter(id => pairIds.includes(id));
+    const expectedPairOrder = inverted ? [...priorPairOrder].reverse() : priorPairOrder;
+    const targetIndex = visibleOrder.indexOf(Number(target));
+    assert(targetIndex >= 2);
+    assert.deepEqual(visibleOrder.slice(targetIndex - 2, targetIndex), expectedPairOrder, 'Released pair must occupy the requested visible slot immediately before target, preserving pane order');
+    const state = await apiPage.evaluate(async () => ({ local: await chrome.storage.local.get(['splitPinsV1', 'savedSplitRecipesV1']), session: await chrome.storage.session.get('splitPinInstancesV1') }));
+    assert(!state.local.splitPinsV1.pins.some(p => p.bookmarkId === pin.id));
+    assert(!state.local.savedSplitRecipesV1.some(recipe => recipe.id === new URL(pin.url).hash.slice(1)), 'Release removes the saved recipe rather than leaving a duplicate closed shortcut');
+    assert(!Object.values(state.session.splitPinInstancesV1 || {}).some(p => p.bookmarkId === pin.id));
+    await apiPage.evaluate(id => chrome.bookmarks.remove(id), folder.id);
+    await checkpoint('compound-live-pin-today-roundtrip', { pinId: pin.id, pairIds: sourcePair.map(t => t.id), before: baseline, after: released });
 }

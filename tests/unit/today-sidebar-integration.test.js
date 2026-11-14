@@ -501,7 +501,9 @@ test('real sidebar keyboard selected pair creates and ends native Split View wit
     assert.equal(splitRequests.length, 1); assert.deepEqual(splitRequests[0].entries.map(entry => entry.tabId), [101, 102]);
     assert(live(101).querySelector('.today-split-badge')); assert(live(102).querySelector('.today-split-badge')); assert.equal(live(101).querySelector('.today-split-target'), null);
     assert.deepEqual(tabs.map(tab => tab.id), beforeIds); assert.deepEqual(bookmarks, beforeBookmarks); assert.deepEqual(local.tabNameOverridesById, beforeAliases);
-    const drag = event(live(101), 'dragstart', { dataTransfer: { setData() { assert.fail('Split members cannot start moving'); } } }); assert(drag.defaultPrevented);
+    const drag = event(live(101), 'dragstart', { dataTransfer: { setData() {} } }); assert.equal(drag.defaultPrevented, false);
+    event(live(101), 'dragend');
+    assert.deepEqual(nativeSplitCalls, [['create', [101, 102]]], 'Starting a compound pin drag cannot mutate the native pair');
     await splitKeyboardMenu(101, 'ContextMenu'); assert.equal(document.activeElement, menuItem('endSplitView'));
     event(document.activeElement, 'keydown', { key: 'Enter' }); await wait(320);
     assert.deepEqual(nativeSplitCalls.at(-1), ['end', 701]); assert.equal(splitRequests.at(-1).entries.length, 2);
