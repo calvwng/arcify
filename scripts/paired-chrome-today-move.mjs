@@ -376,7 +376,8 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
         await input('Restore source Space before reload', () => native.page.click(`#spaceSwitcher button[data-space-id="${source.id}"]`));
         await poll(() => snapshot(windowId), state => state.activeSpaceId === source.id, 'source restored before reload');
         await checkpoint('render-and-paired-search', { sourceRendered, destinationRendered, searchBefore, searchAfter, searchSurface, invalidation });
-        await input('Keep an existing source content tab active before closing the helper', () => native.page.click(todayRow(seed[4])));
+        await input('Keep an existing source content tab active before closing the helper', () => clickBookmarkFixtureRow(native.page, todayRow(seed[4]), [],
+            observation => checkpoint('row-click-observation', { observation })));
         await poll(read, state => state.tabs.find(tab => tab.id === seed[4])?.active && state.activeSpaceId === source.id, 'source content remains active before helper cleanup');
         const closedHelper = await native.close(); native = null;
         const beforeReload = await waitForTodayMoveHelperCleanup({ read, poll, closedHelper });
