@@ -74,6 +74,8 @@ globalThis.MutationObserver = window.MutationObserver;
 globalThis.chrome = {
     runtime: { onMessage: listeners(), getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'splitPinAction' && hooks.splitAction) return hooks.splitAction(message);
+            if (message.type === 'splitPinAction') return { success: true, pins: (local.splitPinsV1?.pins || []).map(pin => ({ ...pin, tabIds: [] })) };
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: tabs.filter(tab => tab.pinned) };
             if (message.type === 'sidebarTour') return { success: true, state: null };
             if (message.type === 'bookmarkOrder') {
@@ -94,7 +96,7 @@ globalThis.chrome = {
         } },
     storage: { onChanged, local: area(local), sync: area(settings), session: area(session) },
     windows: { getCurrent(_options, callback) { if (callback) callback({ id: 10 }); return Promise.resolve({ id: 10 }); } },
-    tabs: { onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
+    tabs: { createSplit() {}, unsplit() {}, onActivated, ...Object.fromEntries(['onCreated', 'onUpdated', 'onRemoved', 'onAttached', 'onDetached', 'onMoved'].map(name => [name, listeners()])),
         async query(query) { return structuredClone(tabs.filter(tab => (!query.windowId || tab.windowId === query.windowId) && (!query.active || tab.active) && (query.pinned === undefined || query.pinned === tab.pinned))); },
         async get(id, callback) { const result = structuredClone(tabs.find(tab => tab.id === id)); callback?.(result); return result; } },
     bookmarks: { ...Object.fromEntries(['onChanged', 'onMoved', 'onRemoved'].map(name => [name, listeners()])), async get(id) { await hooks.bookmarkGet?.(id); return structuredClone(nodes().filter(node => node.id === id)); },
@@ -749,4 +751,116 @@ for (const todayInverted of [false, true]) for (const closePeer of [false, true]
         drag(source, 'dragend'); tabs.splice(0, tabs.length, ...originalTabs);
         delete settings.todayNewTabsAtTop; await reset();
     }
+});
+
+for (const inverted of [false, true]) for (const targetKind of ['header', 'empty']) test(`closed inline split pin moves into an empty folder and back (inverted=${inverted}, ${targetKind})`, async () => {
+    await reset({ inverted });
+    const recipeId = '12345678-1234-4123-8123-123456789abc';
+    const marker = getNode('c');
+    marker.url = chrome.runtime.getURL(`saved-split.html#${recipeId}`);
+    local.splitPinsV1 = { version: 1, destination: { spaceId: 'alpha', parentId: 'p' }, pins: [{ recipeId, bookmarkId: 'c', parentId: 'p', phase: 'committed' }] };
+    local.savedSplitRecipesV1 = [{ id: recipeId, name: 'Pair', pages: [{ url: 'https://one.test/' }, { url: 'https://two.test/' }] }];
+    local['folderCollapsed:g'] = false;
+    try {
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        assert(row('c').classList.contains('split-pin')); assert.equal(row('c').dataset.splitLive, 'false');
+        assert.equal(row('c').draggable, true);
+        const baseline = structuredClone({ recipes: local.savedSplitRecipesV1, pins: local.splitPinsV1, session, tabs, spaces: storedSpaces, bindings: local.pinnedTabStatesById });
+        const folder = row('g'), header = folder.firstElementChild;
+        rect(header, 80, 32);
+        const target = targetKind === 'header' ? header : folder.querySelector('.folder-content');
+        assert(target);
+        await drop(row('c'), target, targetKind === 'header' ? 96 : 125);
+        assert.deepEqual(ids('g'), ['c']); assert.equal(row('c').closest('.folder').dataset.bookmarkId, 'g');
+        rect(row('a'), 80);
+        await drop(row('c'), row('a'), 81);
+        assert.equal(row('c').parentElement, root()); assert.deepEqual(ids('g'), []);
+        assert.deepEqual({ recipes: local.savedSplitRecipesV1, pins: local.splitPinsV1, session, tabs, spaces: storedSpaces, bindings: local.pinnedTabStatesById }, baseline);
+        assert(writes.length > 0 && writes.every(write => write.kind === 'move' && write.id === 'c'));
+        assert.deepEqual(alerts, []);
+    } finally { delete local.splitPinsV1; delete local.savedSplitRecipesV1; await reset(); }
+});
+
+for (const inverted of [false, true]) test(`actual Today split drag sends one pair pin operation without one-tab writes (inverted=${inverted})`, async () => {
+    await reset({ empty: true, inverted });
+    const original = structuredClone(tabs), requests = [];
+    for (let i = 0; i < 2; i++) Object.assign(tabs[i], { index: i, groupId: -1, splitViewId: 7, incognito: false });
+    hooks.splitAction = message => { requests.push(structuredClone(message)); return { success: true }; };
+    try {
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        const source = temporary().querySelector('[data-tab-id="2"]');
+        await drop(source, root(), 20);
+        const pins = requests.filter(r => r.action === 'pin');
+        assert.equal(pins.length, 1); assert.deepEqual(pins[0].entries.map(e => e.tabId), [1, 2]);
+        assert.deepEqual(pins[0].destination, { parentId: 'p', expectedCanonicalIds: [], beforeId: null });
+        assert.deepEqual(writes, []); assert.deepEqual(storedSpaces[0].temporaryTabs, [1, 2, 3]);
+        assert.deepEqual(local.pinnedTabStatesById, {}); assert.deepEqual(alerts, []);
+    } finally { hooks = {}; tabs.splice(0, tabs.length, ...original); await reset(); }
+});
+
+for (const inverted of [false, true]) for (const live of [false, true]) test(`actual split marker Today drop is ${live ? 'compound release' : 'not advertised'} (inverted=${inverted})`, async () => {
+    await reset({ empty: true, todayInverted: inverted });
+    const recipeId = '12345678-1234-4123-8123-123456789abc';
+    getNode('p').children.push({ id: 'pair', title: 'Pair', url: chrome.runtime.getURL(`saved-split.html#${recipeId}`) });
+    local.splitPinsV1 = { version: 1, destination: 'p', pins: [{ recipeId, bookmarkId: 'pair', parentId: 'p', phase: 'committed' }] };
+    const requests = [], entries = [1, 2].map((tabId, index) => ({ tabId, index, url: tabs[index].url, groupId: -1, pinned: false, splitViewId: 7 }));
+    hooks.splitAction = message => { requests.push(structuredClone(message)); return { success: true, pins: [{ bookmarkId: 'pair', tabIds: live ? [1, 2] : [], entries: live ? entries : [], splitViewId: 7 }] }; };
+    try {
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        const source = row('pair'), target = temporary().querySelector('[data-tab-id="3"]'); rect(target, 100);
+        const start = drag(source, 'dragstart'); assert.equal(start.defaultPrevented, false);
+        const over = drag(target, 'dragover', 101); assert.equal(over.defaultPrevented, live);
+        drag(target, 'drop', 101); drag(source, 'dragend'); await wait(180);
+        const releases = requests.filter(r => r.action === 'release'); assert.equal(releases.length, live ? 1 : 0);
+        if (live) {
+            assert.deepEqual(releases[0].entries, entries);
+            assert.deepEqual(releases[0].bookmark, { parentId: 'p', title: 'Pair', url: getNode('pair').url });
+            assert.deepEqual(releases[0].today, { expectedCanonicalIds: [1, 2, 3], beforeId: inverted ? null : 3 });
+        }
+        assert.deepEqual(writes, []); assert.deepEqual(alerts, []);
+    } finally { hooks = {}; delete local.splitPinsV1; await reset(); }
+});
+
+test('compound pin uses frozen displayed inversion when preference changes during drag', async () => {
+    await reset({ empty: true });
+    const original = structuredClone(tabs), requests = [];
+    getNode('p').children.push(bookmark('anchor1'), bookmark('anchor2'));
+    for (let i = 0; i < 2; i++) Object.assign(tabs[i], { index: i, groupId: -1, splitViewId: 7, incognito: false });
+    hooks.splitAction = message => { requests.push(structuredClone(message)); return { success: true }; };
+    try {
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        const source = temporary().querySelector('[data-tab-id="2"]'), target = row('anchor2'); rect(target, 100);
+        drag(source, 'dragstart');
+        settings.invertTabOrder = true;
+        await onChanged.emit({ invertTabOrder: { oldValue: false, newValue: true } }, 'sync');
+        drag(target, 'dragover', 101); drag(target, 'drop', 101); drag(source, 'dragend'); await wait(180);
+        const pins = requests.filter(r => r.action === 'pin'); assert.equal(pins.length, 1);
+        assert.deepEqual(pins[0].destination, { parentId: 'p', expectedCanonicalIds: ['anchor1', 'anchor2'], beforeId: 'anchor2' });
+        assert.deepEqual(writes, []); assert.deepEqual(alerts, []);
+    } finally { hooks = {}; tabs.splice(0, tabs.length, ...original); await reset(); }
+});
+
+for (const inverted of [false, true]) for (const partial of [false, true]) test(`compound release adopts acknowledged Today order before refresh without storage event (inverted=${inverted}, partial=${partial})`, async () => {
+    await reset({ empty: true, todayInverted: inverted });
+    const recipeId = '12345678-1234-4123-8123-123456789abc';
+    getNode('p').children.push({ id: 'pair', title: 'Pair', url: chrome.runtime.getURL(`saved-split.html#${recipeId}`) });
+    local.splitPinsV1 = { version: 1, destination: 'p', pins: [{ recipeId, bookmarkId: 'pair', parentId: 'p', phase: 'committed' }] };
+    const entries = [1, 2].map((tabId, index) => ({ tabId, index, url: tabs[index].url, groupId: -1, pinned: false, splitViewId: 7 }));
+    let released = false;
+    hooks.splitAction = message => {
+        if (message.action === 'release') {
+            assert.deepEqual(message.today, { expectedCanonicalIds: [1, 2, 3], beforeId: null });
+            storedSpaces = structuredClone(storedSpaces); storedSpaces[0].temporaryTabs = [3, 1, 2];
+            local.spaces = structuredClone(storedSpaces); getNode('p').children = []; local.splitPinsV1.pins = []; released = true;
+        }
+        return { success: !(partial && message.action === 'release'), error: partial ? 'Metadata cleanup incomplete' : undefined, pins: released ? [] : [{ bookmarkId: 'pair', tabIds: [1, 2], entries, splitViewId: 7 }] };
+    };
+    try {
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        const target = temporary().querySelector('[data-tab-id="3"]'); rect(target, 100);
+        await drop(row('pair'), target, inverted ? 101 : 127);
+        assert.equal(released, true); assert.equal(row('pair'), null);
+        assert.deepEqual([...temporary().querySelectorAll('.tab[data-tab-id]')].map(node => Number(node.dataset.tabId)), inverted ? [2, 1, 3] : [3, 1, 2]);
+        assert.deepEqual(alerts, partial ? ['Metadata cleanup incomplete'] : []); assert.deepEqual(writes, []);
+    } finally { hooks = {}; delete local.splitPinsV1; await reset(); }
 });

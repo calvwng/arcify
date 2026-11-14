@@ -10,7 +10,7 @@ function install(initialByParent, { delayed = false } = {}) {
     const creates = [];
     let afterMove = null;
     let afterCreate = null;
-    globalThis.chrome = { bookmarks: {
+    globalThis.chrome = { storage: { local: { async get() { return {}; } } }, bookmarks: {
         getChildren: async parentId => structuredClone(trees[parentId] || []),
         move: async (id, { parentId, index }) => {
             if (delayed) await new Promise(resolve => setTimeout(resolve, 3));

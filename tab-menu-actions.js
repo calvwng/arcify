@@ -1,3 +1,4 @@
+import { isSplitPinUrl } from './split-pin-identity.js';
 import { assertNotTransient, isTransientTab } from './transient-safety.js';
 import { getSpaceBookmarkById } from './space-bookmarks.js';
 import { readTodayOrderInverted } from './today-order.js';
@@ -81,6 +82,7 @@ export async function runTabMenuActionCore(store, request, { beforeWrite = null,
         return { space, bookmark, tab, expected, title: bookmark?.title || aliases[tabId]?.name || tab?.title || '', url: bookmark?.url || tab?.url || tab?.pendingUrl || '', muted: Boolean(tab?.mutedInfo?.muted) };
     }
     let target = await resolve();
+    if (isSplitPinUrl(target.bookmark?.url) && !['describe', 'rename', 'removePin'].includes(action)) throw new Error('This action does not apply to a saved Split View.');
     if (action === 'describe') return { title: target.title, url: target.url, expected: target.expected, muted: target.muted, currentUrl: target.tab?.url || target.tab?.pendingUrl || null };
     if (action === 'copyLink') {
         const url = target.tab ? target.tab.url || target.tab.pendingUrl : target.bookmark.url;

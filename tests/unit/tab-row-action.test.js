@@ -1,3 +1,4 @@
+import { isSplitPinUrl } from '../../split-pin-identity.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -28,7 +29,7 @@ const sidebarSource = await readFile(new URL('../../sidebar.js', import.meta.url
 const start = sidebarSource.indexOf('async function closeTab(');
 const end = sidebarSource.indexOf('async function createTabElement(', start);
 assert(start >= 0 && end > start, 'Production closeTab handler must be available for effect tests');
-const makeCloseTab = new Function('Logger', 'spaces', 'removeSpacePin', 'chrome', 'updatePinnedSectionPlaceholders', 'captureSidebarViewport', `${sidebarSource.slice(start, end)}\nreturn closeTab;`);
+const makeCloseTab = new Function('isSplitPinUrl', 'Logger', 'spaces', 'removeSpacePin', 'chrome', 'updatePinnedSectionPlaceholders', 'captureSidebarViewport', `${sidebarSource.slice(start, end)}\nreturn closeTab;`);
 
 function fixture(bookmarkId = 'bound', spaceId = 'space-a') {
     const nodes = [
@@ -54,7 +55,7 @@ function fixture(bookmarkId = 'bound', spaceId = 'space-a') {
         }
     };
     const row = { dataset: { bookmarkId }, closest(selector) { if (selector === '.space-content') return null; assert.equal(selector, '.space'); return { dataset: { spaceId } }; }, remove() { effects.removedRows++; } };
-    const close = makeCloseTab({ log() {} }, spaces, removeSpacePin, chrome, () => { effects.placeholderRefreshes++; }, captureSidebarViewport);
+    const close = makeCloseTab(isSplitPinUrl, { log() {} }, spaces, removeSpacePin, chrome, () => { effects.placeholderRefreshes++; }, captureSidebarViewport);
     return { nodes, effects, row, close };
 }
 

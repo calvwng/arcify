@@ -1,3 +1,4 @@
+import { isSplitPinUrl } from './split-pin-identity.js';
 import { getSpaceTabs, spaceRequest } from './space-client.js';
 /**
  * Bookmark Utils - Consolidated bookmark operations for Arcify Chrome Extension
@@ -146,6 +147,7 @@ export const BookmarkUtils = {
      * @returns {Object} The created Chrome tab object
      */
     async openBookmarkAsTab(bookmarkData, targetSpaceId, replaceElement = null, context, isPinned) {
+        if (isSplitPinUrl(bookmarkData.url)) throw new Error('Open this Split View from its pinned row in the Arcify sidebar.');
         const {
             spaces,
             activeSpaceId,
@@ -262,6 +264,7 @@ export const BookmarkUtils = {
 
         for (const item of items) {
             if (item.url) {
+                if (isSplitPinUrl(item.url)) continue;
                 // This is a bookmark. Pick the first matching tab that hasn't already
                 // been bound to another bookmark in this run, so URL twins don't both
                 // get claimed by a single bookmark.

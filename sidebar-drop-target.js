@@ -31,14 +31,14 @@ function subtreeDepth(folder) {
         .filter(child => child.classList.contains('folder')).map(subtreeDepth));
 }
 
-export function resolveSidebarDrop({ section, dragging, target, clientY, maxFolderDepth = 2 }) {
+export function resolveSidebarDrop({ section, dragging, target, clientY, maxFolderDepth = 2, allowLiveSplitPin = false }) {
     if (!section || !dragging || !target || !section.contains(target) || dragging.contains(target)) return null;
     if (!dragging.matches('.tab, .folder, .pinned-favicon')) return null;
     const sourceSpace = dragging.closest('.space');
     if (sourceSpace && sourceSpace !== section.closest('.space')) return null;
     const pinned = section.dataset.tabType === 'pinned';
     if (pinned && section.closest('.space')?.dataset.bookmarkTreeUnavailable === 'true') return null;
-    if (!pinned && (dragging.classList.contains('folder') || !dragging.dataset.tabId)) return null;
+    if (!pinned && (dragging.classList.contains('folder') || (!dragging.dataset.tabId && !allowLiveSplitPin))) return null;
 
     let container = section, reference = null, placement = 'empty';
     const row = target.closest?.('.tab, .folder');
