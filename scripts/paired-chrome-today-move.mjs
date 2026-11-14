@@ -213,13 +213,26 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
     };
     const read = async () => {
         const state = await apiPage.evaluate(async () => {
-            const local = await chrome.storage.local.get(['spaces', 'pinnedTabStatesById', 'tabNameOverridesById', 'persistentFavorites']);
-            const session = await chrome.storage.session.get(['activeSpaces', 'spaceGroupProjection']);
+            const local = await chrome.storage.local.get(['spaces', 'pinnedTabStatesById', 'tabNameOverridesById', 'persistentFavorites', 'spaceDurableTodayLayout', 'spaceExplicitTodayCheckpoint']);
+            const session = await chrome.storage.session.get(['activeSpaces', 'spaceGroupProjection', 'spaceGroupSplitDeferrals', 'spaceExplicitTodayEpoch', 'favoriteRestartRecovery', 'transientWindowSession', 'spaceRecoveryCandidates', 'spaceRestoreQueue']);
             return { tabs: (await chrome.tabs.query({})).map(({ id, windowId, index, url, pendingUrl, title, pinned, incognito, active, groupId, splitViewId }) =>
                 ({ id, windowId, index, url, pendingUrl: pendingUrl || null, title, pinned, incognito, active, groupId, splitViewId: splitViewId ?? -1 })).sort((a, b) => a.id - b.id),
                 spaces: (local.spaces || []).map(({ id, bookmarkFolderId, spaceBookmarks, temporaryTabs }) => ({ id, bookmarkFolderId, spaceBookmarks, temporaryTabs })),
                 bookmarks: await chrome.bookmarks.getTree(), bindings: local.pinnedTabStatesById || {}, aliases: local.tabNameOverridesById || {}, favorites: local.persistentFavorites || [],
                 activeSpaces: session.activeSpaces || {}, projection: session.spaceGroupProjection || {}, groups: await chrome.tabGroups.query({}),
+                // Read-only persisted evidence, not worker-local deferral authority.
+                // Deliberately excluded from comparable()/positive assertions.
+                groupProjectionDiagnostics: {
+                    syncTabGroups: (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups ?? false,
+                    splitDeferrals: session.spaceGroupSplitDeferrals ?? null,
+                    durableLayout: local.spaceDurableTodayLayout ?? null,
+                    explicitCheckpoint: local.spaceExplicitTodayCheckpoint ?? null,
+                    explicitSessionEpoch: session.spaceExplicitTodayEpoch ?? null,
+                    favoriteRecovery: session.favoriteRestartRecovery ?? null,
+                    transientRegistry: session.transientWindowSession ?? null,
+                    recoveryCandidates: session.spaceRecoveryCandidates ?? null,
+                    restoreQueue: session.spaceRestoreQueue ?? null
+                },
                 windows: (await chrome.windows.getAll()).map(({ id, type, incognito, focused, state }) => ({ id, type, incognito, focused, state })).sort((a, b) => a.id - b.id) };
         });
         state.snapshot = await snapshot(windowId); state.activeSpaceId = state.snapshot.activeSpaceId;

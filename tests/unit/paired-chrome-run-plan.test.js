@@ -138,7 +138,7 @@ test('actual smoke orchestration preserves full order and explicitly gates each 
     const secondEnd = smoke.indexOf('    } // Full-only cases 34–35 and 37.');
     const moveDrag = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'move-drag') {");
     const moveDragEnd = smoke.indexOf('    } // Shared tab-menu and Move/drag case 38.');
-    const thirdFull = smoke.indexOf("    if (report.runMode === 'full') {\n", secondFull + 1);
+    const thirdFull = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'today-move-diagnostic') {\n", secondFull + 1);
     const thirdEnd = smoke.indexOf('    } // Full-only cases 40–45.');
     const actions = smoke.indexOf("    if (report.runMode === 'full' || report.runMode === 'appearance-actions') {", appearance + 1);
     const actionsEnd = smoke.indexOf('    } // Shared appearance cases 46–47;');
@@ -211,7 +211,7 @@ async function runOrchestration(mode, failAt = null, definitions = []) {
     });
     if (failAt !== null) await assert.rejects(execute, error => error === failure);
     else await execute;
-    const order = allPlans.find(([plan]) => plan === mode)[1], recoveryIndex = order.indexOf(48);
+    const order = allPlans.find(([plan]) => plan === mode)?.[1] || report.expectedCases.map(item => item.caseIndex), recoveryIndex = order.indexOf(48);
     assert.equal(preparations, recoveryIndex !== -1 && (failAt === null || failAt === 'observation' || order.indexOf(failAt) >= recoveryIndex) ? 1 : 0);
     return report;
 }
@@ -689,4 +689,10 @@ test('legacy callback receipts reject missing, duplicate or wrong native menu ad
         assert.notDeepEqual(changed, original);
         assert.notEqual(receipt(changed), receipt(original), 'Only the exact host argument is excluded from the legacy receipt.');
     }
+});
+
+for (const [mode, expected] of [['today-move-diagnostic', [0, 1, 2, 40, 41]], ['today-move-control', [0, 1, 2, 41]]]) test(`${mode} executes only declared unchanged cases`, async () => {
+    const report = await runOrchestration(mode);
+    assert.deepEqual(report.executedCaseIndices, expected);
+    assertPairedChromeRunPassed(report);
 });
