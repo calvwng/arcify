@@ -86,6 +86,58 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
     await poll(read, state => ids.every(id => !state.tabs.some(t => t.id === id)), 'exact pinned pair closed');
     assert(await apiPage.evaluate(async id => (await chrome.bookmarks.get(id)).length === 1, pin.bookmarkId));
     await sidebar.page.waitForFunction(selector => document.querySelector(selector)?.dataset.splitLive === 'false', { polling: 50 }, selector);
+    // Exercise the actual HTML5 drag input for a closed compound pin. Merely
+    // clicking/selecting the row is not evidence that native dragstart fired.
+    const dragFolder = await apiPage.evaluate(async id => {
+        const [marker] = await chrome.bookmarks.get(id);
+        return chrome.bookmarks.create({ parentId: marker.parentId, title: 'Saved split drag fixture' });
+    }, pin.bookmarkId);
+    const folderSelector = `.folder[data-bookmark-id="${dragFolder.id}"]`;
+    await sidebar.page.waitForSelector(folderSelector, { visible: true });
+    const closedBaseline = await read();
+    const pinStorage = () => apiPage.evaluate(async () => ({
+        local: await chrome.storage.local.get(['savedSplitRecipesV1', 'splitPinsV1']),
+        session: await chrome.storage.session.get('splitPinInstancesV1')
+    }));
+    const closedStorage = await pinStorage();
+    await ui(sidebar.page, 'Move closed inline split pin into folder and back with trusted drag', async () => {
+        await sidebar.page.evaluate(bookmarkId => {
+            globalThis.__splitPinFolderDrag = [];
+            for (const type of ['dragstart', 'dragover', 'drop', 'dragend']) document.addEventListener(type, event => {
+                const row = event.target.closest?.('[data-bookmark-id]');
+                globalThis.__splitPinFolderDrag.push({ type, trusted: event.isTrusted, bookmarkId: row?.dataset.bookmarkId, x: event.clientX, y: event.clientY, effectAllowed: event.dataTransfer?.effectAllowed, dropEffect: event.dataTransfer?.dropEffect, dragging: document.querySelector('.dragging')?.dataset.bookmarkId, connected: row?.isConnected });
+            }, true);
+        }, pin.bookmarkId);
+        const dragTo = async (targetSelector, fraction) => {
+            const source = await sidebar.page.$(selector), target = await sidebar.page.$(targetSelector);
+            const from = await source.boundingBox(), to = await target.boundingBox();
+            assert(from && to);
+            await sidebar.page.evaluate(geometry => { globalThis.__splitPinDragGeometry = geometry; }, { from, to, targetSelector, fraction });
+            await sidebar.page.mouse.move(from.x + 55, from.y + from.height / 2);
+            await sidebar.page.mouse.down();
+            try {
+                await sidebar.page.mouse.move(from.x + 67, from.y + from.height / 2, { steps: 6 });
+                await poll(() => sidebar.page.evaluate(selector => document.querySelector(selector)?.classList.contains('dragging'), selector), Boolean, 'closed split genuine dragstart');
+                await sidebar.page.mouse.move(to.x + 55, to.y + to.height * fraction, { steps: 15 });
+                await new Promise(resolve => setTimeout(resolve, 350));
+            } finally { await sidebar.page.mouse.up(); }
+        };
+        await dragTo(`${folderSelector} > .folder-header`, 0.5);
+        await poll(() => apiPage.evaluate(async id => (await chrome.bookmarks.get(id))[0].parentId, pin.bookmarkId), id => id === dragFolder.id, 'same marker nested in folder');
+        await sidebar.page.waitForSelector(`${folderSelector} ${selector}`, { visible: true });
+        await dragTo(`${folderSelector} > .folder-header`, 0.98);
+        await poll(() => apiPage.evaluate(async id => (await chrome.bookmarks.get(id))[0].parentId, pin.bookmarkId), id => id === dragFolder.parentId, 'same marker restored to root');
+        const trace = await sidebar.page.evaluate(() => globalThis.__splitPinFolderDrag);
+        for (const type of ['dragstart', 'drop', 'dragend']) assert.equal(trace.filter(event => event.type === type && event.trusted).length, 2, `Two trusted ${type} events required`);
+        const afterDrag = await read();
+        for (const key of ['tabs', 'bindings', 'favorites', 'spaces', 'pageStates']) assert.deepEqual(afterDrag[key], closedBaseline[key], `Folder drag cannot change ${key}`);
+        assert.deepEqual(await pinStorage(), closedStorage, 'Folder movement cannot change recipes or live witnesses');
+        const withoutMarker = nodes => nodes.filter(node => node.id !== pin.bookmarkId).map(({ index, dateGroupModified, children, ...node }) => ({ ...node, ...(children ? { children: withoutMarker(children) } : {}) }));
+        assert.deepEqual(withoutMarker(afterDrag.bookmarks), withoutMarker(closedBaseline.bookmarks), 'Unrelated bookmark identities, content and order must remain unchanged');
+        assert.equal(await sidebar.page.$eval(selector, node => node.dataset.splitLive), 'false');
+        await checkpoint('saved-split-trusted-folder-drag', { bookmarkId: pin.bookmarkId, folderId: dragFolder.id, trace });
+    });
+    await apiPage.evaluate(id => chrome.bookmarks.remove(id), dragFolder.id);
     const beforeReopen = await read();
     await ui(sidebar.page, 'Reopen same named pin after close', () => sidebar.page.click(selector));
     const reopened = await poll(read, state => {
@@ -148,7 +200,7 @@ export async function exerciseSavedSplitReopen({ apiPage, sidebar, ui, menu, rea
         // Do not guess which tabs a failed action owns. Preserve them in this
         // disposable profile and capture identities before outer fixture teardown.
         try {
-            await checkpoint('saved-split-failure-preserved', { error: error.message, source, observed: await read(), recipes: await recipes(), cleanup: 'Unverified tabs and recipe preserved in disposable test profile; no retry.' });
+            await checkpoint('saved-split-failure-preserved', { error: error.message, source, observed: await read(), recipes: await recipes(), dragEvidence: await sidebar.page.evaluate(() => ({ trace: globalThis.__splitPinFolderDrag || [], geometry: globalThis.__splitPinDragGeometry || null })), cleanup: 'Unverified tabs and recipe preserved in disposable test profile; no retry.' });
         } catch { /* Diagnostic failure must not replace the action failure. */ }
         throw error;
     }

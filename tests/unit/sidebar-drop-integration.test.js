@@ -74,6 +74,7 @@ globalThis.MutationObserver = window.MutationObserver;
 globalThis.chrome = {
     runtime: { onMessage: listeners(), getURL: path => `chrome-extension://fixture/${path}`, getManifest: () => ({ version: 'test' }),
         async sendMessage(message) {
+            if (message.type === 'splitPinAction') return { success: true, pins: (local.splitPinsV1?.pins || []).map(pin => ({ ...pin, tabIds: [] })) };
             if (message.type === 'favoriteStore') return { success: true, favorites: [], nativeTabs: tabs.filter(tab => tab.pinned) };
             if (message.type === 'sidebarTour') return { success: true, state: null };
             if (message.type === 'bookmarkOrder') {
@@ -749,4 +750,32 @@ for (const todayInverted of [false, true]) for (const closePeer of [false, true]
         drag(source, 'dragend'); tabs.splice(0, tabs.length, ...originalTabs);
         delete settings.todayNewTabsAtTop; await reset();
     }
+});
+
+for (const inverted of [false, true]) for (const targetKind of ['header', 'empty']) test(`closed inline split pin moves into an empty folder and back (inverted=${inverted}, ${targetKind})`, async () => {
+    await reset({ inverted });
+    const recipeId = '12345678-1234-4123-8123-123456789abc';
+    const marker = getNode('c');
+    marker.url = chrome.runtime.getURL(`saved-split.html#${recipeId}`);
+    local.splitPinsV1 = { version: 1, destination: { spaceId: 'alpha', parentId: 'p' }, pins: [{ recipeId, bookmarkId: 'c', parentId: 'p', phase: 'committed' }] };
+    local.savedSplitRecipesV1 = [{ id: recipeId, name: 'Pair', pages: [{ url: 'https://one.test/' }, { url: 'https://two.test/' }] }];
+    local['folderCollapsed:g'] = false;
+    try {
+        await chrome.runtime.onMessage.emit({ action: 'arcifyBookmarksChanged' }); await wait(180);
+        assert(row('c').classList.contains('split-pin')); assert.equal(row('c').dataset.splitLive, 'false');
+        assert.equal(row('c').draggable, true);
+        const baseline = structuredClone({ recipes: local.savedSplitRecipesV1, pins: local.splitPinsV1, session, tabs, spaces: storedSpaces, bindings: local.pinnedTabStatesById });
+        const folder = row('g'), header = folder.firstElementChild;
+        rect(header, 80, 32);
+        const target = targetKind === 'header' ? header : folder.querySelector('.folder-content');
+        assert(target);
+        await drop(row('c'), target, targetKind === 'header' ? 96 : 125);
+        assert.deepEqual(ids('g'), ['c']); assert.equal(row('c').closest('.folder').dataset.bookmarkId, 'g');
+        rect(row('a'), 80);
+        await drop(row('c'), row('a'), 81);
+        assert.equal(row('c').parentElement, root()); assert.deepEqual(ids('g'), []);
+        assert.deepEqual({ recipes: local.savedSplitRecipesV1, pins: local.splitPinsV1, session, tabs, spaces: storedSpaces, bindings: local.pinnedTabStatesById }, baseline);
+        assert(writes.length > 0 && writes.every(write => write.kind === 'move' && write.id === 'c'));
+        assert.deepEqual(alerts, []);
+    } finally { delete local.splitPinsV1; delete local.savedSplitRecipesV1; await reset(); }
 });
