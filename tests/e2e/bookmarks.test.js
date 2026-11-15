@@ -9,6 +9,7 @@ import {
   createSpace,
   waitForCondition,
 } from './helpers/extension-helper.js';
+import { requireBaseline, requirePinnedResult, openObservedPinSidebar, waitForPinCountState } from './helpers/pin-count-readiness.js';
 import {
   delay,
   takeScreenshotOnFailure,
@@ -1184,76 +1185,39 @@ describe('Bookmarks and Pinned Tabs', () => {
         await testPage2.goto('https://www.example.com?page=wiki', { waitUntil: 'domcontentloaded' });
         await delay(1000);
 
+        const pageErrors = [];
         await sidebarPage.close();
-        sidebarPage = await openSidebar(browser, extensionId);
+        sidebarPage = await openObservedPinSidebar(browser, extensionId, pageErrors);
+        const { result: baseline } = await waitForPinCountState({page:sidebarPage,waitForCondition,check:requireBaseline,errors:pageErrors});
+        const initialTemp = baseline.initialTemp, sourceId = baseline.tempIds[0];
+        logTestStep(`Initial temporary count: ${initialTemp}; Space: ${baseline.spaceId}; exact source: ${sourceId}`);
 
-        // Get initial temporary count
-        const initialTemp = await sidebarPage.evaluate(() => {
-          const spaces = document.querySelectorAll('.space');
-          for (const space of spaces) {
-            if (space.style.display !== 'none') {
-              const tempSection = space.querySelector('[data-tab-type="temporary"]');
-              return tempSection ? tempSection.querySelectorAll('.tab').length : 0;
-            }
-          }
-          return 0;
+        // One exact action. Missing/stale menu is a failure, never a warning-pass.
+        const pinResult = await sidebarPage.evaluate(async ({spaceId,sourceId}) => {
+          const space = [...document.querySelectorAll('.space')].find(s=>s.dataset.spaceId===spaceId&&s.style.display!=='none');
+          const tab = space?.querySelector(`[data-tab-type="temporary"] .tab[data-tab-id="${sourceId}"]`);
+          if(!tab)return {success:false,reason:'Exact source row unavailable'};
+          const rect=tab.getBoundingClientRect();
+          tab.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2,clientX:rect.x+5,clientY:rect.y+5}));
+          return {success:true,sourceId,spaceId};
+        },{spaceId:baseline.spaceId,sourceId});
+        expect(pinResult).toEqual({success:true,sourceId,spaceId:baseline.spaceId});
+        await sidebarPage.waitForFunction(()=>[...document.querySelectorAll('.context-menu-item')].filter(item=>item.textContent.trim()==='Pin Tab').length===1,{timeout:5000});
+        const clicked=await sidebarPage.evaluate(()=>{
+          const choices=[...document.querySelectorAll('.context-menu-item')].filter(item=>item.textContent.trim()==='Pin Tab');
+          if(choices.length!==1)return {success:false,reason:'Exact Pin Tab action unavailable'};
+          choices[0].click();return {success:true};
         });
+        expect(clicked).toEqual({success:true});
+        await waitForPinCountState({page:sidebarPage,waitForCondition,sourceId,errors:pageErrors,check:s=>requirePinnedResult(s,baseline,sourceId)});
 
-        logTestStep(`Initial temporary count: ${initialTemp}`);
-
-        // Pin one tab
-        const pinResult = await sidebarPage.evaluate(async () => {
-          const spaces = document.querySelectorAll('.space');
-          for (const space of spaces) {
-            if (space.style.display !== 'none') {
-              const tempSection = space.querySelector('[data-tab-type="temporary"]');
-              if (!tempSection) return { success: false, reason: 'no temporary section' };
-              const tab = tempSection.querySelector('.tab[data-tab-id]');
-              if (!tab) return { success: false, reason: 'no tab in temporary section' };
-
-              const rect = tab.getBoundingClientRect();
-              tab.dispatchEvent(new MouseEvent('contextmenu', {
-                bubbles: true, cancelable: true, button: 2,
-                clientX: rect.x + 5, clientY: rect.y + 5,
-              }));
-              await new Promise(r => setTimeout(r, 500));
-
-              for (const item of document.querySelectorAll('.context-menu-item')) {
-                if (item.textContent.trim() === 'Pin Tab') {
-                  item.click();
-                  return { success: true };
-                }
-              }
-              return { success: false, reason: 'Pin Tab not found' };
-            }
-          }
-          return { success: false, reason: 'no visible space' };
-        });
-
-        await delay(2000);
-
-        if (pinResult.success) {
-          // Reopen sidebar and check temporary count decreased
-          await sidebarPage.close();
-          sidebarPage = await openSidebar(browser, extensionId);
-
-          const afterPinTemp = await sidebarPage.evaluate(() => {
-            const spaces = document.querySelectorAll('.space');
-            for (const space of spaces) {
-              if (space.style.display !== 'none') {
-                const tempSection = space.querySelector('[data-tab-type="temporary"]');
-                return tempSection ? tempSection.querySelectorAll('.tab').length : 0;
-              }
-            }
-            return 0;
-          });
-
-          expect(afterPinTemp).toBe(initialTemp - 1);
-          logTestStep(`After pin - temporary count: ${afterPinTemp} (decreased by 1)`);
-          logTestStep('✓ Temporary tab count decreases correctly when tabs are pinned');
-        } else {
-          logTestStep(`⚠ ${pinResult.reason}`);
-        }
+        await sidebarPage.close();
+        sidebarPage = await openObservedPinSidebar(browser, extensionId, pageErrors);
+        const {state:afterPin}=await waitForPinCountState({page:sidebarPage,waitForCondition,sourceId,errors:pageErrors,check:s=>requirePinnedResult(s,baseline,sourceId)});
+        const afterPinTemp=afterPin.visibleSpaces[0].tempIds.length;
+        expect(afterPinTemp).toBe(initialTemp - 1);
+        logTestStep(`After pin - temporary count: ${afterPinTemp} (decreased by 1)`);
+        logTestStep('✓ Exact pinned source and original Today survivors persist after sidebar reopen');
       } catch (error) {
         await takeScreenshotOnFailure(sidebarPage, 'temp-count-decrease-failure');
         throw error;
