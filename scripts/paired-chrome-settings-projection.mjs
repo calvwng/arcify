@@ -29,19 +29,25 @@ export async function exerciseSettingsProjection({ browser, apiPage, fixture, ar
     await checkpoint('baseline', { retired, sourceId: source.id, homeId: home.id, controlWindow });
     let priorId = null;
     if (retired) {
-        priorId = await create(controlWindow, home.id);
-        await checkpoint('prior-settings-created', { priorId });
-        // Establish real explicit user-placement evidence through the existing
-        // exact Today Move operation, never by modifying recovery metadata.
-        const placement = await apiPage.evaluate(async ({ priorId, controlWindow, home, source, url }) => {
+        // Broad suite has already performed explicit ordinary Today moves.
+        // Establish that authority with an HTTP anchor; extension URLs are
+        // intentionally ineligible for the public Today Move command.
+        const anchorUrl = `${fixture.base}/alpha`;
+        const anchor = await apiPage.evaluate(({ controlWindow, anchorUrl }) => chrome.tabs.create({ windowId: controlWindow, url: anchorUrl, active: false }), { controlWindow, anchorUrl });
+        await poll(() => apiPage.evaluate(id => chrome.tabs.get(id), anchor.id), t => t.url === anchorUrl && t.status === 'complete', 'authority anchor loaded');
+        const assigned = await apiPage.evaluate(({ tabId, spaceId }) => chrome.runtime.sendMessage({ type: 'spaceStore', action: 'assign', tabId, spaceId, pinned: false }), { tabId: anchor.id, spaceId: home.id });
+        assert.equal(assigned.success, true);
+        const placement = await apiPage.evaluate(async ({ tabId, controlWindow, home, source, url }) => {
             const { todayOrderRepresentation } = await chrome.storage.local.get('todayOrderRepresentation');
             return chrome.runtime.sendMessage({ type: 'moveTodayTabsToSpace', windowId: controlWindow,
                 spaceId: home.id, bookmarkFolderId: home.bookmarkFolderId,
                 destinationSpaceId: source.id, destinationBookmarkFolderId: source.bookmarkFolderId,
-                inverted: todayOrderRepresentation.inverted, entries: [{ tabId: priorId, url }] });
-        }, { priorId, controlWindow, home, source, url });
+                inverted: todayOrderRepresentation.inverted, entries: [{ tabId, url }] });
+        }, { tabId: anchor.id, controlWindow, home, source, url: anchorUrl });
         assert.equal(placement.success, true, JSON.stringify(placement));
-        await checkpoint('prior-settings-explicit-move', { priorId, placement });
+        await checkpoint('prior-http-authority-established', { anchorId: anchor.id, placement });
+        priorId = await create(controlWindow, home.id);
+        await checkpoint('prior-settings-created', { priorId });
         await poll(read, o => o.decisions.find(d => d.tabId === priorId)?.explicitOwner,
             'prior Settings has real current explicit ownership before witnessed close');
         await apiPage.evaluate(id => chrome.tabs.remove(id), priorId);
