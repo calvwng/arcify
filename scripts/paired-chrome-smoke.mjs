@@ -192,6 +192,16 @@ const networkSessions = [];
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const head = path => execFileSync('git', ['rev-parse', 'HEAD'], { cwd: path, encoding: 'utf8' }).trim();
 const slug = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+async function observeProjection(phase) {
+    if (!browser || !arcifyId) return;
+    try {
+        const targets=browser.targets().filter(t=>t.type()==='service_worker' && t.url()===`chrome-extension://${arcifyId}/background.js`);
+        if(targets.length!==1) { (report.projectionTransitions ||= []).push({phase,gap:'No unique existing worker'}); return; }
+        const worker=await targets[0].worker();
+        const state=await worker.evaluate(async()=> typeof globalThis.__settingsProjectionDiagnostic==='function' ? globalThis.__settingsProjectionDiagnostic() : {gap:'Instrumentation not ready'});
+        (report.projectionTransitions ||= []).push({phase,observedAt:new Date().toISOString(),state});
+    } catch(error) { (report.projectionTransitions ||= []).push({phase,gap:error.message}); }
+}
 async function saveReport() { await writeFile(resolve(OUTPUT, 'report.json'), JSON.stringify(report, null, 2)); }
 async function recordUi(checkpoint) {
     report.uiActions ||= [];
@@ -264,6 +274,7 @@ async function observePage(page) {
 }
 async function step(name, operation, { windowIsolation = true } = {}) {
     const check = beginPairedChromeCase(report, name);
+    await observeProjection(`before-case-${check.caseIndex}`);
     check.status = 'running'; check.startedAt = new Date().toISOString();
     await saveReport();
     try {
@@ -283,7 +294,7 @@ async function step(name, operation, { windowIsolation = true } = {}) {
     } catch (error) {
         check.status = 'failed'; check.error = { message: error.message, stack: error.stack };
         throw error;
-    } finally { check.finishedAt = new Date().toISOString(); await saveReport(); }
+    } finally { await observeProjection(`after-case-${check.caseIndex}`); check.finishedAt = new Date().toISOString(); await saveReport(); }
 }
 async function internal(page, message) {
     return page.evaluate(message => chrome.runtime.sendMessage(message), message);
@@ -2442,7 +2453,7 @@ try {
         const { collectOptionsAppearanceEvidence } = await import(pathToFileURL(resolve(COMPANION, 'test/e2e/options-appearance-evidence.js')).href);
         const evidence = await exerciseSpotlightOptionsAppearance({ browser,collectOptionsAppearanceEvidence,observePage,apiPage:arcifyOptions,peerPage:spotlightOptions,
             extensionId:spotlightId,outputDir:resolve(OUTPUT,'spotlight-options-appearance'),poll,
-            record:async evidence => { report.spotlightOptionsAppearance = evidence; await saveReport(); } });
+            record:async evidence => { report.spotlightOptionsAppearance = evidence; await observeProjection('options-appearance-checkpoint'); await saveReport(); } });
         for (const shot of evidence.screenshots) report.screenshots.push({ ...shot, filename:`spotlight-options-appearance/${shot.filename}`,
             label:'Required Spotlight options appearance', capturedAt:new Date().toISOString() });
         await saveReport(); return evidence;
@@ -2521,12 +2532,12 @@ try {
     if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {
     await step(stepNames[36], async () => {
         await normalizeReloadControlWindow({ apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,pageForUrl,arcifyId,spotlightId,sourceWindowId:fixture.windowA,counterpartWindowId:fixture.windowB,
-            record:async observation => { report.controlWindowSetup ||= []; report.controlWindowSetup.push(observation); await saveReport(); } });
+            record:async observation => { report.controlWindowSetup ||= []; report.controlWindowSetup.push(observation); await observeProjection(observation.phase); await saveReport(); } });
         ordinaryFixture = await exerciseOrdinaryFavorites({ browser,apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,
             newTabPage,pageForUrl,ui,screenshot,snapshot,poll,fixture,arcifyId,spotlightId,search,
             prepareReloadSpacePins:report.runMode === 'favorite-lifecycle' ? () => seedFocusedReloadSpacePins({ fixture,snapshot,bridge }) : undefined,
             reloadArcify:()=>reloadPairedExtension('arcify'),reloadSpotlight:()=>reloadPairedExtension('spotlight'),
-            record:async evidence => { report.ordinaryFavorites = evidence; await saveReport(); } });
+            record:async evidence => { report.ordinaryFavorites = evidence; await observeProjection('favorite-checkpoint'); await saveReport(); } });
         return ordinaryFixture;
     });
 
