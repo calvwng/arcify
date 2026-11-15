@@ -34,11 +34,11 @@
     },
     {
       "path": "scripts/paired-chrome-focus-link-acceptance.mjs",
-      "sha256": "1e150ccf63a1cb1f9c5c3ec4bd2b764c78d57119f38a908ff0d076214a17cc46"
+      "sha256": "727419e3920aefee02343e2c6ab0855f7754550203934db4b9c318b960bad050"
     },
     {
       "path": "scripts/paired-chrome-focus-link-acceptance.test.mjs",
-      "sha256": "73c223d6fbcfabc7e813c027ccbfeb84b411a89ed5dcc1fe188724d4a5f198b8"
+      "sha256": "592ef8acc5c289a4002e3ededb01c3516f96f8817ad468d5d765ad098d0c3015"
     },
     {
       "path": "scripts/paired-chrome-focus-link-generator.test.mjs",

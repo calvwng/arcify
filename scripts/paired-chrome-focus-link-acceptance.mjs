@@ -20,6 +20,8 @@ export function assertNoAssociation(state,bookmarkId){
  for(const key of ['splitPinInstancesV1','splitPinFocusLinksV1'])assert(!Object.values(state.session[key]||{}).some(v=>v.bookmarkId===bookmarkId),'No implicit saved-pin association');
 }
 export function assertUnchangedFocusNative(before,after,{allowUnsplit=false}={}){
+ assert.deepEqual(after.window,before.window,'Exact native window identity/type/privacy must persist');
+ assert.deepEqual(after.session.activeSpaces,before.session.activeSpaces,'Active Space mapping must persist');
  const shape=t=>({id:t.id,windowId:t.windowId,url:t.url,pinned:t.pinned,groupId:t.groupId,index:t.index,...(!allowUnsplit?{splitViewId:t.splitViewId}: {})});
  assert.deepEqual(after.tabs.map(shape).sort((a,b)=>a.id-b.id),before.tabs.map(shape).sort((a,b)=>a.id-b.id),'Focus/link must not create, remove, navigate, move or regroup native tabs');
  assert.deepEqual(after.documents,before.documents,'All independently marked documents must survive untouched');
@@ -71,6 +73,45 @@ export function assertConfirmedLinkResponse(events,exact){
  assert.equal(event.response?.success,true,`Attach was rejected: ${event.response?.error||'no confirmed success'}`);
  assert.equal(event.response.linked,true);assert.equal(event.response.focusOnly,true);
 }
+const STALE_FOCUS_ERRORS=Object.freeze([
+ 'This Split View pin or its Space changed. Refresh the sidebar before trying again.',
+ 'This pair or saved pin changed. Reopen Attach open Split View to choose again. No fresh pair was opened.'
+]);
+function exactActionResponse(events,exact,action){
+ assert.equal(events.length,1,'One actual trusted-click request is required');const event=events[0];
+ assert.equal(event.request.type,'splitPinAction');assert.equal(event.request.action,action);
+ for(const k of ['windowId','spaceId','bookmarkId'])assert.equal(event.request[k],exact[k]);
+ assert.equal(event.state,'resolved',event.error||'Actual product response required');return event.response;
+}
+export function assertCurrentFocusScope(state,exact){
+ assert.equal(state.session.activeSpaces?.[exact.windowId],exact.spaceId,'Exact target window must actively own the expected Space');
+ assert(state.window,'Target native window snapshot required');assert.equal(state.window.id,exact.windowId);assert.equal(state.window.type,'normal');assert.equal(state.window.incognito,false);
+}
+export function assertStaleFocusRefusal(before,after,events,exact,receipt,successfulFocusEvents){
+ assertCurrentFocusScope(before,exact);assertCurrentFocusScope(after,exact);
+ assertConfirmedFocusResponse(successfulFocusEvents,exact);exactActionResponse(successfulFocusEvents,exact,'activate');
+ assert.deepEqual(events[0]?.request,successfulFocusEvents[0].request,'Stale refusal must use the exact previously successful scope, including root');
+ assert.equal(successfulFocusEvents[0].request.bookmarkFolderId,receipt.target.space.bookmarkFolderId);
+ assert.equal(typeof receipt.target.space.bookmarkFolderId,'string');assert(receipt.target.space.bookmarkFolderId);
+ assertUnchangedFocusNative(before,after);
+ assert.deepEqual(after.tabs.map(t=>({id:t.id,active:t.active})).sort((a,b)=>a.id-b.id),before.tabs.map(t=>({id:t.id,active:t.active})).sort((a,b)=>a.id-b.id),'Refused stale action must not change active native tabs');
+ for(const id of exact.ids){const tab=after.tabs.find(t=>t.id===id);assert(tab);assert.equal(tab.windowId,exact.windowId);assert.equal(tab.splitViewId,-1,'Both original panes must remain unsplit');}
+ assert.deepEqual(after.session,before.session,'Refused stale link retains all session receipts');
+ assert.deepEqual(after.session.splitPinFocusLinksV1?.[`${exact.windowId}:${exact.bookmarkId}`],receipt,'Explicit receipt cannot disappear on refusal');
+ assert(!Object.values(after.session.splitPinInstancesV1||{}).some(v=>v.bookmarkId===exact.bookmarkId),'No strong witness may be inferred');
+ const response=exactActionResponse(events,exact,'activate');assert.equal(response?.success,false,'Stale native pair must be refused');
+ assert(STALE_FOCUS_ERRORS.includes(response.error),`Unexpected failure is not stale-pair evidence: ${response.error}`);return response.error;
+}
+export function assertConfirmedUnlinkResponse(events,exact){
+ const response=exactActionResponse(events,exact,'unlinkFocus');assert.equal(response?.success,true,`Unlink failed: ${response?.error}`);assert.equal(response.unlinked,true);
+}
+export function assertOnlyFocusReceiptRemoved(before,after,exact){
+ const expected=structuredClone(before.session),key=`${exact.windowId}:${exact.bookmarkId}`;
+ assert(expected.splitPinFocusLinksV1?.[key],'Exact original receipt required before unlink');delete expected.splitPinFocusLinksV1[key];
+ assert.deepEqual(after.session,expected,'Unlink may remove only the exact scoped focus receipt');
+ assertNoAssociation(after,exact.bookmarkId);assertUnchangedFocusNative(before,after);
+ assert.deepEqual(after.tabs.map(t=>({id:t.id,active:t.active})).sort((a,b)=>a.id-b.id),before.tabs.map(t=>({id:t.id,active:t.active})).sort((a,b)=>a.id-b.id),'Unlink must not change native activation');
+}
 export async function exerciseFocusLinkAcceptance({browser,apiPage,arcifyId,coldEvidence,observePage,blockExternalHttps,ui,screenshot,poll,record,releaseWorkerNetwork}){
  const exact=assertRestoredOriginals(coldEvidence),url=coldEvidence.url;
  const evidence={status:'running',scope:'Regular sidebar.html trusted-input focus-only link acceptance, not native sidebar-panel acceptance',steps:[],worker:[]};
@@ -84,11 +125,12 @@ export async function exerciseFocusLinkAcceptance({browser,apiPage,arcifyId,cold
   const added=(await apiPage.evaluate(()=>chrome.tabs.query({}))).filter(t=>!before.some(b=>b.id===t.id));assert.deepEqual(added.map(t=>t.id),[tab.id]);return{tab,page};
  };
  const read=async()=>{
-  const state=await apiPage.evaluate(async()=>{
+  const state=await apiPage.evaluate(async windowId=>{
    const d=await chrome.storage.local.get(['spaces','splitPinsV1','savedSplitRecipesV1','pinnedTabStatesById']);
    const clean=nodes=>nodes.map(({id,parentId,index,title,url,children})=>({id,parentId,index,title,url,...(children?{children:clean(children)}:{})}));
-   return{tabs:await chrome.tabs.query({}),session:await chrome.storage.session.get(['splitPinInstancesV1','splitPinFocusLinksV1']),local:{bookmarks:clean(await chrome.bookmarks.getTree()),splitPinsV1:d.splitPinsV1,savedSplitRecipesV1:d.savedSplitRecipesV1,pinnedTabStatesById:d.pinnedTabStatesById,spaces:d.spaces.map(s=>({id:s.id,bookmarkFolderId:s.bookmarkFolderId,temporaryTabs:s.temporaryTabs,spaceBookmarks:s.spaceBookmarks}))}};
-  });
+   const {id,type,incognito}=await chrome.windows.get(windowId);
+   return{window:{id,type,incognito},tabs:await chrome.tabs.query({}),session:await chrome.storage.session.get(['splitPinInstancesV1','splitPinFocusLinksV1','activeSpaces']),local:{bookmarks:clean(await chrome.bookmarks.getTree()),splitPinsV1:d.splitPinsV1,savedSplitRecipesV1:d.savedSplitRecipesV1,pinnedTabStatesById:d.pinnedTabStatesById,spaces:d.spaces.map(s=>({id:s.id,bookmarkFolderId:s.bookmarkFolderId,temporaryTabs:s.temporaryTabs,spaceBookmarks:s.spaceBookmarks}))}};
+  },exact.windowId);
   state.documents=await Promise.all([...tracked].sort((a,b)=>a[0]-b[0]).map(async([id,p])=>({id,...await p.evaluate(key=>({url:location.href,title:document.title,documentId:document.body.dataset.documentId,marker:sessionStorage.getItem(key),timeOrigin:performance.timeOrigin}),MARKER)})));
   return state;
  };
@@ -157,13 +199,16 @@ export async function exerciseFocusLinkAcceptance({browser,apiPage,arcifyId,cold
   const focused=await read();assert.deepEqual(assertFocusOnlyReceipt(focused,exact),receipt);assertUnchangedFocusNative(beforeFocus,focused);await today();await save('focused-originals',{focused});await pinInput('after-focus-refresh',{click:false,label:'Observe completed focus refresh on current pin row'});
   const splitId=focused.tabs.find(t=>t.id===exact.ids[0]).splitViewId;assert(splitId>=0);await apiPage.evaluate(id=>chrome.tabs.unsplit(id),splitId);
   const unsplit=await poll(read,s=>exact.ids.every(id=>s.tabs.find(t=>t.id===id)?.splitViewId===-1),'original pair unsplit');assertUnchangedFocusNative(focused,unsplit,{allowUnsplit:true});
+  evidence.refusalBeforeState=unsplit;await record(structuredClone(evidence));assertCurrentFocusScope(unsplit,exact);
   await startActivation();await pinInput('stale',{requireUnsplit:true,label:'Verify changed focus link refuses opening fresh pages'});
-  evidence.refusalResponse=await finishActivation();assert.equal(evidence.refusalResponse.length,1);assert.equal(evidence.refusalResponse[0].state,'resolved');assert.equal(evidence.refusalResponse[0].response?.success,false);assert.match(evidence.refusalResponse[0].response.error,/No fresh pair was opened/);
-  await poll(()=>sidebar.$eval('#favoritesDropStatus',n=>n.textContent),t=>/No fresh pair was opened/.test(t),'visible fail-closed stale link error');
-  const refused=await read();assertUnchangedFocusNative(unsplit,refused);await screenshot(sidebar,'focus-link-stale-pair-refused');await save('stale-link-refused',{refused});
-  await openAttach();const unlink=await exactButton('Remove link; keep panes');await ui(sidebar,'Explicitly remove focus link and keep panes',()=>unlink.click());await unlink.dispose();
+  evidence.refusalResponse=await finishActivation();evidence.refusalState=await read();await record(structuredClone(evidence));
+  const refused=evidence.refusalState,refusalError=assertStaleFocusRefusal(unsplit,refused,evidence.refusalResponse,exact,receipt,evidence.focusResponse);
+  await poll(()=>sidebar.$eval('#favoritesDropStatus',n=>n.textContent),t=>t===refusalError,'visible exact accepted stale link error');
+  await screenshot(sidebar,'focus-link-stale-pair-refused');await save('stale-link-refused',{refused});
+  await openAttach();const unlink=await exactButton('Remove link; keep panes');await startActivation('unlinkFocus');await ui(sidebar,'Explicitly remove focus link and keep panes',()=>unlink.click());await unlink.dispose();
+  evidence.unlinkResponse=await finishActivation();evidence.unlinkState=await read();await record(structuredClone(evidence));assertConfirmedUnlinkResponse(evidence.unlinkResponse,exact);
   const removed=await poll(read,s=>!Object.values(s.session.splitPinFocusLinksV1||{}).some(v=>v.bookmarkId===exact.bookmarkId),'explicit link removal');
-  assertNoAssociation(removed,exact.bookmarkId);assertUnchangedFocusNative(refused,removed);await today();await screenshot(sidebar,'focus-link-removed-panes-retained');await save('unlinked',{removed});
+  assertOnlyFocusReceiptRemoved(refused,removed,exact);await today();await screenshot(sidebar,'focus-link-removed-panes-retained');await save('unlinked',{removed});
   evidence.status='passed';await record(structuredClone(evidence));return evidence;
  }catch(error){if(sidebar)await sidebar.evaluate(()=>globalThis.__pairedFocusActivateObserver?.stop()).catch(()=>{});evidence.status='failed';evidence.error={message:error.message,stack:error.stack};await record(structuredClone(evidence));throw error;}
 }
