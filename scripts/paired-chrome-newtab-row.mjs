@@ -4,7 +4,7 @@ import { tabToSelector, setAppearanceControl } from './paired-chrome-sidebar-app
 import { readNewTabReuseState } from './paired-chrome-newtab.mjs';
 import { normalizeSidebarAppearance } from '../sidebar-appearance.js';
 import { readSpotlightRows } from './paired-chrome-sidebar.mjs';
-import { selectResultWithKeyboard } from './paired-chrome-ui.mjs';
+import { selectResultWithKeyboard, clickFreshResult } from './paired-chrome-ui.mjs';
 
 export function assertFrozenTodayRowOrder(before, after, inverted) {
     assert.equal(before.inverted, String(inverted));
@@ -250,7 +250,9 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
         await poll(snapshot, state => state.activeSpaceId === folder.spaceId, 'empty current Space');
         await layout('empty-saved-inverted', folder.spaceId, inverted);
         await option(false);
-        await input('Keep empty Space selected after returning from options', () => page.click(`#spaceSwitcher > button[data-space-id="${folder.spaceId}"]`));
+        await input('Keep empty Space selected after returning from options', () => clickFreshResult(
+            timeout => page.waitForSelector(`#spaceSwitcher > button[data-space-id="${folder.spaceId}"]`, { visible: true, timeout }),
+            async observation => { (evidence.fixtureReacquisitions ||= []).push(observation); await record(structuredClone(evidence)); }));
         await poll(snapshot, state => state.activeSpaceId === folder.spaceId, 'empty current Space after options');
         await layout('empty-saved-normal', folder.spaceId, inverted);
         await apiPage.evaluate(id => chrome.bookmarks.update(id, { title: 'New Tab row renamed fixture' }), folder.folderId);
