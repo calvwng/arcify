@@ -202,6 +202,30 @@ async function observeProjection(phase) {
         (report.projectionTransitions ||= []).push({phase,observedAt:new Date().toISOString(),state});
     } catch(error) { (report.projectionTransitions ||= []).push({phase,gap:error.message}); }
 }
+async function establishGenuineSettingsRetirement() {
+    const phase='diagnostic-genuine-settings-retirement';
+    await observeProjection(`${phase}-before`);
+    const control=await arcifyOptions.evaluate(async()=>({tab:await chrome.tabs.getCurrent(),tabs:await chrome.tabs.query({})}));
+    const beforeIds=control.tabs.map(t=>t.id).sort((a,b)=>a-b);
+    const url=`chrome-extension://${spotlightId}/options.html`;
+    const created=await arcifyOptions.evaluate(({url,windowId})=>chrome.tabs.create({url,windowId,active:false}),{url,windowId:control.tab.windowId});
+    report.genuineRetirementFixture={label:'Diagnostic-only extra native Settings incarnation after unchanged broad prefix; never fabricated history',tabId:created.id,windowId:created.windowId,url};
+    const read=async()=>{await observeProjection(`${phase}-probe`);return report.projectionTransitions.at(-1).state;};
+    const owned=await poll(read,s=>s?.decisions?.some(d=>d.tabId===created.id&&d.url===url&&d.explicitOwner===true)
+        && s.layout?.fingerprint===s.committedLayout?.fingerprint
+        && s.layout?.cohorts?.some(c=>c.contextSubset&&c.binding?.tabIds?.length===1&&c.binding.tabIds[0]===created.id),
+        'genuine new Settings has explicit current ownership and single-tab committed cohort',10000);
+    const cohort=owned.layout.cohorts.find(c=>c.contextSubset&&c.binding?.tabIds?.length===1&&c.binding.tabIds[0]===created.id);
+    report.genuineRetirementFixture.beforeClose={cohort,decision:owned.decisions.find(d=>d.tabId===created.id)};
+    // Only close the exact tab this diagnostic created after its real witness exists.
+    await arcifyOptions.evaluate(async({id,url,windowId})=>{const t=await chrome.tabs.get(id);if(t.url!==url||t.windowId!==windowId||t.incognito||t.pinned)throw Error('Diagnostic creation changed before close');await chrome.tabs.remove(id);},{id:created.id,url,windowId:created.windowId});
+    const retired=await poll(read,s=>s?.layout?.fingerprint===s?.committedLayout?.fingerprint && s?.layout?.retirements?.some(r=>r.cohortId===cohort.id&&r.reason==='observed-individual-close'),
+        'actual observed individual Settings close committed retirement receipt',10000);
+    report.genuineRetirementFixture.receipt=retired.layout.retirements.find(r=>r.cohortId===cohort.id);
+    const after=await arcifyOptions.evaluate(()=>chrome.tabs.query({}));
+    assert.deepEqual(after.map(t=>t.id).sort((a,b)=>a-b),beforeIds,'Diagnostic must preserve every preexisting native tab');
+    await saveReport();
+}
 async function saveReport() { await writeFile(resolve(OUTPUT, 'report.json'), JSON.stringify(report, null, 2)); }
 async function recordUi(checkpoint) {
     report.uiActions ||= [];
@@ -2447,6 +2471,7 @@ try {
     await step(stepNames[46], () => exerciseSpaceTheme({ apiPage:arcifyOptions,nativeSidebar:nativeTodayMoveSidebar,newTabPage,ui,screenshot,
         screenshotBytes:captured => readFile(resolve(OUTPUT,captured.filename)),snapshot,poll,fixture,arcifyId,
         record:async evidence => { report.spaceTheme = evidence; await saveReport(); } }));
+    await establishGenuineSettingsRetirement();
     await step(stepNames[47], async () => {
         // Imported only after the runner has verified the exact reviewed peer HEAD.
         // Missing collector or missing evidence fails this mandatory case.
