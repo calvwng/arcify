@@ -1,3 +1,4 @@
+import { rememberGeneralUndo } from './general-undo-state.js';
 import { assertNotTransient, isTransientTab } from './transient-safety.js';
 import { getSpaceBookmarkFolder } from './space-bookmarks.js';
 import { isStartupLauncherTab } from './startup-launcher-tab.js';
@@ -29,12 +30,20 @@ const ownsToday = (spaces, spaceId, id) => {
 // SpaceStore queue, persistence, continuity stamp and change notifications remain
 // authoritative. No URL matching, native tab activation, or bookmark writes occur.
 export function moveTodayTabsToSpace(store, request) {
-    return store.run(() => moveTodayTabsToSpaceCore(store, request));
+    return store.run(async () => {
+        const before = structuredClone(store.spaces);
+        const batch = await moveTodayTabsToSpaceCore(store, request);
+        if (!batch.uncertain && batch.completed.length === request.entries.length && !batch.remaining.length) {
+            batch.undoToken = rememberGeneralUndo(store, { kind: 'today', windowId: request.windowId,
+                request, originalOrder: before.find(space => space.id === request.spaceId).temporaryTabs });
+        }
+        return batch;
+    });
 }
 
 // Internal only: callers already holding SpaceStore.run() may compose this core.
 // The queued public wrapper remains the sidebar/menu entry point.
-export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation = async () => {}, skipGroupSync = false, getOrder = () => Utils.getTodayOrderInverted() } = {}) {
+export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation = async () => {}, skipGroupSync = false, getOrder = () => Utils.getTodayOrderInverted(), activeSpaceId = request?.spaceId, targetOrder = null } = {}) {
         if (!request || typeof request !== 'object' || Array.isArray(request) ||
             Object.keys(request).some(key => !['type', 'windowId', 'spaceId', 'bookmarkFolderId', 'destinationSpaceId', 'destinationBookmarkFolderId', 'inverted', 'entries'].includes(key)) ||
             request.type !== undefined && request.type !== 'moveTodayTabsToSpace' ||
@@ -60,7 +69,7 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             const source = store.spaces.filter(space => space.id === spaceId);
             const target = store.spaces.filter(space => space.id === destinationSpaceId);
             if (source.length !== 1 || target.length !== 1 || source[0].bookmarkFolderId !== bookmarkFolderId ||
-                target[0].bookmarkFolderId !== destinationBookmarkFolderId || store.active[windowId] !== spaceId ||
+                target[0].bookmarkFolderId !== destinationBookmarkFolderId || store.active[windowId] !== activeSpaceId ||
                 store.spaces.some(space => space.id !== spaceId && space.bookmarkFolderId === bookmarkFolderId ||
                     space.id !== destinationSpaceId && space.bookmarkFolderId === destinationBookmarkFolderId)) throw changed();
             if (staged && (!sameIds(source[0].temporaryTabs, expectedSourceIds) ||
@@ -118,6 +127,11 @@ export async function moveTodayTabsToSpaceCore(store, request, { beforeMutation 
             // Append at the visible bottom. Existing destination members, including
             // other windows' IDs, keep their exact relative canonical order.
             target.temporaryTabs = inverted ? [...ids].reverse().concat(target.temporaryTabs) : target.temporaryTabs.concat(ids);
+            if (targetOrder) {
+                if (targetOrder.length !== target.temporaryTabs.length || new Set(targetOrder).size !== targetOrder.length ||
+                    targetOrder.some(id => !target.temporaryTabs.includes(id))) throw changed();
+                target.temporaryTabs = [...targetOrder];
+            }
             if (selected.has(source.lastTab)) delete source.lastTab;
             assertNativeSplitMembershipPreserved(store.spaces, next, tabs);
             expectedSourceIds = [...source.temporaryTabs]; expectedTargetIds = [...target.temporaryTabs];

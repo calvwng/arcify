@@ -74,3 +74,7 @@ test('observation cleanup failure never replaces the original menu failure', asy
     await assert.rejects(helper({ page, selector: '.folder-header', menuSelector: '#folder-context-menu', observe: true, record: async value => records.push(value) }), error => error === expected);
     assert.equal(clicks, 1); assert.equal(records[1].status, 'menu-input-observation-failed');
 });
+
+test('ordinary tab-menu opens retain passive gesture and row-lifecycle evidence, not only later probes', () => {
+    assert.match(text, /openFreshTabMenu\(\{ page: sidebar\.page, selector, menuSelector: '#tab-context-menu', observe: true,\s*record: observation => checkpoint\('context-menu-input'/);
+});

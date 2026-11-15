@@ -387,3 +387,56 @@ test('a one-tab move retains all seven proven current placements when legacy con
     assert.equal(owner(cold,2101),'source');assert(ids.slice(1).every(id=>owner(cold,id+2000)==='target'));
     assert(selectedIds(2000).every(id=>cold.explicitToday.has(id)));
 });
+
+
+for (const mutation of ['stable', 'unsplit', 'different-pair', 'excluded-partner']) test(`fresh checkpoint preserves existing native split: ${mutation}`, async () => {
+    const f = await pending();
+    await moveFresh(f);
+    f.tabs.find(t => t.id === 1101).splitViewId = 77;
+    f.tabs.find(t => t.id === 1102).splitViewId = 77;
+    if (mutation === 'excluded-partner') {
+        f.globals.add(1102);
+        for (const space of f.s.spaces) space.temporaryTabs = space.temporaryTabs.filter(id=>id!==1102);
+        f.s.explicitToday.delete(1102);
+    }
+    const persist = f.s.persist.bind(f.s);
+    f.s.persist = options => persist({...options, beforeWrite: async () => {
+        await options.beforeWrite?.();
+        if (mutation === 'excluded-partner') f.tabs.find(t => t.id === 1102).splitViewId = -1;
+        if (mutation === 'unsplit') f.tabs.find(t => t.id === 1101).splitViewId = -1;
+        if (mutation === 'different-pair') {
+            f.tabs.find(t => t.id === 1102).splitViewId = -1;
+            f.tabs.find(t => t.id === 1103).splitViewId = 77;
+        }
+    }});
+    const run = () => moveTodayTabsToSpace(f.s, {...f.request, entries: [{tabId:1108,url:'https://choice.test/108'}]});
+    if (mutation === 'stable') {
+        await run();
+        assert.equal(owner(f.s, 1108), 'target');
+        assert.equal(JSON.stringify(f.local[DURABLE_LAYOUT_KEY]).includes('splitViewId'), false);
+    } else await assert.rejects(run(), /Fresh native layout changed/);
+});
+
+test('saved split reopen persists new blanks beside an existing native pair', async () => {
+    const { runSavedSplitAction, SAVED_SPLITS_KEY } = await import('../../saved-splits.js');
+    const f = await pending(); await moveFresh(f);
+    for (const id of [1101,1102]) f.tabs.find(t => t.id === id).splitViewId = 77;
+    f.s.active[10] = 'target';
+    f.local[SAVED_SPLITS_KEY] = [{id:'recipe',name:'Pair',pages:[{url:'https://choice.test/101',title:'A'},{url:'https://choice.test/102',title:'B'}]}];
+    let nextId = 12000;
+    chrome.tabs.create = async options => {
+        const tab = {id:nextId++,windowId:10,index:Math.max(...f.tabs.filter(t=>t.windowId===10).map(t=>t.index))+1,
+            url:options.url,pinned:false,incognito:false,splitViewId:-1,groupId:-1};
+        f.tabs.push(tab);
+        f.s.layoutObservedCreations.set(tab.id,{windowId:10,worker:f.s.currentLayoutWorker,token:crypto.randomUUID()});
+        return structuredClone(tab);
+    };
+    chrome.tabs.get = async id => structuredClone(f.tabs.find(t=>t.id===id));
+    chrome.tabs.createSplit = async ids => { for(const id of ids) f.tabs.find(t=>t.id===id).splitViewId=88; return 88; };
+    chrome.tabs.unsplit = async () => assert.fail('Must not unsplit');
+    chrome.tabs.update = async (id, update) => Object.assign(f.tabs.find(t=>t.id===id),update);
+    const result = await runSavedSplitAction(f.s,{type:'savedSplitAction',action:'open',windowId:10,spaceId:'target',bookmarkFolderId:'target-root',recipeId:'recipe'});
+    assert.deepEqual(result.tabIds,[12000,12001]);
+    assert.deepEqual(result.tabIds.map(id=>f.tabs.find(t=>t.id===id).url),['https://choice.test/101','https://choice.test/102']);
+    assert([1101,1102].every(id=>f.tabs.find(t=>t.id===id).splitViewId===77));
+});

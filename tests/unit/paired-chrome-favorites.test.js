@@ -32,7 +32,7 @@ test('case 26 uses bounded exact-source geometry before one real gesture and ret
     const fixture = source.slice(start, end);
     const drag = fixture.slice(fixture.indexOf('const dragToFavorites ='), fixture.indexOf('\n        try {', fixture.indexOf('const dragToFavorites =')));
     assert.match(fixture, /const row = id => `\.space\[data-space-id="\$\{fixture\.spaces\.work\}"\] \[data-bookmark-id="\$\{id\}"\]`/);
-    assert.match(drag, /locateFreshDragGeometry\(page,sourceSelector,'#pinnedFavicons',\s*observation => geometry\.push\(observation\),\{scrollSource:true\}\)/);
+    assert.match(drag, /locateFreshDragGeometry\(page,sourceSelector,'#pinnedFavicons',\s*observation => geometry\.push\(observation\),\{scrollSource:true,stableGeometry:true\}\)/);
     assert(drag.indexOf('locateFreshDragGeometry(') < drag.indexOf('page.mouse.move('));
     assert.equal((drag.match(/page\.mouse\.down\(\)/g) || []).length, 1);
     assert.doesNotMatch(drag, /\b(?:for|while)\s*\(|dispatchEvent\(|\.dragAndDrop\(/);

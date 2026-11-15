@@ -131,6 +131,17 @@ export async function cleanupNewTabFixtureSpace({ apiPage, folder, snapshot, pol
     return { ...folder, authoritativeSpaceIds: state.spaces.map(space => space.id) };
 }
 
+// Cleanup is idempotent by observation, not by replaying input. Returning from
+// options can repaint the native panel even when the original Space is already
+// active; clicking that redundant chip races its replacement for no user benefit.
+export async function restoreNewTabFixtureSpace({ snapshot, poll, spaceId, select }) {
+    const before = await snapshot();
+    const alreadyActive = before.activeSpaceId === spaceId;
+    if (!alreadyActive) await select(); // Exactly one trusted input; never retry an uncertain click.
+    const after = await poll(snapshot, state => state.activeSpaceId === spaceId, 'original current Space restored');
+    return { spaceId, alreadyActive, activeSpaceId: after.activeSpaceId };
+}
+
 export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage, spotlightId, windowId, snapshot, poll,
     ui, search, activate, screenshot, record }) {
     const initial = await snapshot(), settings = await apiPage.evaluate(() => chrome.storage.sync.get('invertTabOrder'));
@@ -283,19 +294,25 @@ export async function exerciseNativeNewTabRow({ page, helper, apiPage, peerPage,
     } catch (error) { primaryError = error; throw error; }
     finally {
         const cleanups = [
-            () => page.evaluate(() => globalThis.__newTabRowTrace?.stop()),
-            async () => { if (disconnected) await reconnect(); },
-            async () => { if (fallback) await apiPage.evaluate(id => chrome.tabs.remove(id), fallback.tabId); },
-            () => option(Boolean(settings.invertTabOrder)),
-            () => compact(appearance.favoritesLayout, appearance.spaceHeaderSize),
-            async () => {
-                await input('Restore initial Space after row proof', () => page.click(`#spaceSwitcher > button[data-space-id="${initial.activeSpaceId}"]`));
-                await poll(snapshot, state => state.activeSpaceId === initial.activeSpaceId, 'original current Space restored');
-            },
-            async () => { if (folder) evidence.cleanup = await cleanupNewTabFixtureSpace({ apiPage, folder, snapshot, poll }); }
+            ['stop row input trace', () => page.evaluate(() => globalThis.__newTabRowTrace?.stop())],
+            ['restore Spotlight pairing', async () => { if (disconnected) await reconnect(); }],
+            ['remove fallback tab', async () => { if (fallback) await apiPage.evaluate(id => chrome.tabs.remove(id), fallback.tabId); }],
+            ['restore saved pin order', () => option(Boolean(settings.invertTabOrder))],
+            ['restore appearance', () => compact(appearance.favoritesLayout, appearance.spaceHeaderSize)],
+            ['restore initial Space', async () => {
+                evidence.spaceRestoration = await restoreNewTabFixtureSpace({ snapshot, poll, spaceId: initial.activeSpaceId,
+                    select: async () => {
+                        const selector = `#spaceSwitcher > button[data-space-id="${initial.activeSpaceId}"]`;
+                        await page.waitForSelector(selector, { visible: true });
+                        await input('Restore initial Space after row proof', () => page.click(selector));
+                    } });
+                await page.waitForFunction(spaceId => document.visibilityState === 'visible' &&
+                    document.querySelector('.space.active')?.dataset.spaceId === spaceId, { polling: 50 }, initial.activeSpaceId);
+            }],
+            ['remove fixture Space', async () => { if (folder) evidence.cleanup = await cleanupNewTabFixtureSpace({ apiPage, folder, snapshot, poll }); }]
         ];
         const errors = [];
-        for (const cleanup of cleanups) try { await cleanup(); } catch (error) { errors.push(error.message); }
+        for (const [label, cleanup] of cleanups) try { await cleanup(); } catch (error) { errors.push(`${label}: ${error.message}`); }
         if (errors.length) evidence.cleanupErrors = errors;
         try { await record(structuredClone(evidence)); } catch (error) { errors.push(`Could not save cleanup evidence: ${error.message}`); }
         if (errors.length) { if (primaryError) primaryError.cleanupErrors = errors; else throw new Error(`New Tab fixture cleanup failed: ${errors.join('; ')}`); }

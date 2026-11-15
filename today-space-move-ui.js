@@ -40,7 +40,7 @@ export function describeTodayMoveOutcome(response, entries, destination) {
 }
 
 export function createTodaySpaceMoveAction({ document, selection, getContext, sendRequest, showStatus,
-    begin = () => {}, end = () => {}, refresh = async () => {},
+    begin = () => {}, end = () => {}, refresh = async () => {}, offerUndo = () => {},
     openRecoveryChannel = snapshot => createTodayRecoveryChannel({ api: globalThis.chrome, document, windowId: snapshot.windowId }) }) {
     let pending = false;
     const diagnose=selectedRecoveryDiagnosticsEnabled&&document?createSelectedRecoveryDiagnosticAction({document,selection,sendRequest,showStatus,begin,end}):null;
@@ -67,6 +67,8 @@ export function createTodaySpaceMoveAction({ document, selection, getContext, se
                     destinationSpaceId: destination.id, destinationBookmarkFolderId: destination.bookmarkFolderId,
                     inverted: snapshot.inverted, entries: snapshot.entries.map(({ tabId, url }) => ({ tabId, url })) });
                 report(describeTodayMoveOutcome(result, snapshot.entries, destination));
+                if (result?.success && !result.batch?.uncertain && result.batch?.completed?.length === snapshot.entries.length &&
+                    result.batch?.remaining?.length === 0) offerUndo(result.batch.undoToken);
             } catch (error) { report(attempted ? UNKNOWN : error.message); }
             finally {
                 pending = false; end();

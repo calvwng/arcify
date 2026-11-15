@@ -16,6 +16,8 @@ const epochShape = value => value && text(value.epoch) && (value.kind==='session
 const nativeIdentityEligible = (store,tab) => tab && !tab.incognito && !tab.pinned && !store.isGlobalTab?.(tab) && !store.isGlobalTab?.(tab.id)
     && !store.isTransientTab?.(tab) && !isStartupLauncherTab(tab) && text(tab.url);
 const eligible = (store,tab) => nativeIdentityEligible(store,tab) && (!tab.pendingUrl || tab.pendingUrl===tab.url);
+// Ephemeral native evidence only: never persist or restore a native split ID.
+const splitMembership = tabs => tabs.map(tab => [tab.id, Number.isInteger(tab.splitViewId) && tab.splitViewId >= 0 ? tab.splitViewId : -1]).sort((a,b)=>a[0]-b[0]);
 const signature = tabs => tabs.map(tab=>({index:tab.index,url:tab.url,pinned:!!tab.pinned})).sort((a,b)=>a.index-b.index);
 function windows(store,tabs) {
     const groups=new Map();
@@ -501,7 +503,7 @@ export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{
             for(const prior of replayScope&&!intent.length?[replayScope]:pending)if(prior.placements.some(p=>chosen.has(prior.signature.find(t=>t.index===p.index)?.url)))
                 prior.blockedBy=[...new Set([...(prior.blockedBy||[]),c.id])];
             const witnesses=new Map(captureTabs.filter(t=>explicitTodayOwner(store,t)).map(t=>[t.id,encode(store.explicitToday.get(t.id))]));
-            freshPlans.push({c,w,witnesses});
+            freshPlans.push({c,w,witnesses,nativeSplits:splitMembership(tabs.filter(t=>t.windowId===w.id))});
         }
         if(existing&&!fresh)cohorts[cohorts.indexOf(existing)]=c;else cohorts.push(c);
     }
@@ -514,13 +516,15 @@ export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{
                 for(const p of c.placements)await getSpaceBookmarkFolder(root(store,p));
             }
             const metadata=await chrome.storage.local.get(['pinnedTabStatesById','tabNameOverridesById']);
-            const current=windows(store,await store.queryTabs({}));
+            const currentNative=await store.queryTabs({});
+            const current=windows(store,currentNative);
             // A secondary proof can expire during either awaited read even if
             // the preferred browser epoch survives. Check all epochs last.
             const acceptedEpochs=await explicitTodayEpochs(store);
             if(encode(acceptedEpochs[0]||null)!==encode(epoch))throw new Error('Fresh layout epoch changed. Nothing was committed.');
-            for(const {c,w,witnesses} of freshPlans){const now=current.find(n=>n.id===w.id);
+            for(const {c,w,witnesses,nativeSplits} of freshPlans){const now=current.find(n=>n.id===w.id);
                 if(!now||encode(now.signature)!==encode(w.signature)||encode(now.tabs.map(t=>t.id))!==encode(w.tabs.map(t=>t.id))
+                    ||encode(splitMembership(currentNative.filter(t=>t.windowId===w.id)))!==encode(nativeSplits)
                     ||[...witnesses].some(([id,proof])=>encode(store.explicitToday.get(id))!==proof)
                     ||provenContextOnly&&c.binding.tabIds.some(id=>!explicitTodayOwner(store,now.tabs.find(t=>t.id===id))
                         ||!acceptedEpochs.some(e=>encode(e)===encode(store.explicitToday.get(id)?.epoch)))
@@ -528,8 +532,7 @@ export async function captureDurableLayout(store,tabs,snapshot,rankFingerprint,{
                         ||!acceptedEpochs.some(e=>encode(e)===encode(store.explicitToday.get(tab.id)?.epoch))
                         ||store.explicitToday.get(tab.id).spaceId!==p.spaceId||store.explicitToday.get(tab.id).bookmarkFolderId!==p.bookmarkFolderId
                         ||root(store,p)?.temporaryTabs.indexOf(tab.id)!==p.order
-                        ||metadata.pinnedTabStatesById?.[tab.id]||metadata.tabNameOverridesById?.[tab.id]
-                        ||Number.isInteger(tab.splitViewId)&&tab.splitViewId>=0;}))throw new Error('Fresh native layout changed. Nothing was committed.');
+                        ||metadata.pinnedTabStatesById?.[tab.id]||metadata.tabNameOverridesById?.[tab.id];}))throw new Error('Fresh native layout changed. Nothing was committed.');
             }
         };
     }

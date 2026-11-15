@@ -1,6 +1,8 @@
+import { createSpotlightBridge } from '../../spotlight-bridge.js';
+import { readFolderActionContext, runFolderMove } from '../../spotlight-folder-actions.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { moveSavedItemsToSpace, registerSavedMoveMessages } from '../../saved-move-store.js';
+import { moveSavedItemsToSpace, moveSavedItemsToSpaceUnlocked, registerSavedMoveMessages } from '../../saved-move-store.js';
 import { SpaceStore } from '../../space-store.js';
 import { SAVED_MOVE_JOURNAL_KEY as KEY } from '../../saved-move-lock.js';
 
@@ -276,4 +278,56 @@ test('native split preflight returns a clear untouched batch rather than unknown
         assert.match(error.message, /End Split View/); assert.deepEqual(error.batch.completed, []);
         assert.deepEqual(error.batch.remaining, ['a', 'x']); assert.equal(error.batch.uncertain, false); return true;
     });
+});
+
+test('unlocked saved move composes inside the caller store queue without nesting', async () => {
+    const f = fixture({folder:true});
+    const batch = await f.store.run(() => moveSavedItemsToSpaceUnlocked(f.store, f.request));
+    assert.deepEqual(batch.completed,['folder']); assert.equal(moves(f).length,1);
+});
+test('optional external authority denial before preflight has zero writes', async () => {
+    const f=fixture();
+    await assert.rejects(moveSavedItemsToSpace(f.store,f.request,{beforeMutation:async()=>{throw new Error('revoked');}}),/revoked/);
+    assert.deepEqual(f.effects,[]);
+});
+test('authority revoked after prepare prevents the first irreversible bookmark write', async () => {
+    const f=fixture(); let revoked=false;
+    f.hooks.afterSet=(area,update)=>{if(area==='local'&&update[KEY]?.phase==='prepared')revoked=true;};
+    await assert.rejects(moveSavedItemsToSpace(f.store,f.request,{beforeMutation:async()=>{if(revoked)throw new Error('revoked');}}),/revoked/);
+    assert.equal(moves(f).length,0);assert.equal(f.local[KEY].phase,'prepared');
+});
+test('authority revoked after a bookmark commit never retries or moves the remainder', async () => {
+    const f=fixture(); let revoked=false;
+    f.hooks.afterMove=()=>{revoked=true;};
+    await assert.rejects(moveSavedItemsToSpace(f.store,f.request,{beforeMutation:async()=>{if(revoked)throw new Error('revoked');}}),/revoked/);
+    assert.equal(moves(f).length,1); assert.deepEqual(f.children('target-root'),['z','a']); assert.equal(f.local[KEY].phase,'prepared');
+});
+test('Spotlight folder move reuses full transaction and preserves linked pin ownership', async () => {
+    const f=fixture({folder:true});
+    const context=await readFolderActionContext(f.store,{windowId:10,tabId:1,folderId:'folder'},{pairingGeneration:'generation'});
+    const result=await f.store.run(()=>runFolderMove(f.store,{context,destination:{spaceId:'target',bookmarkFolderId:'target-root'}}));
+    assert.deepEqual(result,{folderId:'folder',destinationSpaceId:'target'}); assert.equal(moves(f).length,1);
+    for(const id of [2,3,12])assert.deepEqual(membership(f.store.spaces,id),['target']);
+    assert.equal(f.store.active[10],'source'); assert.equal(f.local[KEY],null);
+});
+test('Spotlight folder move rejects stale destination and source without bookmark writes', async () => {
+    for(const fault of ['destination','source']) {
+        const f=fixture({folder:true}); const context=await readFolderActionContext(f.store,{windowId:10,tabId:1,folderId:'folder'});
+        if(fault==='source') f.tabs.find(tab=>tab.id===1).active=false;
+        await assert.rejects(f.store.run(()=>runFolderMove(f.store,{context,destination:{spaceId:'target',bookmarkFolderId:fault==='destination'?'changed':'target-root'}})));
+        assert.equal(moves(f).length,0);
+    }
+});
+test('paired folder move crosses bridge queue once and confirmed replay never repeats move',async()=>{
+ const f=fixture({folder:true});const peer='a'.repeat(32);
+ f.local.arcifyBridgePeerId=peer;f.local.arcifyBridgePairingGeneration='generation';
+ f.store.favoriteStore.read=async()=>({favorites:[]});
+ const handle=createSpotlightBridge(f.store);const sender={id:peer,url:`chrome-extension://${peer}/background.js`};
+ const base={type:'arcify-bridge',version:1,windowId:10,supportedFeatures:['folderActionsV1','globalFavoritesV1']};
+ const read=await handle({...base,requestId:'folder-read',command:'folderActionContext',tabId:1,folderId:'folder'},sender);
+ assert.equal(read.ok,true,JSON.stringify(read));
+ const request={...base,requestId:'folder-move',command:'moveSavedFolderToSpace',context:read.folderContext,destination:{spaceId:'target',bookmarkFolderId:'target-root'}};
+ const result=await handle(request,sender);assert.equal(result.ok,true,JSON.stringify(result));
+ assert.equal(result.folderId,'folder');assert.equal(result.destinationSpaceId,'target');assert.equal(moves(f).length,1);
+ const replay=await handle(request,sender);assert.equal(replay.ok,true,JSON.stringify(replay));assert.equal(moves(f).length,1);
 });

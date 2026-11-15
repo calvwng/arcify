@@ -1,3 +1,4 @@
+import { undoGeneralAction, reorderSpaceWithUndo, registerGeneralUndoMessages } from '../../general-undo.js';
 import { describeTodayMoveOutcome } from '../../today-space-move-ui.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -96,7 +97,8 @@ test(`batch-size probe count=${count} sameUrl=${sameUrl} blocked=${blocked}`, as
 for (const inverted of [false, true]) test(`bulk move preserves exact IDs, native activity and destination visible order (inverted=${inverted})`, async () => {
     const f = fixture({ inverted }), beforeTabs = structuredClone(f.tabs), beforeNodes = structuredClone(f.nodes);
     const result = await f.move();
-    assert.deepEqual(result, { total: 2, completed: inverted ? [3, 1] : [1, 3], remaining: [], uncertain: false, destinationSpaceId: 'target' });
+    assert.equal(typeof result.undoToken, 'string');
+    assert.deepEqual({ ...result, undoToken: undefined }, { undoToken: undefined, total: 2, completed: inverted ? [3, 1] : [1, 3], remaining: [], uncertain: false, destinationSpaceId: 'target' });
     assert.deepEqual(f.store.spaces[0].temporaryTabs, [2, 9]);
     assert.deepEqual(f.store.spaces[1].temporaryTabs, inverted ? [1, 3, 4, 10, 5] : [4, 10, 5, 1, 3]);
     const display = f.store.spaces[1].temporaryTabs.filter(id => id < 9); if (inverted) display.reverse();
@@ -519,4 +521,101 @@ for(const blocker of ['provisional','recoveryCandidates'])test(`return probe one
   await assert.rejects(f.move(),e=>{assert.deepEqual(e.batch.completed,[]);assert.deepEqual(e.batch.remaining,[1,3]);return true;});
   assert.deepEqual(f.store.spaces[1].temporaryTabs,[1,3]);assert.equal(writes(f).length,1);
  }else{assert.deepEqual((await f.move()).completed,[1,3]);assert.deepEqual(f.local.spaces[1].temporaryTabs,[]);}
+});
+
+for (const inverted of [false, true]) test(`general Undo restores exact Today order and preserves native state (${inverted})`, async () => {
+    const f = fixture({ inverted }), before = structuredClone(f.store.spaces), tabs = structuredClone(f.tabs);
+    const result = await f.move();
+    await undoGeneralAction(f.store, { token: result.undoToken, windowId: 10 });
+    assert.deepEqual(f.store.spaces.map(s => s.temporaryTabs), before.map(s => s.temporaryTabs));
+    assert.deepEqual(f.local.spaces.map(s => s.temporaryTabs), before.map(s => s.temporaryTabs));
+    assert.deepEqual(f.tabs, tabs);
+    await assert.rejects(undoGeneralAction(f.store, { token: result.undoToken, windowId: 10 }), /no longer available/);
+});
+for (const change of ['persist', 'metadata', 'order', 'active', 'url', 'closed', 'split', 'window', 'pin', 'root']) test(`general Undo declines stale Today ${change}`, async () => {
+    const f = fixture(), result = await f.move();
+    if (change === 'persist') await f.store.persist();
+    if (change === 'metadata') f.store.spaces[0].name = 'New name';
+    if (change === 'order') f.store.spaces[1].temporaryTabs.reverse();
+    if (change === 'active') f.store.active[10] = 'target';
+    if (change === 'url') f.tabs[0].url = 'https://new.test/';
+    if (change === 'closed') f.tabs.shift();
+    if (change === 'split') f.tabs[0].splitViewId = 17;
+    if (change === 'window') f.tabs[0].windowId = 20;
+    if (change === 'pin') f.tabs[0].pinned = true;
+    if (change === 'root') f.nodes.find(n => n.id === 'source-root').parentId = 'elsewhere';
+    const before = structuredClone(f.store.spaces), count = writes(f).length;
+    await assert.rejects(undoGeneralAction(f.store, { token: result.undoToken, windowId: 10 }));
+    assert.deepEqual(f.store.spaces, before); assert.equal(writes(f).length, count);
+});
+test('Space reorder Undo is single-use and order-only', async () => {
+    const f = fixture(), before = structuredClone(f.store.spaces);
+    const result = await reorderSpaceWithUndo(f.store, { windowId: 10, spaceId: 'source', anchorSpaceId: 'target', position: 'after' });
+    assert.deepEqual(result.spaces.map(s => s.id), ['target', 'source']);
+    await undoGeneralAction(f.store, { windowId: 10, token: result.undoToken });
+    assert.deepEqual(f.store.spaces, before);
+    await assert.rejects(undoGeneralAction(f.store, { windowId: 10, token: result.undoToken }));
+});
+test('Undo rejects private and wrong-window callers without consuming valid receipt', async () => {
+    const f = fixture(), result = await f.move();
+    await assert.rejects(undoGeneralAction(f.store, { windowId: 20, token: result.undoToken }));
+    f.hooks.windowAttrs = { incognito: true };
+    await assert.rejects(undoGeneralAction(f.store, { windowId: 10, token: result.undoToken }));
+    f.hooks.windowAttrs = {};
+    await undoGeneralAction(f.store, { windowId: 10, token: result.undoToken });
+});
+test('uncertain move never offers Undo', async () => {
+    const f = fixture(); f.hooks.afterSet = (area, update) => { if (area === 'local' && update.spaces) throw new Error('uncertain'); };
+    await assert.rejects(f.move(), error => { assert.equal(error.batch.undoToken, undefined); return true; });
+});
+test('Undo of an explicitly recovered Today move remains an explicit choice', async () => {
+    const f = fixture(); f.store.recoveryCandidates.add(1);
+    const before = structuredClone(f.store.spaces.map(s => s.temporaryTabs));
+    const result = await f.move();
+    await undoGeneralAction(f.store, { windowId: 10, token: result.undoToken });
+    assert.deepEqual(f.store.spaces.map(s => s.temporaryTabs), before);
+    assert.deepEqual(f.local.spaces.map(s => s.temporaryTabs), before);
+});
+test('Undo storage rejection consumes its receipt and never retries a possibly committed write', async () => {
+    const f = fixture(), result = await f.move();
+    f.hooks.afterSet = (area, update) => { if (area === 'local' && update.spaces) throw new Error('lost acknowledgement'); };
+    await assert.rejects(undoGeneralAction(f.store, { windowId: 10, token: result.undoToken }));
+    f.hooks.afterSet = undefined; f.store.initialized = true;
+    await assert.rejects(undoGeneralAction(f.store, { windowId: 10, token: result.undoToken }), /no longer available/);
+});
+test('Space Undo is invalidated by a later persisted action even if the order returns', async () => {
+    const f = fixture(), result = await reorderSpaceWithUndo(f.store, { windowId: 10, spaceId: 'source', anchorSpaceId: 'target', position: 'after' });
+    await f.store.persist();
+    await assert.rejects(undoGeneralAction(f.store, { windowId: 10, token: result.undoToken }), /no longer available/);
+});
+test('Undo message registration ignores unrelated messages and rejects private or foreign senders', () => {
+    const f = fixture(); registerGeneralUndoMessages(f.store); const listener = f.listeners.at(-1), responses = [];
+    assert.equal(listener({ type: 'other' }, {}, value => responses.push(value)), undefined);
+    for (const sender of [{ id: 'foreign', url: 'https://example.test/' }, { id: 'test', url: 'chrome-extension://test/sidebar.html', tab: { incognito: true, windowId: 10 } }]) {
+        listener({ type: 'undoGeneralAction', windowId: 10, token: 'token' }, sender, value => responses.push(value));
+    }
+    assert.equal(responses.length, 2); assert.ok(responses.every(value => !value.success));
+});
+test('own native-group projection events do not expire a new receipt when delayed bookkeeping runs', async () => {
+    const f = fixture({ syncGroups: true });
+    const event = () => { const callbacks = []; return { addListener: cb => callbacks.push(cb), fire: (...args) => callbacks.forEach(cb => cb(...args)) }; };
+    for (const name of ['onCreated', 'onUpdated', 'onRemoved', 'onReplaced', 'onActivated', 'onMoved', 'onAttached', 'onDetached']) chrome.tabs[name] = event();
+    chrome.storage.onChanged = event(); chrome.tabGroups.onRemoved = event(); chrome.tabGroups.onUpdated = event();
+    const group = chrome.tabs.group;
+    chrome.tabs.group = async args => { const result = await group(args); chrome.tabs.onMoved.fire(args.tabIds[0]); return result; };
+    f.store.install(); await f.store.run(() => {});
+    const result = await f.move();
+    await new Promise(resolve => setTimeout(resolve, 260)); await f.store.run(() => {});
+    await undoGeneralAction(f.store, { windowId: 10, token: result.undoToken });
+    await new Promise(resolve => setTimeout(resolve, 260)); await f.store.run(() => {});
+});
+test('later native movement invalidates receipt immediately, before delayed persistence', async () => {
+    const f = fixture();
+    const event = () => { const callbacks = []; return { addListener: cb => callbacks.push(cb), fire: (...args) => callbacks.forEach(cb => cb(...args)) }; };
+    for (const name of ['onCreated', 'onUpdated', 'onRemoved', 'onReplaced', 'onActivated', 'onMoved', 'onAttached', 'onDetached']) chrome.tabs[name] = event();
+    chrome.storage.onChanged = event(); chrome.tabGroups.onRemoved = event(); chrome.tabGroups.onUpdated = event();
+    f.store.install(); await f.store.run(() => {});
+    const result = await f.move(); chrome.tabs.onMoved.fire(1);
+    await assert.rejects(undoGeneralAction(f.store, { windowId: 10, token: result.undoToken }), /no longer available/);
+    await new Promise(resolve => setTimeout(resolve, 260)); await f.store.run(() => {});
 });

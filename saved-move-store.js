@@ -273,9 +273,17 @@ export async function recoverSavedMove(store) {
     await store.initialize();
 }
 
-export function moveSavedItemsToSpace(store, request) {
-    return store.run(() => withSavedMoveLock(() => Utils._serializePinnedStateOp(async () => {
+export function moveSavedItemsToSpace(store, request, options) {
+    return store.run(() => moveSavedItemsToSpaceUnlocked(store, request, options));
+}
+
+// For callers already inside SpaceStore.run(). Keep the same journal, lock and
+// pinned-state transaction; never nest the store queue. The optional authority
+// guard runs last at every write boundary and leaves internal callers unchanged.
+export function moveSavedItemsToSpaceUnlocked(store, request, { beforeMutation = async () => {} } = {}) {
+    return withSavedMoveLock(() => Utils._serializePinnedStateOp(async () => {
         validateRequest(request);
+        await beforeMutation();
         assertNotTransient(store, { windowId: request.windowId });
         for (const entry of request.entries) assertNotTransient(store, { tabId: entry.tabId });
         const existing = (await chrome.storage.local.get(SAVED_MOVE_JOURNAL_KEY))[SAVED_MOVE_JOURNAL_KEY];
@@ -321,12 +329,13 @@ export function moveSavedItemsToSpace(store, request) {
         if (session[SESSION_KEY] !== undefined && !id(session[SESSION_KEY])) fail('Saved-move session tracking is invalid. Reload the extension before retrying.');
         journal.sessionToken = session[SESSION_KEY] || crypto.randomUUID();
         await readLive(store, journal, store.spaces);
-        if (!session[SESSION_KEY]) await chrome.storage.session.set({ [SESSION_KEY]: journal.sessionToken });
+        if (!session[SESSION_KEY]) { await beforeMutation(); await chrome.storage.session.set({ [SESSION_KEY]: journal.sessionToken }); }
         let prepared = false, attempted = false;
         const validate = async (expected = [], moved = []) => {
             await verifySpaces(store.spaces, journal, { active: store.active });
             if (Boolean(await Utils.getInvertTabOrder()) !== request.inverted || !same(await classify(store.spaces, journal), expected)) fail();
             await readLive(store, journal, store.spaces, { moved });
+            await beforeMutation();
         };
         try {
             // The prepared intent shares the exact existing snapshot. A crash
@@ -352,7 +361,7 @@ export function moveSavedItemsToSpace(store, request) {
             // Receipt cleanup is auxiliary: after canonical/session commit and
             // final validation, a lost cleanup acknowledgement cannot erase the
             // already-proven result or imply the bookmarks should be retried.
-            try { await clearJournal(journal.operationId); } catch { store.initialized = false; }
+            try { await beforeMutation(); await clearJournal(journal.operationId); } catch { store.initialized = false; }
             return batchFor(journal, completed);
         } catch (error) {
             store.initialized = false;
@@ -379,7 +388,7 @@ export function moveSavedItemsToSpace(store, request) {
             if (prepared && !batch.completed.length) error.message += ' Saved-item recovery is pending; reopen the sidebar before retrying.';
             throw error;
         }
-    }))).catch(error => {
+    })).catch(error => {
         // Preflight has not touched bookmarks or membership. Preserve specific
         // blockers (especially native splits) in the same validated batch shape.
         if (!error.batch) {

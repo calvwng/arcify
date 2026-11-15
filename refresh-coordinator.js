@@ -41,6 +41,13 @@ export class RefreshCoordinator {
         this.schedule();
     }
 
+    // Preserve deferred repaint work even when the model was already adopted.
+    // Fence any in-flight read/render without treating this as navigation.
+    invalidateRender() {
+        this.renderDirty = true;
+        this.invalidateSpaces();
+    }
+
     invalidateActiveView() {
         this.activeViewGeneration++;
         this.retryCount = 0;

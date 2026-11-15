@@ -380,3 +380,71 @@ test('mutation request journal stays bounded and retains the latest completed id
     assert.equal(f.session.spotlightBridgeRequests.at(-1).response.folderId, f.nodes.at(-1).id);
     assert(f.session.spotlightBridgeRequests.every(entry => !('snapshot' in entry.response)));
 });
+
+// Folder actions reuse the same negotiated/journaled authority path as Space
+// actions, but carry their own exact tree descriptor rather than a tab context.
+function folderFixture() {
+    const f = fixture();
+    const tree = id => {
+        const node = f.nodes.find(node => node.id === id);
+        return node ? { ...clone(node), children: f.nodes.filter(child => child.parentId === id).map(child => tree(child.id)) } : null;
+    };
+    chrome.bookmarks.getSubTree = async id => { await f.hooks.subTree?.(id); const node = tree(id); return node ? [node] : []; };
+    chrome.bookmarks.update = async (id, change) => { Object.assign(f.nodes.find(node => node.id === id), change); f.effects.push(['rename-folder', id, clone(change)]); chrome.bookmarks.onChanged.emit(id, clone(change)); };
+    const request = (command, fields = {}) => f.request(command, { supportedFeatures: ['folderActionsV1', 'globalFavoritesV1'], ...fields });
+    const capture = async (folderId = 'nested') => success(await f.handle(request('folderActionContext', { tabId: 1, folderId }), f.sender)).folderContext;
+    return { ...f, folderRequest: request, folderCapture: capture };
+}
+test('folder capability is opt-in and mutation receipts are replay-safe', async () => {
+    const f = folderFixture();
+    assert(!success(await f.handle(f.request('hello'), f.sender)).capabilities.includes('folderActionsV1'));
+    assert(success(await f.handle(f.folderRequest('hello'), f.sender)).capabilities.includes('folderActionsV1'));
+    const context = await f.folderCapture();
+    const unsupported = f.request('renameSavedFolder', { context, title: 'Other' });
+    error(await f.handle(unsupported, f.sender), 'UNSUPPORTED_FEATURE');
+    const request = f.folderRequest('renameSavedFolder', { context, title: 'Projects' });
+    assert.equal(success(await f.handle(request, f.sender)).folderId, 'nested');
+    success(await f.handle(request, f.sender));
+    assert.equal(f.effects.filter(([kind]) => kind === 'rename-folder').length, 1);
+});
+test('folder context schema rejects unknown keys, oversized or inconsistent trees and missing confirmation', async () => {
+    const f = folderFixture(), context = await f.folderCapture();
+    for (const request of [
+        f.folderRequest('folderActionContext', { tabId: 1, folderId: '' }),
+        f.folderRequest('renameSavedFolder', { context: { ...context, extra: true }, title: 'Next' }),
+        f.folderRequest('renameSavedFolder', { context: { ...context, folder: { ...context.folder, children: [{ ...context.folder.children[0], parentId: 'different' }] } }, title: 'Next' }),
+        f.folderRequest('renameSavedFolder', { context: { ...context, ancestors: [] }, title: 'Next' }),
+        f.folderRequest('renameSavedFolder', { context, title: 'x'.repeat(257) }),
+        f.folderRequest('deleteEmptyFolder', { context }),
+    ]) error(await f.handle(request, f.sender), 'INVALID_REQUEST');
+    assert.deepEqual(f.writes(), []);
+});
+test('folder mutation rejects stale generation and revocation during its final authority read', async () => {
+    const f = folderFixture(), context = await f.folderCapture();
+    error(await f.handle(f.folderRequest('renameSavedFolder', { context: { ...context, pairingGeneration: 'old' }, title: 'Next' }), f.sender), 'UNAUTHORIZED');
+    let armed = false;
+    f.hooks.subTree = async () => { armed = true; };
+    f.hooks.storageGet = async (area, keys) => { if (armed && area === 'local' && (keys === PEER_KEY || Array.isArray(keys) && keys.includes(PEER_KEY))) { f.local[PEER_KEY] = 'c'.repeat(32); armed = false; } };
+    error(await f.handle(f.folderRequest('renameSavedFolder', { context, title: 'Next' }), f.sender), 'UNAUTHORIZED');
+    assert.deepEqual(f.writes(), []);
+});
+test('folder mutation protects Space roots and refuses nonempty deletion through bridge', async () => {
+    const f = folderFixture();
+    error(await f.handle(f.folderRequest('renameSavedFolder', { context: await f.folderCapture('root'), title: 'No' }), f.sender), 'PROTECTED_FOLDER');
+    error(await f.handle(f.folderRequest('deleteEmptyFolder', { context: await f.folderCapture(), confirmed: true }), f.sender), 'NONEMPTY_FOLDER');
+    assert.deepEqual(f.writes(), []);
+});
+test('folder pairing rechecks persisted authority after final native reads', async () => {
+    const f = folderFixture(), context = await f.folderCapture();
+    let armed = false;
+    f.hooks.subTree = async () => { armed = true; };
+    f.hooks.tabAfterQuery = async () => { if (armed) f.local[PEER_KEY] = 'c'.repeat(32); };
+    error(await f.handle(f.folderRequest('renameSavedFolder', { context, title: 'Next' }), f.sender), 'UNAUTHORIZED');
+    assert.deepEqual(f.writes(), []);
+});
+test('folder move protocol requires an exact different destination Space',async()=>{
+ const f=folderFixture(),context=await f.folderCapture();
+ for(const destination of [undefined,{spaceId:'space',bookmarkFolderId:'root'},{spaceId:'other',bookmarkFolderId:'other-root',extra:true},{spaceId:'other',bookmarkFolderId:''}])
+  error(await f.handle(f.folderRequest('moveSavedFolderToSpace',{context,destination}),f.sender),'INVALID_REQUEST');
+ assert.deepEqual(f.writes(),[]);
+});

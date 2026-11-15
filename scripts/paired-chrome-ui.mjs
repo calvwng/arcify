@@ -150,7 +150,7 @@ export async function clickFreshResult(locate, record = async () => {}, {
 // handles may be reacquired; a connected hidden row or arbitrary API error fails.
 // This helper never starts or retries a drag.
 export async function locateFreshDragGeometry(page, sourceSelector, targetSelector, record = async () => {}, {
-    maxAttempts = 3, scrollSource = false, pause = ms => new Promise(resolve => setTimeout(resolve, ms))
+    maxAttempts = 3, scrollSource = false, stableGeometry = false, pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 } = {}) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let source, target, retained = false, scrolling = false;
@@ -172,6 +172,22 @@ export async function locateFreshDragGeometry(page, sourceSelector, targetSelect
             } else {
                 if (!from || !to || from.height <= 0 || to.height <= 0 || from.width <= 0 || to.width <= 0) {
                     throw new Error('Connected drag rows must have visible geometry.');
+                }
+                if (stableGeometry) {
+                    // The preceding drop can finish its writer before the sidebar
+                    // replacement/layout settles. Reacquire only before any input.
+                    await pause(50);
+                    const nextFrom = await source.boundingBox(), nextTo = await target.boundingBox();
+                    const sourceStillCurrent = await source.evaluate(isCurrent, sourceSelector);
+                    const targetStillCurrent = await target.evaluate(isCurrent, targetSelector);
+                    const sameBox = (a, b) => a && b && ['x', 'y', 'width', 'height'].every(key => a[key] === b[key]);
+                    const stable = sourceStillCurrent && targetStillCurrent && sameBox(from, nextFrom) && sameBox(to, nextTo);
+                    await record({ attempt, phase: 'settled-geometry', stable, sourceCurrent: sourceStillCurrent,
+                        targetCurrent: targetStillCurrent, from: nextFrom, to: nextTo });
+                    if (!stable) {
+                        if (attempt === maxAttempts) throw new Error('Drag layout kept changing before input.');
+                        continue;
+                    }
                 }
                 retained = true;
                 return { source, target, from, to };

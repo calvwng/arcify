@@ -284,7 +284,7 @@ export async function exerciseTabMenuActions({ apiPage, nativeSidebar, newTabPag
             await sidebar.page.click('#favoritesDropDismiss');
             await sidebar.page.waitForFunction(() => document.getElementById('favoritesDropNotice')?.hidden === true, { polling: 50 });
         }
-        await openFreshTabMenu({ page: sidebar.page, selector, menuSelector: '#tab-context-menu',
+        await openFreshTabMenu({ page: sidebar.page, selector, menuSelector: '#tab-context-menu', observe: true,
             record: observation => checkpoint('context-menu-input', { selector, menuSelector: '#tab-context-menu', ...observation }) });
     });
     const item = async action => ui(sidebar.page, `Choose ${action} through tab menu`, () => sidebar.page.click(`#tab-context-menu [data-action="${action}"]`));

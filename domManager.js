@@ -221,7 +221,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
             if (!session.active || !contextMenu.contains(item)) return;
             // Transfer focus before removing the menu; refresh then restores the
             // same live row identity without overriding later user focus.
-            if (['createSplitView', 'endSplitView'].includes(action) && contextMenu.contains(document.activeElement) && tabElement.isConnected) tabElement.focus({ preventScroll: true });
+            if (['createSplitView', 'endSplitView', 'saveSplitView'].includes(action) && contextMenu.contains(document.activeElement) && tabElement.isConnected) tabElement.focus({ preventScroll: true });
             closeMenu(); void callback();
         }, { once: true });
         item.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click(); } });
@@ -230,6 +230,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
     if (splitActions) {
         addAction('Create Split View', splitActions.create, 'createSplitView');
         addAction('End Split View', splitActions.end, 'endSplitView');
+        addAction('Save Split View', splitActions.save, 'saveSplitView');
         if (splitActions.hint) {
             const hint = document.createElement('div'); hint.className = 'context-menu-hint today-split-menu-hint';
             hint.dataset.action = 'splitViewHint'; hint.setAttribute('aria-disabled', 'true'); hint.textContent = splitActions.hint;
