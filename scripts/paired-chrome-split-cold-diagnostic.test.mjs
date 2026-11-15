@@ -29,3 +29,27 @@ for(const [field,value,pattern] of [['windowId',99,/observed window/],['spaceId'
 test('wrong association key rejected',()=>{const f=fixture();f.after.session.splitPinInstancesV1={wrong:{windowId:20,spaceId:'home',bookmarkId:'bookmark',splitViewId:40,tabIds:[101,102]}};assert.throws(()=>run(f),/map key/);});
 test('missing saved Space rejected',()=>{const f=fixture();f.after.local.spaces=[];assert.throws(()=>run(f),/Space must still exist/);});
 test('changed saved root rejected',()=>{const f=fixture();f.after.local.spaces[0].bookmarkFolderId='changed';assert.throws(()=>run(f),/Space root/);});
+
+import {readFile,mkdtemp,writeFile,mkdir,symlink,rm} from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import {captureSplitColdPackageInventory,prepareSplitColdRegistration} from './paired-chrome-split-cold-diagnostic.mjs';
+test('inventory hashes only exact package regular files and rejects symlinks',async()=>{
+ const root=await mkdtemp(path.join(os.tmpdir(),'split-cold-inventory-'));
+ try{await mkdir(path.join(root,'nested'));await writeFile(path.join(root,'nested','a.js'),'one');
+ const expected=[{id:'arcify',path:root}];const before=await captureSplitColdPackageInventory(expected);
+ assert.deepEqual(before[0].files.map(f=>f.path),['nested/a.js']);assert.match(before[0].files[0].sha256,/^[0-9a-f]{64}$/);
+ await writeFile(path.join(root,'nested','a.js'),'two');assert.notDeepEqual(await captureSplitColdPackageInventory(expected),before);
+ await symlink(path.join(root,'nested','a.js'),path.join(root,'link'));await assert.rejects(()=>captureSplitColdPackageInventory(expected),/rejects symlinks/);
+ }finally{await rm(root,{recursive:true,force:true});}
+});
+test('preflight rejects changed original launch condition without launch or mutation',async()=>{
+ const records=[];let launches=0;await assert.rejects(()=>prepareSplitColdRegistration({launchOptions:{args:[]},launch:async()=>{launches++;},record:e=>records.push(e)}));
+ assert.equal(launches,0);assert.equal(records.at(-1).status,'failed');assert.equal(records.at(-1).scenarioStarted,false);
+});
+test('both phases use shared passive bounded registration gate, no setup reload inside module',async()=>{
+ const source=await readFile(new URL('./paired-chrome-split-cold-diagnostic.mjs',import.meta.url),'utf8');
+ assert.equal((source.match(/await validatedSplitColdRestart\(/g)||[]).length,2);
+ assert.match(source,/for\(const expected of expectedExtensions\)/);assert.match(source,/await waitForExactRestartRegistry/);
+ assert.match(source,/mode.manager.inDevMode,true/);assert.doesNotMatch(source,/enableDeveloperModeViaUi|runtime\.reload\(|Extensions\.loadUnpacked/);
+});

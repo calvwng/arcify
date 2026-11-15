@@ -1,6 +1,10 @@
 /** Isolated, test-only cold restart characterization. Never imported by product. */
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import { readDeveloperModeDomState, developerModeStateReady } from './paired-chrome-extensions.mjs';
+import { waitForExactRestartRegistry } from './packaged-layout-exhaustion-registry.mjs';
+import { randomBytes, createHash } from 'node:crypto';
 import { observeTargetDiagnostics, assertNoTargetCrashes } from './paired-chrome-worker.mjs';
 import { restartObservedBrowser } from './paired-chrome-browser-restart.mjs';
 import { assertUnchangedExtensionRegistry } from './paired-chrome-favorites-restart.mjs';
@@ -47,6 +51,68 @@ export function characterizeColdSplit(before, after, observations) {
         identityMethod:'Per-page fixture sessionStorage token plus unique current random document title; never old native ID or URL identity'};
 }
 
+
+export async function captureSplitColdPackageInventory(expectedExtensions){
+    async function walk(root,prefix=''){
+        const entries=[];
+        for(const entry of await readdir(path.join(root,prefix),{withFileTypes:true})){
+            const name=path.join(prefix,entry.name);
+            if(entry.isDirectory())entries.push(...await walk(root,name));
+            else{assert(entry.isFile(),'Package inventory rejects symlinks and non-files');entries.push({path:name,sha256:createHash('sha256').update(await readFile(path.join(root,name))).digest('hex')});}
+        }
+        return entries.sort((a,b)=>a.path.localeCompare(b.path));
+    }
+    return Promise.all(expectedExtensions.map(async expected=>{assert(path.isAbsolute(expected.path));return{id:expected.id,path:expected.path,files:await walk(expected.path)};}));
+}
+async function validatedSplitColdRestart({browser,launchOptions,launch,arcifyId,spotlightId,expectedExtensions,observePage,blockExternalHttps,screenshot,poll,recordTarget,recordDiagnostic,evidence,checkpoint}){
+    assert.deepEqual(launchOptions.args,['--restore-last-session']);
+    let currentBrowser=browser,arcifyOptions,spotlightOptions;
+    const registry=async b=>{const c=await b.target().createCDPSession();try{return(await c.send('Extensions.getExtensions')).extensions;}finally{await c.detach();}};
+    const openOptions=async id=>{const p=await observePage(await currentBrowser.newPage());await p.goto(`chrome-extension://${id}/options.html`,{waitUntil:'domcontentloaded'});assert.equal(await p.evaluate(()=>chrome.runtime.id),id);return p;};
+    evidence.registryBefore=await registry(browser);
+    assertUnchangedExtensionRegistry(evidence.registryBefore,evidence.registryBefore,expectedExtensions);
+            const restarted=await restartObservedBrowser({browser,launchOptions,
+            launch:async options=>{validateNamespaceLaunchEnvironment(process.env,process.getuid?.());evidence.runtime=await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);currentBrowser=await launch(options);return currentBrowser;},
+            record:async observation=>{evidence.restartObservations.push(observation);await checkpoint('restarting');},
+            revalidate:async fresh=>{
+                validateChromeLaunchArguments(fresh.process().spawnargs);evidence.process=await inspectChromeProcessRuntime(fresh.process().pid);
+                evidence.chromeVersion=await fresh.version();assert.equal(evidence.chromeVersion,`Chrome/${evidence.runtime.package.browserVersion}`);
+                const targetSession=await fresh.target().createCDPSession();
+                observeTargetDiagnostics(targetSession,'split-cold-restarted-browser',event=>{evidence.targetLifecycle.push(event);recordTarget(event);});
+                await targetSession.send('Target.setDiscoverTargets',{discover:true});
+                fresh.on('targetcreated',t=>blockExternalHttps(t).catch(e=>recordDiagnostic({type:'split-cold-network',message:e.message})));
+                for(const t of fresh.targets())await blockExternalHttps(t);
+                const sandbox=await observePage(await fresh.newPage());await sandbox.goto('chrome://sandbox/',{waitUntil:'domcontentloaded'});
+                await sandbox.waitForFunction(()=>document.querySelector('#sandbox-status tr')&&document.getElementById('evaluation')?.textContent.trim());
+                evidence.sandbox=await sandbox.evaluate(()=>({url:location.href,title:document.title,bodyText:document.body.innerText,evaluation:document.getElementById('evaluation')?.textContent||'',rows:[...document.querySelectorAll('#sandbox-status tr')].map(row=>{const cells=row.querySelectorAll('td');return{name:cells[0]?.textContent||'',value:cells[1]?.textContent||''};})}));
+                evidence.sandbox.validation=validateChromeNamespaceSandboxStatus(evidence.sandbox);await screenshot(sandbox,'split-cold-restarted-sandbox');await sandbox.close();
+                const extensionsPage=await observePage(await fresh.newPage());
+                try{
+                    await extensionsPage.goto('chrome://extensions/',{waitUntil:'domcontentloaded'});
+                    const mode=await poll(async()=>{const state=await extensionsPage.evaluate(readDeveloperModeDomState);(evidence.restartDeveloperMode||=[]).push(state);await checkpoint('passive-developer-mode');return state;},developerModeStateReady,'read-only restored Developer-mode readiness');
+                    assert.equal(mode.manager.inDevMode,true,'Developer mode must remain enabled; never re-enable it');
+                    for(const expected of expectedExtensions){
+                        evidence.registryAfter=await waitForExactRestartRegistry({read:()=>registry(fresh),before:evidence.registryBefore,expected,record:async entries=>{(evidence.restartRegistry||=[]).push({expectedId:expected.id,entries});await checkpoint('passive-registry');}});
+                    }
+                    assertUnchangedExtensionRegistry(evidence.registryBefore,evidence.registryAfter,expectedExtensions);
+                }finally{await extensionsPage.close();}
+                arcifyOptions=await openOptions(arcifyId);spotlightOptions=await openOptions(spotlightId);
+                return{runtime:true,sandbox:true,registry:true};
+            }});
+        evidence.restart=restarted.evidence;
+
+    assertNoTargetCrashes(evidence.targetLifecycle);
+    return{browser:currentBrowser,arcifyOptions,spotlightOptions,evidence};
+}
+export async function prepareSplitColdRegistration({record,recordTarget=()=>{},recordDiagnostic=()=>{},...options}){
+    const evidence={status:'running',phase:'registration-preflight',restartObservations:[],targetLifecycle:[],scenarioStarted:false};
+    const checkpoint=async phase=>{evidence.phase=phase;await record(structuredClone(evidence));};
+    try{
+        const result=await validatedSplitColdRestart({...options,recordTarget,recordDiagnostic,evidence,checkpoint});
+        evidence.status='passed';await checkpoint('registration-preflight-complete');return result;
+    }catch(error){evidence.status='failed';evidence.failure={message:error.message,stack:error.stack};await checkpoint('registration-preflight-failed');throw error;}
+}
+
 export async function exerciseSplitColdDiagnostic({browser,launchOptions,launch,apiPage,fixture,arcifyId,spotlightId,
     expectedExtensions,observePage,blockExternalHttps,screenshot,poll,record,recordTarget=()=>{},recordDiagnostic=()=>{}}){
     assert.deepEqual(launchOptions.args,['--restore-last-session'],'This conditional diagnostic requires restore-last-session from the first launch, unchanged on relaunch');
@@ -64,7 +130,6 @@ export async function exerciseSplitColdDiagnostic({browser,launchOptions,launch,
         local:await chrome.storage.local.get(['savedSplitRecipesV1','splitPinsV1','spaces','spaceTabSnapshot','spaceRankCheckpoint','spaceExplicitTodayCheckpoint','spaceDurableTodayLayout']),
         session:await chrome.storage.session.get(['splitPinInstancesV1','spaceExplicitTodayEpoch','activeSpaces','spaceRecoveryCandidates'])
     }));
-    const openOptions=async id=>{const p=await observePage(await currentBrowser.newPage());await p.goto(`chrome-extension://${id}/options.html`,{waitUntil:'domcontentloaded'});assert.equal(await p.evaluate(()=>chrome.runtime.id),id);return p;};
     try{
         const sender=await apiPage.evaluate(()=>chrome.tabs.getCurrent());assert(Number.isSafeInteger(sender?.windowId));
         const initial=await read(apiPage),windowId=sender.windowId,spaceId=initial.session.activeSpaces?.[windowId];
@@ -105,26 +170,8 @@ export async function exerciseSplitColdDiagnostic({browser,launchOptions,launch,
         assert(!witness.tabIds.includes(evidence.seeds[2].tab.id));
         evidence.registryBefore=await registry(browser);assertUnchangedExtensionRegistry(evidence.registryBefore,evidence.registryBefore,expectedExtensions);
         await screenshot(apiPage,'split-cold-before-close-options');await checkpoint('before-close');
-        const restarted=await restartObservedBrowser({browser,launchOptions,
-            launch:async options=>{validateNamespaceLaunchEnvironment(process.env,process.getuid?.());evidence.runtime=await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);currentBrowser=await launch(options);return currentBrowser;},
-            record:async observation=>{evidence.restartObservations.push(observation);await checkpoint('restarting');},
-            revalidate:async fresh=>{
-                validateChromeLaunchArguments(fresh.process().spawnargs);evidence.process=await inspectChromeProcessRuntime(fresh.process().pid);
-                evidence.chromeVersion=await fresh.version();assert.equal(evidence.chromeVersion,`Chrome/${evidence.runtime.package.browserVersion}`);
-                const targetSession=await fresh.target().createCDPSession();
-                observeTargetDiagnostics(targetSession,'split-cold-restarted-browser',event=>{evidence.targetLifecycle.push(event);recordTarget(event);});
-                await targetSession.send('Target.setDiscoverTargets',{discover:true});
-                fresh.on('targetcreated',t=>blockExternalHttps(t).catch(e=>recordDiagnostic({type:'split-cold-network',message:e.message})));
-                for(const t of fresh.targets())await blockExternalHttps(t);
-                const sandbox=await observePage(await fresh.newPage());await sandbox.goto('chrome://sandbox/',{waitUntil:'domcontentloaded'});
-                await sandbox.waitForFunction(()=>document.querySelector('#sandbox-status tr')&&document.getElementById('evaluation')?.textContent.trim());
-                evidence.sandbox=await sandbox.evaluate(()=>({url:location.href,title:document.title,bodyText:document.body.innerText,evaluation:document.getElementById('evaluation')?.textContent||'',rows:[...document.querySelectorAll('#sandbox-status tr')].map(row=>{const cells=row.querySelectorAll('td');return{name:cells[0]?.textContent||'',value:cells[1]?.textContent||''};})}));
-                evidence.sandbox.validation=validateChromeNamespaceSandboxStatus(evidence.sandbox);await screenshot(sandbox,'split-cold-restarted-sandbox');await sandbox.close();
-                evidence.registryAfter=await registry(fresh);assertUnchangedExtensionRegistry(evidence.registryBefore,evidence.registryAfter,expectedExtensions);
-                arcifyOptions=await openOptions(arcifyId);spotlightOptions=await openOptions(spotlightId);
-                return{runtime:true,sandbox:true,registry:true};
-            }});
-        evidence.restart=restarted.evidence;
+        const restarted=await validatedSplitColdRestart({browser,launchOptions,launch,arcifyId,spotlightId,expectedExtensions,observePage,blockExternalHttps,screenshot,poll,recordTarget,recordDiagnostic,evidence,checkpoint});
+        ({browser:currentBrowser,arcifyOptions,spotlightOptions}=restarted);
         const observe=async()=>{
             const result=[];
             for(const t of currentBrowser.targets().filter(t=>t.type()==='page'&&t.url()===url)){
