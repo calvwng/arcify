@@ -27,9 +27,10 @@ const LITTLE_ARC_CASE_INDICES = Object.freeze([0, 1, 2, 55]);
 const FOLDER_ACTION_CASE_INDICES = Object.freeze([0, 1, 2, 56]);
 const ALL_CASE_INDICES = Object.freeze([...new Set([...FULL_CASE_INDICES, ...FAVORITE_LIFECYCLE_CASE_INDICES, ...MOVE_DRAG_CASE_INDICES,
     ...NATIVE_SPLIT_CASE_INDICES, ...APPEARANCE_ACTION_CASE_INDICES, ...RECOVERY_ACTION_CASE_INDICES,
-    ...EXTENDED_ACTION_CASE_INDICES, ...ARCHIVE_ACTION_CASE_INDICES, ...ARCHIVE_REOPEN_CASE_INDICES, ...LITTLE_ARC_CASE_INDICES, ...FOLDER_ACTION_CASE_INDICES])].sort((a, b) => a - b));
+    ...EXTENDED_ACTION_CASE_INDICES, ...ARCHIVE_ACTION_CASE_INDICES, ...ARCHIVE_REOPEN_CASE_INDICES, ...LITTLE_ARC_CASE_INDICES, ...FOLDER_ACTION_CASE_INDICES, 57])].sort((a, b) => a - b));
 
 function caseIndicesForMode(mode) {
+    if (['settings-control', 'settings-retirement'].includes(mode)) return [0, 1, 2, 57];
     assert(mode === 'folder-actions' || mode === 'full' || mode === 'favorite-lifecycle' || mode === 'native-split' || mode === 'appearance-actions' || mode === 'recovery-actions' || mode === 'extended-actions' || mode === 'archive-actions' || mode === 'archive-reopen' || mode === 'move-drag' || mode === 'little-arc',
         `Unsupported ARCIFY_PAIRED_RUN_MODE: ${String(mode)}. Expected full, favorite-lifecycle, native-split, appearance-actions, recovery-actions, extended-actions, archive-actions, archive-reopen, move-drag, little-arc or folder-actions.`);
     return mode === 'folder-actions' ? FOLDER_ACTION_CASE_INDICES : mode === 'full' ? FULL_CASE_INDICES : mode === 'favorite-lifecycle' ? FAVORITE_LIFECYCLE_CASE_INDICES :
@@ -47,7 +48,7 @@ export function createPairedChromeRunReport(caseNames, mode = 'full') {
     const expectedCases = indices.map(caseIndex => ({ caseIndex, name: caseIndex === 39 ? NATIVE_SPLIT_CASE_NAME : caseNames[caseIndex] }));
     return {
         runMode: mode,
-        scope: mode === 'folder-actions' ? 'Supplemental fresh-profile nested-folder browse and management coverage; this is not overlay, browser-restart or full-suite acceptance.' : mode === 'full' ? 'Full paired-extension suite.' : mode === 'move-drag' ?
+        scope: mode.startsWith('settings-') ? 'Instrumented diagnostic only: genuine Settings retirement versus control, not product acceptance.' : mode === 'folder-actions' ? 'Supplemental fresh-profile nested-folder browse and management coverage; this is not overlay, browser-restart or full-suite acceptance.' : mode === 'full' ? 'Full paired-extension suite.' : mode === 'move-drag' ?
             'Supplemental fresh-profile tab-menu, native Move to New Window and sticky New Tab drag coverage; this is not Little Arc, full-browser restart or full-suite acceptance.' : mode === 'little-arc' ?
             'Supplemental fresh-profile Little Arc exact-tab launch, transfer and missing-controller ordinary-tab fallback after full extension reload; intact-controller recovery remains native-unverified; this is not full-browser restart or full-suite acceptance.' : mode === 'archive-reopen' ?
             'Supplemental fresh-profile Spotlight Archive exact-entry reopen coverage; this is not native-panel opening, archive-actions or full-suite acceptance.' : mode === 'archive-actions' ?

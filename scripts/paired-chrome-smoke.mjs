@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { exerciseSettingsProjection, SETTINGS_PROJECTION_CASE } from './paired-chrome-settings-projection.mjs';
 import { exerciseSpotlightFolders, SPOTLIGHT_FOLDER_CASE_NAME } from './paired-chrome-spotlight-folders.mjs';
 import { exerciseSpotlightSplit, serveSpotlightSplitFixture, SPOTLIGHT_SPLIT_CASE_NAME } from './paired-chrome-spotlight-split.mjs';
 import { exerciseNativeTodaySplit, serveNativeSplitFixture, NATIVE_SPLIT_CASE_NAME } from './paired-chrome-native-split.mjs';
@@ -146,7 +147,8 @@ const stepNames = [
     'Spotlight Archive reopens exact same-address entries in their original Space and source window without replay',
     'Spotlight Split and End Split keep exact left and right source panes and original documents',
     'Little Arc trusted launch and same-tab transfer preserve documents with missing-controller reload fallback',
-    'Spotlight nested folders support fuzzy browse and trusted create rename empty-delete cross-Space move'
+    'Spotlight nested folders support fuzzy browse and trusted create rename empty-delete cross-Space move',
+    SETTINGS_PROJECTION_CASE,
 ];
 assert.equal(stepNames[49], SPOTLIGHT_ACTION_CASE_NAME, 'Initial Spotlight action case must retain its reviewed identity.');
 assert.equal(stepNames[56], SPOTLIGHT_FOLDER_CASE_NAME);
@@ -183,7 +185,7 @@ const report = {
         "Worker termination uses Chrome's documented Puppeteer WebWorker.close API; real raw target destruction and a distinct restarted worker are required. This is not a full browser restart."
     ]
 };
-const OUTPUT = resolve(ROOT, report.runMode === 'folder-actions' ? 'test-results/paired-chrome-folder-actions' : report.runMode === 'move-drag' ? 'test-results/paired-chrome-move-drag' : report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
+const OUTPUT = resolve(ROOT, report.runMode.startsWith('settings-') ? `test-results/paired-chrome-${report.runMode}` : report.runMode === 'folder-actions' ? 'test-results/paired-chrome-folder-actions' : report.runMode === 'move-drag' ? 'test-results/paired-chrome-move-drag' : report.runMode === 'little-arc' ? 'test-results/paired-chrome-little-arc' : report.runMode === 'archive-reopen' ? 'test-results/paired-chrome-archive-reopen' : report.runMode === 'archive-actions' ? 'test-results/paired-chrome-archive-actions' : report.runMode === 'extended-actions' ? 'test-results/paired-chrome-extended-actions' : report.runMode === 'recovery-actions' ? 'test-results/paired-chrome-recovery-actions' : report.runMode === 'appearance-actions' ? 'test-results/paired-chrome-appearance-actions' : report.runMode === 'native-split' ? 'test-results/paired-chrome-native-split' : report.runMode === 'full' ? 'test-results/paired-chrome' : 'test-results/paired-chrome-favorite-lifecycle');
 let launchOptions, persistentFixture, ordinaryFixture;
 let browser, server, profile, arcifyId, spotlightId, arcifyOptions, spotlightOptions, fixture, sourcePage, sidebarFixture;
 const observedPages = new Set();
@@ -2544,6 +2546,10 @@ try {
     },{windowIsolation:false});
     } // Preserve both original full/favorite-lifecycle endings unchanged.
 
+    if (report.runMode.startsWith('settings-')) {
+        await step(stepNames[57], () => exerciseSettingsProjection({ browser, apiPage: arcifyOptions, fixture, arcifyId, spotlightId, snapshot, poll,
+            retired: report.runMode === 'settings-retirement', record: async checkpoint => { report.settingsProjection ||= []; report.settingsProjection.push(checkpoint); await saveReport(); } }));
+    }
     assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');
     assertNoTargetCrashes(report.targetLifecycle);
     assertNoPageErrors(report.diagnostics);
