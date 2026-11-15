@@ -86,3 +86,37 @@ destination order. Uncertain bookmark or storage outcomes stop without opening,
 closing, or recreating panes. A reported partial result requires refresh, not an
 automatic retry. Hosted acceptance uses trusted drag events and verifies current
 hit-testing before release; it does not substitute synthetic drops for input.
+
+### Experimental explicit focus link (local reconstructed prototype)
+
+`Attach open Split View…` offers an explicit current native pair in the active
+Space/window. No default selection, URL adoption, tab creation, rebuilding or
+navigation occurs. It stores a separate `storage.session.splitPinFocusLinksV1`
+receipt, not a `splitPinInstancesV1` witness. The pair remains in Today and gets
+no saved-pin close/release/move/recovery authority. A normal pin click revalidates
+exact IDs, membership, Space, marker and recipe, then activates one exact pane.
+It does not prove the pair's historical identity. Only HTTP(S) settled panes are
+offered in this bounded prototype.
+
+The advisory link survives service-worker suspension, not a cold browser restart
+or extension reload/update. A stale/pending/malformed scoped receipt blocks
+silent fresh opening. Review the chooser to reattach, or explicitly remove the
+link while keeping the panes. Only a later separate normal click opens fresh.
+Ordinary unlinked pins and existing strong witnesses retain their old behavior.
+Chooser capabilities expire in two minutes and on native/bookmark lifecycle
+changes; reopening a chooser invalidates older choices in that worker.
+
+All requests use the existing shared SpaceStore queue. Storage and native tabs
+are not one atomic transaction. Pending and final receipt readback plus lifecycle
+fences detect uncertainty; rollback only replaces the exact attempted receipt,
+never a newer scoped link. Lost acknowledgement plus failed cleanup may leave an
+advisory record, never ownership or a confirmed-success claim. Every later focus
+rechecks it. Focus results require returned and freshly observed active=true and
+an unchanged final lifecycle generation; uncertainty causes no automatic retry.
+
+An obsolete advisory record ceases vetoing a new explicit choice only after
+proof its original tabs left that window, its Space/root disappeared, its exact
+marker/recipe disappeared, or its original marker ID is absent. It is not deleted
+or adopted by URL. If obsolete scope revives, overlapping links fail closed until
+explicit unlink. Same pin instances in different windows remain independent.
+This is not automatic inline reattachment or cold-restart recovery.

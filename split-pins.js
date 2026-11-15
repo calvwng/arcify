@@ -1,3 +1,5 @@
+import { SPLIT_PIN_FOCUS_LINKS_KEY, readSplitPinFocusLinks, runSplitFocusAction, focusLinkedPair } from './split-pin-focus-links.js';
+export { SPLIT_PIN_FOCUS_LINKS_KEY };
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { SAVED_SPLITS_KEY, readSavedSplitRecipes, runSavedSplitActionCore } from './saved-splits.js';
 import { getSpaceBookmarkById, getSpaceBookmarkFolder, getSpaceBookmarkTree, observeSpaceBookmarkRemoval } from './space-bookmarks.js';
@@ -157,11 +159,13 @@ async function ensureBookmark(store, request, state, recipe, parentId) {
 }
 export function runSplitPinAction(store, request) {
     return store.run(async () => {
-        if (!exact(request, ['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'bookmarkId', 'entries', 'recipe', 'candidate', 'destination', 'bookmark', 'today']) || request.type !== 'splitPinAction' ||
-            !['migrate', 'list', 'pin', 'activate', 'close', 'recoveryList', 'recover', 'defer', 'release'].includes(request.action) || !Number.isSafeInteger(request.windowId) || request.windowId <= 0 || !id(request.spaceId) || !id(request.bookmarkFolderId)) throw stale();
+        if (!exact(request, ['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'bookmarkId', 'entries', 'recipe', 'candidate', 'destination', 'bookmark', 'today', 'candidateToken']) || request.type !== 'splitPinAction' ||
+            !['migrate', 'list', 'pin', 'activate', 'close', 'recoveryList', 'recover', 'defer', 'release', 'attachCandidates', 'attach', 'unlinkFocus'].includes(request.action) || !Number.isSafeInteger(request.windowId) || request.windowId <= 0 || !id(request.spaceId) || !id(request.bookmarkFolderId)) throw stale();
         const space = await context(store, request);
         let state = await readState();
         let recipes = await readSavedSplitRecipes();
+        const focusDeps = { resolve: async () => resolve(store, request, await readState(), await readSavedSplitRecipes()), exactPair: r => exactPair(store, r) };
+        if (['attachCandidates','attach','unlinkFocus'].includes(request.action)) return runSplitFocusAction(store,request,focusDeps);
         // Recovery is an explicit association chosen in a review dialog, never
         // automatic adoption based on a matching marker URL. No tabs are reused.
         if (request.action === 'recoveryList') {
@@ -294,6 +298,7 @@ export function runSplitPinAction(store, request) {
         }
         if (request.action === 'list') {
             const pins = [];
+            const focusLinks = await readSplitPinFocusLinks();
             const tree = await presentationTree(space), bookmarks = new Map();
             const visit = node => { bookmarks.set(node.id, node); for (const child of node.children || []) visit(child); }; visit(tree);
             const observation = { session: (await chrome.storage.session.get(SPLIT_PIN_SESSION_KEY))[SPLIT_PIN_SESSION_KEY] || {},
@@ -307,7 +312,7 @@ export function runSplitPinAction(store, request) {
                 const recipe = recipes.find(r => r.id === pin.recipeId), bookmark = bookmarks.get(pin.bookmarkId);
                 if (!recipe || !bookmark || bookmark.url !== splitPinUrl(recipe.id)) continue;
                 const live = await witness(store, request, { recipe, bookmark, pin, space }, observation);
-                pins.push({ bookmarkId: pin.bookmarkId, name: bookmark.title, tabIds: live?.tabIds || [], splitViewId: live?.splitViewId ?? null, releaseAllowed: Boolean(live) && !blockedRelease.has(pin.bookmarkId), entries: live ? observation.tabs.filter(t => live.tabIds.includes(t.id)).sort((a,b) => a.index - b.index).map(tabEntry) : [] });
+                pins.push({ focusLinkPresent: Object.prototype.hasOwnProperty.call(focusLinks, `${request.windowId}:${pin.bookmarkId}`), bookmarkId: pin.bookmarkId, name: bookmark.title, tabIds: live?.tabIds || [], splitViewId: live?.splitViewId ?? null, releaseAllowed: Boolean(live) && !blockedRelease.has(pin.bookmarkId), entries: live ? observation.tabs.filter(t => live.tabIds.includes(t.id)).sort((a,b) => a.index - b.index).map(tabEntry) : [] });
             }
             await context(store, request);
             return { pins };
@@ -389,6 +394,8 @@ export function runSplitPinAction(store, request) {
             await chrome.tabs.update(live.tabIds[0], { active: true });
             return { tabIds: live.tabIds, reused: true };
         }
+        const focusLinks = await readSplitPinFocusLinks(), focusKey = `${request.windowId}:${request.bookmarkId}`;
+        if (Object.prototype.hasOwnProperty.call(focusLinks,focusKey)) return focusLinkedPair(store,request,focusDeps,focusLinks[focusKey]);
         const result = await runSavedSplitActionCore(store, { type: 'savedSplitAction', action: 'open', windowId: request.windowId, spaceId: request.spaceId, bookmarkFolderId: request.bookmarkFolderId, recipeId: target.recipe.id });
         await resolve(store, request, await readState(), await readSavedSplitRecipes());
         await remember(store, request, target, result.tabIds, result.splitViewId);
