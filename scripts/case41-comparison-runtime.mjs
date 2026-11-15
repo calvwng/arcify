@@ -1,0 +1,14 @@
+// Installed only by ephemeral instrumented build. No storage/endpoints/native calls.
+export function installCase41Audit(){
+ const events=[];let seq=0,dropped=0,bytes=0,op=0,activeOperation=null,pending=null;const workerId=crypto.randomUUID();
+ const token=s=>{let a=2166136261,b=2246822507;for(let i=0;i<s.length;i++){a=Math.imul(a^s.charCodeAt(i),16777619);b=Math.imul(b^s.charCodeAt(i),3266489909);}return `h:${(a>>>0).toString(16).padStart(8,'0')}${(b>>>0).toString(16).padStart(8,'0')}:${s.length}`;};
+ const clean=value=>{let nodes=0,truncated=false;const visit=(v,depth)=>{if(++nodes>6000||depth>20){truncated=true;return{truncated:true};}if(typeof v==='string')return token(v);if(v===null||typeof v==='number'||typeof v==='boolean'||v===undefined)return v;if(Array.isArray(v))return v.map(x=>visit(x,depth+1));if(v instanceof Set)return [...v].map(x=>visit(x,depth+1));if(v instanceof Map)return [...v].map(x=>visit(x,depth+1));if(typeof v==='object')return Object.fromEntries(Object.entries(v).map(([k,x])=>[/^(?:https?:|chrome:)/.test(k)?token(k):k,visit(x,depth+1)]));return typeof v;};return {value:visit(value,0),nodeLimitReached:truncated};};
+ globalThis.__c41Armed=false;
+ globalThis.__c41Audit=(phase,data)=>{if(!globalThis.__c41Armed)return;try{const cleaned=clean(data),item={sequence:++seq,at:Date.now(),phase,activeOperation,data:cleaned.value,nodeLimitReached:cleaned.nodeLimitReached};let text=JSON.stringify(item);if(text.length>262144){item.data={oversize:true,length:text.length};text=JSON.stringify(item);}while(events.length&&(events.length>=256||bytes+text.length>4194304)){bytes-=JSON.stringify(events.shift()).length;dropped++;}bytes+=text.length;events.push(item);}catch{dropped++;}};
+ globalThis.__c41PendingBegin=data=>{pending={inputs:data,operands:[],overflow:false,stage:0};};
+ globalThis.__c41PendingStage=stage=>{if(pending)pending.stage=stage;};
+ globalThis.__c41PendingEnd=data=>{globalThis.__c41Audit('pending-decision',{...pending,result:data,guardInterpretation:{absentMeansNotEvaluated:true,orderIsActualShortCircuit:true}});pending=null;};
+ globalThis.__c41Value=(phase,value,data)=>{if(pending){if(pending.operands.length<3000)pending.operands.push({stage:pending.stage,[phase]:{...data,value}});else pending.overflow=true;}else globalThis.__c41Audit(phase,{...data,value});return value;};
+ globalThis.__c41Queue=(phase,id)=>{if(phase==='enqueue')id=++op;if(phase==='start')activeOperation=id;globalThis.__c41Audit(`queue-${phase}`,{id});if(phase==='end'&&activeOperation===id)activeOperation=null;return id;};
+ globalThis.__c41Read=()=>({workerId,armed:globalThis.__c41Armed,sequence:seq,dropped,firstSequence:events[0]?.sequence??null,events:structuredClone(events),limits:{maxEvents:256,maxBytes:4194304,maxEventBytes:262144,stringTokens:'noncryptographic equality tokens; collisions possible',activeOperation:'best-effort shared worker queue attribution, not async-local'}});
+}

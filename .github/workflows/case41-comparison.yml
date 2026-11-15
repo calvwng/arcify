@@ -1,0 +1,97 @@
+name: Exact main and PR87 case41 projection comparison
+on:
+  push:
+    branches: [diagnostic/case41-main-pr87-20261115]
+    paths:
+      - '.github/workflows/case41-comparison.yml'
+permissions:
+  contents: read
+jobs:
+  paired-chrome:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: main
+            head: 2aacc2753b984c8c968a47ec2e2b093c12a162d9
+            tree: ce6664e07ec862f1d507ec685d1da77ef380dd35
+          - lane: pr87
+            head: 673db7d9e825a50bc482d446d03f08c4fa6ee0aa
+            tree: 80b907f9c0421363848ebc97567027d8c307d8a0
+    env:
+      CI: 'true'
+      ARCIFY_TEST_HEAD: ${{ matrix.head }}
+      ARCIFY_PR_HEAD: ''
+    steps:
+      - name: Check out exact diagnostic harness
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: diagnostic
+      - name: Check out exact Arcify lane
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.head }}
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c3e4e4d374136e608d447716c0321b32b2aa8cfb
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Verify exact source and fixture custody
+        run: |
+          set -euo pipefail
+          mkdir -p arcify/test-results/paired-chrome
+          {
+            test "$(git -C diagnostic rev-parse HEAD)" = '${{ github.sha }}'
+            test "$(git -C arcify rev-parse HEAD)" = '${{ matrix.head }}'
+            test "$(git -C arcify rev-parse HEAD^{tree})" = '${{ matrix.tree }}'
+            test "$(git -C arcify-spotlight rev-parse HEAD)" = c3e4e4d374136e608d447716c0321b32b2aa8cfb
+            for f in scripts/paired-chrome-smoke.mjs scripts/paired-chrome-today-move.mjs scripts/paired-chrome-run-plan.mjs; do cmp "diagnostic/$f" "arcify/$f"; done
+            printf 'lane=%s\ndiagnostic=%s\narcify=%s\ntree=%s\nImageVersion=%s\n' '${{ matrix.lane }}' '${{ github.sha }}' '${{ matrix.head }}' '${{ matrix.tree }}' "$ImageVersion"
+            sha256sum diagnostic/scripts/case41-comparison*.mjs
+          } | tee arcify/test-results/paired-chrome/diagnostic-custody.log
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and observer contracts without browser
+        run: |
+          npm test --prefix arcify/scripts/paired-chrome-runtime
+          node --test diagnostic/scripts/case41-comparison.test.mjs
+      - name: Build identical bounded observation overlay and restore sources
+        run: |
+          node diagnostic/scripts/case41-comparison-instrument.mjs --root "$GITHUB_WORKSPACE/arcify" --build
+          git -C arcify diff --exit-code
+          npm run build --prefix arcify-spotlight
+      - name: Run unchanged full paired case sequence once
+        working-directory: arcify
+        run: |
+          set -o pipefail
+          xvfb-run --auto-servernum node scripts/.case41-paired-chrome-smoke.mjs ../arcify-spotlight 2>&1 | tee test-results/paired-chrome/runner.log
+      - name: Preserve success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: case41-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome/
+          if-no-files-found: warn
+          retention-days: 14
