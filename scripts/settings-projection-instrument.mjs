@@ -29,6 +29,7 @@ globalThis.__settingsProjectionDiagnostic = async () => {
             terminal: diagTerminal(spaceStore, tab), explicitOwner: diagOwner(spaceStore, tab) || null,
             ownership: spaceStore.explicitToday?.get(tab.id) || null })),
         committedLayout: (await chrome.storage.local.get('spaceDurableTodayLayout')).spaceDurableTodayLayout,
+        committedSnapshot: (await chrome.storage.local.get('spaceTabSnapshot')).spaceTabSnapshot,
         spaces: structuredClone(spaceStore.spaces), layout: structuredClone(spaceStore.durableLayout),
         tabs, groups: await chrome.tabGroups.query({}),
         setting: await chrome.storage.sync.get('syncTabGroups'),

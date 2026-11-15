@@ -49,6 +49,9 @@ jobs:
           npm ci --prefix arcify-spotlight
       - name: Verify isolated driver and sandbox defaults (no browser launch)
         run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Verify diagnostic negative cases and unchanged authority fences
+        working-directory: arcify
+        run: node --test tests/unit/helper-isolation-diagnostic.test.js tests/unit/settings-retirement-regression.test.js tests/unit/current-layout-authority.test.js tests/unit/current-layout-projection.test.js
       - name: Build the exact paired revisions
         run: |
           git -C arcify rev-parse HEAD
