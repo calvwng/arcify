@@ -17,6 +17,6 @@ test('diagnostic does not change original full run case identities',()=>{
 });
 test('published instrumentation script reads worker decisions without a new message endpoint',()=>{
  const s=readFileSync(new URL('../../scripts/settings-projection-instrument.mjs',import.meta.url),'utf8');
- assert.match(s,/terminalLayoutRefusal\(spaceStore, tab\)/);assert.match(s,/explicitTodayOwner\(spaceStore, tab\)/);assert.match(s,/pendingLayoutWindowIds\(spaceStore, tabs, epochs\)/);
+ assert.match(s,/diagTerminal\(spaceStore, tab\)/);assert.match(s,/diagOwner\(spaceStore, tab\)/);assert.match(s,/diagPending\(spaceStore, tabs, epochs\)/);
  assert.doesNotMatch(s,/onMessage|storage\.[a-z]+\.set|tabs\.(move|create|remove)|\.persist\(/);
 });

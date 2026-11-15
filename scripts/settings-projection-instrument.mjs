@@ -3,18 +3,18 @@ import { readFile, writeFile } from 'node:fs/promises';
 const file = new URL('../background.js', import.meta.url);
 let source = await readFile(file, 'utf8');
 source += `\n// DIAGNOSTIC BUILD ONLY: read-only worker-state observation, no message endpoint.\n`;
-source += `globalThis.__settingsProjectionDiagnostic = async () => {
-    const { terminalLayoutRefusal, pendingLayoutWindowIds } = await import('./durable-today-layout.js');
-    const { explicitTodayOwner, explicitTodayEpochs } = await import('./explicit-today-ownership.js');
+source += `import { terminalLayoutRefusal as diagTerminal, pendingLayoutWindowIds as diagPending } from './durable-today-layout.js';
+import { explicitTodayOwner as diagOwner, explicitTodayEpochs as diagEpochs } from './explicit-today-ownership.js';
+globalThis.__settingsProjectionDiagnostic = async () => {
     const tabs = await chrome.tabs.query({});
-    const epochs = await explicitTodayEpochs(spaceStore);
+    const epochs = await diagEpochs(spaceStore);
     return { initialized: spaceStore.initialized, epochs,
-        pendingWindows: [...pendingLayoutWindowIds(spaceStore, tabs, epochs)],
+        pendingWindows: [...diagPending(spaceStore, tabs, epochs)],
         layoutPending: [...(spaceStore.layoutPending || [])],
         layoutProvisional: [...(spaceStore.layoutProvisional || [])],
         recoveryCandidates: [...(spaceStore.recoveryCandidates || [])],
         decisions: tabs.map(tab => ({ tabId: tab.id, windowId: tab.windowId, url: tab.url,
-            terminal: terminalLayoutRefusal(spaceStore, tab), explicitOwner: explicitTodayOwner(spaceStore, tab) || null,
+            terminal: diagTerminal(spaceStore, tab), explicitOwner: diagOwner(spaceStore, tab) || null,
             ownership: spaceStore.explicitToday?.get(tab.id) || null })),
         spaces: structuredClone(spaceStore.spaces), layout: structuredClone(spaceStore.durableLayout),
         tabs, groups: await chrome.tabGroups.query({}),
