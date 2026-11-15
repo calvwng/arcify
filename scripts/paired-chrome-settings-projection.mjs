@@ -31,6 +31,17 @@ export async function exerciseSettingsProjection({ browser, apiPage, fixture, ar
     if (retired) {
         priorId = await create(controlWindow, home.id);
         await checkpoint('prior-settings-created', { priorId });
+        // Establish real explicit user-placement evidence through the existing
+        // exact Today Move operation, never by modifying recovery metadata.
+        const placement = await apiPage.evaluate(async ({ priorId, controlWindow, home, source, url }) => {
+            const { todayOrderRepresentation } = await chrome.storage.local.get('todayOrderRepresentation');
+            return chrome.runtime.sendMessage({ type: 'moveTodayTabsToSpace', windowId: controlWindow,
+                spaceId: home.id, bookmarkFolderId: home.bookmarkFolderId,
+                destinationSpaceId: source.id, destinationBookmarkFolderId: source.bookmarkFolderId,
+                inverted: todayOrderRepresentation.inverted, entries: [{ tabId: priorId, url }] });
+        }, { priorId, controlWindow, home, source, url });
+        assert.equal(placement.success, true, JSON.stringify(placement));
+        await checkpoint('prior-settings-explicit-move', { priorId, placement });
         await poll(read, o => o.decisions.find(d => d.tabId === priorId)?.explicitOwner,
             'prior Settings has real current explicit ownership before witnessed close');
         await apiPage.evaluate(id => chrome.tabs.remove(id), priorId);
