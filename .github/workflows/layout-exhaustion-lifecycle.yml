@@ -1,7 +1,7 @@
 name: Packaged final-cohort lifecycle
 on:
   pull_request:
-    branches: [main]
+    branches: [main, integration/four-priority-workstreams]
     paths:
       - '.github/workflows/layout-exhaustion-lifecycle.yml'
       - 'scripts/packaged-layout-exhaustion*.mjs'

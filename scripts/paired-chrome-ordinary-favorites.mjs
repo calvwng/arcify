@@ -400,9 +400,9 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
     const read = async (favoriteId, includeWitness = false) => {
         const projected = await get(), snap = await snapshot(windowId);
         const values = await apiPage.evaluate(async ({ sourceIds, includeWitness, includeSpacePins }) => {
-            const local = await chrome.storage.local.get(['persistentFavorites', 'favoriteIconCache', 'favoriteContinuity', ...(includeWitness ? ['spaces'] : []),
+            const local = await chrome.storage.local.get(['persistentFavorites', 'favoriteIconCache', 'favoriteContinuity', ...(includeWitness ? ['spaces', 'spaceDurableTodayLayout', 'spaceExplicitTodayCheckpoint'] : []),
                 ...(includeSpacePins ? ['pinnedTabStatesById', 'tabNameOverridesById', 'spaceTabSnapshot', 'spaceDurableTodayLayout'] : [])]);
-            const session = await chrome.storage.session.get(['favoriteSession', 'favoriteContinuityReceipt', ...(includeWitness ? ['activeSpaces'] : [])]);
+            const session = await chrome.storage.session.get(['favoriteSession', 'favoriteContinuityReceipt', ...(includeWitness ? ['activeSpaces', 'spaceGroupProjection', 'spaceGroupSplitDeferrals', 'spaceExplicitTodayEpoch', 'favoriteRestartRecovery', 'transientWindowSession'] : [])]);
             const sources = await Promise.all(sourceIds.map(async id => {
                 const [node] = await chrome.bookmarks.get(id);
                 return { id: node.id, parentId: node.parentId, index: node.index, title: node.title, url: node.url };
@@ -415,7 +415,19 @@ export async function exerciseOrdinaryFavorites({ browser, apiPage, spotlightApi
                     // pending layout evidence from a grouping regression.
                     durableLayout: local.spaceDurableTodayLayout || null } : {}),
                 ...(includeWitness ? { groupState: { spaces: local.spaces, groups: await chrome.tabGroups.query({}), windows: await chrome.windows.getAll({}),
-                    syncTabGroups: (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups ?? false, activeSpaces: session.activeSpaces || {} } } : {}) };
+                    syncTabGroups: (await chrome.storage.sync.get('syncTabGroups')).syncTabGroups ?? false, activeSpaces: session.activeSpaces || {} },
+                    // Read-only evidence from this synthetic disposable profile.
+                    // Persisted snapshots do not claim to expose worker-local pending
+                    // sets or prove why a partition was deferred. Keep assertions strict.
+                    groupProjectionDiagnostics: {
+                        projection: session.spaceGroupProjection ?? null,
+                        splitDeferrals: session.spaceGroupSplitDeferrals ?? null,
+                        durableLayout: local.spaceDurableTodayLayout ?? null,
+                        explicitCheckpoint: local.spaceExplicitTodayCheckpoint ?? null,
+                        explicitSessionEpoch: session.spaceExplicitTodayEpoch ?? null,
+                        favoriteRecovery: session.favoriteRestartRecovery ?? null,
+                        transientRegistry: session.transientWindowSession ?? null
+                    } } : {}) };
         }, { sourceIds: sources.map(source => source.id), includeWitness, includeSpacePins: includeWitness && Boolean(evidence.spacePinSetup) });
         return { ...values, favorites: projected.favorites, snapshot: snap,
             ...(includeWitness ? { fixturePages: await observeFixturePages(values.tabs) } : {}),

@@ -1,3 +1,4 @@
+import { registerSplitPinMessages } from './split-pins.js';
 import { registerGeneralUndoMessages } from './general-undo.js';
 import { registerSavedSplitMessages } from './saved-splits.js';
 import { registerSelectedTabClose } from './selected-tab-close.js';
@@ -80,6 +81,7 @@ registerTabMenuMessages(spaceStore);
 registerSelectedTabClose(spaceStore);
 registerTodaySplitMessages(spaceStore);
 registerSavedSplitMessages(spaceStore);
+registerSplitPinMessages(spaceStore);
 const favoriteStore = new FavoriteStore(spaceStore, { ownershipPersistence: createFavoriteContinuity({ isTransientTab: tab => spaceStore.isTransientTab(tab),
     isTransientWindow: id => spaceStore.isTransientWindow(id) }) });
 favoriteStore.install();

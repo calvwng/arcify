@@ -16,7 +16,7 @@ on:
         required: false
         type: string
   pull_request:
-    branches: [main]
+    branches: [main, integration/four-priority-workstreams]
     paths:
       - '.github/workflows/paired-extension-smoke.yml'
       - 'scripts/paired-chrome-smoke.mjs'

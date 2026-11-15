@@ -15,7 +15,7 @@ export function validSavedSplit(recipe) {
         typeof recipe.name === 'string' && recipe.name.length > 0 && recipe.name.length <= 160 && Array.isArray(recipe.pages) && recipe.pages.length === 2 &&
         recipe.pages.every(page => exactKeys(page, ['url', 'title']) && urlAllowed(page.url) && typeof page.title === 'string' && page.title.length <= 160);
 }
-async function recipes() {
+export async function readSavedSplitRecipes() {
     const value = (await chrome.storage.local.get(SAVED_SPLITS_KEY))[SAVED_SPLITS_KEY];
     if (value === undefined) return [];
     if (!Array.isArray(value) || value.length > MAX || !value.every(validSavedSplit) || new Set(value.map(r => r.id)).size !== value.length)
@@ -25,7 +25,10 @@ async function recipes() {
 // Recipes contain only explicit, normal-window web pages. Native IDs are always
 // freshly resolved, never persisted, restored by URL, or shared with private UI.
 export function runSavedSplitAction(store, request) {
-    return store.run(async () => {
+    return store.run(() => runSavedSplitActionCore(store, request));
+}
+
+export async function runSavedSplitActionCore(store, request) {
         if (!exactKeys(request, ['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'entries', 'recipeId']) || request.type !== 'savedSplitAction' ||
             !['list', 'save', 'open', 'remove'].includes(request.action) || !Number.isSafeInteger(request.windowId) || request.windowId <= 0 ||
             typeof request.spaceId !== 'string' || typeof request.bookmarkFolderId !== 'string') throw changed();
@@ -38,7 +41,7 @@ export function runSavedSplitAction(store, request) {
             return space;
         };
         await context();
-        const saved = await recipes();
+        const saved = await readSavedSplitRecipes();
         await context();
         if (request.action === 'list') return { recipes: saved };
         if (request.action === 'save') {
@@ -137,11 +140,10 @@ export function runSavedSplitAction(store, request) {
                     tab.windowId !== request.windowId || tab.incognito || tab.pinned || tab.url !== 'about:blank' || tab.pendingUrl && tab.pendingUrl !== 'about:blank' || !space.temporaryTabs.includes(tab.id)) throw changed();
                 await chrome.tabs.update(tab.id, { url: recipe.pages[i].url, ...(i === 0 ? { active: true } : {}) });
             }
-            return { tabIds: created };
+            return { tabIds: created, splitViewId: transition.receipt.splitViewId };
         } catch (error) {
             throw new Error(`${error.message} Stopped while ${phase}.${created.length ? ' Newly opened tabs were left open. Check them before retrying; nothing was closed or retried.' : ''}`);
         }
-    });
 }
 export function registerSavedSplitMessages(store) {
     chrome.runtime.onMessage.addListener((message, sender, respond) => {

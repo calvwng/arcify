@@ -134,3 +134,24 @@ test('startup retains every exact copy of one saved pin in the same window', asy
     assert.deepEqual(result.local.pinnedTabStatesById[44], data.local.pinnedTabStatesById[44]);
     assert.equal(result.local.spaces[0].temporaryTabs.includes(44), false);
 });
+
+for (const mode of ['live', 'closed', 'unavailable', 'native-marker']) test(`real inline split pin renders one ordinary saved row with ${mode} state and no separate section`, async () => {
+    const data = fixture();
+    data.bookmarks.push({ id: 'split-bookmark', parentId: 'nested', title: 'Planning pair', url: 'chrome-extension://fixture/saved-split.html#pair' });
+    data.tabs.push(...[50,51].map((id, index) => ({ id, windowId: 10, title: `Pair ${id}`, url: `https://pair.test/${id}`, index: 50 + index, groupId: -1, splitViewId: 6, pinned: false, incognito: false })));
+    data.local.spaces[0].temporaryTabs.push(50,51);
+    data.local.splitPinsV1 = { version: 1, destination: 'work-folder', pins: [{ recipeId: 'pair', bookmarkId: 'split-bookmark', parentId: 'nested', phase: 'committed' }] };
+    data.splitPins = [{ bookmarkId: 'split-bookmark', name: 'Planning pair', tabIds: mode === 'live' ? [50,51] : [], splitViewId: mode === 'live' ? 6 : null }];
+    data.splitPinsUnavailable = mode === 'unavailable';
+    if (mode === 'native-marker') {
+        data.tabs.push({ id: 52, windowId: 10, title: 'Saved Split View', url: 'chrome-extension://fixture/saved-split.html#pair', pinned: false });
+        data.local.spaces[0].spaceBookmarks.push(52);
+        data.local.pinnedTabStatesById[52] = { bookmarkId: 'split-bookmark', pinnedUrl: 'chrome-extension://fixture/saved-split.html#pair' };
+    }
+    const result = await initialize(data);
+    assert.equal(result.splitPresentation.panelCount, 0);
+    if (mode === 'native-marker') assert.equal(result.rows.find(r => r.tabId === 52)?.bookmarkId, null, 'A marker page must not become ordinary saved-pin authority');
+    assert.deepEqual(result.splitPresentation.pins, [{ bookmarkId: 'split-bookmark', live: String(mode === 'live'), closeControl: mode === 'live', actionHidden: mode !== 'live', title: 'Planning pair' }]);
+    assert.equal(result.rows.filter(r => r.bookmarkId === 'split-bookmark').length, 1);
+    assert.equal(result.rows.filter(r => [50,51].includes(r.tabId)).length, mode === 'live' ? 0 : 2);
+});

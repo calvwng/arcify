@@ -150,6 +150,8 @@ function originalNativeMenuWatchBytes(text) {
 }
 
 function originalLittleArcWorkflowBytes(workflow) {
+    // Exact additional base for the reviewed stacked split-pin draft only.
+    workflow = workflow.replace('    branches: [main, integration/four-priority-workstreams]\n', '    branches: [main]\n');
     const legacy = originalNativeMenuWatchBytes(workflow)
         .replace("      - 'scripts/paired-chrome-spotlight-folders.mjs'\n", '')
         .replace("      - 'tests/unit/paired-chrome-spotlight-folders.test.js'\n", '');
@@ -322,6 +324,7 @@ const receiptWorkflowMutations = [
         ];
     }),
     ['unrelated added path', value => value.replace('  pull_request:', "  pull_request:\n    paths-ignore:\n      - 'unreviewed.js'")],
+    ['unreviewed base branch', value => value.replace('integration/four-priority-workstreams', 'unreviewed/base')],
     ['changed event', value => value.replace('  pull_request:', '  pull_request_target:')],
     ['changed permission', value => value.replace('  contents: read', '  contents: write')],
     ['changed job runtime', value => value.replace("node-version: '22'", "node-version: '20'")],

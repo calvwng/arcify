@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSavedSplitReopened } from '../../scripts/paired-chrome-native-split-saved.mjs';
+import { assertSavedSplitReopened, isExactSavedPairFocused } from '../../scripts/paired-chrome-native-split-saved.mjs';
 function fixture() {
     const tab = (id, index, url, splitViewId) => ({ id, index, url, pendingUrl: null, windowId: 1, incognito: false, pinned: false, splitViewId });
     const before = { tabs: [tab(1, 0, 'https://a.test', 7), tab(2, 1, 'https://b.test', 7)], spaces: [{ id: 's', temporaryTabs: [1, 2], spaceBookmarks: [] }], bookmarks: [], bindings: {}, favorites: [], pageStates: { 1: { documentId: 'unchanged' } } };
@@ -60,4 +60,18 @@ for (const kind of ['dispatch', 'unknown']) test(`native context menu never repl
     const page = { waitForSelector: async () => { lookups++; return { click: async () => { clicks++; throw error; }, dispose: async () => {} }; } };
     await assert.rejects(clickNativeSplitMenuRow(page, '.exact-tab-42'), actual => actual === error);
     assert.equal(lookups, 1); assert.equal(clicks, 1);
+});
+
+for (const activeIndex of [0, 1]) test(`exact saved pair focus accepts native active pane ${activeIndex}`, () => {
+    const f = fixture(); f.before.tabs[activeIndex].active = true;
+    assert.equal(isExactSavedPairFocused(f.before, f.before.tabs), true);
+});
+test('exact saved pair focus rejects unrelated active tab, changed pair and third member', () => {
+    const f = fixture(); const pair = structuredClone(f.before.tabs);
+    f.after.tabs[2].active = true;
+    assert.equal(isExactSavedPairFocused(f.after, pair), false);
+    f.after.tabs[0].active = true; f.after.tabs[0].splitViewId = 9;
+    assert.equal(isExactSavedPairFocused(f.after, pair), false);
+    f.after.tabs[0].splitViewId = 7; f.after.tabs[2].splitViewId = 7;
+    assert.equal(isExactSavedPairFocused(f.after, pair), false);
 });

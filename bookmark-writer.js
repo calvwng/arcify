@@ -1,3 +1,4 @@
+import { assertSplitPinMoveSafe } from './split-pin-move-safety.js';
 let chain = Promise.resolve();
 
 export class BookmarkOrderError extends Error {
@@ -180,6 +181,8 @@ async function applyOperation(request = {}, { beforeWrite, onCreated, onWrite } 
                 throw new BookmarkOrderError('Bookmark destination is invalid.', { code: 'invalid_request', observedOrders: fresh });
             }
             predictedAfterRelocation = predictRelocationOrders(parents, relocation);
+            await beforeWrite?.();
+            await assertSplitPinMoveSafe(bookmarkId, target.parentId);
             await beforeWrite?.();
             onWrite?.();
             await chrome.bookmarks.move(bookmarkId, { parentId: target.parentId, index: target.desired.indexOf(bookmarkId) });
