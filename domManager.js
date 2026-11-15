@@ -231,6 +231,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
         addAction('Create Split View', splitActions.create, 'createSplitView');
         addAction('End Split View', splitActions.end, 'endSplitView');
         addAction('Pin Split View', splitActions.save, 'saveSplitView');
+        addAction('Attach open Split View…', splitActions.attach, 'attachSplitView');
         if (splitActions.hint) {
             const hint = document.createElement('div'); hint.className = 'context-menu-hint today-split-menu-hint';
             hint.dataset.action = 'splitViewHint'; hint.setAttribute('aria-disabled', 'true'); hint.textContent = splitActions.hint;

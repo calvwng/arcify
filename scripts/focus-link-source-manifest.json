@@ -1,0 +1,96 @@
+{
+  "status": "reviewed-exact-candidate",
+  "base": "2aacc2753b984c8c968a47ec2e2b093c12a162d9",
+  "companion": "c3e4e4d374136e608d447716c0321b32b2aa8cfb",
+  "productPatchSha256": "bb0fe46641fc6a7bc9f3c1b0547518508bd6cd3ad8d3422239167d535e691afc",
+  "files": [
+    {
+      "path": ".github/workflows/split-cold-characterization.yml",
+      "sha256": "054196759f167445504d16f8f9845f4aae7c1169303efce107c51f13b780fa68"
+    },
+    {
+      "path": ".github/workflows/split-focus-link-acceptance.yml",
+      "sha256": "48fc6f82d877b12e408ba599950b15f5db399f94828cb5b8eb288ca778b4c9be"
+    },
+    {
+      "path": "docs/saved-split-views.md",
+      "sha256": "c402449f78abb6ddf112398cdad796102444834a20db4332869f30f8298b5d65"
+    },
+    {
+      "path": "domManager.js",
+      "sha256": "205659c547adb0a85b8d13a1e457817e05e85560a6ede81a2f3e04474f9546e1"
+    },
+    {
+      "path": "scripts/build-focus-link-acceptance-runner.mjs",
+      "sha256": "6a06c070a15f5ae4bdde60542b48442c4427c223949348e92e1dd787be20a1ca"
+    },
+    {
+      "path": "scripts/build-split-cold-diagnostic-runner.mjs",
+      "sha256": "8017d9ad797695e29a81f8e5293a6630f7d68c7ee49b6cab897618df183a7f90"
+    },
+    {
+      "path": "scripts/focus-link-evidence.test.mjs",
+      "sha256": "761442bb9183ee7b4878a63271b4b1ad64e89ac14453d5eaf0f893eecdc33a6b"
+    },
+    {
+      "path": "scripts/paired-chrome-focus-link-acceptance.mjs",
+      "sha256": "73d99453a6cd6fef35bc069d755666478bfb50d87eeaa89f5339241678c16cd9"
+    },
+    {
+      "path": "scripts/paired-chrome-focus-link-acceptance.test.mjs",
+      "sha256": "295c7a6037633ea1548e56e9665ac3be562cc8a8bcb0afa6b14fa6c22fc82854"
+    },
+    {
+      "path": "scripts/paired-chrome-focus-link-generator.test.mjs",
+      "sha256": "bc02a944eb37bb556805ca3393498c9bc4903b5054d3f68fbbb0e2a7898f17f8"
+    },
+    {
+      "path": "scripts/paired-chrome-split-cold-diagnostic.mjs",
+      "sha256": "9f2b69dbe7eb8b0c9ce724898459ab3f8beea7d0c1d5a920043bb7e7d41b729f"
+    },
+    {
+      "path": "scripts/paired-chrome-split-cold-diagnostic.test.mjs",
+      "sha256": "6a60068616121077fe2e215e60e8b238728b4b5c4d6b4e2042c7455b60a676c6"
+    },
+    {
+      "path": "scripts/paired-chrome-split-cold-run-plan.mjs",
+      "sha256": "80e047ec179a1657d2fc65ae1e8694ce511bbffaaad0a077790472afac52120e"
+    },
+    {
+      "path": "scripts/paired-chrome-split-cold-run-plan.test.mjs",
+      "sha256": "5f9b2e79011bffd8993ccb354f00d0dcc4731915d9d973285bc52e06a8c4ef30"
+    },
+    {
+      "path": "scripts/summarize-focus-link-evidence.mjs",
+      "sha256": "7bfd5670184b8efa473c9b5c2c093bb453a1ad6da80c657920a01463d42bb0ab"
+    },
+    {
+      "path": "scripts/verify-focus-link-provenance.mjs",
+      "sha256": "392e1f1039f36bf089702599acdc0ce355204c437c4eb2f4994d6713af82a795"
+    },
+    {
+      "path": "sidebar.js",
+      "sha256": "9ab998985023bbed00a8e8cd70e5361f965634defa2111e882b13656471c3a04"
+    },
+    {
+      "path": "split-pin-attach-ui.js",
+      "sha256": "29edbe86199e6abe18b94030c3234c00e207cf36d6911e1a17478e73904a865d"
+    },
+    {
+      "path": "split-pin-focus-links.js",
+      "sha256": "7c463115b8bcf118fc04037235b5bda4cfa02febd0bad61ba2e621c84ee99709"
+    },
+    {
+      "path": "split-pins.js",
+      "sha256": "335c467f9f56be26be82a5fdcc0a81f3c769efdc3ebcbf6518ab68482ad3b67b"
+    },
+    {
+      "path": "tests/unit/split-pin-attach-ui.test.js",
+      "sha256": "3af1ce62f1ca2b46b6e557437338d44797c3b0de84e4b8c40deda0ebe6159ce6"
+    },
+    {
+      "path": "tests/unit/split-pin-focus-link.test.js",
+      "sha256": "d2c4a7b21e57d540f831438c4994b7901ffaa27d93385b4e061ad058d5839907"
+    }
+  ]
+}
