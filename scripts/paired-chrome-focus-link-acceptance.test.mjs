@@ -35,3 +35,21 @@ test('passive observer preserves actual rejection and synchronous error',async()
  try{installFocusActivateObserver(exact);const message={type:'splitPinAction',action:'activate',windowId:8,spaceId:'home',bookmarkId:'b'};assert.equal(chrome.runtime.sendMessage(message),promise);await assert.rejects(promise);const events=globalThis.__pairedFocusActivateObserver.stop();assert.equal(events[0].state,'rejected');assert.throws(()=>assertConfirmedFocusResponse(events,exact));chrome.runtime.sendMessage=()=>{throw error;};installFocusActivateObserver(exact);assert.throws(()=>chrome.runtime.sendMessage(message),e=>e===error);assert.equal(globalThis.__pairedFocusActivateObserver.stop()[0].state,'threw');
  }finally{globalThis.__pairedFocusActivateObserver?.stop();globalThis.chrome=prior;}
 });
+
+import {assertConfirmedLinkResponse} from './paired-chrome-focus-link-acceptance.mjs';
+test('actual attach rejection fails immediately with product error, without receipt polling',async()=>{
+ const prior=globalThis.chrome;let calls=0;const promise=Promise.resolve({success:false,error:'Candidate changed; no link saved'});globalThis.chrome={runtime:{sendMessage:()=>{calls++;return promise;}}};
+ try{installFocusActivateObserver({...exact,action:'attach'});const message={type:'splitPinAction',action:'attach',windowId:8,spaceId:'home',bookmarkId:'b',candidateToken:'opaque'};assert.equal(chrome.runtime.sendMessage(message),promise);await promise;const events=globalThis.__pairedFocusActivateObserver.stop();assert.equal(calls,1);assert.throws(()=>assertConfirmedLinkResponse(events,exact),/Candidate changed; no link saved/);events[0].response={success:true,linked:true,focusOnly:true};assertConfirmedLinkResponse(events,exact);events[0].response.linked=false;assert.throws(()=>assertConfirmedLinkResponse(events,exact));
+ }finally{globalThis.__pairedFocusActivateObserver?.stop();globalThis.chrome=prior;}
+});
+test('generalized observer preserves callback overload arguments, this and return value without callback wrapping',()=>{
+ const prior=globalThis.chrome;let calls=0,receiver,actualArgs,callbackCalls=0;
+ const callback=()=>callbackCalls++;const token={originalReturn:true};globalThis.chrome={runtime:{sendMessage:function(...args){calls++;receiver=this;actualArgs=args;args[1]({success:true});return token;}}};
+ try{installFocusActivateObserver({...exact,action:'attach'});const message={type:'splitPinAction',action:'attach',windowId:8,spaceId:'home',bookmarkId:'b'};assert.equal(chrome.runtime.sendMessage(message,callback),token);assert.equal(calls,1);assert.equal(callbackCalls,1);assert.equal(receiver,chrome.runtime);assert.equal(actualArgs[0],message);assert.equal(actualArgs[1],callback);const events=globalThis.__pairedFocusActivateObserver.stop();assert.equal(events[0].state,'unsupported');assert.throws(()=>assertConfirmedLinkResponse(events,exact));
+ }finally{globalThis.__pairedFocusActivateObserver?.stop();globalThis.chrome=prior;}
+});
+test('published six-step summary contract remains exact; attach response is evidence only',async()=>{
+ const s=await readFile(new URL('./paired-chrome-focus-link-acceptance.mjs',import.meta.url),'utf8');
+ assert.deepEqual([...s.matchAll(/await save\('([^']+)'/g)].map(m=>m[1]),['two-pairs-before-explicit-choice','linked','worker-replaced','focused-originals','stale-link-refused','unlinked']);
+ assert.match(s,/evidence\.linkResponse=await finishActivation\(\);await record\(structuredClone\(evidence\)\);assertConfirmedLinkResponse/);
+});

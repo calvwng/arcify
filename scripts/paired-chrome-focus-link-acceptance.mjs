@@ -44,7 +44,7 @@ export function installFocusActivateObserver(exact){
  const runtime=chrome.runtime,original=runtime.sendMessage,events=[];
  if(globalThis.__pairedFocusActivateObserver)throw Error('Activate observer already installed');
  function wrapped(...args){
-  const m=args[0],matches=m?.type==='splitPinAction'&&m.action==='activate'&&['windowId','spaceId','bookmarkId'].every(k=>m[k]===exact[k]);
+  const m=args[0],matches=m?.type==='splitPinAction'&&m.action===(exact.action||'activate')&&['windowId','spaceId','bookmarkId'].every(k=>m[k]===exact[k]);
   let event;if(matches){event={request:structuredClone(m),state:'pending'};events.push(event);}
   let result;try{result=Reflect.apply(original,this,args);}catch(error){if(event){event.state='threw';event.error=String(error);}throw error;}
   if(event){
@@ -62,6 +62,13 @@ export function assertConfirmedFocusResponse(events,exact){
  for(const k of ['windowId','spaceId','bookmarkId'])assert.equal(event.request[k],exact[k]);
  assert.equal(event.state,'resolved');assert.equal(event.response?.success,true,'Changed focus is not confirmed product success');
  assert.equal(event.response.focused,true);assert.equal(event.response.focusOnly,true);assert.deepEqual(ordered(event.response.tabIds),ordered(exact.ids));
+}
+export function assertConfirmedLinkResponse(events,exact){
+ assert.equal(events.length,1,'One actual trusted-click attach request is required');const event=events[0];
+ assert.equal(event.request.action,'attach');for(const k of ['windowId','spaceId','bookmarkId'])assert.equal(event.request[k],exact[k]);
+ assert.equal(event.state,'resolved',`Attach request did not resolve: ${event.error||event.state}`);
+ assert.equal(event.response?.success,true,`Attach was rejected: ${event.response?.error||'no confirmed success'}`);
+ assert.equal(event.response.linked,true);assert.equal(event.response.focusOnly,true);
 }
 export async function exerciseFocusLinkAcceptance({browser,apiPage,arcifyId,coldEvidence,observePage,blockExternalHttps,ui,screenshot,poll,record,releaseWorkerNetwork}){
  const exact=assertRestoredOriginals(coldEvidence),url=coldEvidence.url;
@@ -93,7 +100,7 @@ export async function exerciseFocusLinkAcceptance({browser,apiPage,arcifyId,cold
   await sidebar.waitForSelector('.split-pin-recovery-dialog[open]',{visible:true});
   assert.equal(await sidebar.$eval('.split-pin-recovery-dialog h2',n=>n.textContent),'Attach open Split View');
  };
- const startActivation=()=>sidebar.evaluate(installFocusActivateObserver,exact);
+ const startActivation=(action='activate')=>sidebar.evaluate(installFocusActivateObserver,{...exact,action});
  const finishActivation=async()=>{await poll(()=>sidebar.evaluate(()=>globalThis.__pairedFocusActivateObserver.read()),events=>events.length>0&&events.every(e=>e.state!=='pending'),'actual activate response');return sidebar.evaluate(()=>globalThis.__pairedFocusActivateObserver.stop());};
  const today=async()=>{for(const id of exact.ids)await sidebar.waitForSelector(todayRowSelector(id),{visible:true});};
  try{
@@ -125,7 +132,8 @@ export async function exerciseFocusLinkAcceptance({browser,apiPage,arcifyId,cold
   for(const r of radios){const label=await r.evaluate(n=>n.closest('label')?.textContent||'');const contains=ids=>ids.every(id=>label.includes(`Tab ${id} ·`));if(contains(exact.ids))original.push(r);else if(contains(duplicate))other.push(r);else await r.dispose();}
   assert.equal(original.length,1);assert.equal(other.length,1,'Same-URL competitor must appear distinctly');
   await ui(sidebar,'Choose original pair by its displayed exact tab IDs',()=>original[0].click());await original[0].dispose();for(const r of other)await r.dispose();
-  const link=await exactButton('Link selected pair for focus');await ui(sidebar,'Confirm focus-only link',()=>link.click());await link.dispose();
+  const link=await exactButton('Link selected pair for focus');await startActivation('attach');await ui(sidebar,'Confirm focus-only link',()=>link.click());await link.dispose();
+  evidence.linkResponse=await finishActivation();await record(structuredClone(evidence));assertConfirmedLinkResponse(evidence.linkResponse,exact);
   await poll(read,s=>{try{assertFocusOnlyReceipt(s,exact);return true;}catch{return false;}},'explicit linked receipt');
   await today();const linked=await read();const receipt=assertFocusOnlyReceipt(linked,exact);assertUnchangedFocusNative(baseline,linked);await screenshot(sidebar,'focus-link-original-pair-linked');await save('linked',{linked,receipt});
   const workerUrl=`chrome-extension://${arcifyId}/background.js`,oldTarget=await browser.waitForTarget(t=>t.type()==='service_worker'&&t.url()===workerUrl),worker=await oldTarget.worker();

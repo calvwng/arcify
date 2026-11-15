@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runSplitPinAction, validSplitPinState, SPLIT_PINS_KEY, SPLIT_PIN_SESSION_KEY } from '../../split-pins.js';
 import { SpaceStore } from '../../space-store.js';
-import { SPLIT_PIN_FOCUS_LINKS_KEY } from '../../split-pin-focus-links.js';
+import { SPLIT_PIN_FOCUS_LINKS_KEY, sameFocusValue } from '../../split-pin-focus-links.js';
 import { SAVED_SPLITS_KEY } from '../../saved-splits.js';
 import { splitPinUrl } from '../../split-pin-identity.js';
 import { Utils } from '../../utils.js';
+const reorder = v => Array.isArray(v) ? v.map(reorder) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map(k => [k,reorder(v[k])])) : v;
 function fixture() {
     const effects = [], hooks = {}, data = {}, listeners = [];
     const tabs = [1, 2].map((id, index) => ({ id, windowId: 10, url: `https://page.test/${id}`, title: `Page ${id}`, index, groupId: -1, pinned: false, splitViewId: 70, incognito: false }));
@@ -43,7 +44,7 @@ function fixture() {
     chrome.bookmarks.remove = async id => { await hooks.beforeRemove?.(); const at = nodes.findIndex(n => n.id === id); if (at < 0) throw new Error('Missing bookmark'); nodes.splice(at, 1); effects.push(['bookmarkRemove', id]); await hooks.afterRemove?.(); };
     for (const key of ['onUpdated','onRemoved','onReplaced','onAttached','onDetached','onMoved']) chrome.tabs[key] = events();
     const session = {};
-    chrome.storage.session = { async get(key) { return { [key]: copy(session[key]) }; }, async set(value) { await hooks.beforeSessionSet?.(value); Object.assign(session, copy(value)); await hooks.afterSessionSet?.(value); } };
+    chrome.storage.session = { async get(key) { return { [key]: hooks.reorderStorage ? reorder(copy(session[key])) : copy(session[key]) }; }, async set(value) { await hooks.beforeSessionSet?.(value); Object.assign(session, copy(value)); await hooks.afterSessionSet?.(value); } };
     chrome.tabs.remove = async ids => { effects.push(['remove', ids]); for (const id of [].concat(ids)) { const i = tabs.findIndex(t => t.id === id); if (i >= 0) tabs.splice(i, 1); } };
     Utils._pinnedStateChain = Promise.resolve();
     const request = { type: 'savedSplitAction', action: 'save', windowId: 10, spaceId: 's', bookmarkFolderId: 'root', entries: tabs.map(t => ({ tabId: t.id, url: t.url, index: t.index, groupId: t.groupId, pinned: t.pinned, splitViewId: t.splitViewId })) };
@@ -171,4 +172,33 @@ test('same pin links distinct pairs in different windows without cross-window fo
 test('missing link never auto-associates existing same-URL pair; ordinary explicit open remains fresh',async()=>{
  const f=await ready();assert.deepEqual((await f.action('list')).pins[0].tabIds,[]);assert.equal(f.session[SPLIT_PIN_FOCUS_LINKS_KEY],undefined);
  await f.action('activate');assert.equal(f.effects.filter(e=>e[0]==='create').length,2);assert.equal(f.session[SPLIT_PIN_FOCUS_LINKS_KEY],undefined);
+});
+test('semantic equality ignores only object key ordering recursively, not values/presence/array order',()=>{
+ const a={windowId:10,entries:[{tabId:1,url:'https://a.test'},{tabId:2,url:'https://b.test'}],target:{space:{id:'s',bookmarkFolderId:'root'}}};
+ assert.equal(sameFocusValue(a,reorder(a)),true);
+ for(const mutate of [v=>v.entries.reverse(),v=>v.entries[0].url='https://changed.test',v=>v.windowId='10',v=>v.extra=null,v=>delete v.target.space.id]){const b=structuredClone(a);mutate(b);assert.equal(sameFocusValue(a,reorder(b)),false);}
+ assert.equal(sameFocusValue({a:undefined},{}),false);assert.equal(sameFocusValue([1,2],{'0':1,'1':2}),false);
+});
+test('Chrome-style recursively reordered storage readback commits and focuses exact pair',async()=>{
+ const f=await ready();f.hooks.reorderStorage=true;await link(f);
+ assert.equal(f.session[SPLIT_PIN_FOCUS_LINKS_KEY][`10:${f.bookmarkId}`].phase,'linked');
+ assert.equal((await f.action('activate')).focused,true);noCreates(f);assert.equal(f.session[SPLIT_PIN_SESSION_KEY],undefined);
+});
+for(const mutation of ['url','pane-order','extra-key'])test(`reordered storage still refuses real ${mutation} change without overwriting it`,async()=>{
+ const f=await ready();f.hooks.reorderStorage=true;const c=await f.action('attachCandidates');let writes=0;
+ f.hooks.afterSessionSet=()=>{if(++writes===1){const r=f.session[SPLIT_PIN_FOCUS_LINKS_KEY][`10:${f.bookmarkId}`];if(mutation==='url')r.entries[0].url='https://changed.test';if(mutation==='pane-order')r.entries.reverse();if(mutation==='extra-key')r.extra=true;}};
+ await assert.rejects(f.action('attach',{candidateToken:c.candidates[0].candidateToken}));assert.equal(writes,1);assert.equal(f.session[SPLIT_PIN_FOCUS_LINKS_KEY][`10:${f.bookmarkId}`].phase,'pending');noCreates(f);
+});
+test('reordered pending receipt with lost acknowledgement is exactly rolled back',async()=>{
+ const f=await ready();f.hooks.reorderStorage=true;let writes=0;f.hooks.afterSessionSet=()=>{if(++writes===1)throw Error('lost ack');};
+ await assert.rejects(link(f));assert.equal(writes,2);assert.deepEqual(f.session[SPLIT_PIN_FOCUS_LINKS_KEY],{});noCreates(f);
+});
+test('reordered replacement receipt failure restores exact existing predecessor, not a newer receipt',async()=>{
+ const f=await ready();f.hooks.reorderStorage=true;await link(f);const before=structuredClone(f.session[SPLIT_PIN_FOCUS_LINKS_KEY]);const c=await f.action('attachCandidates');let writes=0;
+ f.hooks.afterSessionSet=()=>{if(++writes===1)throw Error('lost ack');};
+ await assert.rejects(f.action('attach',{candidateToken:c.candidates[0].candidateToken}));assert.deepEqual(f.session[SPLIT_PIN_FOCUS_LINKS_KEY],reorder(before));assert.equal((await f.action('activate')).focused,true);noCreates(f);
+});
+test('reordered final linked receipt lost acknowledgement is rolled back without ownership',async()=>{
+ const f=await ready();f.hooks.reorderStorage=true;let writes=0;f.hooks.afterSessionSet=()=>{if(++writes===2)throw Error('lost final ack');};
+ await assert.rejects(link(f));assert.equal(writes,3);assert.deepEqual(f.session[SPLIT_PIN_FOCUS_LINKS_KEY],{});assert.equal(f.session[SPLIT_PIN_SESSION_KEY],undefined);noCreates(f);
 });

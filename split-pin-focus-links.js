@@ -3,7 +3,17 @@
 export const SPLIT_PIN_FOCUS_LINKS_KEY = 'splitPinFocusLinksV1';
 const managers = new WeakMap();
 const clone = value => structuredClone(value);
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// Chrome storage may reorder dictionary keys on round trip. Key insertion order
+// is not identity; own-key presence, primitive values and array order still are.
+export function sameFocusValue(a, b) {
+    if (a === b) return true;
+    if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    const ak = Object.keys(a), bk = Object.keys(b);
+    if (ak.length !== bk.length || Array.isArray(a) && a.length !== b.length) return false;
+    return ak.every(k => Object.prototype.hasOwnProperty.call(b, k) && sameFocusValue(a[k], b[k]));
+}
+const same = sameFocusValue;
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const changed = () => new Error('This pair or saved pin changed. Reopen Attach open Split View to choose again. No fresh pair was opened.');

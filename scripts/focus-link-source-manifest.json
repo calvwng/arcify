@@ -2,7 +2,7 @@
   "status": "reviewed-exact-candidate",
   "base": "2aacc2753b984c8c968a47ec2e2b093c12a162d9",
   "companion": "c3e4e4d374136e608d447716c0321b32b2aa8cfb",
-  "productPatchSha256": "bb0fe46641fc6a7bc9f3c1b0547518508bd6cd3ad8d3422239167d535e691afc",
+  "productPatchSha256": "bc145ad42082462db43cf2530396ad951218a4d923a666bd0ac12743a069c7b1",
   "files": [
     {
       "path": ".github/workflows/split-cold-characterization.yml",
@@ -34,11 +34,11 @@
     },
     {
       "path": "scripts/paired-chrome-focus-link-acceptance.mjs",
-      "sha256": "73d99453a6cd6fef35bc069d755666478bfb50d87eeaa89f5339241678c16cd9"
+      "sha256": "a9ca9852a8200582f39a76515a62071222e46fd892dd0dd9f215becdfaaf35d6"
     },
     {
       "path": "scripts/paired-chrome-focus-link-acceptance.test.mjs",
-      "sha256": "295c7a6037633ea1548e56e9665ac3be562cc8a8bcb0afa6b14fa6c22fc82854"
+      "sha256": "73c223d6fbcfabc7e813c027ccbfeb84b411a89ed5dcc1fe188724d4a5f198b8"
     },
     {
       "path": "scripts/paired-chrome-focus-link-generator.test.mjs",
@@ -78,7 +78,7 @@
     },
     {
       "path": "split-pin-focus-links.js",
-      "sha256": "7c463115b8bcf118fc04037235b5bda4cfa02febd0bad61ba2e621c84ee99709"
+      "sha256": "8bcdc774937ae5188bc0ec555ed85e54a3954b5be7040e994e6443abc16b5179"
     },
     {
       "path": "split-pins.js",
@@ -90,7 +90,7 @@
     },
     {
       "path": "tests/unit/split-pin-focus-link.test.js",
-      "sha256": "d2c4a7b21e57d540f831438c4994b7901ffaa27d93385b4e061ad058d5839907"
+      "sha256": "3ee8470be5ebc97b37c7cb1252820a947528fa6cb75936b6bfc7bce3e17885c4"
     }
   ]
 }
