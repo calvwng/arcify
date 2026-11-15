@@ -405,7 +405,12 @@ function originalTodayOrderDiagnosticCallback(definition) {
     return definition.callback.replace(current, previous);
 }
 
+const freshHelperSetup = "        if (report.runMode === 'full') spotlightOptions = await recreateFixtureHelpers({browser,apiPage:arcifyOptions,spotlightId,oldOptions:spotlightOptions,pageForUrl,observePage,poll,\n            record:async evidence=>{report.helperIsolation=structuredClone(evidence);await saveReport();}});\n";
 function originalCallbackBytes(item) {
+    if(item.caseIndex===36){
+        assert.equal(item.callback.split(freshHelperSetup).length-1,1,"Exact full-only fresh helper setup must appear once");
+        item={...item,callback:item.callback.replace(freshHelperSetup,'')};
+    }
     // Exact inverse of the two reviewed passive diagnostic properties only.
     // Every original callback byte and all existing digest literals stay guarded.
     item = { ...item, callback: originalTodayOrderDiagnosticCallback(item) };
@@ -689,4 +694,9 @@ test('legacy callback receipts reject missing, duplicate or wrong native menu ad
         assert.notDeepEqual(changed, original);
         assert.notEqual(receipt(changed), receipt(original), 'Only the exact host argument is excluded from the legacy receipt.');
     }
+});
+
+test('fresh helper wiring inverse rejects missing, duplicated and wrong-mode setup',async()=>{
+ const definitions=[];await runOrchestration('full',null,definitions);const original=definitions.find(d=>d.caseIndex===36);
+ for(const callback of [original.callback.replace(freshHelperSetup,''),original.callback.replace(freshHelperSetup,freshHelperSetup+freshHelperSetup),original.callback.replace("report.runMode === 'full'","report.runMode === 'favorite-lifecycle'")])assert.throws(()=>originalCallbackBytes({...original,callback}),/Exact full-only/);
 });

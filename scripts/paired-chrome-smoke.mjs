@@ -14,6 +14,7 @@ import { exerciseBookmarkFallback } from './paired-chrome-bookmark-fallback.mjs'
 import { exerciseMoveToNewWindow } from './paired-chrome-move-window.mjs';
 import { exerciseTabMenuActions, serveTabMenuFixture } from './paired-chrome-tab-menu.mjs';
 import { exerciseOrdinaryFavorites, serveOrdinaryFavoriteFixture, summarizeFavoriteOwnership, seedFocusedReloadSpacePins } from './paired-chrome-ordinary-favorites.mjs';
+import { recreateFixtureHelpers } from './paired-chrome-helper-isolation.mjs';
 import { normalizeReloadControlWindow } from './paired-chrome-control-window.mjs';
 import { readReloadOnboardingState, readReloadOnboardingDocument, waitForExpectedReloadOnboarding } from './paired-chrome-reload-onboarding.mjs';
 import { GLOBAL_FAVORITES_FEATURE } from '../spotlight-bridge-protocol.js';
@@ -2520,6 +2521,8 @@ try {
     } // Supplemental Little Arc case 55; all pre-existing case plans and legacy job bodies/pins are preserved.
     if (report.runMode === 'full' || report.runMode === 'favorite-lifecycle') {
     await step(stepNames[36], async () => {
+        if (report.runMode === 'full') spotlightOptions = await recreateFixtureHelpers({browser,apiPage:arcifyOptions,spotlightId,oldOptions:spotlightOptions,pageForUrl,observePage,poll,
+            record:async evidence=>{report.helperIsolation=structuredClone(evidence);await saveReport();}});
         await normalizeReloadControlWindow({ apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,pageForUrl,arcifyId,spotlightId,sourceWindowId:fixture.windowA,counterpartWindowId:fixture.windowB,
             record:async observation => { report.controlWindowSetup ||= []; report.controlWindowSetup.push(observation); await saveReport(); } });
         ordinaryFixture = await exerciseOrdinaryFavorites({ browser,apiPage:arcifyOptions,spotlightApiPage:spotlightOptions,
