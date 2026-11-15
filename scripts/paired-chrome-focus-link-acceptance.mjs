@@ -1,5 +1,6 @@
 /** Test-only trusted UI acceptance. No imported code launches a browser. */
 import assert from 'node:assert/strict';
+import {exerciseReadyFocusPinInput} from './paired-chrome-focus-link-input.mjs';
 import {randomBytes} from 'node:crypto';
 import {terminateObservedWorker,findExactWorkerTarget,waitForExtensionWorkerIdentity} from './paired-chrome-worker.mjs';
 import {todayRowSelector} from './paired-chrome-native-split.mjs';
@@ -102,6 +103,7 @@ export async function exerciseFocusLinkAcceptance({browser,apiPage,arcifyId,cold
  };
  const startActivation=(action='activate')=>sidebar.evaluate(installFocusActivateObserver,{...exact,action});
  const finishActivation=async()=>{await poll(()=>sidebar.evaluate(()=>globalThis.__pairedFocusActivateObserver.read()),events=>events.length>0&&events.every(e=>e.state!=='pending'),'actual activate response');return sidebar.evaluate(()=>globalThis.__pairedFocusActivateObserver.stop());};
+ const pinInput=async(key,options={})=>exerciseReadyFocusPinInput({page:sidebar,selector:pinSelector,ids:exact.ids,ui,poll,record:async input=>{(evidence.pinInputs||={})[key]=input;await record(structuredClone(evidence));},...options});
  const today=async()=>{for(const id of exact.ids)await sidebar.waitForSelector(todayRowSelector(id),{visible:true});};
  try{
   // Re-observe actual live documents. Never adopt a native tab by URL alone.
@@ -149,13 +151,13 @@ export async function exerciseFocusLinkAcceptance({browser,apiPage,arcifyId,cold
   }finally{await cdp.detach();}
   const afterWorker=await read();assert.deepEqual(assertFocusOnlyReceipt(afterWorker,exact),receipt);assertUnchangedFocusNative(linked,afterWorker);await save('worker-replaced',{afterWorker});
   await apiPage.evaluate(id=>chrome.tabs.update(id,{active:true}),exact.unrelatedId);
-  const beforeFocus=await read();assert.equal(beforeFocus.tabs.find(t=>t.id===exact.unrelatedId)?.active,true,'Unrelated original must be active immediately before focus action');await startActivation();await ui(sidebar,'Activate saved pin to focus explicitly linked originals',()=>sidebar.click(pinSelector));
+  const beforeFocus=await read();assert.equal(beforeFocus.tabs.find(t=>t.id===exact.unrelatedId)?.active,true,'Unrelated original must be active immediately before focus action');await startActivation();await pinInput('focus',{label:'Activate saved pin to focus explicitly linked originals'});
   evidence.focusResponse=await finishActivation();assertConfirmedFocusResponse(evidence.focusResponse,exact);
   await poll(read,s=>exact.ids.some(id=>s.tabs.find(t=>t.id===id)?.active),'original pair focused');
-  const focused=await read();assert.deepEqual(assertFocusOnlyReceipt(focused,exact),receipt);assertUnchangedFocusNative(beforeFocus,focused);await today();await save('focused-originals',{focused});
+  const focused=await read();assert.deepEqual(assertFocusOnlyReceipt(focused,exact),receipt);assertUnchangedFocusNative(beforeFocus,focused);await today();await save('focused-originals',{focused});await pinInput('after-focus-refresh',{click:false,label:'Observe completed focus refresh on current pin row'});
   const splitId=focused.tabs.find(t=>t.id===exact.ids[0]).splitViewId;assert(splitId>=0);await apiPage.evaluate(id=>chrome.tabs.unsplit(id),splitId);
   const unsplit=await poll(read,s=>exact.ids.every(id=>s.tabs.find(t=>t.id===id)?.splitViewId===-1),'original pair unsplit');assertUnchangedFocusNative(focused,unsplit,{allowUnsplit:true});
-  await startActivation();await ui(sidebar,'Verify changed focus link refuses opening fresh pages',()=>sidebar.click(pinSelector));
+  await startActivation();await pinInput('stale',{requireUnsplit:true,label:'Verify changed focus link refuses opening fresh pages'});
   evidence.refusalResponse=await finishActivation();assert.equal(evidence.refusalResponse.length,1);assert.equal(evidence.refusalResponse[0].state,'resolved');assert.equal(evidence.refusalResponse[0].response?.success,false);assert.match(evidence.refusalResponse[0].response.error,/No fresh pair was opened/);
   await poll(()=>sidebar.$eval('#favoritesDropStatus',n=>n.textContent),t=>/No fresh pair was opened/.test(t),'visible fail-closed stale link error');
   const refused=await read();assertUnchangedFocusNative(unsplit,refused);await screenshot(sidebar,'focus-link-stale-pair-refused');await save('stale-link-refused',{refused});

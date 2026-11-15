@@ -54,7 +54,7 @@ jobs:
       - name: Validate isolated diagnostic and source scope
         working-directory: arcify
         run: |
-          node --test scripts/paired-chrome-split-cold-diagnostic.test.mjs scripts/paired-chrome-split-cold-run-plan.test.mjs scripts/paired-chrome-focus-link-acceptance.test.mjs scripts/paired-chrome-focus-link-generator.test.mjs scripts/focus-link-evidence.test.mjs
+          node --test scripts/paired-chrome-split-cold-diagnostic.test.mjs scripts/paired-chrome-split-cold-run-plan.test.mjs scripts/paired-chrome-focus-link-acceptance.test.mjs scripts/paired-chrome-focus-link-input.test.mjs scripts/paired-chrome-focus-link-generator.test.mjs scripts/focus-link-evidence.test.mjs
           node scripts/build-focus-link-acceptance-runner.mjs
           node --check scripts/.focus-link-paired-chrome-smoke.mjs
           git diff --exit-code

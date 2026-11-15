@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/split-focus-link-acceptance.yml",
-      "sha256": "48fc6f82d877b12e408ba599950b15f5db399f94828cb5b8eb288ca778b4c9be"
+      "sha256": "11fcf0208fd1f76c106a852e022e5ef06f6332390b5272c1c49fe2da806085ba"
     },
     {
       "path": "docs/saved-split-views.md",
@@ -34,7 +34,7 @@
     },
     {
       "path": "scripts/paired-chrome-focus-link-acceptance.mjs",
-      "sha256": "a9ca9852a8200582f39a76515a62071222e46fd892dd0dd9f215becdfaaf35d6"
+      "sha256": "1e150ccf63a1cb1f9c5c3ec4bd2b764c78d57119f38a908ff0d076214a17cc46"
     },
     {
       "path": "scripts/paired-chrome-focus-link-acceptance.test.mjs",
@@ -43,6 +43,14 @@
     {
       "path": "scripts/paired-chrome-focus-link-generator.test.mjs",
       "sha256": "bc02a944eb37bb556805ca3393498c9bc4903b5054d3f68fbbb0e2a7898f17f8"
+    },
+    {
+      "path": "scripts/paired-chrome-focus-link-input.mjs",
+      "sha256": "9630f5ca9b6ed00b16902a3ce85b585721fc4f71b15f5db5159c2769d70dca0d"
+    },
+    {
+      "path": "scripts/paired-chrome-focus-link-input.test.mjs",
+      "sha256": "b8efb16394b9775644153f694a7008c3566e2cf2f63aaf28fea0e00ce55367fe"
     },
     {
       "path": "scripts/paired-chrome-split-cold-diagnostic.mjs",
