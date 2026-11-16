@@ -1,0 +1,56 @@
+name: Isolated Helium first focus diagnostic
+on:
+  push:
+    branches: [diagnostic/helium-first-focus-20261116]
+permissions:
+  contents: read
+jobs:
+  helium:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.14.0'
+      - name: Verify diagnostic-only custody
+        run: |
+          test "$(git rev-parse HEAD^)" = f1e77e792069cf160e3ed2cb0eb2197aa703a210
+          git diff --name-only HEAD^ HEAD | tee changed-files.txt
+          test -z "$(grep -Ev '^scripts/helium-diagnostic/|^.github/workflows/helium-first-focus.yml$' changed-files.txt)"
+          mkdir -p test-results/helium-first-focus
+          printf '%s\n' "$ImageVersion" > test-results/helium-first-focus/runner-image.txt
+          npm ci
+          npm ci --prefix scripts/paired-chrome-runtime
+          npm run build
+          node --check scripts/helium-diagnostic/run.mjs
+      - name: Fetch official portable Helium and verify exact digest
+        run: |
+          set -euo pipefail
+          H="$RUNNER_TEMP/helium-02131"
+          mkdir -p "$H"
+          curl --fail --location --retry 2 'https://github.com/imputnet/helium-linux/releases/download/0.21.3.1/helium-0.21.3.1-x86_64_linux.tar.xz' -o "$H/helium.tar.xz"
+          echo '88f3c53a237182e872ac3061cc8c129e75aecbce84aead834225d8103096c254  '"$H/helium.tar.xz" | sha256sum --check | tee test-results/helium-first-focus/browser-digest.txt
+          tar --extract --file "$H/helium.tar.xz" --directory "$H" --no-same-owner
+          echo "HELIUM_EXECUTABLE=$H/helium-0.21.3.1-x86_64_linux/helium" >> "$GITHUB_ENV"
+          "$H/helium-0.21.3.1-x86_64_linux/helium" --version | tee test-results/helium-first-focus/browser-version.txt
+      - name: Run normally sandboxed synthetic fixture
+        run: |
+          set -o pipefail
+          command -v xvfb-run
+          xvfb-run --auto-servernum node scripts/helium-diagnostic/run.mjs 2>&1 | tee test-results/helium-first-focus/runner.log
+      - name: Upload bounded evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: helium-first-focus-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/helium-first-focus/
+          retention-days: 7
+          if-no-files-found: warn
