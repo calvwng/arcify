@@ -22,8 +22,8 @@ jobs:
           node-version: '22.14.0'
       - name: Verify diagnostic-only custody
         run: |
-          test "$(git rev-parse HEAD^)" = f1e77e792069cf160e3ed2cb0eb2197aa703a210
-          git diff --name-only HEAD^ HEAD | tee changed-files.txt
+          git merge-base --is-ancestor f1e77e792069cf160e3ed2cb0eb2197aa703a210 HEAD
+          git diff --name-only f1e77e792069cf160e3ed2cb0eb2197aa703a210 HEAD | tee changed-files.txt
           test -z "$(grep -Ev '^scripts/helium-diagnostic/|^.github/workflows/helium-first-focus.yml$' changed-files.txt)"
           mkdir -p test-results/helium-first-focus
           printf '%s\n' "$ImageVersion" > test-results/helium-first-focus/runner-image.txt

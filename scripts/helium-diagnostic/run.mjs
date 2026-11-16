@@ -23,10 +23,10 @@ for(const [f,h]of Object.entries(expected.dist_sha256))assert.equal(createHash('
 await save('exact-build-verified',{files:62,source:expected.commit});
 const executable=await realpath(process.env.HELIUM_EXECUTABLE);
 const version=execFileSync(executable,['--version'],{encoding:'utf8'}).trim();assert.equal(version,'Helium 0.21.3.1 (Chromium 157.0.8103.78)');
-const args=[`--load-extension=${dist}`,`--disable-extensions-except=${dist}`,'--no-first-run','--no-default-browser-check','--disable-background-networking','--window-size=1440,1000'];
+const args=[`--load-extension=${dist}`,`--disable-extensions-except=${dist}`,'--no-first-run','--no-default-browser-check','--disable-background-networking','--window-size=1440,1000','--restore-last-session'];
 validateChromeLaunchArguments(args);validateNamespaceLaunchEnvironment(process.env,process.getuid());
 async function launch(restoring=false){
- browser=await puppeteer.launch({executablePath:executable,headless:false,userDataDir:profile,defaultViewport:null,ignoreDefaultArgs:['--disable-extensions','--disable-component-extensions-with-background-pages'],args:[...args,...(restoring?['--restore-last-session']:[])]});
+ browser=await puppeteer.launch({executablePath:executable,headless:false,userDataDir:profile,defaultViewport:null,ignoreDefaultArgs:['--disable-extensions','--disable-component-extensions-with-background-pages'],args:[...args]});
  const proc=browser.process();validateChromeLaunchArguments(proc.spawnargs.slice(1));assert.equal(await realpath(`/proc/${proc.pid}/exe`),executable);
  const session=await browser.target().createCDPSession();const protocol=await session.send('Browser.getVersion');await session.detach();assert.match(protocol.product,/157\.0\.8103\.78$/);
  const page=await browser.newPage();await page.goto('chrome://sandbox/');await page.waitForFunction(()=>document.querySelector('#sandbox-status tr')&&document.getElementById('evaluation')?.textContent.trim());
@@ -82,8 +82,9 @@ try{
  await passive(api,windowId=>chrome.sidePanel.close({windowId}),windowId);
  await browser.close();browser=null;
  const pid2=await launch(true);assert.notEqual(pid2,pid1);
- const documents=[];for(const p of await browser.pages()){if(p.url()===url){await p.waitForFunction(()=>document.readyState==='complete'&&document.body.dataset.proof);documents.push({page:p,...await passive(p,()=>({marker:sessionStorage.getItem('helium-proof'),title:document.title,url:location.href}))});}}
- const restored=await state();const originals=[];for(const seed of seeds){const match=documents.filter(d=>d.marker===seed.marker);assert.equal(match.length,1,'Independent sessionStorage marker identifies exactly one restored original');const tabs=restored.tabs.filter(t=>t.url===match[0].url&&t.title===match[0].title);assert.equal(tabs.length,1,'Fresh document title maps marker to native tab without URL-only adoption');originals.push({...seed,newTabId:tabs[0].id,page:match[0].page});}
+ const observeDocuments=async()=>{const result=[];for(const p of await browser.pages()){if(p.url()!==url)continue;try{result.push({page:p,...await passive(p,()=>({marker:sessionStorage.getItem('helium-proof'),title:document.title,url:location.href,ready:document.readyState}))});}catch(error){result.push({page:p,url,error:error.message,marker:null});}}return result;};
+ let documents=[];try{documents=await poll(observeDocuments,d=>d.length>=3&&d.every(x=>x.ready==='complete'&&x.marker),'restored synthetic documents observed',15000);}catch(error){report.restoreReadinessError=error.message;documents=await observeDocuments();}
+ const restored=await state();await save('raw-post-restart',{documents:documents.map(({page,...d})=>d),restored,targets:browser.targets().map(t=>({type:t.type(),url:t.url()}))});const originals=[];for(const seed of seeds){const match=documents.filter(d=>d.marker===seed.marker);assert.equal(match.length,1,'Independent sessionStorage marker identifies exactly one restored original');const tabs=restored.tabs.filter(t=>t.url===match[0].url&&t.title===match[0].title);assert.equal(tabs.length,1,'Fresh document title maps marker to native tab without URL-only adoption');originals.push({...seed,newTabId:tabs[0].id,page:match[0].page});}
  const restoredIds=originals.slice(0,2).map(s=>s.newTabId);const restoredPair=restored.tabs.filter(t=>restoredIds.includes(t.id));assert(restoredPair[0].splitViewId>=0&&restoredPair[0].splitViewId===restoredPair[1].splitViewId,'Helium restored the real native pair');
  assert.deepEqual(restored.local.splitPinsV1,before.local.splitPinsV1);assert.deepEqual(restored.local.savedSplitRecipesV1,before.local.savedSplitRecipesV1);
  assert(!Object.values(restored.session.splitPinInstancesV1||{}).some(v=>v.bookmarkId===pin.bookmarkId));assert(!Object.values(restored.session.splitPinFocusLinksV1||{}).some(v=>v.bookmarkId===pin.bookmarkId));
