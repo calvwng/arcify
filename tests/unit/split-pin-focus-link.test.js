@@ -202,3 +202,49 @@ test('reordered final linked receipt lost acknowledgement is rolled back without
  const f=await ready();f.hooks.reorderStorage=true;let writes=0;f.hooks.afterSessionSet=()=>{if(++writes===2)throw Error('lost final ack');};
  await assert.rejects(link(f));assert.equal(writes,3);assert.deepEqual(f.session[SPLIT_PIN_FOCUS_LINKS_KEY],{});assert.equal(f.session[SPLIT_PIN_SESSION_KEY],undefined);noCreates(f);
 });
+
+const emitUpdate = (id, change) => chrome.tabs.onUpdated.callbacks.forEach(fn => fn(id, change));
+for (const id of [1, 999]) for (const change of [{title:'Loaded title'}, {favIconUrl:'https://page.test/icon'}, {title:'',favIconUrl:''}]) test(`focus cosmetic ${id} ${JSON.stringify(change)} keeps exact proof`,async()=>{
+ const f=await ready();await link(f);const receipt=structuredClone(f.session);
+ f.hooks.update=()=>emitUpdate(id,change);
+ assert.equal((await f.action('activate')).focused,true);noCreates(f);
+ assert.equal(f.effects.filter(e=>e[0]==='update').length,1);assert.deepEqual(f.session,receipt);
+});
+for (const change of [{},{title:null},{title:'x',unknown:true},{status:'unknown'},{url:'https://page.test/1'},{splitViewId:70},{pendingUrl:'https://page.test/1'}]) test(`unknown/structural update fails closed ${JSON.stringify(change)}`,async()=>{
+ const f=await ready();await link(f);f.hooks.update=()=>emitUpdate(1,change);
+ await assert.rejects(f.action('activate'),e=>!e.message.includes('verification is pending'));noCreates(f);
+ assert.equal(f.effects.filter(e=>e[0]==='update').length,1);
+});
+for(const mode of ['loading','loading-complete','no-event-loading'])test(`post-activation ${mode} stays uncertain without retry`,async()=>{
+ const f=await ready();await link(f);const receipt=structuredClone(f.session);
+ f.hooks.update=()=>{f.tabs[0].status='loading';if(mode!=='no-event-loading')emitUpdate(1,{status:'loading'});if(mode==='loading-complete'){f.tabs[0].status='complete';emitUpdate(1,{status:'complete',title:'Ready'});}};
+ await assert.rejects(f.action('activate'),/Focus verification is pending/);noCreates(f);
+ assert.equal(f.effects.filter(e=>e[0]==='update').length,1);assert.deepEqual(f.session,receipt);
+});
+for(const mode of ['navigation-aba','split-aba','space','receipt','inactive'])test(`loading never masks ${mode}`,async()=>{
+ const f=await ready();await link(f);f.hooks.update=()=>{
+  f.tabs[0].status='loading';emitUpdate(1,{status:'loading'});
+  if(mode==='navigation-aba')emitUpdate(1,{url:'https://else.test'});
+  if(mode==='split-aba')chrome.tabs.onMoved.callbacks.forEach(fn=>fn(1,{}));
+  if(mode==='space')f.store.active[10]='else';
+  if(mode==='receipt')f.session[SPLIT_PIN_FOCUS_LINKS_KEY][`10:${f.bookmarkId}`].token='replacement';
+  if(mode==='inactive')f.hooks.query=()=>{f.tabs[0].active=false;};
+ };
+ await assert.rejects(f.action('activate'),e=>!e.message.includes('verification is pending'));noCreates(f);
+});
+test('cosmetic event still invalidates chooser and strict loading preflight',async()=>{
+ const f=await ready(),c=await f.action('attachCandidates');emitUpdate(1,{title:'New'});
+ await assert.rejects(f.action('attach',{candidateToken:c.candidates[0].candidateToken}));await link(f);
+ f.tabs[0].status='loading';await assert.rejects(f.action('activate'));assert.equal(f.effects.filter(e=>e[0]==='update').length,0);noCreates(f);
+});
+for(const kind of ['cosmetic','structural','inactive'])test(`late post-focus read ${kind} retains final proof fence`,async()=>{
+ const f=await ready();await link(f);
+ f.hooks.update=()=>{f.hooks.query=()=>{
+  if(kind==='cosmetic')emitUpdate(999,{title:'Unrelated'});
+  if(kind==='structural'){emitUpdate(1,{status:'loading'});emitUpdate(1,{unknown:true});}
+  if(kind==='inactive'){emitUpdate(1,{status:'loading'});f.tabs[0].active=false;}
+ };};
+ if(kind==='cosmetic')assert.equal((await f.action('activate')).focused,true);
+ else await assert.rejects(f.action('activate'),e=>!e.message.includes('verification is pending'));
+ noCreates(f);assert.equal(f.effects.filter(e=>e[0]==='update').length,1);
+});

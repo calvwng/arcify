@@ -120,3 +120,11 @@ marker/recipe disappeared, or its original marker ID is absent. It is not delete
 or adopted by URL. If obsolete scope revives, overlapping links fail closed until
 explicit unlink. Same pin instances in different windows remain independent.
 This is not automatic inline reattachment or cold-restart recovery.
+
+Focus verification treats well-formed title/favicon-only tab updates as cosmetic,
+without relaxing the chooser or attachment fence. All exact pair, ownership,
+receipt, window/Space and active-tab checks still run. Unknown or structural events
+fail closed. Loading events (even loading followed by complete during the same
+activation) cannot produce confirmed success: the UI reports verification pending,
+keeps the advisory link, and does not activate again or open replacement panes.
+There is no timer, polling, automatic retry, or queue-held stabilization delay.

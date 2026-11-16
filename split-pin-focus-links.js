@@ -22,12 +22,23 @@ const entry = t => ({ tabId: t.id, url: t.url, index: t.index, groupId: t.groupI
 export const focusTarget = t => ({ pin: clone(t.pin), recipe: clone(t.recipe), bookmark: Object.fromEntries(['id','parentId','title','url'].map(k => [k,t.bookmark[k]])), space: { id: t.space.id, bookmarkFolderId: t.space.bookmarkFolderId } });
 function manager(store) {
     if (managers.has(store)) return managers.get(store);
-    const m = { revision: 0, choices: new Map() };
+    const m = { revision: 0, focusRevision: 0, loadingRevision: 0, choices: new Map() };
     const invalidate = () => { m.revision++; m.choices.clear(); };
     for (const [api, names] of [[chrome.tabs,['onUpdated','onRemoved','onReplaced','onAttached','onDetached','onMoved']], [chrome.bookmarks,['onChanged','onMoved','onRemoved']]]) {
         for (const name of names) {
             if (!api?.[name]?.addListener) throw new Error('Native lifecycle observation unavailable. No link changed.');
-            api[name].addListener(invalidate);
+            api[name].addListener((tabId, change) => {
+                invalidate(); // Chooser/attach retains its original conservative fence.
+                const keys = object(change) ? Object.keys(change) : [];
+                const knownUpdate = api === chrome.tabs && name === 'onUpdated' &&
+                    Number.isSafeInteger(tabId) && tabId > 0 && keys.length > 0 &&
+                    keys.every(k => ['title', 'favIconUrl', 'status'].includes(k)) &&
+                    keys.every(k => k === 'status' ? ['loading', 'complete'].includes(change[k]) : typeof change[k] === 'string');
+                if (!knownUpdate) m.focusRevision++;
+                else if (own(change, 'status')) m.loadingRevision++;
+                // Only documented cosmetic strings are immaterial to focus. Status
+                // events retain uncertainty, including a loading→complete ABA cycle.
+            });
         }
     }
     managers.set(store, m); return m;
@@ -65,11 +76,13 @@ async function orphan(store, record, tabs) {
 }
 // Called on the same SpaceStore queue as all split actions. No storage CAS or
 // native+storage transaction is claimed; concurrent native events fail closed.
-async function guard(store, request, proof, deps, expected) {
+async function guard(store, request, proof, deps, expected, postFocus = false) {
     const target = await deps.resolve();
     if (!same(focusTarget(target), proof.target)) throw changed();
     const pair = await deps.exactPair({ ...request, entries: proof.entries });
-    if (pair.some(t => t.status === 'loading' || t.pendingUrl || !/^https?:/.test(t.url) || store.transientWindows?.isTransientTab?.(t.id))) throw changed();
+    if (pair.some(t => t.pendingUrl || !/^https?:/.test(t.url) || store.transientWindows?.isTransientTab?.(t.id))) throw changed();
+    const loading = pair.some(t => t.status === 'loading');
+    if (loading && !postFocus) throw changed();
     const links = await read(), key = keyOf(request);
     if (expected ? !same(links[key], expected) : own(links,key) !== proof.priorPresent || !same(links[key],proof.prior)) throw changed();
     const allTabs = await chrome.tabs.query({});
@@ -85,7 +98,7 @@ async function guard(store, request, proof, deps, expected) {
         if (w.tabIds.some(id => pair.some(t => t.id === id)) || wkey === key && w.tabIds.some(id => allTabs.some(t => t.id === id))) throw changed();
     }
     if (!same(focusTarget(await deps.resolve()),proof.target)) throw changed();
-    return pair;
+    return postFocus ? { pair, loading } : pair;
 }
 export async function runSplitFocusAction(store, request, deps) {
     const m = manager(store), key = keyOf(request);
@@ -144,16 +157,21 @@ export async function runSplitFocusAction(store, request, deps) {
 export async function focusLinkedPair(store,request,deps,record) {
     const key = keyOf(request);
     if (!valid(record,key) || record.phase !== 'linked') throw new Error('This link needs review. Reattach or explicitly remove it before opening fresh. No fresh pair was opened.');
-    const m = manager(store), revision = m.revision;
+    const m = manager(store), revision = m.focusRevision, loadingRevision = m.loadingRevision;
+    const check = () => { if (m.focusRevision !== revision) throw changed(); };
     const proof = {target:record.target,entries:record.entries};
-    const pair = await guard(store,request,proof,deps,record); fence(m,revision);
-    await guard(store,request,proof,deps,record); fence(m,revision);
+    const pair = await guard(store,request,proof,deps,record); check();
+    await guard(store,request,proof,deps,record); check();
+    if (m.loadingRevision !== loadingRevision) throw changed();
     let updated;
     try {
         updated = await chrome.tabs.update(pair[0].id,{active:true});
-        const after = await guard(store,request,proof,deps,record);
-        fence(m,revision);
+        const observation = await guard(store,request,proof,deps,record,true), after = observation.pair;
+        check();
         if (!updated || updated.id !== pair[0].id || updated.windowId !== request.windowId || updated.splitViewId !== pair[0].splitViewId || updated.active !== true || after[0].id !== pair[0].id || after[0].active !== true) throw changed();
+        if (observation.loading || m.loadingRevision !== loadingRevision) {
+            throw new Error('Focus verification is pending because page loading changed during activation. The existing link was kept; no second activation or fresh pair was attempted.');
+        }
         return { focused:true,focusOnly:true,tabIds:pair.map(t=>t.id) };
     } catch (error) { throw new Error(`Focus may have changed, but the result could not be confirmed. No fresh pair was opened. ${error.message}`); }
 }
