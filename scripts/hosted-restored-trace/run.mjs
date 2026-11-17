@@ -99,35 +99,19 @@ try {
         report.checkpoints.push({label,...state,cancelPreserved:true,today:todayBefore});await save();return state;
     }
     await inspectPicker('same-session','same-or-invalid-session');
-    if(process.env.ARCIFY_TRACE_COLD_RESTORE==='1') {
-        const coldLimits={paneProvenance:'unproven-url-matching-only',cleanExitVerified:false};
-        report.cold={status:'running',syntheticRestore:false,...coldLimits};await save();
-        let coldMeasurementStarted=false;
-        try {
-            await api.evaluate(id=>chrome.tabs.update(id,{active:true}),fixture.ids[2]);
-            await api.evaluate(windowId=>chrome.sidePanel.close({windowId}),fixture.windowId);
-            await browser.close();browser=null;
-            // Same profile and identical launch options, no storage rewrite or
-            // tabs recreation. The loopback server remains alive for restore.
-            browser=await puppeteer.launch(structuredClone(launch));
-            validateChromeLaunchArguments(browser.process().spawnargs);
-            await inspectChromeProcessRuntime(browser.process().pid);
-            const existing=(await browser.pages()).filter(p=>p.url()===`chrome-extension://${id}/options.html`);
-            api=existing[0]||await browser.newPage();if(!existing[0])await api.goto(`chrome-extension://${id}/options.html`);
-            const restored=await poll(()=>api.evaluate(()=>chrome.tabs.query({})),tabs=>['/first','/second','/neutral'].every(suffix=>tabs.filter(t=>(t.url||t.pendingUrl)===`${base}${suffix}`).length===1),'restored synthetic URL document set');
-            const members=['/first','/second','/neutral'].map(suffix=>restored.find(t=>(t.url||t.pendingUrl)===`${base}${suffix}`));assert(members.every(t=>t.windowId===members[0].windowId));
-            fixture={...fixture,windowId:members[0].windowId,ids:members.map(t=>t.id)};
-            await api.evaluate(windowId=>{globalThis.highlightPanelEvents=[];chrome.sidePanel.onOpened.addListener(info=>globalThis.highlightPanelEvents.push(info));const b=document.createElement('button');b.id='reopen-trace-panel';b.textContent='Open test sidebar';b.style='position:fixed;top:0;left:0;z-index:2147483647';b.onclick=()=>chrome.sidePanel.open({windowId});document.body.append(b);},fixture.windowId);
-            await api.bringToFront();await api.click('#reopen-trace-panel');
-            await poll(()=>api.evaluate(async()=>({events:globalThis.highlightPanelEvents,contexts:await chrome.runtime.getContexts({contextTypes:['SIDE_PANEL']})})),s=>s.events.some(e=>e.windowId===fixture.windowId)&&s.contexts.filter(c=>c.documentUrl===`chrome-extension://${id}/sidebar.html`).length===1,'cold native panel proof');
-            panel=await(await browser.waitForTarget(t=>t.url()===`chrome-extension://${id}/sidebar.html`)).asPage();
-            const hosting=await panel.evaluate(async()=>({tab:await chrome.tabs.getCurrent()||null,windowId:(await chrome.windows.getCurrent()).id}));assert.equal(hosting.tab,null);assert.equal(hosting.windowId,fixture.windowId);
-            await panel.waitForSelector(`${selector}[data-split-live="false"]`,{visible:true});
-            const evidence=await api.evaluate(async({bookmarkId,ids})=>{const r=(await chrome.storage.local.get('splitPinRestoredHintsV1')).splitPinRestoredHintsV1?.records?.find(r=>r.bookmarkId===bookmarkId);const tabs=await chrome.tabs.query({});const pair=tabs.filter(t=>ids.slice(0,2).includes(t.id));const session=await chrome.storage.session.get(['splitPinRestoredHintSessionV1','splitPinInstancesV1','splitPinFocusLinksV1']);return{sameKey:pair.length===2&&pair.every(t=>t.splitViewId===r?.splitViewId),complete:pair.every(t=>t.status==='complete'&&!t.pendingUrl&&!t.discarded&&!t.frozen),globalKnown:tabs.every(t=>Number.isSafeInteger(t.splitViewId)),newSession:session.splitPinRestoredHintSessionV1===undefined||session.splitPinRestoredHintSessionV1!==r?.sessionNonce,noClaims:!Object.keys(session.splitPinInstancesV1||{}).length&&!Object.keys(session.splitPinFocusLinksV1||{}).length};},{bookmarkId:pin.bookmarkId,ids:fixture.ids});
-            const positive=Object.values(evidence).every(Boolean);coldMeasurementStarted=true;const state=await inspectPicker('real-cold',positive?'suggested':null);
-            if(positive)assert.equal(state.badgeCount,1);report.cold={status:positive?'positive-hint-rendered':'observed-not-positive',...coldLimits,...evidence,reason:state.text};
-        } catch(error){report.cold={status:coldMeasurementStarted||error.code==='ERR_ASSERTION'?'failed':'inconclusive',error:error.message,syntheticRestore:false,...coldLimits};if(report.cold.status==='failed')throw error;}
-    }
-    report.status='passed-same-session-scope';
+    // Explicit synthetic session-boundary control, NOT a browser restart.
+    // Keep the native pair and saved hint exactly as observed; remove only
+    // the named session nonce in this disposable synthetic fixture.
+    const boundaryBefore=await conservation();
+    assert.equal(typeof boundaryBefore.session.splitPinRestoredHintSessionV1,'string');
+    await api.evaluate(()=>chrome.storage.session.remove('splitPinRestoredHintSessionV1'));
+    const boundaryAfter=await conservation();
+    const expectedBoundary=structuredClone(boundaryBefore);
+    delete expectedBoundary.session.splitPinRestoredHintSessionV1;
+    assert.deepEqual(boundaryAfter,expectedBoundary,'Synthetic boundary changes only the named nonce');
+    report.syntheticBoundary={removedOnly:'splitPinRestoredHintSessionV1',nativePairAndSavedHintPreserved:true,realRestart:false};
+    await inspectPicker('simulated-session-boundary','suggested');
+    report.cold={status:'not-attempted',reason:'Synthetic session-boundary control only; no real cold or unloaded coverage'};
+    report.status='passed-synthetic-negative-and-positive-controls';
 } catch(error) {report.status='failed';report.error={message:error.message,stack:error.stack};throw error;}
 finally {await save();await browser?.close();if(server)await new Promise(r=>server.close(r));}

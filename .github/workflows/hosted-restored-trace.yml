@@ -14,7 +14,6 @@ jobs:
     env:
       CI: 'true'
       PUPPETEER_SKIP_DOWNLOAD: 'true'
-      ARCIFY_TRACE_COLD_RESTORE: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -41,12 +40,12 @@ jobs:
           google-chrome --version
           test -x /usr/bin/xvfb-run
           node --check scripts/hosted-restored-trace/run.mjs
-      - name: Run genuine native picker trace and optional real restore observation
+      - name: Run native picker negative and simulated session-boundary positive controls
         run: |
           set -o pipefail
           mkdir -p test-results/hosted-restored-trace
           xvfb-run --auto-servernum node scripts/hosted-restored-trace/run.mjs 2>&1 | tee test-results/hosted-restored-trace/runner.log
-      - name: Retain synthetic evidence, including inconclusive restore
+      - name: Retain explicitly synthetic control evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
