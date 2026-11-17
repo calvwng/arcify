@@ -1,3 +1,5 @@
+import { restoredHintTrace } from './split-restored-hint-trace.js';
+import { rememberRestoredSplitHint, forgetRestoredSplitHint, possibleRestoredSplitCandidate } from './split-pin-restored-hints.js';
 // Advisory session links only. Never read by strong witness, hide, close, release,
 // grouping or recovery code. storage.session survives worker suspension, not cold restart.
 export const SPLIT_PIN_FOCUS_LINKS_KEY = 'splitPinFocusLinksV1';
@@ -100,9 +102,34 @@ async function guard(store, request, proof, deps, expected, postFocus = false) {
     if (!same(focusTarget(await deps.resolve()),proof.target)) throw changed();
     return postFocus ? { pair, loading } : pair;
 }
+// This is only a verified rendering hint. It is never a live ownership
+// witness and must not be read by Today suppression or mutating actions.
+export function captureFocusLinkDisplayRevision(store) {
+    try {
+        const m = manager(store), revision = m.revision;
+        return () => m.revision === revision;
+    } catch {
+        return () => false;
+    }
+}
+export async function focusLinkedTabIdsForDisplay(store, request, deps, record) {
+    if (!valid(record, keyOf(request)) || record.phase !== 'linked') return [];
+    try {
+        const m = manager(store), revision = m.revision;
+        const pair = await guard(store, request, { target: record.target, entries: record.entries }, deps, record);
+        fence(m, revision);
+        return pair.map(tab => tab.id);
+    } catch {
+        return []; // Retain the current Today presentation on any uncertainty.
+    }
+}
+
 export async function runSplitFocusAction(store, request, deps) {
     const m = manager(store), key = keyOf(request);
     if (request.action === 'attachCandidates') {
+        const trace = restoredHintTrace.begin('chooser');
+        try {
+        trace?.stage('candidate-enumeration');
         m.choices.clear(); const revision = m.revision;
         const target = focusTarget(await deps.resolve()), links = await read();
         const base = { request: Object.fromEntries(['windowId','spaceId','bookmarkFolderId','bookmarkId'].map(k => [k,request[k]])), target, priorPresent: own(links,key), prior: links[key] };
@@ -116,7 +143,38 @@ export async function runSplitFocusAction(store, request, deps) {
             candidates.push({ candidateToken: issue(m,proof), entries: pair.map(t => ({...entry(t),title:t.title})) });
         }
         fence(m,revision);
-        return { candidates, ...(base.priorPresent ? { unlinkToken:issue(m,{...base,kind:'unlink'}) } : {}) };
+        // Optional decoration only; the original chooser proofs remain authority.
+        trace?.stage('hint-read');
+        const suggested = await possibleRestoredSplitCandidate(request,target,candidates,links,trace);
+        if (suggested && m.revision === revision) {
+            try {
+                trace?.stage('revalidate-choice');
+                const selectedProof = choice(m,suggested,'attach',request);
+                trace?.stage('revalidate-guard');
+                await guard(store,request,selectedProof,deps);
+                trace?.stage('revalidate-fence');
+                fence(m,revision);
+                trace?.stage('revalidate-expiry');
+                choice(m,suggested,'attach',request); // Slow optional reads cannot revive an expired token.
+                trace?.stage('assign-flag');
+                const candidate = candidates.find(c=>c.candidateToken===suggested);
+                if (candidate) { candidate.possibleRestoredMatch = true; trace?.observe(()=>({flagAssigned:true})); }
+            } catch { trace?.revalidationFailed(); /* Missing hint never changes chooser eligibility. */ }
+        }
+        trace?.stage('final-fence');
+        fence(m,revision);
+        trace?.stage('final-tokens');
+        for (const candidate of candidates) choice(m,candidate.candidateToken,'attach',request);
+        const result = { candidates, ...(base.priorPresent ? { unlinkToken:issue(m,{...base,kind:'unlink'}) } : {}) };
+        trace?.stage('return');
+        trace?.flagged(candidates.some(candidate=>candidate.possibleRestoredMatch === true));
+        trace?.end('returned');
+        if (import.meta.env && import.meta.env.VITE_ARCIFY_RESTORED_HINT_TRACE === 'true') {
+            const decision = trace?.decision();
+            if (decision) result.qaRestoredHintDecision = decision;
+        }
+        return result;
+        } catch (error) { trace?.end('threw'); throw error; }
     }
     const kind = request.action === 'unlinkFocus' ? 'unlink' : 'attach';
     const proof = choice(m,request.candidateToken,kind,request), revision = m.revision;
@@ -127,6 +185,7 @@ export async function runSplitFocusAction(store, request, deps) {
         fence(m,revision); m.choices.delete(request.candidateToken); delete links[key];
         await chrome.storage.session.set({[SPLIT_PIN_FOCUS_LINKS_KEY]:links});
         if (own(await read(),key)) throw new Error('Link removal was not confirmed. Keep the panes and review again before opening fresh.');
+        forgetRestoredSplitHint(request);
         return { unlinked:true };
     }
     await guard(store,request,proof,deps); fence(m,revision);
@@ -142,6 +201,7 @@ export async function runSplitFocusAction(store, request, deps) {
         if (!same(current[key],pending)) throw changed();
         await chrome.storage.session.set({[SPLIT_PIN_FOCUS_LINKS_KEY]:{...current,[key]:linked}});
         await guard(store,request,proof,deps,linked); fence(m,revision);
+        rememberRestoredSplitHint(request,proof.target,proof.entries);
         return { linked:true,focusOnly:true };
     } catch (error) {
         try {

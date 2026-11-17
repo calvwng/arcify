@@ -1,0 +1,56 @@
+name: Isolated restored-match picker trace
+on:
+  push:
+    branches: [diagnostic/restored-match-trace-20261117]
+permissions:
+  contents: read
+concurrency:
+  group: diagnostic-restored-match-trace-20261117
+  cancel-in-progress: false
+jobs:
+  native-picker-trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CI: 'true'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+      ARCIFY_TRACE_COLD_RESTORE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Install locked build and isolated browser driver
+        run: |
+          npm ci
+          npm ci --prefix scripts/paired-chrome-runtime
+          npm test --prefix scripts/paired-chrome-runtime
+          node --test scripts/hosted-restored-trace/checks.test.mjs
+      - name: Build and verify exact approved 62-file QA artifact
+        env:
+          VITE_ARCIFY_RESTORED_HINT_TRACE: 'true'
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          npm run build
+          node --input-type=module -e "import{verifyDist}from'./scripts/hosted-restored-trace/checks.mjs';await verifyDist('./dist','./scripts/hosted-restored-trace/expected-dist.sha256')"
+      - name: Require unchanged installed browser and native display
+        run: |
+          google-chrome --version
+          test -x /usr/bin/xvfb-run
+          node --check scripts/hosted-restored-trace/run.mjs
+      - name: Run genuine native picker trace and optional real restore observation
+        run: |
+          set -o pipefail
+          mkdir -p test-results/hosted-restored-trace
+          xvfb-run --auto-servernum node scripts/hosted-restored-trace/run.mjs 2>&1 | tee test-results/hosted-restored-trace/runner.log
+      - name: Retain synthetic evidence, including inconclusive restore
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: isolated-restored-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/hosted-restored-trace/
+          retention-days: 7
+          if-no-files-found: warn

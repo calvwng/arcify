@@ -1,3 +1,4 @@
+import { createCompoundPinHighlight } from './compound-pin-highlight.js';
 import { applySpaceTheme } from './sidebar-theme.js';
 import { placeNewTabRow } from './sidebar-new-tab.js';
 import { appendTodayMovePicker } from './today-space-move-ui.js';
@@ -156,6 +157,8 @@ export function showSpaceNameInput() {
     return;
 }
 
+export const compoundPinHighlights = createCompoundPinHighlight(document);
+
 export function activateTabInDOM(tabId) {
     // Remove active class from all tabs and pinned favicons
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -165,7 +168,10 @@ export function activateTabInDOM(tabId) {
     const targetTab = document.querySelector(`[data-tab-id="${tabId}"]`);
     if (targetTab) {
         targetTab.classList.add('active');
+    } else {
+        compoundPinHighlights.activate(tabId);
     }
+    compoundPinHighlights.activateLinked(tabId);
 }
 
 export function activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher, { restoreFocus = document.activeElement === newTabBtn && document.hasFocus?.() !== false } = {}) {

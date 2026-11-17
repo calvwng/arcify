@@ -155,3 +155,22 @@ for (const mode of ['live', 'closed', 'unavailable', 'native-marker']) test(`rea
     assert.equal(result.rows.filter(r => r.bookmarkId === 'split-bookmark').length, 1);
     assert.equal(result.rows.filter(r => [50,51].includes(r.tabId)).length, mode === 'live' ? 0 : 2);
 });
+
+for (const mode of ['live', 'advisory', 'closed']) test(`actual compound row highlight tracks either pane, not authority for ${mode}`, async () => {
+    const data = fixture();
+    data.bookmarks.push({ id: 'split-bookmark', parentId: 'nested', title: 'Planning pair', url: 'chrome-extension://fixture/saved-split.html#pair' });
+    data.tabs.push(...[50,51].map((id,index) => ({id,windowId:10,title:`Pair ${id}`,url:`https://pair.test/${id}`,index:50+index,splitViewId:6,pinned:false})));
+    data.local.spaces[0].temporaryTabs.push(50,51);
+    data.local.splitPinsV1 = {version:1,destination:'work-folder',pins:[{recipeId:'pair',bookmarkId:'split-bookmark',parentId:'nested',phase:'committed'}]};
+    data.splitPins = [{bookmarkId:'split-bookmark',tabIds:mode==='live'?[50,51]:[],splitViewId:mode==='live'?6:null,focusLinkPresent:mode==='advisory',focusLinkedTabIds:mode==='advisory'?[50,51]:[]}];
+    data.compoundActivationIds = [50,51,9,50];
+    const result = await initialize(data);
+    const selected = id => [{bookmarkId:mode==='live'?'split-bookmark':null,tabId:mode==='live'?null:id}];
+    assert.deepEqual(result.compoundActivations,[selected(50),selected(51),[{bookmarkId:null,tabId:9}],selected(50)]);
+    const badge=mode==='advisory'?[{bookmarkId:'split-bookmark',active:false,label:'Linked pair selected'}]:[];
+    assert.deepEqual(result.linkedActivations,[badge,badge,[],badge]);
+    assert.equal(result.rows.filter(row=>[50,51].includes(row.tabId)).length,mode==='live'?0:2);
+    assert.equal(result.splitPresentation.pins[0].actionHidden,mode!=='live');
+    assert.deepEqual(result.session,data.session);
+    assert.deepEqual(result.patches,[]);
+});
