@@ -123,7 +123,17 @@ if (workerData.handoffTabId) {
         await new Promise(resolve => setTimeout(resolve, 10));
     }
 }
+const compoundActivations = [], linkedActivations = [];
+if (workerData.compoundActivationIds) {
+    const { activateTabInDOM } = await import('../../domManager.js');
+    for (const id of workerData.compoundActivationIds) {
+        activateTabInDOM(id);
+        linkedActivations.push([...document.querySelectorAll('.space.active [data-split-linked-active="true"]')].map(row => ({bookmarkId:row.dataset.bookmarkId, active:row.classList.contains('active'), label:row.querySelector('.split-linked-selection')?.textContent})));
+        compoundActivations.push([...document.querySelectorAll('.space.active .tab.active')].map(row => ({bookmarkId: row.dataset.bookmarkId || null, tabId: row.dataset.tabId ? Number(row.dataset.tabId) : null})));
+    }
+}
 parentPort.postMessage({
+    compoundActivations, linkedActivations,
     handoffObserved, handoffBefore,
     splitPresentation: { panelCount: document.querySelectorAll('.saved-splits-panel').length,
         pins: [...document.querySelectorAll('.space.active .split-pin')].map(row => ({ bookmarkId: row.dataset.bookmarkId,

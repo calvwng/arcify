@@ -1,0 +1,54 @@
+name: Isolated native Split pin highlight
+on:
+  push:
+    branches: [diagnostic/native-split-highlight-20261117]
+permissions:
+  contents: read
+concurrency:
+  group: diagnostic-native-split-highlight-20261117
+  cancel-in-progress: false
+jobs:
+  native-highlight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CI: 'true'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked build and isolated driver dependencies
+        run: |
+          npm ci
+          npm ci --prefix scripts/paired-chrome-runtime
+          npm test --prefix scripts/paired-chrome-runtime
+          node --test scripts/hosted-highlight/checks.test.mjs
+      - name: Verify exact approved build bytes
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          npm run build
+          test "$(find dist -type f | wc -l)" -eq 62
+          (cd dist && sha256sum --check ../scripts/hosted-highlight/expected-dist.sha256)
+      - name: Require existing supported installed Chrome without modifying host policy
+        run: |
+          google-chrome --version
+          test -x /usr/bin/xvfb-run
+          node --check scripts/hosted-highlight/run.mjs
+      - name: Verify native sidebar highlight with unchanged sandbox
+        run: |
+          set -o pipefail
+          mkdir -p test-results/hosted-highlight
+          xvfb-run --auto-servernum node scripts/hosted-highlight/run.mjs 2>&1 | tee test-results/hosted-highlight/runner.log
+      - name: Retain synthetic success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: isolated-native-highlight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/hosted-highlight/
+          retention-days: 7
+          if-no-files-found: warn

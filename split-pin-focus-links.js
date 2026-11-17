@@ -100,6 +100,28 @@ async function guard(store, request, proof, deps, expected, postFocus = false) {
     if (!same(focusTarget(await deps.resolve()),proof.target)) throw changed();
     return postFocus ? { pair, loading } : pair;
 }
+// This is only a verified rendering hint. It is never a live ownership
+// witness and must not be read by Today suppression or mutating actions.
+export function captureFocusLinkDisplayRevision(store) {
+    try {
+        const m = manager(store), revision = m.revision;
+        return () => m.revision === revision;
+    } catch {
+        return () => false;
+    }
+}
+export async function focusLinkedTabIdsForDisplay(store, request, deps, record) {
+    if (!valid(record, keyOf(request)) || record.phase !== 'linked') return [];
+    try {
+        const m = manager(store), revision = m.revision;
+        const pair = await guard(store, request, { target: record.target, entries: record.entries }, deps, record);
+        fence(m, revision);
+        return pair.map(tab => tab.id);
+    } catch {
+        return []; // Retain the current Today presentation on any uncertainty.
+    }
+}
+
 export async function runSplitFocusAction(store, request, deps) {
     const m = manager(store), key = keyOf(request);
     if (request.action === 'attachCandidates') {

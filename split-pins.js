@@ -1,4 +1,4 @@
-import { SPLIT_PIN_FOCUS_LINKS_KEY, readSplitPinFocusLinks, runSplitFocusAction, focusLinkedPair } from './split-pin-focus-links.js';
+import { SPLIT_PIN_FOCUS_LINKS_KEY, readSplitPinFocusLinks, runSplitFocusAction, focusLinkedPair, focusLinkedTabIdsForDisplay, captureFocusLinkDisplayRevision } from './split-pin-focus-links.js';
 export { SPLIT_PIN_FOCUS_LINKS_KEY };
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { SAVED_SPLITS_KEY, readSavedSplitRecipes, runSavedSplitActionCore } from './saved-splits.js';
@@ -298,6 +298,7 @@ export function runSplitPinAction(store, request) {
         }
         if (request.action === 'list') {
             const pins = [];
+            let focusDisplayIsCurrent;
             const focusLinks = await readSplitPinFocusLinks();
             const tree = await presentationTree(space), bookmarks = new Map();
             const visit = node => { bookmarks.set(node.id, node); for (const child of node.children || []) visit(child); }; visit(tree);
@@ -312,9 +313,24 @@ export function runSplitPinAction(store, request) {
                 const recipe = recipes.find(r => r.id === pin.recipeId), bookmark = bookmarks.get(pin.bookmarkId);
                 if (!recipe || !bookmark || bookmark.url !== splitPinUrl(recipe.id)) continue;
                 const live = await witness(store, request, { recipe, bookmark, pin, space }, observation);
-                pins.push({ focusLinkPresent: Object.prototype.hasOwnProperty.call(focusLinks, `${request.windowId}:${pin.bookmarkId}`), bookmarkId: pin.bookmarkId, name: bookmark.title, tabIds: live?.tabIds || [], splitViewId: live?.splitViewId ?? null, releaseAllowed: Boolean(live) && !blockedRelease.has(pin.bookmarkId), entries: live ? observation.tabs.filter(t => live.tabIds.includes(t.id)).sort((a,b) => a.index - b.index).map(tabEntry) : [] });
+                const scopedRequest = { ...request, bookmarkId: pin.bookmarkId };
+                const focusKey = `${request.windowId}:${pin.bookmarkId}`;
+                const focusLinkPresent = Object.prototype.hasOwnProperty.call(focusLinks, focusKey);
+                if (!live && focusLinkPresent) focusDisplayIsCurrent ??= captureFocusLinkDisplayRevision(store);
+                const focusLinkedTabIds = !live && focusLinkPresent
+                    ? await focusLinkedTabIdsForDisplay(store, scopedRequest, {
+                        resolve: async () => resolve(store, scopedRequest, await readState(), await readSavedSplitRecipes()),
+                        exactPair: r => exactPair(store, r)
+                    }, focusLinks[focusKey])
+                    : [];
+                pins.push({ focusLinkPresent, focusLinkedTabIds, bookmarkId: pin.bookmarkId, name: bookmark.title, tabIds: live?.tabIds || [], splitViewId: live?.splitViewId ?? null, releaseAllowed: Boolean(live) && !blockedRelease.has(pin.bookmarkId), entries: live ? observation.tabs.filter(t => live.tabIds.includes(t.id)).sort((a,b) => a.index - b.index).map(tabEntry) : [] });
             }
             await context(store, request);
+            // A late change during the remaining list/Space reads withdraws
+            // advisory decoration, not the existing pin action semantics.
+            if (focusDisplayIsCurrent && !focusDisplayIsCurrent()) {
+                for (const pin of pins) pin.focusLinkedTabIds = [];
+            }
             return { pins };
         }
         const target = await resolve(store, request, state, recipes);

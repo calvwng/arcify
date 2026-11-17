@@ -15,6 +15,11 @@ changed split, missing receipt or uncertain metadata reveals Today rather than
 hiding or closing an unrelated page. Witnesses are session-only; browser restart
 reattachment is not implemented by this change.
 
+An exactly witnessed live pin is highlighted only while one of its two panes is
+selected in the current Space/window. Selecting a regular tab clears the pin
+highlight while leaving the pin open. The highlight is presentation only; it
+never establishes an ownership witness.
+
 A live pair can be reordered or placed in folders within its Space. Moving its
 pin (or containing folder) to another Space is currently refused with a clear
 close-first message while any witnessed member remains open. This is a safety
@@ -119,7 +124,20 @@ proof its original tabs left that window, its Space/root disappeared, its exact
 marker/recipe disappeared, or its original marker ID is absent. It is not deleted
 or adopted by URL. If obsolete scope revives, overlapping links fail closed until
 explicit unlink. Same pin instances in different windows remain independent.
-This is not automatic inline reattachment or cold-restart recovery.
+This is not automatic inline reattachment or cold-restart recovery. After
+relaunch the browser can restore the native split without carrying the
+extension's link to its newly assigned tab IDs. Use **Attach open Split View**
+to select the intended current pair again. URL, title and tab order are not
+proof those are the historical panes, even when there is only one apparent
+match. Until an exact association is available, the panes remain visible
+in Today.
+
+After explicit attachment, a separate read-only indicator can show when a
+linked pane is selected. It is not the identity or active highlight of a live
+owned pin. The indicator requires a valid current session receipt and exact
+native pane membership; missing, stale, overlapping or uncertain evidence
+withdraws it. Both Today panes remain available, and close, move and release
+authority is unchanged.
 
 Focus verification treats well-formed title/favicon-only tab updates as cosmetic,
 without relaxing the chooser or attachment fence. All exact pair, ownership,

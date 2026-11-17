@@ -71,6 +71,7 @@ import {
     setupDOMElements,
     showSpaceNameInput,
     activateTabInDOM,
+    compoundPinHighlights,
     activateSpaceInDOM,
     showTabContextMenu,
     closeTabContextMenu,
@@ -2307,6 +2308,7 @@ async function createNewFolder(spaceElement, parentFolderElement = null) {
 const spaceRenderTasks = new Map();
 const spaceRenderRequests = new Map();
 const displayChanges = observeDisplayChanges();
+compoundPinHighlights.observe(chrome, () => refreshCoordinator.invalidateActiveView());
 const savedSectionChanges = observeSavedSectionChanges();
 const committedSavedSections = new CommittedSavedSections();
 let committedDisplayIsCurrent = null;
@@ -2340,6 +2342,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
     Logger.log('Space bookmarks in space:', space.spaceBookmarks);
     let representedPinnedTabIds = new Set();
     const displayIsCurrent = displayChanges.capture();
+    const compoundIsCurrent = compoundPinHighlights.capture();
     const todayOrderInverted = await Utils.getTodayOrderInverted();
     const invertTabOrder = await Utils.getInvertTabOrder();
     const tabs = (await getOwnedTabs(space.id)).filter(t => !t.pinned);
@@ -2638,6 +2641,7 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
         committedSavedSections.commit(pinnedContainer, savedSignature, representedPinnedTabIds, true);
     }
     tempContainer.appendChild(tempFragment);
+    compoundPinHighlights.publish(pinnedContainer, displayMetadata.splitPins, compoundIsCurrent);
     committedDisplayIsCurrent = displayIsCurrent;
     tempContainer.dataset.todayOrderInverted = String(todayOrderInverted);
     pinnedContainer.dataset.savedOrderInverted = String(invertTabOrder);

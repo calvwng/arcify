@@ -1,0 +1,6 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {assertHighlightCheckpoint} from './checks.mjs';
+const before={tabs:[{id:1,windowId:1,splitViewId:7,active:false},{id:2,windowId:1,splitViewId:7,active:false},{id:3,windowId:1,splitViewId:-1,active:true}],session:{pin:{tabIds:[1,2],splitViewId:7}}};
+for(const id of [1,2,3])test(`native selection ${id} matches strong compound state`,()=>{const after=structuredClone(before);after.tabs.forEach(t=>t.active=t.id===id);assertHighlightCheckpoint(before,after,{active:id!==3,live:'true',today:[0,0]},id,id!==3);});
+for(const fault of ['duplicate','wrong-id','split','witness','inactive','highlight','today'])test(`rejects false-positive ${fault}`,()=>{const after=structuredClone(before);after.tabs.forEach(t=>t.active=t.id===1);const rendered={active:true,live:'true',today:[0,0]};if(fault==='duplicate')after.tabs.push({...after.tabs[0],id:4});if(fault==='wrong-id')after.tabs[0].id=4;if(fault==='split')after.tabs[0].splitViewId=9;if(fault==='witness')after.session={};if(fault==='inactive')after.tabs[0].active=false;if(fault==='highlight')rendered.active=false;if(fault==='today')rendered.today=[1,0];assert.throws(()=>assertHighlightCheckpoint(before,after,rendered,1,true));});

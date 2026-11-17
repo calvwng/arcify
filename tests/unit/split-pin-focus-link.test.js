@@ -17,7 +17,7 @@ function fixture() {
         async persist(options = {}) { effects.push('persist'); await hooks.persist?.(); await options.beforeWrite?.(); effects.push('persistCommitted'); } };
     globalThis.chrome = {
         runtime: { id: 'test', getURL: p => `chrome-extension://test/${p}`, onMessage: { addListener: fn => listeners.push(fn) } },
-        windows: { async get(id) { return { id, type: 'normal', incognito: false, ...hooks.window }; } },
+        windows: { async get(id) { await hooks.windowGet?.(); return { id, type: 'normal', incognito: false, ...hooks.window }; } },
         storage: { local: {
             async get(key) { effects.push(['read', key]); return Object.fromEntries([].concat(key).map(k=>[k,k === 'pinnedTabStatesById' ? hooks.bindings || {} : copy(data[k])])); },
             async set(values) { effects.push('save'); Object.assign(data, copy(values)); await hooks.localSet?.(values); }
@@ -58,10 +58,50 @@ const noCreates=f=>assert.equal(f.effects.filter(e=>e[0]==='create').length,0);
 test('explicit focus link never becomes strong witness or hides Today; worker replacement focuses exact pair',async()=>{
  const f=await ready(); const before=structuredClone(f.data); await link(f);
  assert.deepEqual(f.data,before); assert.equal(f.session[SPLIT_PIN_SESSION_KEY],undefined);
- assert.deepEqual((await f.action('list')).pins[0].tabIds,[]);
+ const presented=(await f.action('list')).pins[0];
+ assert.deepEqual(presented.tabIds,[]); assert.deepEqual(presented.focusLinkedTabIds,[1,2]);
+ assert.equal(presented.releaseAllowed,false);
  f.store={...f.store}; f.action=(action,extra={})=>runSplitPinAction(f.store,{...f.request,type:'splitPinAction',action,bookmarkId:f.bookmarkId,...extra});
  assert.equal((await f.action('activate')).focusOnly,true); noCreates(f);
  await assert.rejects(f.action('close')); assert.equal(f.tabs.length,2);
+});
+test('verified advisory rendering is exact and read-only, even with same-URL native decoys',async()=>{
+ const f=await ready();
+ f.tabs.push(...f.tabs.map((t,i)=>({...t,id:3+i,index:2+i,splitViewId:71})));
+ f.store.spaces[0].temporaryTabs.push(3,4);
+ const choices=await f.action('attachCandidates');
+ assert.equal(choices.candidates.length,2);
+ await f.action('attach',{candidateToken:choices.candidates.find(c=>c.entries[0].tabId===1).candidateToken});
+ const before=structuredClone({session:f.session,data:f.data,tabs:f.tabs,spaces:f.store.spaces});
+ const pin=(await f.action('list')).pins[0];
+ assert.deepEqual(pin.focusLinkedTabIds,[1,2]); assert.deepEqual(pin.tabIds,[]); assert.equal(pin.releaseAllowed,false);
+ assert.deepEqual({session:f.session,data:f.data,tabs:f.tabs,spaces:f.store.spaces},before);
+ await assert.rejects(f.action('close')); noCreates(f);
+});
+test('a native lifecycle change during the final list context withdraws the advisory decoration',async()=>{
+ const f=await ready(); await link(f);
+ let reads=0; f.hooks.windowGet=()=>{ reads++; };
+ assert.deepEqual((await f.action('list')).pins[0].focusLinkedTabIds,[1,2]);
+ const finalRead=reads; reads=0;
+ f.hooks.windowGet=()=>{
+  if(++reads!==finalRead) return;
+  f.tabs[1].splitViewId=-1;
+  for(const cb of chrome.tabs.onUpdated.callbacks) cb(2,{splitViewId:-1});
+ };
+ const pin=(await f.action('list')).pins[0];
+ assert.equal(reads,finalRead); assert.deepEqual(pin.focusLinkedTabIds,[]); noCreates(f);
+});
+for (const variant of ['cold','pending','dissolved','navigating','changed-marker','overlapping-witness']) test(`advisory rendering is absent for ${variant}`, async()=>{
+ const f=await ready(); await link(f);
+ const key=`10:${f.bookmarkId}`;
+ if(variant==='cold') delete f.session[SPLIT_PIN_FOCUS_LINKS_KEY];
+ if(variant==='pending')f.session[SPLIT_PIN_FOCUS_LINKS_KEY][key].phase='pending';
+ if(variant==='dissolved')f.tabs[1].splitViewId=-1;
+ if(variant==='navigating')f.tabs[0].pendingUrl='https://destination.test/pending';
+ if(variant==='changed-marker')f.nodes.find(n=>n.id===f.bookmarkId).title='Changed';
+ if(variant==='overlapping-witness')f.session[SPLIT_PIN_SESSION_KEY]={'10:other':{bookmarkId:'other',windowId:10,tabIds:[1,2],splitViewId:70}};
+ const pin=(await f.action('list')).pins[0];
+ assert.deepEqual(pin.focusLinkedTabIds,[]); assert.deepEqual(pin.tabIds,[]); assert.equal(pin.releaseAllowed,false); noCreates(f);
 });
 for (const kind of ['dissolve','navigation','private','loading','binding','global','root','pin','space','removed']) test(`stale ${kind} choice is rejected`,async()=>{
  const f=await ready(), c=await f.action('attachCandidates');
