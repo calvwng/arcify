@@ -6,9 +6,11 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import puppeteer from '../paired-chrome-runtime/index.mjs';
-import { snapshotChromeLaunchOptions } from '../paired-chrome-browser-restart.mjs';
+import { restartObservedBrowser, snapshotChromeLaunchOptions } from '../paired-chrome-browser-restart.mjs';
 import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
     validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from '../paired-chrome-sandbox.mjs';
+import { reloadPackagedExtensionForPersistence } from '../packaged-layout-exhaustion-registration.mjs';
+import { findInstalledExtension } from '../paired-chrome-extensions.mjs';
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.env.CI, 'true');
 validateNamespaceLaunchEnvironment(process.env, process.getuid?.());
 const output=resolve('test-results/hosted-restored-trace'); await mkdir(output,{recursive:true});
@@ -27,11 +29,14 @@ try {
     validateChromeLaunchArguments(browser.process().spawnargs);
     report.process=await inspectChromeProcessRuntime(browser.process().pid);
     report.version=await browser.version();assert.equal(report.version,`Chrome/${report.runtime.package.browserVersion}`);
-    const sandbox=await browser.newPage();await sandbox.goto('chrome://sandbox/');
-    await sandbox.waitForFunction(()=>document.querySelector('#sandbox-status tr')&&document.getElementById('evaluation')?.textContent.trim());
-    report.sandbox=await sandbox.evaluate(()=>({url:location.href,title:document.title,bodyText:document.body.innerText,evaluation:document.getElementById('evaluation')?.textContent||'',rows:[...document.querySelectorAll('#sandbox-status tr')].map(row=>{const c=row.querySelectorAll('td');return{name:c[0]?.textContent||'',value:c[1]?.textContent||''};})}));
-    await sandbox.screenshot({path:resolve(output,'sandbox.png')});await save();
-    validateChromeNamespaceSandboxStatus(report.sandbox);await sandbox.close();
+    async function verifySandbox(label) {
+        const sandbox=await browser.newPage();await sandbox.goto('chrome://sandbox/');
+        await sandbox.waitForFunction(()=>document.querySelector('#sandbox-status tr')&&document.getElementById('evaluation')?.textContent.trim());
+        const status=await sandbox.evaluate(()=>({url:location.href,title:document.title,bodyText:document.body.innerText,evaluation:document.getElementById('evaluation')?.textContent||'',rows:[...document.querySelectorAll('#sandbox-status tr')].map(row=>{const c=row.querySelectorAll('td');return{name:c[0]?.textContent||'',value:c[1]?.textContent||''};})}));
+        await sandbox.screenshot({path:resolve(output,`${label}-sandbox.png`)});await save();
+        validateChromeNamespaceSandboxStatus(status);await sandbox.close();return status;
+    }
+    report.sandbox=await verifySandbox("initial");
     const id=await browser.installExtension(resolve('dist'));report.extensionId=id;
     await browser.waitForTarget(t=>t.type()==='service_worker'&&t.url()===`chrome-extension://${id}/background.js`);
     let api=await browser.newPage();await api.goto(`chrome-extension://${id}/options.html`);
@@ -99,19 +104,88 @@ try {
         report.checkpoints.push({label,...state,cancelPreserved:true,today:todayBefore});await save();return state;
     }
     await inspectPicker('same-session','same-or-invalid-session');
-    // Explicit synthetic session-boundary control, NOT a browser restart.
-    // Keep the native pair and saved hint exactly as observed; remove only
-    // the named session nonce in this disposable synthetic fixture.
-    const boundaryBefore=await conservation();
-    assert.equal(typeof boundaryBefore.session.splitPinRestoredHintSessionV1,'string');
-    await api.evaluate(()=>chrome.storage.session.remove('splitPinRestoredHintSessionV1'));
-    const boundaryAfter=await conservation();
-    const expectedBoundary=structuredClone(boundaryBefore);
-    delete expectedBoundary.session.splitPinRestoredHintSessionV1;
-    assert.deepEqual(boundaryAfter,expectedBoundary,'Synthetic boundary changes only the named nonce');
-    report.syntheticBoundary={removedOnly:'splitPinRestoredHintSessionV1',nativePairAndSavedHintPreserved:true,realRestart:false};
-    await inspectPicker('simulated-session-boundary','suggested');
-    report.cold={status:'not-attempted',reason:'Synthetic session-boundary control only; no real cold or unloaded coverage'};
-    report.status='passed-synthetic-negative-and-positive-controls';
+    const oldPid=browser.process().pid;
+    const savedHint=()=>api.evaluate(async id=>{
+        const snapshot=(await chrome.storage.local.get('splitPinRestoredHintsV1')).splitPinRestoredHintsV1;
+        return snapshot?.records?.find(r=>r.bookmarkId===id);
+    },pin.bookmarkId);
+    const nativeFixture=()=>api.evaluate(async(base)=>(await chrome.tabs.query({}))
+        .filter(t=>[base+'/first',base+'/second',base+'/neutral'].includes(t.pendingUrl||t.url))
+        .map(({id,windowId,splitViewId,index,active,url,pendingUrl})=>({id,windowId,splitViewId,index,active,url:url||pendingUrl}))
+        .sort((a,b)=>a.index-b.index),base);
+    const before={hint:await savedHint(),native:await nativeFixture(),session:(await conservation()).session};
+    assert(before.hint);assert.equal(before.native.length,3);
+    assert.equal(typeof before.session.splitPinRestoredHintSessionV1,'string');
+    const manifest=JSON.parse(await readFile(resolve('dist/manifest.json'),'utf8'));
+    const expected={id,name:manifest.name,version:manifest.version,path:resolve('dist')};
+    const reloaded=await reloadPackagedExtensionForPersistence({browser,control:api,expected,record:async event=>{
+        (report.reloadEvents||=[]).push(event);await save();
+    }});
+    api=reloaded.control;
+    assert.equal(browser.process().pid,oldPid,'Same browser PID after a real extension runtime reload');
+    assert.deepEqual(await nativeFixture(),before.native,'Reload must keep exact synthetic native fixtures');
+    assert.deepEqual(await savedHint(),before.hint,'Saved hint must survive reload');
+    const sessionAfterReload=(await conservation()).session;
+    assert.notEqual(sessionAfterReload.splitPinRestoredHintSessionV1,before.session.splitPinRestoredHintSessionV1);
+    report.extensionReload={realReload:true,sameBrowserPid:true,sameNativeFixture:true,persistedHint:true,sessionChanged:true};
+    await save();
+    async function openReplacementPanel() {
+        await api.evaluate(windowId=>{
+            globalThis.highlightPanelEvents=[];
+            chrome.sidePanel.onOpened.addListener(info=>globalThis.highlightPanelEvents.push(info));
+            const button=document.createElement('button');button.id='open-highlight-panel';
+            button.textContent='Open test sidebar';button.style='position:fixed;top:0;left:0;z-index:2147483647';
+            button.addEventListener('click',()=>chrome.sidePanel.open({windowId}));document.body.appendChild(button);
+        },fixture.windowId);
+        await api.bringToFront();await api.click('#open-highlight-panel');
+        await poll(()=>api.evaluate(async()=>await chrome.runtime.getContexts({contextTypes:['SIDE_PANEL']})),contexts=>contexts.some(c=>c.documentUrl===`chrome-extension://${id}/sidebar.html`),'replacement native sidebar');
+        const target=await browser.waitForTarget(t=>t.url()===`chrome-extension://${id}/sidebar.html`);
+        panel=await target.asPage();
+        assert.deepEqual(await panel.evaluate(async()=>({ordinaryTab:!!(await chrome.tabs.getCurrent()),windowId:(await chrome.windows.getCurrent()).id})),{ordinaryTab:false,windowId:fixture.windowId});
+        await panel.waitForSelector(`${selector}[data-split-live="false"]`,{visible:true});
+    }
+    await openReplacementPanel();
+    await inspectPicker('real-extension-reload');
+    try {
+        const restart=await restartObservedBrowser({
+            browser,launchOptions:launch,launch:async options=>puppeteer.launch(structuredClone(options)),
+            revalidate:async b=>{
+                browser=b;
+                await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);
+                await inspectChromeProcessRuntime(browser.process().pid);
+                assert.equal(await browser.version(),report.version);
+                report.coldSandbox=await verifySandbox('cold');
+                const connection=await browser.target().createCDPSession();
+                try {
+                    const entries=(await connection.send('Extensions.getExtensions')).extensions;
+                    assert.equal(findInstalledExtension(entries,expected)?.enabled,true,'Exact diagnostic not enabled after restart; do not reload or reinstall');
+                } finally {await connection.detach();}
+                return {runtime:true,sandbox:true,registry:true};
+            },
+            record:async event=>{(report.coldEvents||=[]).push(event);await save();}
+        });
+        browser=restart.browser;
+        report.cold={realRestart:true,status:'native-state-check'};
+        await save();
+        api=await browser.newPage();await api.goto(`chrome-extension://${id}/options.html`);
+        const restored=await poll(nativeFixture,entries=>entries.length===3,'three original synthetic document URLs restored without opening them');
+        const tagged=suffix=>restored.find(t=>t.url===base+suffix);
+        const left=tagged('/first'),right=tagged('/second'),neutral=tagged('/neutral');
+        assert(left&&right&&neutral&&left.windowId===right.windowId&&left.windowId===neutral.windowId,'Restored fixture must be in one window');
+        assert(Number.isSafeInteger(left.splitViewId)&&left.splitViewId>=0&&left.splitViewId===right.splitViewId,'Restored panes must still be a native split');
+        assert.notEqual(neutral.splitViewId,left.splitViewId);
+        fixture={...fixture,windowId:left.windowId,ids:[left.id,right.id,neutral.id]};
+        report.cold.native={before:before.native,after:restored};
+        assert.deepEqual(await savedHint(),before.hint,'Cold restart must preserve exact original persisted hint');
+        await openReplacementPanel();
+        await inspectPicker('real-browser-restart');
+        report.cold.status='picker-observed';
+        report.status='passed-real-lifecycle-observations';
+    } catch(error) {
+        if(error.restartedBrowser)browser=error.restartedBrowser;
+        report.cold={...report.cold,status:'inconclusive',reason:error.message,
+            cleanProcessRestart:!!report.coldEvents?.some(event=>event.phase==='original-exited')&&!!report.coldEvents?.some(event=>event.phase==='new-process')};
+        report.status='passed-extension-reload-cold-inconclusive';
+    }
 } catch(error) {report.status='failed';report.error={message:error.message,stack:error.stack};throw error;}
 finally {await save();await browser?.close();if(server)await new Promise(r=>server.close(r));}
