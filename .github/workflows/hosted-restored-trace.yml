@@ -9,7 +9,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   native-picker-trace:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     env:
       CI: 'true'
@@ -35,17 +35,29 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           npm run build
           node --input-type=module -e "import{verifyDist}from'./scripts/hosted-restored-trace/checks.mjs';await verifyDist('./dist','./scripts/hosted-restored-trace/expected-dist.sha256')"
-      - name: Require unchanged installed browser and native display
+      - name: Verify and unpack official Chrome for Testing in runner temp
         run: |
-          google-chrome --version
+          CFT_VERSION=157.0.8103.50
+          CFT_DIR="$(mktemp -d "$RUNNER_TEMP/chrome-for-testing.XXXXXXXX")"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 "https://storage.googleapis.com/chrome-for-testing-public/$CFT_VERSION/linux64/chrome-linux64.zip" -o "$CFT_DIR/chrome.zip"
+          printf '%s  %s\n' 'd17167bc092eb495a3b768c7467f27e35f625aa03834233a1663af67dcb668c9' "$CFT_DIR/chrome.zip" | sha256sum --check
+          unzip -q "$CFT_DIR/chrome.zip" -d "$CFT_DIR"
+          CFT_CHROME="$CFT_DIR/chrome-linux64/chrome"
+          test -x "$CFT_CHROME"
+          test ! -u "$CFT_CHROME"
+          test ! -g "$CFT_CHROME"
+          "$CFT_CHROME" --version
+          printf 'ARCF_CFT_BINARY=%s\nARCF_CFT_VERSION=%s\n' "$CFT_CHROME" "$CFT_VERSION" >> "$GITHUB_ENV"
+      - name: Require native display
+        run: |
           test -x /usr/bin/xvfb-run
           node --check scripts/hosted-restored-trace/run.mjs
-      - name: Run native picker negative and simulated session-boundary positive controls
+      - name: Run native picker baseline, real extension reload, and real browser restart
         run: |
           set -o pipefail
           mkdir -p test-results/hosted-restored-trace
           xvfb-run --auto-servernum node scripts/hosted-restored-trace/run.mjs 2>&1 | tee test-results/hosted-restored-trace/runner.log
-      - name: Retain explicitly synthetic control evidence
+      - name: Retain disposable lifecycle evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

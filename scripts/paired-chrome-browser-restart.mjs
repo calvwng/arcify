@@ -32,8 +32,8 @@ function liveProcess(browser, isProcessAlive) {
     assert.equal(isProcessAlive(child.pid), true, 'Browser process PID must still be live.');
     return child;
 }
-function processEvidence(child, userDataDir) {
-    assert.equal(child.spawnfile, CHROME_EXECUTABLE, 'Restart must retain the fixed installed Chrome executable.');
+function processEvidence(child, userDataDir, executable = CHROME_EXECUTABLE) {
+    assert.equal(child.spawnfile, executable, 'Restart must retain the expected Chrome executable.');
     validateChromeLaunchArguments(child.spawnargs);
     assert.deepEqual(child.spawnargs.filter(arg => /^--?user-data-dir(?:=|$)/.test(arg.trim())),
         [`--user-data-dir=${userDataDir}`], 'Chrome must use exactly the original disposable profile.');
@@ -87,7 +87,7 @@ async function closeAndObserveExit(browser, child, isProcessAlive, timeout, obse
  * The timeout bounds close/exit only; the original launch timeout is unchanged.
  */
 export async function restartObservedBrowser({ browser, launchOptions, launch, revalidate, record }, {
-    timeout = 30_000, isProcessAlive = processAlive
+    timeout = 30_000, isProcessAlive = processAlive, expectedExecutable = CHROME_EXECUTABLE
 } = {}) {
     const evidence = { status: 'running', phase: 'preflight', observations: [] };
     let restarted;
@@ -103,14 +103,19 @@ export async function restartObservedBrowser({ browser, launchOptions, launch, r
         }
         assert(Number.isFinite(timeout) && timeout > 0, 'Browser close timeout must be positive.');
         const options = snapshotChromeLaunchOptions(launchOptions);
-        assert.equal(options.channel, 'chrome', 'Restart must retain the installed stable Chrome channel.');
+        if (expectedExecutable === CHROME_EXECUTABLE) assert.equal(options.channel, 'chrome', 'Restart must retain the installed stable Chrome channel.');
+        else {
+            assert(isAbsolute(expectedExecutable), 'Alternate test executable must use its absolute path.');
+            assert.equal(options.channel, undefined);
+            assert.equal(options.executablePath, expectedExecutable, 'Restart must retain the exact alternate test executable.');
+        }
         assert.equal(options.headless, false, 'Restart must retain headed Chrome.');
         assert.equal(options.pipe, true, 'Restart must retain the original pipe transport.');
         assert.equal(options.enableExtensions, true, 'Restart must retain extension debugging support.');
         assert(typeof options.userDataDir === 'string' && isAbsolute(options.userDataDir), 'Original disposable profile path is required.');
         validateChromeLaunchArguments(options.args || []);
         const original = liveProcess(browser, isProcessAlive);
-        evidence.original = processEvidence(original, options.userDataDir);
+        evidence.original = processEvidence(original, options.userDataDir, expectedExecutable);
         evidence.userDataDir = options.userDataDir;
         await checkpoint('before-close', { original: evidence.original });
         evidence.phase = 'closing';
@@ -125,7 +130,7 @@ export async function restartObservedBrowser({ browser, launchOptions, launch, r
         const next = liveProcess(restarted, isProcessAlive);
         assert.notEqual(next, original, 'Restart must create a new child process.');
         assert.notEqual(next.pid, original.pid, 'Restart must expose a distinct live process PID.');
-        evidence.restarted = processEvidence(next, options.userDataDir);
+        evidence.restarted = processEvidence(next, options.userDataDir, expectedExecutable);
         assert.deepEqual(evidence.restarted.arguments, evidence.original.arguments, 'Actual Chrome launch arguments must remain unchanged on restart.');
         await checkpoint('new-process', { restarted: evidence.restarted });
         evidence.phase = 'revalidating';

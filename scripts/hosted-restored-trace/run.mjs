@@ -2,17 +2,22 @@
 import assert from 'node:assert/strict';
 import { verifyDist, assertPickerReadout } from './checks.mjs';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, lstat, readFile, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { resolve, isAbsolute } from 'node:path';
 import puppeteer from '../paired-chrome-runtime/index.mjs';
 import { restartObservedBrowser, snapshotChromeLaunchOptions } from '../paired-chrome-browser-restart.mjs';
-import { CHROME_EXECUTABLE, inspectInstalledChromeRuntime, inspectChromeProcessRuntime,
-    validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from '../paired-chrome-sandbox.mjs';
+import { validateChromeLaunchArguments, validateNamespaceLaunchEnvironment, validateChromeNamespaceSandboxStatus } from '../paired-chrome-sandbox.mjs';
 import { reloadPackagedExtensionForPersistence } from '../packaged-layout-exhaustion-registration.mjs';
 import { findInstalledExtension } from '../paired-chrome-extensions.mjs';
 assert.equal(process.env.GITHUB_ACTIONS, 'true'); assert.equal(process.env.CI, 'true');
 validateNamespaceLaunchEnvironment(process.env, process.getuid?.());
+const executable=process.env.ARCF_CFT_BINARY, version=process.env.ARCF_CFT_VERSION;
+assert(isAbsolute(executable)&&executable.startsWith(resolve(process.env.RUNNER_TEMP,'chrome-for-testing.')));
+assert.equal(executable,await realpath(executable));
+assert.equal(version,'157.0.8103.50');
+const executableStat=await lstat(executable);
+assert(executableStat.isFile()&&!(executableStat.mode&0o6000),'Official test browser must be ordinary unprivileged executable');
 const output=resolve('test-results/hosted-restored-trace'); await mkdir(output,{recursive:true});
 const report={status:'running',scope:'Native Chromium QA restored-match picker trace, not Windows/Helium acceptance',checkpoints:[],input:'Trusted native sidebar pin/picker/Cancel; synthetic same-session receipt-loss setup explicitly recorded'};
 const save=()=>writeFile(resolve(output,'report.json'),JSON.stringify(report,null,2));
@@ -20,15 +25,21 @@ const poll=async(fn,predicate,label)=>{const start=Date.now();while(Date.now()-s
 let browser, server;
 try {
     report.dist=await verifyDist(resolve('dist'),resolve('scripts/hosted-restored-trace/expected-dist.sha256'));
-    report.runtime=await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);
+    report.runtime={source:'Official Chrome for Testing pinned archive verified by workflow SHA-256',executable,version};
     const profile=await mkdtemp(resolve(process.env.RUNNER_TEMP||tmpdir(),'highlight-'));
-    const launch=snapshotChromeLaunchOptions({channel:'chrome',headless:false,pipe:true,enableExtensions:true,dumpio:true,userDataDir:profile,timeout:60000,protocolTimeout:30000,defaultViewport:{width:1280,height:900},args:['--restore-last-session']});
+    const launch=snapshotChromeLaunchOptions({executablePath:executable,headless:false,pipe:true,enableExtensions:true,dumpio:true,userDataDir:profile,timeout:60000,protocolTimeout:30000,defaultViewport:{width:1280,height:900},args:['--restore-last-session',`--load-extension=${resolve('dist')}`]});
     validateChromeLaunchArguments(await puppeteer.defaultArgs(structuredClone(launch)));
     browser=await puppeteer.launch(structuredClone(launch));
-    assert.equal(browser.process().spawnfile,CHROME_EXECUTABLE);
-    validateChromeLaunchArguments(browser.process().spawnargs);
-    report.process=await inspectChromeProcessRuntime(browser.process().pid);
-    report.version=await browser.version();assert.equal(report.version,`Chrome/${report.runtime.package.browserVersion}`);
+    async function describeProcess(b) {
+        const p=b.process();
+        assert.equal(p.spawnfile,executable);
+        assert.equal(await realpath(`/proc/${p.pid}/exe`),executable);
+        validateChromeLaunchArguments(p.spawnargs);
+        assert.equal(await b.version(),`Chrome/${version}`);
+        return {pid:p.pid,executable,browserVersion:await b.version()};
+    }
+    report.process=await describeProcess(browser);
+    report.version=report.process.browserVersion;
     async function verifySandbox(label) {
         const sandbox=await browser.newPage();await sandbox.goto('chrome://sandbox/');
         await sandbox.waitForFunction(()=>document.querySelector('#sandbox-status tr')&&document.getElementById('evaluation')?.textContent.trim());
@@ -37,7 +48,14 @@ try {
         validateChromeNamespaceSandboxStatus(status);await sandbox.close();return status;
     }
     report.sandbox=await verifySandbox("initial");
-    const id=await browser.installExtension(resolve('dist'));report.extensionId=id;
+    async function registry(b){
+        const connection=await b.target().createCDPSession();
+        try { return (await connection.send('Extensions.getExtensions')).extensions; }
+        finally {await connection.detach();}
+    }
+    const initial=await poll(()=>registry(browser),entries=>entries.some(e=>e.path===resolve('dist')&&e.enabled),'exact unpacked extension installed from standard Chrome for Testing startup');
+    const entry=initial.find(e=>e.path===resolve('dist'));
+    const id=entry.id;report.extensionId=id;
     await browser.waitForTarget(t=>t.type()==='service_worker'&&t.url()===`chrome-extension://${id}/background.js`);
     let api=await browser.newPage();await api.goto(`chrome-extension://${id}/options.html`);
     await poll(()=>api.evaluate(()=>chrome.runtime.sendMessage({type:'spaceStore',action:'get'})),r=>r.success&&r.spaces?.some(s=>s.bookmarkFolderId),'initialized SpaceStore');
@@ -151,9 +169,7 @@ try {
             browser,launchOptions:launch,launch:async options=>puppeteer.launch(structuredClone(options)),
             revalidate:async b=>{
                 browser=b;
-                await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);
-                await inspectChromeProcessRuntime(browser.process().pid);
-                assert.equal(await browser.version(),report.version);
+                report.coldProcess=await describeProcess(browser);
                 report.coldSandbox=await verifySandbox('cold');
                 const connection=await browser.target().createCDPSession();
                 try {
@@ -163,7 +179,7 @@ try {
                 return {runtime:true,sandbox:true,registry:true};
             },
             record:async event=>{(report.coldEvents||=[]).push(event);await save();}
-        });
+        },{expectedExecutable:executable});
         browser=restart.browser;
         report.cold={realRestart:true,status:'native-state-check'};
         await save();
