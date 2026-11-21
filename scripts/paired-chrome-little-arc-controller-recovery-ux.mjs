@@ -17,8 +17,8 @@ export function assertControllerRecovery({before,after,oldRecord,documentBefore,
  const created=events.filter(e=>e.type==='tabs.onCreated');assert.equal(created.length,1);assert.equal(created[0].data[0].id,record.controllerTabId);assert.equal(created[0].data[0].windowId,record.windowId);
  assert.equal(events.filter(e=>e.type==='tabs.onRemoved'&&e.data[0]===oldRecord.controllerTabId).length,1);
  const requests=events.filter(e=>e.type==='external'&&e.data.message.type==='arcify-little-arc-header-v1');const recovery=requests.filter(e=>e.data.message.action==='recoverControls');assert.equal(recovery.length,1);
- for(const e of requests){assert.equal(e.data.sender.id,peerId);assert.deepEqual(e.data.message.source,{tabId:record.tabId,windowId:record.windowId,url:documentBefore.url});assert(['inspect','recoverControls'].includes(e.data.message.action),'Recovery cannot place, review or launch a page.');}
- assert.equal(requests.at(-1).data.message.action,'recoverControls');assert.equal(requests.at(-2).data.message.action,'inspect');
+ for(const e of requests){assert.equal(e.data.sender.id,peerId);assert.deepEqual(e.data.message.source,{tabId:record.tabId,windowId:record.windowId,url:documentBefore.url});assert(['inspect','inspectSpaceIcons','recoverControls'].includes(e.data.message.action),'Recovery cannot place, review or launch a page.');}
+ assert.equal(requests.at(-1).data.message.action,'recoverControls');assert(['inspect','inspectSpaceIcons'].includes(requests.at(-2).data.message.action));
  for(const key of ['spaces','savedSnapshot','bindings','favorites','archivedTabs','bookmarks','sizePreference'])assert.deepEqual(after[key],before[key],`Recovery cannot mutate ${key}.`);
  assert.deepEqual(after.registry.records.filter(r=>r.token!==record.token),before.registry.records.filter(r=>r.token!==record.token));
  const clean=tab=>{const {active,index,...rest}=tab;return rest;};

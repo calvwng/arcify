@@ -25,7 +25,7 @@ function fixture(){
 }
 const event=()=>{const handlers=new Set();return {addListener:f=>handlers.add(f),removeListener:f=>handlers.delete(f),emit:(...args)=>Promise.all([...handlers].map(f=>f(...args)))};};
 for(const invalidation of ['expired','replaced'])for(const failAfterDispatch of [false,true])test(`real paired settings refreshes ${invalidation} view; dispatch error=${failAfterDispatch}`,async t=>{
- const f=fixture(),originalNow=Date.now;let now=originalNow();Date.now=()=>now;t.after(()=>{Date.now=originalNow;delete globalThis.chrome;});
+ const f=fixture(),originalNow=Date.now;f.store.spaces[0].icon='work';let now=originalNow();Date.now=()=>now;t.after(()=>{Date.now=originalNow;delete globalThis.chrome;});
  registerLittleArcHeader(f.store,f.api);const requests=[],notices=[];f.api.runtime.sendMessage=async m=>notices.push(m);
  const local={arcifyBridgePeerId:SELF,arcifyBridgePairingGeneration:'g'},session={};
  const api={runtime:{id:PEER,getURL:p=>`chrome-extension://${PEER}/${p}`,onConnect:event(),onMessage:event(),onMessageExternal:event(),sendMessage:async(peer,request)=>{
@@ -41,8 +41,14 @@ for(const invalidation of ['expired','replaced'])for(const failAfterDispatch of 
  await assert.rejects(f.store.littleArcHeader.review(f.source,cached.viewId,null,PEER,'g',async()=>{},'window-size'),{code:'STALE_HEADER'});
  assert.equal(f.mutations.length,0);const spaces=structuredClone(f.store.spaces);
  await frame.onMessage.emit({kind:'sizeSettings'});
- assert.deepEqual(requests.map(r=>r.action),['inspect','inspect','settings']);
+ const inspectAction=requests[0].action;assert(['inspect','inspectSpaceIcons'].includes(inspectAction));
+ assert.deepEqual(requests.map(r=>r.action),[inspectAction,inspectAction,'settings']);
  const fresh=frame.messages.find(m=>m.kind==='settingsContext').context;assert.notEqual(fresh.viewId,cached.viewId);assert.equal(requests[2].viewId,fresh.viewId);
+ for(const view of [cached,fresh]){
+  if(inspectAction==='inspectSpaceIcons')assert.equal(view.spaces[0].icon,'💼');
+  else assert.equal(Object.hasOwn(view.spaces[0],'icon'),false);
+  assert.deepEqual(view.proposed,f.target);
+ }
  for(const request of requests)assert.deepEqual(request.source,f.source);
  assert.deepEqual(f.mutations,[['tab',2,{active:true}],['window',20,{focused:true}]]);assert.deepEqual(f.store.spaces,spaces);assert.equal(f.tabs[2].windowId,20);assert.equal(f.tabs[2].url,f.source.url);assert.equal(notices[0].section,'window-size');
  await frame.onMessage.emit({kind:'sizeSettings'});assert.equal(requests.filter(r=>r.action==='settings').length,1,'A response error or repeated click must never replay settings dispatch');assert.equal(f.mutations.length,2);

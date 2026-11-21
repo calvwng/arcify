@@ -66,3 +66,18 @@ test('closure notification never holds the serialized store queue during peer in
  let resolve;const delivered=new Promise(r=>resolve=r);f.api.runtime.sendMessage=async(peer,request)=>{assert.equal(busy,false);assert.equal(peer,PEER);assert.equal(request.type,'littleArcControlsClosed');const context=await f.store.run(()=>f.store.littleArcHeader.inspect(f.source,PEER,'g'));assert.equal(context.controlsMissing,true);resolve();};
  registerLittleArcHeader(f.store,f.api);f.tabs.splice(1,1);for(const listener of [...listeners])listener(2,{windowId:20,isWindowClosing:false});await delivered;assert.equal(f.mutations.length,0);
 });
+
+test('paired icon inspect projects normalized glyphs, legacy inspect stays strict and no placement fields change',async()=>{
+ const f=fixture();registerLittleArcHeader(f.store,f.api);
+ const ask=(action,extra={},sender={id:PEER})=>new Promise(resolve=>f.api.listener({type:HEADER_TYPE,action,source:f.source,...extra},sender,resolve));
+ for(const [configured,glyph] of [['work','💼'],['👩🏽‍💻','👩🏽‍💻'],['🇵🇱','🇵🇱'],['🏠🌿',null],['<svg/onload=alert(1)>',null],[{id:'work'},null],['🏠'.repeat(40),null]]){
+  f.store.spaces[0].icon=configured;
+  const legacy=await ask('inspect'),modern=await ask('inspectSpaceIcons');
+  assert.equal(legacy.success,true);assert.equal(modern.success,true);assert.equal(Object.hasOwn(legacy.context.spaces[0],'icon'),false);
+  const {icon,...identity}=modern.context.spaces[0];assert.equal(icon??null,glyph);
+  assert.deepEqual(identity,legacy.context.spaces[0]);assert.deepEqual(modern.context.proposed,legacy.context.proposed);
+ }
+ assert.equal((await ask('inspectSpaceIcons',{target:f.target})).code,'INVALID_REQUEST');
+ assert.equal((await ask('inspectSpaceIcons',{},{id:SELF})).code,'UNAUTHORIZED');
+ assert.equal(f.mutations.length,0);
+});

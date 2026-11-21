@@ -1,4 +1,5 @@
 import {getSpaceTint,normalizeColorOverrides} from './space-colors.js';
+import {getSpaceIcon} from './space-icons.js';
 import {normalizeThemeMode} from './sidebar-theme.js';
 import {createLittleArcDirectService} from './little-arc-direct.js';
 import { isTransientUrl, PEER_KEY, PAIRING_GENERATION_KEY } from './spotlight-bridge-protocol.js';
@@ -32,7 +33,7 @@ export function createLittleArcHeaderService(store, api = chrome) {
         if(fresh.windowId!==source.windowId || fresh.url!==source.url || fresh.pendingUrl&&fresh.pendingUrl!==source.url)fail('STALE_HEADER','The live page changed.');
         return record;
     }
-    async function choices() {
+    async function choices(includeSpaceIcons) {
         // Presentation only: no new authority or arbitrary CSS crosses the bridge.
         const [palette,appearance]=await Promise.all([api.storage.sync.get('colorOverrides'),api.storage.local.get('sidebarAppearance')]);
         const overrides=normalizeColorOverrides(palette.colorOverrides),themeMode=normalizeThemeMode(appearance.sidebarAppearance?.themeMode);
@@ -42,7 +43,9 @@ export function createLittleArcHeaderService(store, api = chrome) {
         for (const space of store.spaces) {
             try { await destinationSpace(store,{spaceId:space.id,bookmarkFolderId:space.bookmarkFolderId}); }
             catch { continue; }
-            spaces.push({id:space.id,bookmarkFolderId:space.bookmarkFolderId,name:space.name,color:getSpaceTint(space,overrides)});
+            // Share only the normalized glyph, never the stored ID or placement authority.
+            const icon=includeSpaceIcons && typeof space.icon==='string' && space.icon.length<=64 ? getSpaceIcon(space.icon)?.glyph : null;
+            spaces.push({id:space.id,bookmarkFolderId:space.bookmarkFolderId,name:space.name,color:getSpaceTint(space,overrides),...(icon?{icon}:{})});
         }
         return {windows,spaces,themeMode};
     }
@@ -83,9 +86,9 @@ export function createLittleArcHeaderService(store, api = chrome) {
         // re-enter it; no transport failure grants a retry or controller create.
         let timer;try{await Promise.race([api.runtime.sendMessage(peerId,request),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('Closure notification timed out.')),3000);})]);}finally{clearTimeout(timer);}
     };
-    const inspect = async (source, peerId, generation) => {
+    const inspect = async (source, peerId, generation, includeSpaceIcons = false) => {
         const record=await sourceRecord(source,true); if(!record) return null;
-        const list=await choices();
+        const list=await choices(includeSpaceIcons);
         // The persisted origin is only a default, never a replacement for a header's
         // explicit selection (the frame retains and validates that exact identity).
         const originSpace=store.spaces.find(s=>s.id===store.active[record.originWindowId]);
@@ -184,7 +187,7 @@ export function registerLittleArcHeader(store, api=chrome) {
             if(request.action==='directPrepare' && exact(request,['type','action','source','target','connection']) && typeof request.connection==='string' && request.connection.length===36)return service.direct.prepare(request.source,request.target,request.connection,peerId,generation,check);
             if(request.action==='directPlace' && exact(request,['type','action','source','connection','authorization']) && typeof request.connection==='string' && typeof request.authorization==='string')return service.direct.place(request.source,request.authorization,request.connection,peerId,generation,check);
             if(request.action==='directRevoke' && exact(request,['type','action','source','connection'])){service.direct.revoke(request.connection);return {revoked:true};}
-            if(request.action==='inspect' && exact(request,['type','action','source'])){const context=await service.inspect(request.source,peerId,generation);await check();return {context};}
+            if(['inspect','inspectSpaceIcons'].includes(request.action) && exact(request,['type','action','source'])){const context=await service.inspect(request.source,peerId,generation,request.action==='inspectSpaceIcons');await check();return {context};}
             if(request.action==='recoverControls'&&exact(request,['type','action','source','viewId','connection','requestId'])&&[request.viewId,request.connection,request.requestId].every(value=>typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)))return service.recoverControls(request.source,request.viewId,request.connection,request.requestId,peerId,generation,check);
             if(request.action==='review' && exact(request,['type','action','source','viewId','target']))return service.review(request.source,request.viewId,request.target,peerId,generation,check);
             if(request.action==='settings' && exact(request,['type','action','source','viewId']))return service.review(request.source,request.viewId,null,peerId,generation,check,'window-size');

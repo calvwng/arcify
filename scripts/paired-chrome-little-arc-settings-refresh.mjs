@@ -52,7 +52,8 @@ export function settingsGeometryReady(value){
 }
 export function assertSettingsRefreshTrace(events,source,peerId){
  const messages=events.filter(event=>event.type==='external'&&event.data.message.type==='arcify-little-arc-header-v1');
- assert.deepEqual(messages.map(event=>event.data.message.action),['inspect','settings'],'One fresh read precedes one settings opening, without replay.');
+ const actions=messages.map(event=>event.data.message.action);
+ assert(actions.length===2&&['inspect','inspectSpaceIcons'].includes(actions[0])&&actions[1]==='settings','One fresh read precedes one settings opening, without replay.');
  for(const event of messages){assert.equal(event.data.sender.id,peerId);assert.deepEqual(event.data.message.source,source);}
  assert.equal(typeof messages[1].data.message.viewId,'string');assert(!Object.hasOwn(messages[1].data.message,'target'));
  assert(!events.some(event=>event.type==='external'&&['promote','directPlace','directPrepare','review','openTransient'].includes(event.data.message.action||event.data.message.command)),'Settings must not request placement or launch.');
