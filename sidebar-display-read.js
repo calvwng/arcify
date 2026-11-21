@@ -17,7 +17,8 @@ export function observeDisplayChanges(api = chrome) {
     api.storage?.onChanged?.addListener((changes, area) => {
         if (area === 'sync' || Object.keys(changes).some(key =>
             ['spaces', 'activeSpaces', 'spaceSession', 'favoriteSession', 'persistentFavorites', 'todayOrderRepresentation',
-                'pinnedTabStatesById', 'tabNameOverridesById'].includes(key) || key.startsWith('folderCollapsed:'))) changed();
+                'pinnedTabStatesById', 'tabNameOverridesById', 'splitPinFocusLinksV1', 'splitPinInstancesV1',
+                'splitPinsV1', 'savedSplitRecipesV1'].includes(key) || key.startsWith('folderCollapsed:'))) changed();
     });
     // Installed before initialization so a native event during the first render
     // cannot be missed merely because normal UI listeners are not ready yet.
