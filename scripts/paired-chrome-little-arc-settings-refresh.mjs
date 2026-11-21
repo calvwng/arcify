@@ -62,16 +62,24 @@ export function embeddedControlReady(value){
  const c=value.control,r=c.rect,v=c.viewport,e=value.embedding;
  return !c.disabled&&c.rectCount>0&&c.display!=='none'&&c.visibility==='visible'&&Number(c.opacity)>0&&r.width>0&&r.height>0&&r.x>=0&&r.y>=0&&r.x+r.width<=v.width&&r.y+r.height<=v.height&&c.hit===true&&e.hit===true&&e.display!=='none'&&e.visibility==='visible';
 }
+export async function readEmbeddedSettingsGeometry(frame,selector='#size-settings'){
+ const element=await frame.frameElement();
+ try{
+  const control=await frame.evaluate(readSettingsGeometry,selector);
+  const embedding=await element.evaluate((node,control)=>{
+   const r=node.getBoundingClientRect(),s=getComputedStyle(node),host=node.getRootNode().host,hr=host?.getBoundingClientRect();
+   return {rect:{x:r.x,y:r.y,width:r.width,height:r.height},clipPath:s.clipPath,display:s.display,visibility:s.visibility,host:hr?{x:hr.x,y:hr.y,width:hr.width,height:hr.height}:null,viewport:{width:innerWidth,height:innerHeight},hit:!!host&&document.elementFromPoint(r.x+control.rect.x+control.rect.width/2,r.y+control.rect.y+control.rect.height/2)===host};
+  },control);
+  return {control,embedding};
+ }finally{await element.dispose();}
+}
 export async function exerciseExpiredHeaderSettings({apiPage,ui,poll,first,spotlightId,checkpoint,screenshot}){
  const trace=()=>apiPage.evaluate(()=>globalThis.__spaceActionObservation.events);
  const raw=()=>apiPage.evaluate(readLittleArcRawState);
  await useNativeHeaderViewport({first,raw,poll,checkpoint,ui});
  const url=`chrome-extension://${spotlightId}/little-arc-header.html`;
  const frame=await poll(()=>first.page.frames().filter(frame=>frame.url()===url),frames=>frames.length===1,'one exact Little Arc header frame').then(frames=>frames[0]);
- const geometry=async(selector='#size-settings')=>{
-  const element=await frame.frameElement();
-  try{const control=await frame.evaluate(readSettingsGeometry,selector);return {control,embedding:await element.evaluate((node,control)=>{const r=node.getBoundingClientRect(),s=getComputedStyle(node),host=node.getRootNode().host,hr=host?.getBoundingClientRect();return {rect:{x:r.x,y:r.y,width:r.width,height:r.height},clipPath:s.clipPath,display:s.display,visibility:s.visibility,host:hr?{x:hr.x,y:hr.y,width:hr.width,height:hr.height}:null,viewport:{width:innerWidth,height:innerHeight},hit:!!host&&document.elementFromPoint(r.x+control.rect.x+control.rect.width/2,r.y+control.rect.y+control.rect.height/2)===host};},control)};}finally{await element.dispose();}
- };
+ const geometry=selector=>readEmbeddedSettingsGeometry(frame,selector);
  const failure=async(label,error)=>{
   const evidence={error:error.message};
   try{evidence.geometry=await geometry();}catch(captureError){evidence.geometryError=captureError.message;}
