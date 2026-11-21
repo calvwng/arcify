@@ -264,6 +264,41 @@ for(const mode of ['window-away','window-aba','unknown-pane','revision-only','un
  assert.deepEqual(f.effects.filter(e=>e[0]==='update'),[['update',1,{active:true}]]);
  noCreates(f);
 });
+for(const mode of ['first-pane','second-pane','unlinked-identical','malformed','pending-receipt','stale-identity','loading',
+    'pending-url','conflicting-link','strong-witness','global','inactive','two-active'])test(`list paints only the active exact receipt: ${mode}`,async()=>{
+ const f=await loadingFixture();
+ f.tabs[mode==='second-pane'?1:0].active=true;
+ const key=`10:${f.bookmarkId}`, links=f.session[SPLIT_PIN_FOCUS_LINKS_KEY], record=links[key];
+ if(mode==='unlinked-identical')delete links[key];
+ if(mode==='malformed')links[key]={entries:{some:true}};
+ if(mode==='pending-receipt')record.phase='pending';
+ if(mode==='stale-identity'){f.tabs[1].id=3;f.store.spaces[0].temporaryTabs=[1,3];}
+ if(mode==='loading')f.tabs[1].status='loading';
+ if(mode==='pending-url')f.tabs[1].pendingUrl=f.tabs[1].url;
+ if(mode==='conflicting-link'){
+  links['10:other']={...structuredClone(record),bookmarkId:'other'};
+  links['10:other'].target.bookmark.id='other';
+  links['10:other'].entries[0].tabId=2;
+  links['10:other'].entries[1].tabId=1;
+  f.nodes.push({...f.nodes.find(node=>node.id===f.bookmarkId),id:'other'});
+ }
+ if(mode==='strong-witness')f.session[SPLIT_PIN_SESSION_KEY]={[key]:{bookmarkId:f.bookmarkId,spaceId:'s',windowId:10,tabIds:[1,2],splitViewId:70}};
+ if(mode==='global')f.hooks.global=2;
+ if(mode==='inactive')f.tabs[0].active=false;
+ if(mode==='two-active')f.tabs[1].active=true;
+ let writes=0,queries=0;f.hooks.beforeSessionSet=()=>writes++;f.hooks.localSet=()=>writes++;f.hooks.query=()=>queries++;
+ const before=structuredClone({session:f.session,data:f.data,spaces:f.store.spaces});
+ const result=await f.action('list');
+ const eligible=['first-pane','second-pane','inactive','two-active'].includes(mode);
+ assert.deepEqual(result.linkedSplitIndicators,eligible?[{bookmarkId:f.bookmarkId,paneIds:[1,2]}]:undefined);
+ assert.equal(result.activePaneId,eligible?(mode==='first-pane'?1:mode==='second-pane'?2:null):undefined);
+ const pin=result.pins.find(pin=>pin.bookmarkId===f.bookmarkId);
+ assert.deepEqual(pin.tabIds,mode==='strong-witness'?[1,2]:[]);
+ assert.equal(pin.releaseAllowed,mode==='strong-witness');
+ assert.equal(f.effects.filter(e=>e[0]==='update').length,0);
+ assert.deepEqual({session:f.session,data:f.data,spaces:f.store.spaces},before);
+ assert.equal(writes,0);assert.equal(queries,1);noCreates(f);
+});
 test('one read-only proof confirms exact settled pair outside real FIFO',async()=>{
  const f=await loadingFixture(),before=structuredClone({session:f.session,data:f.data,spaces:f.store.spaces});
  const ticket=await f.begin();assert.match(ticket.pendingMessage,/verification is pending/);

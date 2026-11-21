@@ -1,5 +1,5 @@
 import { captureFocusConfirmationIntent, confirmSplitFocus, invalidateFocusConfirmation } from './split-focus-confirmation.js';
-import { SPLIT_PIN_FOCUS_LINKS_KEY, readSplitPinFocusLinks, runSplitFocusAction, focusLinkedPair } from './split-pin-focus-links.js';
+import { SPLIT_PIN_FOCUS_LINKS_KEY, linkedSplitIndicatorFromSnapshot, readSplitPinFocusLinks, runSplitFocusAction, focusLinkedPair } from './split-pin-focus-links.js';
 export { SPLIT_PIN_FOCUS_LINKS_KEY };
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
 import { SAVED_SPLITS_KEY, readSavedSplitRecipes, runSavedSplitActionCore } from './saved-splits.js';
@@ -87,8 +87,11 @@ const tabEntry = t => ({ tabId: t.id, url: t.url, index: t.index, groupId: t.gro
 async function exactPair(store, request) {
     const space = await context(store, request), bindings = await Utils.getPinnedTabStates();
     const tabs = await chrome.tabs.query({ windowId: request.windowId });
-    if (!Array.isArray(request.entries) || request.entries.length !== 2 || request.entries[0]?.tabId === request.entries[1]?.tabId) throw stale();
-    const pair = request.entries.map(e => {
+    return exactPairFromObservation(store,space,request.entries,bindings,tabs);
+}
+function exactPairFromObservation(store, space, entries, bindings, tabs) {
+    if (!Array.isArray(entries) || entries.length !== 2 || entries[0]?.tabId === entries[1]?.tabId) throw stale();
+    const pair = entries.map(e => {
         const tab = tabs.find(t => t.id === e?.tabId);
         const owners = store.spaces.flatMap(s => ['temporaryTabs', 'spaceBookmarks'].flatMap(section => (s[section] || []).filter(v => v === e?.tabId).map(() => [s.id, section])));
         if (!exact(e, entryKeys) || !tab || tab.incognito || tab.pinned || tab.pendingUrl && tab.pendingUrl !== tab.url || bindings[tab.id]?.bookmarkId || store.isGlobalTab?.(tab.id) ||
@@ -306,7 +309,7 @@ export function runSplitPinAction(store, request) {
             return { bookmarkId: pin.bookmarkId };
         }
         if (request.action === 'list') {
-            const pins = [];
+            const pins = [], linkedSplitIndicators = [];
             const focusLinks = await readSplitPinFocusLinks();
             const tree = await presentationTree(space), bookmarks = new Map();
             const visit = node => { bookmarks.set(node.id, node); for (const child of node.children || []) visit(child); }; visit(tree);
@@ -322,9 +325,21 @@ export function runSplitPinAction(store, request) {
                 if (!recipe || !bookmark || bookmark.url !== splitPinUrl(recipe.id)) continue;
                 const live = await witness(store, request, { recipe, bookmark, pin, space }, observation);
                 pins.push({ focusLinkPresent: Object.prototype.hasOwnProperty.call(focusLinks, `${request.windowId}:${pin.bookmarkId}`), bookmarkId: pin.bookmarkId, name: bookmark.title, tabIds: live?.tabIds || [], splitViewId: live?.splitViewId ?? null, releaseAllowed: Boolean(live) && !blockedRelease.has(pin.bookmarkId), entries: live ? observation.tabs.filter(t => live.tabIds.includes(t.id)).sort((a,b) => a.index - b.index).map(tabEntry) : [] });
+                if (!live) {
+                    const indicator = linkedSplitIndicatorFromSnapshot({
+                        request:{...request,bookmarkId:pin.bookmarkId}, target:{pin,recipe,bookmark,space},
+                        links:focusLinks, witnesses:observation.session,
+                        exactPair: entries => exactPairFromObservation(store,space,entries,observation.bindings,observation.tabs),
+                        isTransient: tabId => store.transientWindows?.isTransientTab?.(tabId)
+                    });
+                    if (indicator) linkedSplitIndicators.push(indicator);
+                }
             }
             await context(store, request);
-            return { pins };
+            const active = observation.tabs.filter(tab => tab.active === true);
+            return { pins, ...(linkedSplitIndicators.length ? {
+                linkedSplitIndicators, activePaneId:active.length === 1 ? active[0].id : null
+            } : {}) };
         }
         const target = await resolve(store, request, state, recipes);
         const live = await witness(store, request, target);

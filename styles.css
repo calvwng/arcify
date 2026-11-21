@@ -2560,3 +2560,9 @@ select:focus-visible,
 /* A compound pin shares the ordinary row, title editor, folder and move affordances. */
 .split-pin .tab-close[hidden], .split-pin .tab-remove[hidden] { display: none; }
 .split-pin .tab-favicon { object-fit: contain; }
+
+/* Display-only: the linked panes remain Today tabs and keep their highlight. */
+.tab.split-pin-current {
+    outline: 2px solid currentColor;
+    outline-offset: -2px;
+}
