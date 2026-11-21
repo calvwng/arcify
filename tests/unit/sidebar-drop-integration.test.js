@@ -864,3 +864,57 @@ for (const inverted of [false, true]) for (const partial of [false, true]) test(
         assert.deepEqual(alerts, partial ? ['Metadata cleanup incomplete'] : []); assert.deepEqual(writes, []);
     } finally { hooks = {}; delete local.splitPinsV1; await reset(); }
 });
+
+test('actual sidebar decorates an exact linked split without a new queue request or altering Today', async () => {
+    await reset({ empty: true });
+    const originalTabs = structuredClone(tabs);
+    const recipeId = '12345678-1234-4123-8123-123456789abc';
+    getNode('p').children.push({ id:'linked',title:'Linked pair',url:chrome.runtime.getURL(`saved-split.html#${recipeId}`) });
+    local.splitPinsV1 = { version:1,destination:'p',pins:[{recipeId,bookmarkId:'linked',parentId:'p',phase:'committed'}] };
+    let eligible=true;
+    const requests=[];
+    hooks.splitAction = message => {
+        requests.push(message.action);
+        return { success:true, pins:[{bookmarkId:'linked',tabIds:[],focusLinkPresent:true}], ...(eligible?{
+            linkedSplitIndicators:[{bookmarkId:'linked',paneIds:[1,2]}],activePaneId:tabs.find(tab=>tab.active)?.id
+        }:{}) };
+    };
+    async function select(tabId) {
+        for (const tab of tabs) tab.active=tab.id===tabId;
+        await onActivated.emit({windowId:10,tabId});
+        await until(()=>temporary().querySelector('.tab.active')?.dataset.tabId===String(tabId),'native active pane');
+    }
+    try {
+        await chrome.runtime.onMessage.emit({action:'arcifyBookmarksChanged'});
+        await until(()=>row('linked')?.classList.contains('split-pin-current'),'initial linked decoration');
+        const rowIdentity=row('linked');
+        assert.equal(rowIdentity.dataset.splitLive,'false');
+        assert.ok(rowIdentity.classList.contains('inactive'));
+        assert.equal(rowIdentity.querySelector('.tab-remove').hidden,true);
+        const afterInitial=[...requests];
+        await select(3);
+        assert.equal(row('linked').hasAttribute('aria-current'),false);
+        await select(1);
+        assert.equal(row('linked').getAttribute('aria-current'),'true');
+        assert.equal(row('linked'),rowIdentity);
+        assert.equal(temporary().querySelectorAll('.tab[data-tab-id]').length,3);
+        await chrome.tabs.onUpdated.emit(3,{status:'loading'},tabs[2]);
+        await chrome.tabs.onUpdated.emit(3,{status:'complete'},tabs[2]);
+        assert.equal(row('linked').getAttribute('aria-current'),'true');
+        assert.deepEqual(requests,afterInitial);
+        assert.deepEqual(writes,[]);
+        await chrome.tabs.onUpdated.emit(2,{status:'loading'},tabs[1]);
+        assert.equal(row('linked').hasAttribute('aria-current'),false);
+        await chrome.runtime.onMessage.emit({action:'arcifyBookmarksChanged'});
+        await until(()=>row('linked')?.hasAttribute('aria-current'),'ordinary render revalidates decoration');
+        eligible=false;
+        await onChanged.emit({splitPinFocusLinksV1:{oldValue:{},newValue:{}}},'session');
+        assert.equal(row('linked').hasAttribute('aria-current'),false);
+        await select(2);
+        assert.equal(row('linked').hasAttribute('aria-current'),false);
+    } finally {
+        hooks={};delete local.splitPinsV1;
+        tabs.splice(0,tabs.length,...originalTabs);
+        await reset();
+    }
+});

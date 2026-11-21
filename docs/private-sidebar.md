@@ -2,7 +2,7 @@
 
 The sidebar resolves its native owning window before loading normal sidebar code. Private windows show only their current live native tabs, a private indicator, and activate/close/new-tab controls. Spaces, Favorites, import, Spotlight, saving, archive, restore, and transfer controls are absent.
 
-The private module does not use storage, background messaging, analytics, or logging. Titles exist only in the current DOM and native query results; URLs are not rendered or fetched for favicons. Native events trigger fresh queries, with stale query results discarded. Closing the owner removes listeners and clears the list. Reloading reconstructs the view from native tabs, with no saved private history or service-worker dependency.
+The private module does not use storage, background messaging, analytics, or logging. Titles exist only in the current DOM and native query results; URLs are not rendered or fetched for favicons. Native events trigger fresh queries, with stale query results discarded. A native tab replacement also prompts an owning-window-only refresh; neither replacement-event tab ID is looked up or used as a new action target. Closing the owner removes listeners and clears the list. Reloading reconstructs the view from native tabs, with no saved private history or service-worker dependency.
 
 Each mutation verifies the exact owning private window and, for existing tabs, the exact native tab ID and private/window membership immediately before calling the native API. Chrome does not provide an atomic validate-and-mutate API; a concurrent native move between validation and mutation remains a browser API race. There is no fallback target or retry of a mutation.
 

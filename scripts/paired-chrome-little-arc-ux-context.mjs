@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 export const UX_SPOTLIGHT_HEAD='3049c6757ba74dfd20e5383537bb2511fd70bd19';
 export const UX_SPACE_ICONS_BRANCH='feat/little-arc-space-icons';
-export const UX_SPACE_ICONS_SPOTLIGHT_HEAD='e51c3c2004787b7770acac2613ca569b5a486c6b';
+export const UX_SPACE_ICONS_SPOTLIGHT_HEAD='b939c79d0b68fd68a28e505779a21b3d9bd1233d';
 const UX_BRANCHES = new Map([
  ['feature/little-arc-dim-strength', { scope: 'little-arc-ux', spotlightHead: UX_SPOTLIGHT_HEAD }],
  [UX_SPACE_ICONS_BRANCH, { scope: 'little-arc-space-icons', spotlightHead: UX_SPACE_ICONS_SPOTLIGHT_HEAD }],

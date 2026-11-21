@@ -1,3 +1,4 @@
+import { applyActiveLinkedSplitIndicator, linkedSplitBookmarkForPane, sameSplitDisplayMembership } from './split-active-indicator.js';
 import { createSplitFocusConfirmationUI } from './split-focus-confirmation-ui.js';
 import { createSplitPinAttachUI } from './split-pin-attach-ui.js';
 import { createSplitPinRecoveryUI } from './split-pin-recovery-ui.js';
@@ -101,7 +102,7 @@ const spaceTemplate = document.getElementById('spaceTemplate');
 let spaces = [];
 let activeSpaceId = null;
 let archiveDisplayRevision = 0, archiveIntentConsumer = null;
-const invalidateArchiveDisplay = () => { archiveDisplayRevision++; archiveIntentConsumer?.invalidate(); };
+const invalidateArchiveDisplay = () => { archiveDisplayRevision++; invalidateActiveLinkedSplitIndicator(); archiveIntentConsumer?.invalidate(); };
 // Session selection may arrive before the selected bookmark-space is adopted.
 // Keep the intent separate so missing metadata cannot erase it via fallback.
 let pendingActiveSpaceId = null;
@@ -2319,6 +2320,42 @@ async function createNewFolder(spaceElement, parentFolderElement = null) {
 const spaceRenderTasks = new Map();
 const spaceRenderRequests = new Map();
 const displayChanges = observeDisplayChanges();
+let linkedSplitDisplay = null;
+function invalidateActiveLinkedSplitIndicator() {
+    if (!linkedSplitDisplay) return;
+    linkedSplitDisplay = null;
+    applyActiveLinkedSplitIndicator(document, null);
+}
+function paintLinkedSplitForPane(paneId) {
+    const snapshot = linkedSplitDisplay;
+    if (!snapshot || snapshot.scope !== splitFocusRouteFence() || !snapshot.container.isConnected) {
+        invalidateActiveLinkedSplitIndicator();
+        return;
+    }
+    applyActiveLinkedSplitIndicator(snapshot.container, linkedSplitBookmarkForPane(snapshot.indicators,paneId));
+}
+// Never add a worker request or queue admission on activation. A structural
+// change only invalidates the decoration; the ordinary render may rebuild it.
+for (const event of ['onCreated', 'onRemoved', 'onMoved', 'onAttached', 'onDetached', 'onReplaced']) {
+    chrome.tabs?.[event]?.addListener(invalidateActiveLinkedSplitIndicator);
+}
+chrome.tabs?.onUpdated?.addListener((tabId, change) => {
+    const keys = change && typeof change === 'object' ? Object.keys(change) : [];
+    if (linkedSplitDisplay && Number.isSafeInteger(tabId) && tabId > 0 &&
+        keys.length === 1 && keys[0] === 'status' && ['loading','complete'].includes(change.status) &&
+        !linkedSplitDisplay.indicators.some(indicator => indicator.paneIds.includes(tabId))) return;
+    if (!keys.length || keys.some(key => !['title','favIconUrl'].includes(key) || typeof change[key] !== 'string')) {
+        invalidateActiveLinkedSplitIndicator();
+    }
+});
+for (const event of ['onChanged','onMoved','onRemoved']) chrome.bookmarks?.[event]?.addListener(invalidateActiveLinkedSplitIndicator);
+chrome.storage?.onChanged?.addListener((changes, area) => {
+    if (area === 'session' && ['activeSpaces','splitPinFocusLinksV1','splitPinInstancesV1'].some(key => key in changes) ||
+        area === 'local' && ['splitPinsV1','savedSplitRecipesV1','pinnedTabStatesById'].some(key => key in changes) ||
+        area === 'local' && 'spaces' in changes && !sameSplitDisplayMembership(changes.spaces)) {
+        invalidateActiveLinkedSplitIndicator();
+    }
+});
 const savedSectionChanges = observeSavedSectionChanges();
 const committedSavedSections = new CommittedSavedSections();
 let committedDisplayIsCurrent = null;
@@ -2357,6 +2394,8 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
     const tabs = (await getOwnedTabs(space.id)).filter(t => !t.pinned);
     const displayMetadata = await readRowDisplayMetadata();
     displayMetadata.splitPins = [];
+    let linkedSplitList;
+    const linkedSplitScope = splitFocusRouteFence();
     const splitData = await chrome.storage.local.get(['splitPinsV1', 'savedSplitRecipesV1']);
     splitPinRecoveryUI.update(splitData.splitPinsV1);
     if (splitData.splitPinsV1 || splitData.savedSplitRecipesV1?.length) {
@@ -2368,7 +2407,11 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
                 else if (migration.migrated) showFavoritesStatus(`${migration.migrated} saved Split View(s) moved to Pinned in ${spaces.find(s => s.bookmarkFolderId === migration.destination)?.name || 'their migration Space'}. You can move them like other pins.`);
             } catch (error) { showFavoritesStatus(error.message); }
         }
-        try { const result = await splitPinRequest('list', null, space); displayMetadata.splitPins = Array.isArray(result.pins) ? result.pins : []; }
+        try {
+            const result = await splitPinRequest('list', null, space);
+            displayMetadata.splitPins = Array.isArray(result.pins) ? result.pins : [];
+            linkedSplitList = result;
+        }
         catch { /* Keep ordinary Today rows visible when pair metadata is unavailable. */ }
     }
     const { pinnedStatesById } = displayMetadata;
@@ -2650,6 +2693,13 @@ async function renderSpaceTabs(space, pinnedContainer, tempContainer, canCommit)
         committedSavedSections.commit(pinnedContainer, savedSignature, representedPinnedTabIds, true);
     }
     tempContainer.appendChild(tempFragment);
+    if (space.id === activeSpaceId) {
+        invalidateActiveLinkedSplitIndicator();
+        if (displayIsCurrent() && linkedSplitScope === splitFocusRouteFence() && Array.isArray(linkedSplitList?.linkedSplitIndicators)) {
+            linkedSplitDisplay = { scope:linkedSplitScope, container:pinnedContainer, indicators:linkedSplitList.linkedSplitIndicators };
+            paintLinkedSplitForPane(linkedSplitList.activePaneId);
+        }
+    }
     committedDisplayIsCurrent = displayIsCurrent;
     tempContainer.dataset.todayOrderInverted = String(todayOrderInverted);
     pinnedContainer.dataset.savedOrderInverted = String(invertTabOrder);
@@ -3538,6 +3588,7 @@ let activationEventSequence = 0;
 let latestAcceptedActivationSequence = 0;
 
 function handleTabActivated(activeInfo) {
+    if (activeInfo.windowId === currentWindow?.id) paintLinkedSplitForPane(null);
     splitFocusConfirmationUI.observeActivation(activeInfo);
     const eventSequence = ++activationEventSequence;
     // Sequence each window independently: a foreign-window activation must not
@@ -3582,6 +3633,7 @@ function handleTabActivated(activeInfo) {
             || eventSequence !== latestAcceptedActivationSequence
             || latestActivationWindowId !== activeInfo.windowId || activeChromeTabId !== activeInfo.tabId
             || latestWindow.id !== activeInfo.windowId || activeTabs[0]?.id !== activeInfo.tabId) return;
+        paintLinkedSplitForPane(activeInfo.tabId);
         const spaceWithTab = authoritativeSpaces.find(space =>
             space.spaceBookmarks.includes(activeInfo.tabId) ||
             space.temporaryTabs.includes(activeInfo.tabId)

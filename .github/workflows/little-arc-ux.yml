@@ -15,7 +15,7 @@ jobs:
       ARCIFY_PAIRED_RUN_MODE: little-arc
       ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha }}
       ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-      ARCIFY_SPOTLIGHT_HEAD: ${{ github.event.pull_request.head.ref == 'feat/little-arc-space-icons' && 'e51c3c2004787b7770acac2613ca569b5a486c6b' || '3049c6757ba74dfd20e5383537bb2511fd70bd19' }}
+      ARCIFY_SPOTLIGHT_HEAD: ${{ github.event.pull_request.head.ref == 'feat/little-arc-space-icons' && 'b939c79d0b68fd68a28e505779a21b3d9bd1233d' || '3049c6757ba74dfd20e5383537bb2511fd70bd19' }}
     steps:
       - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
         uses: actions/checkout@v4

@@ -15,7 +15,7 @@ function fixture() {
         tabs: { query: async q => { queries.push(q); return tabs; }, get: async id => { const tab = tabs.find(t => t.id === id); if (!tab) throw Error('synthetic stale'); return tab; },
             update: async (...args) => mutations.push(['update', ...args]), remove: async (...args) => mutations.push(['remove', ...args]), create: async (...args) => mutations.push(['create', ...args]) }
     };
-    for (const name of ['onCreated', 'onUpdated', 'onRemoved', 'onMoved', 'onAttached', 'onDetached', 'onActivated']) chrome.tabs[name] = events();
+    for (const name of ['onCreated', 'onUpdated', 'onRemoved', 'onMoved', 'onAttached', 'onDetached', 'onActivated', 'onReplaced']) chrome.tabs[name] = events();
     Object.defineProperty(chrome, 'storage', { get() { forbiddenAccess.push('chrome.storage'); assert.fail('Private UI accessed storage'); } });
     Object.defineProperty(chrome, 'runtime', { get() { forbiddenAccess.push('chrome.runtime'); assert.fail('Private UI accessed normal messaging'); } });
     return { chrome, document, mutations, queries, forbiddenAccess, setTabs(value) { tabs = value; } };
@@ -144,6 +144,47 @@ test('native move/close events requery, foreign events ignored, window close cle
     assert.equal(f.chrome.tabs.onUpdated.listeners.size, 0);
     assert.equal(f.document.querySelector('button').disabled, true);
 });
+test('replacement-only events refresh exact private rows without looking up either event ID', async () => {
+    const f = fixture(); const ui = await mountPrivateSidebar({ ...f, windowId: 7 });
+    const before = f.queries.length;
+    assert.match(f.document.body.textContent, /SYNTHETIC PRIVATE/);
+    f.chrome.tabs.get = async () => assert.fail('No replacement ID lookup');
+    f.setTabs([
+        { id: 8, windowId: 99, incognito: true, title: 'SYNTHETIC FOREIGN PRIVATE', index: 0 },
+        { id: 9, windowId: 7, incognito: false, title: 'SYNTHETIC REGULAR', index: 1 },
+        { id: 2, windowId: 7, incognito: true, title: 'SYNTHETIC REPLACEMENT', index: 0, active: true }
+    ]);
+    f.chrome.tabs.onReplaced.fire(2, 1);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.queries.slice(before), [{ windowId: 7 }]);
+    assert.deepEqual([...f.document.querySelectorAll('[data-action="activate"]')].map(button =>
+        [button.dataset.tabId, button.textContent, button.getAttribute('aria-pressed')]), [
+        ['2', 'SYNTHETIC REPLACEMENT', 'true']
+    ]);
+    assert.deepEqual(f.mutations, []);
+    assert.deepEqual(f.forbiddenAccess, []);
+    ui.dispose();
+    assert.equal(f.chrome.tabs.onReplaced.listeners.size, 0);
+    f.chrome.tabs.onReplaced.fire(3, 2);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.queries.length, before + 1);
+});
+
+test('missing or partial replacement event leaves private sidebar usable and disposable', async () => {
+    for (const optional of [
+        undefined,
+        { addListener: () => assert.fail('Missing removal method') },
+        { removeListener: () => assert.fail('Missing registration method') }
+    ]) {
+        const f = fixture();
+        f.chrome.tabs.onReplaced = optional;
+        const ui = await mountPrivateSidebar({ ...f, windowId: 7 });
+        assert.match(f.document.body.textContent, /SYNTHETIC PRIVATE/);
+        ui.dispose();
+        assert.equal(f.chrome.tabs.onUpdated.listeners.size, 0);
+    }
+});
+
 test('out of order native queries cannot resurrect stale titles', async () => {
     const f = fixture(); const ui = await mountPrivateSidebar({ ...f, windowId: 7 });
     let resolveOld;

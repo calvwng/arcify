@@ -104,6 +104,12 @@ export async function mountPrivateSidebar({ chrome, document, windowId }) {
         });
     }
     subscribe(chrome.tabs.onActivated, info => { if (info.windowId === windowId) refresh(); });
+    // Replacement events have no window ID. Refresh only this private window;
+    // never look up either event tab ID or reuse the old row's action target.
+    const replacement = chrome.tabs.onReplaced;
+    if (typeof replacement?.addListener === 'function' && typeof replacement.removeListener === 'function') {
+        subscribe(replacement, () => refresh());
+    }
     subscribe(chrome.windows.onRemoved, id => {
         if (id === windowId) { dispose(); status.textContent = 'Private window closed.'; }
     });

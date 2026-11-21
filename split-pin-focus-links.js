@@ -110,6 +110,29 @@ async function guard(store, request, proof, deps, expected, postFocus = false, s
     if (stillCurrent && !stillCurrent()) throw changed();
     return postFocus ? { pair, loading } : pair;
 }
+// Display only. The list's native and receipt observation is never an action
+// witness. If another record might claim either pane, omit the indicator.
+export function linkedSplitIndicatorFromSnapshot({request, target, links, witnesses, exactPair, isTransient}) {
+    const key = keyOf(request), record = links[key];
+    if (!valid(record,key) || record.phase !== 'linked' || record.spaceId !== request.spaceId ||
+        !object(witnesses)) return null;
+    try {
+        if (!same(focusTarget(target),record.target)) return null;
+        const pair = exactPair(record.entries), ids = new Set(pair.map(tab => tab.id));
+        if (!pair.every(tab => tab.windowId === request.windowId && tab.status === 'complete' && tab.pendingUrl === undefined &&
+            /^https?:/.test(tab.url) && !isTransient(tab.id))) return null;
+        if (Object.entries(links).some(([otherKey, other]) =>
+            otherKey !== key && (!valid(other,otherKey) || other.entries.some(entry => ids.has(entry.tabId))))) return null;
+        if (Object.entries(witnesses).some(([otherKey,witness]) => !object(witness) ||
+            otherKey !== keyOf(witness) || otherKey === key ||
+            !Number.isSafeInteger(witness.windowId) || witness.windowId <= 0 ||
+            !Number.isSafeInteger(witness.splitViewId) || witness.splitViewId < 0 ||
+            !Array.isArray(witness.tabIds) || witness.tabIds.length !== 2 ||
+            !witness.tabIds.every(Number.isSafeInteger) || new Set(witness.tabIds).size !== 2 ||
+            witness.tabIds.some(id => ids.has(id)))) return null;
+        return { bookmarkId:request.bookmarkId, paneIds:[...ids] };
+    } catch { return null; }
+}
 export async function runSplitFocusAction(store, request, deps) {
     const m = manager(store), key = keyOf(request);
     if (request.action === 'attachCandidates') {
