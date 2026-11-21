@@ -7,7 +7,7 @@ permissions:
 jobs:
   little-arc-ux:
     runs-on: ubuntu-24.04
-    if: github.repository == 'calvwng/arcify' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feature/little-arc-dim-strength' && github.event.pull_request.base.ref == 'main'
+    if: github.repository == 'calvwng/arcify' && github.event.pull_request.head.repo.full_name == github.repository && (github.event.pull_request.head.ref == 'feature/little-arc-dim-strength' || github.event.pull_request.head.ref == 'feat/little-arc-space-icons') && github.event.pull_request.base.ref == 'main'
     timeout-minutes: 20
     env:
       ARCIFY_LITTLE_ARC_UX: '1'
@@ -15,7 +15,7 @@ jobs:
       ARCIFY_PAIRED_RUN_MODE: little-arc
       ARCIFY_TEST_HEAD: ${{ github.event.pull_request.head.sha }}
       ARCIFY_PR_HEAD: ${{ github.event.pull_request.head.sha }}
-      ARCIFY_SPOTLIGHT_HEAD: 3049c6757ba74dfd20e5383537bb2511fd70bd19
+      ARCIFY_SPOTLIGHT_HEAD: ${{ github.event.pull_request.head.ref == 'feat/little-arc-space-icons' && 'b939c79d0b68fd68a28e505779a21b3d9bd1233d' || '3049c6757ba74dfd20e5383537bb2511fd70bd19' }}
     steps:
       - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
         uses: actions/checkout@v4
@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: calvwng/arcify-spotlight
-          ref: 3049c6757ba74dfd20e5383537bb2511fd70bd19
+          ref: ${{ env.ARCIFY_SPOTLIGHT_HEAD }}
           persist-credentials: false
           path: arcify-spotlight
       - name: Record and verify exact source provenance before installation
@@ -42,6 +42,7 @@ jobs:
             printf 'expected-spotlight=%s\nactual-spotlight=%s\n' "$ARCIFY_SPOTLIGHT_HEAD" "$(git -C arcify-spotlight rev-parse HEAD)"
           } | tee "$evidence/source-provenance.txt"
           [[ "$ARCIFY_TEST_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ARCIFY_SPOTLIGHT_HEAD" =~ ^[0-9a-f]{40}$ && "$ARCIFY_SPOTLIGHT_HEAD" != 0000000000000000000000000000000000000000 ]]
           test "$(git -C arcify rev-parse HEAD)" = "$ARCIFY_TEST_HEAD"
           test "$(git -C arcify-spotlight rev-parse HEAD)" = "$ARCIFY_SPOTLIGHT_HEAD"
           for repo in arcify arcify-spotlight; do

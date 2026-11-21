@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {exerciseLittleArcSizingUx} from './paired-chrome-little-arc-sizing-ux.mjs';
 import {exerciseSourceDimming as exerciseLittleArcDimmingUx} from './paired-chrome-little-arc-dimming-ux.mjs';
 import {exerciseControllerRecovery} from './paired-chrome-little-arc-controller-recovery-ux.mjs';
+import {exerciseLittleArcSpaceIcons, SPACE_ICON_FIXTURE} from './paired-chrome-little-arc-space-icons-ux.mjs';
 import {exerciseExpiredHeaderSettings} from './paired-chrome-little-arc-settings-refresh.mjs';
 import { readingBounds, fallbackBounds, readSizePreference } from '../little-arc-window-geometry.js';
 import { randomBytes } from 'node:crypto';
@@ -344,7 +345,7 @@ export async function readLittleArcRawState() {
 }
 
 /** No positive transport adapter: open, recover and promote originate only in genuine visible UI. */
-export async function exerciseLittleArc({ browser, observePage, apiPage, spotlightOptions, ui, screenshot, snapshot, external, poll, fixture, arcifyId, spotlightId, search, reloadArcify, ux=false, record = async () => {} }) {
+export async function exerciseLittleArc({ browser, observePage, apiPage, spotlightOptions, ui, screenshot, snapshot, external, poll, fixture, arcifyId, spotlightId, search, reloadArcify, ux=false, spaceIcons=false, record = async () => {} }) {
     assertLittleArcEnvironment();
     for (const adapter of [observePage, ui, screenshot, snapshot, external, poll, search, reloadArcify, record]) assert.equal(typeof adapter, 'function');
     const nonce = randomBytes(16).toString('hex'), originWindowId = fixture.windowA, targetWindowId = fixture.windowB;
@@ -358,6 +359,14 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
     const settle = () => local({ action: 'get' });
     const raw = () => apiPage.evaluate(readLittleArcRawState);
     const read = async () => { await settle(); const state = await raw(); state.pageStates = Object.fromEntries(await Promise.all([...pages].map(async ([id,page]) => [id, await page.evaluate(readLittleArcPage)]))); state.snapshots = { [originWindowId]: await snapshot(originWindowId), [targetWindowId]: await snapshot(targetWindowId) }; return state; };
+    if (spaceIcons) {
+        // Only the exact synthetic Pair Work folder made by this disposable runner.
+        const seeded = exact((await raw()).spaces, fixture.spaces.work);
+        assert.equal(seeded.name, 'Pair Work');
+        await setup('Configure the disposable fixture Space with its normal preset', () => local({
+            action: 'metadata', spaceId: seeded.id, changes: SPACE_ICON_FIXTURE
+        }));
+    }
     const original = await raw(), oldApiTab = await apiPage.evaluate(() => chrome.tabs.getCurrent());
     const reset = () => apiPage.evaluate(() => { globalThis.__spaceActionObservation.events.length = 0; });
     const trace = () => apiPage.evaluate(() => globalThis.__spaceActionObservation.events);
@@ -502,6 +511,9 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
         await checkpoint('spotlight-cancel-no-launch', { before: cancelBefore, after: cancelled, events: cancelEvents, input: cancelInput });
 
         const first = await launch(false, 'click'); await refreshController(first.controller);
+        if (spaceIcons) await exerciseLittleArcSpaceIcons({
+            apiPage, ui, poll, first, fixture, spotlightId, checkpoint, screenshot, raw, trace
+        });
         if(ux){
             await exerciseLittleArcSizingUx({apiPage,ui,poll,first,selectExact,checkpoint});
             await exerciseLittleArcDimmingUx({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint,selectExact});
