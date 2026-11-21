@@ -4,7 +4,7 @@ export function createFavoritesStatus({ document, returnFocus }) {
     const notice = document.getElementById('favoritesDropNotice');
     const message = document.getElementById('favoritesDropStatus');
     const dismiss = document.getElementById('favoritesDropDismiss');
-    let result = '', dismissible = true, preview = null;
+    let result = '', dismissible = true, preview = null, resultRevision = 0;
     function paint() {
         const text = preview || result;
         message.textContent = text;
@@ -15,7 +15,7 @@ export function createFavoritesStatus({ document, returnFocus }) {
         event.stopPropagation();
         if (dismiss.hidden || notice.hidden) return;
         const hadFocus = document.activeElement === dismiss;
-        result = ''; paint();
+        resultRevision++; result = ''; paint();
         if (hadFocus) returnFocus?.()?.focus();
     }
     dismiss.addEventListener('click', dismissResult);
@@ -24,8 +24,23 @@ export function createFavoritesStatus({ document, returnFocus }) {
     return {
         show(text, { preview: isPreview = false, dismissible: canDismiss = true } = {}) {
             if (isPreview) preview = text || null;
-            else { result = text || ''; dismissible = canDismiss; preview = null; }
+            else { resultRevision++; result = text || ''; dismissible = canDismiss; preview = null; }
             paint();
+            if (isPreview) return;
+            const revision = resultRevision;
+            const clear = () => {
+                if (revision !== resultRevision) return false;
+                const hadFocus = document.activeElement === dismiss;
+                resultRevision++; result = ''; paint();
+                if (hadFocus) returnFocus?.()?.focus();
+                return true;
+            };
+            clear.replace = text => {
+                if (revision !== resultRevision) return false;
+                resultRevision++; result = text; dismissible = true; paint();
+                return true;
+            };
+            return clear;
         },
         clearPreview() { preview = null; paint(); }
     };

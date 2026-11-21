@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runSplitPinAction, validSplitPinState, SPLIT_PINS_KEY, SPLIT_PIN_SESSION_KEY } from '../../split-pins.js';
+import { registerSplitPinMessages, runSplitPinAction, validSplitPinState, SPLIT_PINS_KEY, SPLIT_PIN_SESSION_KEY } from '../../split-pins.js';
 import { SpaceStore } from '../../space-store.js';
 import { SPLIT_PIN_FOCUS_LINKS_KEY, sameFocusValue } from '../../split-pin-focus-links.js';
 import { SAVED_SPLITS_KEY } from '../../saved-splits.js';
@@ -54,6 +54,7 @@ function fixture() {
 
 async function ready() { const f=fixture(); const {bookmarkId}=await f.run(); delete f.session[SPLIT_PIN_SESSION_KEY]; f.bookmarkId=bookmarkId; f.action=(action,extra={})=>f.run({action,bookmarkId,...extra}); return f; }
 async function link(f) { const c=await f.action('attachCandidates'); assert.equal(c.candidates.length,1); return f.action('attach',{candidateToken:c.candidates[0].candidateToken}); }
+const terminalNoOffer="Couldn't confirm focus on this split. No new tabs were opened.";
 const noCreates=f=>assert.equal(f.effects.filter(e=>e[0]==='create').length,0);
 test('explicit focus link never becomes strong witness or hides Today; worker replacement focuses exact pair',async()=>{
  const f=await ready(); const before=structuredClone(f.data); await link(f);
@@ -204,6 +205,186 @@ test('reordered final linked receipt lost acknowledgement is rolled back without
 });
 
 const emitUpdate = (id, change) => chrome.tabs.onUpdated.callbacks.forEach(fn => fn(id, change));
+const focusConfirm=(f,t)=>runSplitPinAction(f.store,{type:'splitPinAction',action:'confirmFocus',windowId:10,spaceId:'s',bookmarkFolderId:'root',bookmarkId:f.bookmarkId,confirmationToken:t.confirmationToken});
+async function loadingFixture() {
+ const f=await ready();await link(f);f.tabs.forEach(t=>t.status='complete');
+ const event=()=>({callbacks:new Set(),addListener(fn){this.callbacks.add(fn);},removeListener(fn){this.callbacks.delete(fn);},fire(...args){for(const fn of this.callbacks)fn(...args);}});
+ chrome.tabs.onActivated=event();chrome.windows.onFocusChanged=event();chrome.storage.onChanged=event();
+ f.store.chain=Promise.resolve();f.store.initialized=false;f.store.initialize=async()=>{};f.store.forgetTransientOwnership=()=>{};f.store.run=SpaceStore.prototype.run;
+ f.hooks.update=()=>{f.tabs[0].status='loading';f.tabs[0].pendingUrl=f.tabs[0].url;};
+ f.begin=()=>f.action('activate',{deferFocusConfirmation:true});
+ return f;
+}
+test('same exact pending URL after successful activation without loading needs no deferred proof',async()=>{
+ const f=await loadingFixture();
+ f.hooks.update=()=>f.tabs.forEach(t=>{t.pendingUrl=t.url;});
+ assert.deepEqual(await f.begin(),{focused:true,focusOnly:true,tabIds:[1,2]});noCreates(f);
+ assert.deepEqual(f.effects.filter(e=>e[0]==='update'),[['update',1,{active:true}]]);
+});
+for(const pending of ['same','https://page.test/1#different',null,false,0,{}])test(`preflight refuses pending ${JSON.stringify(pending)}`,async()=>{
+ const f=await loadingFixture();f.tabs[0].pendingUrl=pending==='same'?f.tabs[0].url:pending;
+ await assert.rejects(f.begin(),e=>!e.message.includes('Focus may have changed'));
+ assert.equal(f.effects.filter(e=>e[0]==='update').length,0);noCreates(f);
+});
+for(const mode of ['window-away','window-aba','unknown-pane','revision-only','unsupported','offered'])test(`worker activation returns truthful lifetime wording for ${mode}`,async()=>{
+ const f=await loadingFixture(),before=structuredClone({session:f.session,data:f.data,spaces:f.store.spaces});
+ let writes=0;
+ f.hooks.beforeSessionSet=()=>{writes++;};
+ f.hooks.localSet=()=>{writes++;};
+ if(mode==='unsupported')delete chrome.windows.onFocusChanged;
+ f.hooks.update=()=>{
+  f.tabs[0].status='loading';
+  if(mode==='window-away'||mode==='window-aba')chrome.windows.onFocusChanged.fire(11);
+  if(mode==='window-aba')chrome.windows.onFocusChanged.fire(10);
+  if(mode==='unknown-pane')f.tabs[1].status='unloaded';
+  if(mode==='revision-only'){
+   emitUpdate(1,{status:'loading'});f.tabs[0].status='complete';emitUpdate(1,{status:'complete'});
+  }
+ };
+ registerSplitPinMessages(f.store);
+ const message=(action,extra={})=>new Promise(resolve=>{
+  const request={type:'splitPinAction',action,windowId:10,spaceId:'s',bookmarkFolderId:'root',bookmarkId:f.bookmarkId,...extra};
+  assert.equal(f.listeners.at(-1)(request,{id:'test',url:'chrome-extension://test/sidebar.html'},resolve),true);
+ });
+ const reply=await message('activate',{deferFocusConfirmation:true});
+ if(mode==='offered'){
+  assert.equal(reply.success,true);
+  assert.equal(reply.pendingMessage,'Focus verification is pending because page loading changed during activation. The existing link was kept; no second activation or fresh pair was attempted.');
+  assert.equal(typeof reply.confirmationToken,'string');
+  assert.equal(reply.activeTabId,1);
+  f.tabs[0].status='complete';
+  assert.deepEqual(await message('confirmFocus',{confirmationToken:reply.confirmationToken}),{success:true,confirmed:true});
+ }else{
+  assert.deepEqual(reply,{success:false,error:terminalNoOffer});
+  assert.equal(chrome.tabs.onActivated.callbacks.size,0);
+ }
+ assert.equal(writes,0);
+ assert.deepEqual({session:f.session,data:f.data,spaces:f.store.spaces},before);
+ assert.deepEqual(f.tabs.map(({id,splitViewId})=>[id,splitViewId]),[[1,70],[2,70]]);
+ assert.deepEqual(f.effects.filter(e=>e[0]==='update'),[['update',1,{active:true}]]);
+ noCreates(f);
+});
+test('one read-only proof confirms exact settled pair outside real FIFO',async()=>{
+ const f=await loadingFixture(),before=structuredClone({session:f.session,data:f.data,spaces:f.store.spaces});
+ const ticket=await f.begin();assert.match(ticket.pendingMessage,/verification is pending/);
+ assert(!ticket.focused&&ticket.confirmationToken);
+ chrome.tabs.onActivated.fire({windowId:10,tabId:1});
+ const result=focusConfirm(f,ticket);assert.deepEqual(await focusConfirm(f,ticket),{confirmed:false});
+ assert.equal(await f.store.run(()=>{f.tabs[0].status='complete';emitUpdate(1,{status:'complete'});return 'unblocked';}),'unblocked');
+ assert.deepEqual(await result,{confirmed:true});
+ assert.deepEqual(await focusConfirm(f,ticket),{confirmed:false});
+ assert.deepEqual({session:f.session,data:f.data,spaces:f.store.spaces},before);
+ assert.deepEqual(f.effects.filter(e=>e[0]==='update'),[['update',1,{active:true}]]);
+ assert.equal(chrome.tabs.onActivated.callbacks.size,0);noCreates(f);
+});
+test('newer admitted split intent prevents the original watcher from issuing a later confirmation',async()=>{
+ const f=await loadingFixture();let entered,released;
+ const started=new Promise(r=>{entered=r;}),gate=new Promise(r=>{released=r;});
+ f.hooks.update=async()=>{f.tabs[0].status='loading';entered();await gate;};
+ const old=f.begin();await started;
+ const newer=f.begin();
+ const checked=Promise.all([assert.rejects(old,{message:terminalNoOffer}),assert.rejects(newer,/changed/)]);
+ released();await checked;assert.equal(f.effects.filter(e=>e[0]==='update').length,1);noCreates(f);
+});
+for(const mode of ['tab-aba','window-aba','space-aba','receipt-change','scope','unloaded','late-load-aba','structural','queue','error','hung'])test(`deferred proof refuses ${mode} and never reactivates`,async()=>{
+ const f=await loadingFixture(),ticket=await f.begin();assert(ticket.confirmationToken);
+ f.tabs[0].status=mode==='unloaded'?'unloaded':'complete';
+ if(mode==='scope')assert.deepEqual(await runSplitPinAction(f.store,{type:'splitPinAction',action:'confirmFocus',windowId:10,spaceId:'wrong',bookmarkFolderId:'root',bookmarkId:f.bookmarkId,confirmationToken:ticket.confirmationToken}),{confirmed:false});
+ let resume,entered,queries=0;const started=new Promise(r=>{entered=r;});
+ if(mode==='scope')f.tabs[0].status='loading';
+ f.hooks.query=async()=>{
+  if(++queries!==1)return;
+  entered();
+  if(mode==='late-load-aba'){emitUpdate(1,{status:'loading'});emitUpdate(1,{status:'complete'});}
+  if(mode==='structural')emitUpdate(1,{pendingUrl:f.tabs[0].url});
+  if(mode==='queue')await f.store.run(()=>null);
+  if(mode==='error')throw Error('scripted read error');
+  if(mode==='hung')await new Promise(r=>{resume=r;});
+ };
+ const result=focusConfirm(f,ticket);
+ if(mode==='tab-aba'){chrome.tabs.onActivated.fire({windowId:10,tabId:99});chrome.tabs.onActivated.fire({windowId:10,tabId:1});}
+ if(mode==='window-aba'){chrome.windows.onFocusChanged.fire(8);chrome.windows.onFocusChanged.fire(10);}
+ if(mode==='space-aba'){chrome.storage.onChanged.fire({activeSpaces:{oldValue:{10:'s'},newValue:{10:'other'}}},'session');chrome.storage.onChanged.fire({activeSpaces:{oldValue:{10:'other'},newValue:{10:'s'}}},'session');}
+ if(mode==='receipt-change')chrome.storage.onChanged.fire({splitPinFocusLinksV1:{oldValue:f.session[SPLIT_PIN_FOCUS_LINKS_KEY],newValue:{}}},'session');
+ if(mode==='hung'){await started;assert.equal(await f.store.run(()=>true),true);}
+ assert.deepEqual(await result,{confirmed:false});
+ if(mode==='hung'){resume();await new Promise(r=>setImmediate(r));assert.equal(queries,1);}
+ assert.deepEqual(await focusConfirm(f,ticket),{confirmed:false});
+ assert.equal(chrome.tabs.onActivated.callbacks.size,0);assert.equal(f.effects.filter(e=>e[0]==='update').length,1);noCreates(f);
+});
+
+
+// The admission handoff is allowed to outlive routine FIFO bookkeeping, but
+// the exact guard must begin only once and never overlap a changing tail.
+const afterFocusTick=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const gateFocusQueue=()=>{let release;return {value:new Promise(resolve=>{release=resolve;}),release:()=>release()};};
+test('repeated real SpaceStore queue admissions settle before one guarded focus proof',async()=>{
+ const f=await loadingFixture(),ticket=await f.begin();assert(ticket.confirmationToken);
+ f.tabs[0].status='complete';
+ const before=structuredClone({session:f.session,data:f.data,spaces:f.store.spaces});
+ let proofReads=0;f.hooks.query=()=>{proofReads++;};
+ const first=gateFocusQueue(),second=gateFocusQueue(),third=gateFocusQueue();
+ const a=f.store.run(()=>first.value);
+ const proof=focusConfirm(f,ticket);
+ await afterFocusTick(340);
+ assert.equal(proofReads,0);
+ const b=f.store.run(()=>second.value);
+ first.release();await a;await afterFocusTick(15);
+ assert.equal(proofReads,0);
+ const c=f.store.run(()=>third.value);
+ second.release();await b;await afterFocusTick(15);
+ assert.equal(proofReads,0);
+ third.release();await c;
+ assert.deepEqual(await proof,{confirmed:true});
+ assert.equal(proofReads,2); // The once-only existing guard reads current window and all tabs.
+ assert.deepEqual(await focusConfirm(f,ticket),{confirmed:false});
+ assert.deepEqual({session:f.session,data:f.data,spaces:f.store.spaces},before);
+ assert.deepEqual(f.effects.filter(e=>e[0]==='update'),[['update',1,{active:true}]]);noCreates(f);
+});
+test('ongoing harmless FIFO churn cannot extend the original ticket or start a proof',async()=>{
+ const f=await loadingFixture(), ticket=await f.begin();assert(ticket.confirmationToken);
+ f.tabs[0].status='complete';let reads=0;f.hooks.query=()=>{reads++;};
+ const initial=gateFocusQueue();let gate=initial, tail=f.store.run(()=>initial.value);
+ const churn=setInterval(()=>{
+  const old=gate,next=gateFocusQueue();
+  gate=next;tail=f.store.run(()=>next.value);old.release();
+ },40);
+ try{
+  assert.deepEqual(await focusConfirm(f,ticket),{confirmed:false});
+  assert.equal(reads,0);
+ }finally{clearInterval(churn);gate.release();await tail;}
+ assert.equal(reads,0);noCreates(f);
+ assert.deepEqual(f.effects.filter(e=>e[0]==='update'),[['update',1,{active:true}]]);
+});
+for(const outcome of ['deadline','newer-native-activation','newer-space-intent','newer-split-intent'])test(`pre-proof recapture remains fail-closed on ${outcome}`,async()=>{
+ const f=await loadingFixture(),ticket=await f.begin();assert(ticket.confirmationToken);
+ f.tabs[0].status='complete';
+ let proofReads=0;f.hooks.query=()=>{proofReads++;};
+ const first=gateFocusQueue(),second=gateFocusQueue();
+ const a=f.store.run(()=>first.value), proof=focusConfirm(f,ticket);
+ await afterFocusTick(340);
+ const b=f.store.run(()=>second.value);
+ first.release();await a;await afterFocusTick(15);
+ assert.equal(proofReads,0);
+ if(outcome==='newer-native-activation')chrome.tabs.onActivated.fire({windowId:10,tabId:99});
+ if(outcome==='newer-space-intent'){
+  f.store.applyAction=async()=>null; // The real SpaceStore dispatch invalidates at ingress.
+  void SpaceStore.prototype.dispatch.call(f.store,{action:'activate',windowId:10,spaceId:'other'});
+ }
+ let newer;
+ if(outcome==='newer-split-intent'){
+  f.tabs[0].status='loading';
+  newer=assert.rejects(f.begin(),/changed/); // Invalidates when admitted, before the queue drains.
+ }
+ assert.deepEqual(await proof,{confirmed:false});
+ assert.equal(proofReads,0);
+ second.release();await b;await newer;await afterFocusTick(0);
+ if(outcome!=='newer-split-intent')assert.equal(proofReads,0);
+ assert.deepEqual(await focusConfirm(f,ticket),{confirmed:false});
+ assert.deepEqual(f.effects.filter(e=>e[0]==='update'),[['update',1,{active:true}]]);noCreates(f);
+ assert.equal(chrome.tabs.onActivated.callbacks.size,0);
+});
+
 for (const id of [1, 999]) for (const change of [{title:'Loaded title'}, {favIconUrl:'https://page.test/icon'}, {title:'',favIconUrl:''}]) test(`focus cosmetic ${id} ${JSON.stringify(change)} keeps exact proof`,async()=>{
  const f=await ready();await link(f);const receipt=structuredClone(f.session);
  f.hooks.update=()=>emitUpdate(id,change);
@@ -212,13 +393,13 @@ for (const id of [1, 999]) for (const change of [{title:'Loaded title'}, {favIco
 });
 for (const change of [{},{title:null},{title:'x',unknown:true},{status:'unknown'},{url:'https://page.test/1'},{splitViewId:70},{pendingUrl:'https://page.test/1'}]) test(`unknown/structural update fails closed ${JSON.stringify(change)}`,async()=>{
  const f=await ready();await link(f);f.hooks.update=()=>emitUpdate(1,change);
- await assert.rejects(f.action('activate'),e=>!e.message.includes('verification is pending'));noCreates(f);
+ await assert.rejects(f.action('activate'),e=>e.message.startsWith('Focus may have changed, but the result could not be confirmed. No fresh pair was opened.'));noCreates(f);
  assert.equal(f.effects.filter(e=>e[0]==='update').length,1);
 });
 for(const mode of ['loading','loading-complete','no-event-loading'])test(`post-activation ${mode} stays uncertain without retry`,async()=>{
  const f=await ready();await link(f);const receipt=structuredClone(f.session);
  f.hooks.update=()=>{f.tabs[0].status='loading';if(mode!=='no-event-loading')emitUpdate(1,{status:'loading'});if(mode==='loading-complete'){f.tabs[0].status='complete';emitUpdate(1,{status:'complete',title:'Ready'});}};
- await assert.rejects(f.action('activate'),/Focus verification is pending/);noCreates(f);
+ await assert.rejects(f.action('activate'),{message:terminalNoOffer});noCreates(f);
  assert.equal(f.effects.filter(e=>e[0]==='update').length,1);assert.deepEqual(f.session,receipt);
 });
 for(const mode of ['navigation-aba','split-aba','space','receipt','inactive'])test(`loading never masks ${mode}`,async()=>{
@@ -230,7 +411,7 @@ for(const mode of ['navigation-aba','split-aba','space','receipt','inactive'])te
   if(mode==='receipt')f.session[SPLIT_PIN_FOCUS_LINKS_KEY][`10:${f.bookmarkId}`].token='replacement';
   if(mode==='inactive')f.hooks.query=()=>{f.tabs[0].active=false;};
  };
- await assert.rejects(f.action('activate'),e=>!e.message.includes('verification is pending'));noCreates(f);
+ await assert.rejects(f.action('activate'),e=>e.message.startsWith('Focus may have changed, but the result could not be confirmed. No fresh pair was opened.'));noCreates(f);
 });
 test('cosmetic event still invalidates chooser and strict loading preflight',async()=>{
  const f=await ready(),c=await f.action('attachCandidates');emitUpdate(1,{title:'New'});
@@ -245,6 +426,6 @@ for(const kind of ['cosmetic','structural','inactive'])test(`late post-focus rea
   if(kind==='inactive'){emitUpdate(1,{status:'loading'});f.tabs[0].active=false;}
  };};
  if(kind==='cosmetic')assert.equal((await f.action('activate')).focused,true);
- else await assert.rejects(f.action('activate'),e=>!e.message.includes('verification is pending'));
+ else await assert.rejects(f.action('activate'),e=>e.message.startsWith('Focus may have changed, but the result could not be confirmed. No fresh pair was opened.'));
  noCreates(f);assert.equal(f.effects.filter(e=>e[0]==='update').length,1);
 });

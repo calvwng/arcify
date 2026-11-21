@@ -106,13 +106,15 @@ Ordinary unlinked pins and existing strong witnesses retain their old behavior.
 Chooser capabilities expire in two minutes and on native/bookmark lifecycle
 changes; reopening a chooser invalidates older choices in that worker.
 
-All requests use the existing shared SpaceStore queue. Storage and native tabs
-are not one atomic transaction. Pending and final receipt readback plus lifecycle
-fences detect uncertainty; rollback only replaces the exact attempted receipt,
-never a newer scoped link. Lost acknowledgement plus failed cleanup may leave an
-advisory record, never ownership or a confirmed-success claim. Every later focus
-rechecks it. Focus results require returned and freshly observed active=true and
-an unchanged final lifecycle generation; uncertainty causes no automatic retry.
+The initial split actions use the existing shared SpaceStore queue. Storage and
+native tabs are not one atomic transaction. Pending and final receipt readback
+plus lifecycle fences detect uncertainty; rollback only replaces the exact
+attempted receipt, never a newer scoped link. Lost acknowledgement plus failed
+cleanup may leave an advisory record, never ownership or a confirmed-success
+claim. Every later focus checks the record again. The initial focus action
+requires a matching native acknowledgement and a fresh observation of the same
+active pane, with the structural lifecycle generation unchanged. The
+verification-only follow-up below does not enter or hold the queue.
 
 An obsolete advisory record ceases vetoing a new explicit choice only after
 proof its original tabs left that window, its Space/root disappeared, its exact
@@ -122,9 +124,26 @@ explicit unlink. Same pin instances in different windows remain independent.
 This is not automatic inline reattachment or cold-restart recovery.
 
 Focus verification treats well-formed title/favicon-only tab updates as cosmetic,
-without relaxing the chooser or attachment fence. All exact pair, ownership,
-receipt, window/Space and active-tab checks still run. Unknown or structural events
-fail closed. Loading events (even loading followed by complete during the same
-activation) cannot produce confirmed success: the UI reports verification pending,
-keeps the advisory link, and does not activate again or open replacement panes.
-There is no timer, polling, automatic retry, or queue-held stabilization delay.
+without relaxing the chooser or attachment fence. Unknown or structural events
+fail closed. A loading observation cannot confirm the initial activation. For
+a direct saved-pin click from the sidebar only, if activation was acknowledged
+and the exact pair is still loading, the sidebar can show a pending notice and
+request one read-only confirmation. A loading revision change alone does not
+qualify, including an observed loading-to-complete cycle with no pane still
+loading after activation.
+
+The follow-up uses a worker-local, one-use token for the same window, Space,
+bookmark folder, and pin. It waits about 300 ms outside the shared queue and
+only starts proof when the observed queue tail is stable. The ticket has a
+1,100 ms deadline from issue. The proof checks the exact pair, active pane,
+both panes complete, current Space, marker, recipe, and advisory receipt,
+plus the absence of conflicting links or saved ownership. Changes to intent,
+the queue, relevant focus or session state, or proof lifecycle observations
+can invalidate the result. The sidebar clears only the pending notice it
+still owns for that click and view; a late result cannot replace a newer
+notice.
+
+If the follow-up cannot confirm, times out, or was never offered, focus remains
+unconfirmed; the advisory link is kept. There is no polling for tab completion,
+second activation, automatic retry of the action, or fresh-pair fallback.
+The confirmation check never changes tabs, bookmarks, or stored links.

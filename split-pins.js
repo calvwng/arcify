@@ -1,3 +1,4 @@
+import { captureFocusConfirmationIntent, confirmSplitFocus, invalidateFocusConfirmation } from './split-focus-confirmation.js';
 import { SPLIT_PIN_FOCUS_LINKS_KEY, readSplitPinFocusLinks, runSplitFocusAction, focusLinkedPair } from './split-pin-focus-links.js';
 export { SPLIT_PIN_FOCUS_LINKS_KEY };
 import { enqueueBookmarkOperation } from './bookmark-writer.js';
@@ -158,8 +159,16 @@ async function ensureBookmark(store, request, state, recipe, parentId) {
     return pin;
 }
 export function runSplitPinAction(store, request) {
+    if (request?.type === 'splitPinAction' && request.action === 'confirmFocus') {
+        if (!exact(request,['type','action','windowId','spaceId','bookmarkFolderId','bookmarkId','confirmationToken']) ||
+            !id(request.confirmationToken)) return Promise.resolve({confirmed:false});
+        return confirmSplitFocus(store,request);
+    }
+    if (request?.type === 'splitPinAction' && ['activate','pin','close','recover','defer','release','attach','unlinkFocus','migrate'].includes(request.action)) invalidateFocusConfirmation(store);
+    const currentIntent = request?.deferFocusConfirmation === true ? captureFocusConfirmationIntent(store) : undefined;
     return store.run(async () => {
-        if (!exact(request, ['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'bookmarkId', 'entries', 'recipe', 'candidate', 'destination', 'bookmark', 'today', 'candidateToken']) || request.type !== 'splitPinAction' ||
+        if (!exact(request, ['type', 'action', 'windowId', 'spaceId', 'bookmarkFolderId', 'bookmarkId', 'entries', 'recipe', 'candidate', 'destination', 'bookmark', 'today', 'candidateToken', 'deferFocusConfirmation']) || request.type !== 'splitPinAction' ||
+            (request.deferFocusConfirmation !== undefined && (request.action !== 'activate' || request.deferFocusConfirmation !== true)) ||
             !['migrate', 'list', 'pin', 'activate', 'close', 'recoveryList', 'recover', 'defer', 'release', 'attachCandidates', 'attach', 'unlinkFocus'].includes(request.action) || !Number.isSafeInteger(request.windowId) || request.windowId <= 0 || !id(request.spaceId) || !id(request.bookmarkFolderId)) throw stale();
         const space = await context(store, request);
         let state = await readState();
@@ -395,7 +404,7 @@ export function runSplitPinAction(store, request) {
             return { tabIds: live.tabIds, reused: true };
         }
         const focusLinks = await readSplitPinFocusLinks(), focusKey = `${request.windowId}:${request.bookmarkId}`;
-        if (Object.prototype.hasOwnProperty.call(focusLinks,focusKey)) return focusLinkedPair(store,request,focusDeps,focusLinks[focusKey]);
+        if (Object.prototype.hasOwnProperty.call(focusLinks,focusKey)) return focusLinkedPair(store,request,focusDeps,focusLinks[focusKey],currentIntent);
         const result = await runSavedSplitActionCore(store, { type: 'savedSplitAction', action: 'open', windowId: request.windowId, spaceId: request.spaceId, bookmarkFolderId: request.bookmarkFolderId, recipeId: target.recipe.id });
         await resolve(store, request, await readState(), await readSavedSplitRecipes());
         await remember(store, request, target, result.tabIds, result.splitViewId);

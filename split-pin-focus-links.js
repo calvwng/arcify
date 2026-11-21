@@ -1,3 +1,4 @@
+import { watchFocusConfirmation } from './split-focus-confirmation.js';
 // Advisory session links only. Never read by strong witness, hide, close, release,
 // grouping or recovery code. storage.session survives worker suspension, not cold restart.
 export const SPLIT_PIN_FOCUS_LINKS_KEY = 'splitPinFocusLinksV1';
@@ -76,28 +77,37 @@ async function orphan(store, record, tabs) {
 }
 // Called on the same SpaceStore queue as all split actions. No storage CAS or
 // native+storage transaction is claimed; concurrent native events fail closed.
-async function guard(store, request, proof, deps, expected, postFocus = false) {
+async function guard(store, request, proof, deps, expected, postFocus = false, stillCurrent) {
+    if (stillCurrent && !stillCurrent()) throw changed();
     const target = await deps.resolve();
     if (!same(focusTarget(target), proof.target)) throw changed();
+    if (stillCurrent && !stillCurrent()) throw changed();
     const pair = await deps.exactPair({ ...request, entries: proof.entries });
-    if (pair.some(t => t.pendingUrl || !/^https?:/.test(t.url) || store.transientWindows?.isTransientTab?.(t.id))) throw changed();
+    // A restored pane may report its exact committed URL as pending after activation.
+    if (pair.some(t => (t.pendingUrl !== undefined && (!postFocus || t.pendingUrl !== t.url)) || !/^https?:/.test(t.url) || store.transientWindows?.isTransientTab?.(t.id))) throw changed();
     const loading = pair.some(t => t.status === 'loading');
     if (loading && !postFocus) throw changed();
+    if (stillCurrent && !stillCurrent()) throw changed();
     const links = await read(), key = keyOf(request);
     if (expected ? !same(links[key], expected) : own(links,key) !== proof.priorPresent || !same(links[key],proof.prior)) throw changed();
+    if (stillCurrent && !stillCurrent()) throw changed();
     const allTabs = await chrome.tabs.query({});
     for (const [otherKey, v] of Object.entries(links)) {
         if (otherKey === key) continue;
         if (!valid(v, otherKey)) throw changed();
+        if (stillCurrent && !stillCurrent()) throw changed();
         if (v.entries.some(e => pair.some(t => t.id === e.tabId)) && !await orphan(store, v, allTabs)) throw changed();
     }
+    if (stillCurrent && !stillCurrent()) throw changed();
     const witnesses = (await chrome.storage.session.get('splitPinInstancesV1')).splitPinInstancesV1 || {};
     if (!object(witnesses)) throw changed();
     for (const [wkey,w] of Object.entries(witnesses)) {
         if (!object(w) || wkey !== `${w.windowId}:${w.bookmarkId}` || !Number.isSafeInteger(w.windowId) || w.windowId <= 0 || !Array.isArray(w.tabIds) || w.tabIds.length !== 2 || !w.tabIds.every(Number.isSafeInteger) || new Set(w.tabIds).size !== 2 || !Number.isSafeInteger(w.splitViewId) || w.splitViewId < 0) throw changed();
         if (w.tabIds.some(id => pair.some(t => t.id === id)) || wkey === key && w.tabIds.some(id => allTabs.some(t => t.id === id))) throw changed();
     }
+    if (stillCurrent && !stillCurrent()) throw changed();
     if (!same(focusTarget(await deps.resolve()),proof.target)) throw changed();
+    if (stillCurrent && !stillCurrent()) throw changed();
     return postFocus ? { pair, loading } : pair;
 }
 export async function runSplitFocusAction(store, request, deps) {
@@ -154,7 +164,7 @@ export async function runSplitFocusAction(store, request, deps) {
         throw new Error(`Link was not confirmed. Review before continuing; no tabs were opened or moved. ${error.message}`);
     }
 }
-export async function focusLinkedPair(store,request,deps,record) {
+export async function focusLinkedPair(store,request,deps,record,currentIntent=()=>false) {
     const key = keyOf(request);
     if (!valid(record,key) || record.phase !== 'linked') throw new Error('This link needs review. Reattach or explicitly remove it before opening fresh. No fresh pair was opened.');
     const m = manager(store), revision = m.focusRevision, loadingRevision = m.loadingRevision;
@@ -163,6 +173,7 @@ export async function focusLinkedPair(store,request,deps,record) {
     const pair = await guard(store,request,proof,deps,record); check();
     await guard(store,request,proof,deps,record); check();
     if (m.loadingRevision !== loadingRevision) throw changed();
+    const watcher = request.deferFocusConfirmation === true && currentIntent() ? watchFocusConfirmation(store,request,pair[0].id) : null;
     let updated;
     try {
         updated = await chrome.tabs.update(pair[0].id,{active:true});
@@ -170,8 +181,22 @@ export async function focusLinkedPair(store,request,deps,record) {
         check();
         if (!updated || updated.id !== pair[0].id || updated.windowId !== request.windowId || updated.splitViewId !== pair[0].splitViewId || updated.active !== true || after[0].id !== pair[0].id || after[0].active !== true) throw changed();
         if (observation.loading || m.loadingRevision !== loadingRevision) {
-            throw new Error('Focus verification is pending because page loading changed during activation. The existing link was kept; no second activation or fresh pair was attempted.');
+            const pendingMessage = 'Focus verification is pending because page loading changed during activation. The existing link was kept; no second activation or fresh pair was attempted.';
+            // Revision-only ABA is still uncertain. Begin only with a known, loading exact pair.
+            const recheck = currentIntent() && observation.loading && after.every(t=>['loading','complete'].includes(t.status))
+                ? watcher?.offer(async unchanged=>{
+                    const loadingAtProof=m.loadingRevision;
+                    const current=()=>currentIntent()&&unchanged()&&m.focusRevision===revision&&m.loadingRevision===loadingAtProof;
+                    if(!current())return null;
+                    const next=await guard(store,request,proof,deps,record,true,current);
+                    return current()&&next.pair.every(t=>t.status==='complete')&&next.pair[0].id===pair[0].id&&next.pair[0].active===true?current:null;
+                }) : null;
+            if(recheck)return {...recheck,pendingMessage,activeTabId:pair[0].id};
+        } else {
+            return { focused:true,focusOnly:true,tabIds:pair.map(t=>t.id) };
         }
-        return { focused:true,focusOnly:true,tabIds:pair.map(t=>t.id) };
     } catch (error) { throw new Error(`Focus may have changed, but the result could not be confirmed. No fresh pair was opened. ${error.message}`); }
+    finally { watcher?.release(); }
+    // Do not promise a follow-up when no ticket was offered.
+    throw new Error("Couldn't confirm focus on this split. No new tabs were opened.");
 }
