@@ -102,7 +102,7 @@ test('setup already initializes Today ordering and supplies every owned menu/nat
     const options = read('options.js'), store = read('space-store.js'), ordering = read('today-order.js');
     assert.match(options, /async function restoreOptions\(\) \{\n  await Utils.getTodayOrderInverted\(\);/);
     assert.match(options, /await restoreOptions\(\);\n    setupAutoSave\(\);/);
-    assert.match(store, /dispatch\(message\) \{\n        return this.run\(/);
+    assert.match(store, /dispatch\(message\) \{\n        if \(message.action === 'activate'\) invalidateFocusConfirmation\(this\);\n        return this\.run\(\(\) => this\.applyAction\(message\)\);\n    \}/);
     assert.match(store, /await this.initialize\(\);/);
     assert.match(store, /this.initializeUnlocked\(\)/);
     assert.match(store.slice(store.indexOf('async initializeUnlocked()'), store.indexOf('exactTodayOpener(')),

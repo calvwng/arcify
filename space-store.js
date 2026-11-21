@@ -1,3 +1,4 @@
+import { invalidateFocusConfirmation } from './split-focus-confirmation.js';
 import { invalidateGeneralUndo } from './general-undo-state.js';
 import { ArchiveStore } from './archive-store.js';
 import { automaticLayoutRestoreEnabled } from './durable-layout-config.js';
@@ -672,6 +673,7 @@ export class SpaceStore {
         catch (error) { console.warn('Tab group sync deferred:', error); }
     }
     async dispatch(message) {
+        if (message.action === 'activate') invalidateFocusConfirmation(this);
         return this.run(() => this.applyAction(message));
     }
     // Internal only: callers already holding run() may compose the existing operations.
@@ -744,6 +746,7 @@ export class SpaceStore {
                 this.spaces = moveSpace(this.spaces, message);
                 break;
             case 'activate':
+                invalidateFocusConfirmation(this);
                 if (!this.isTransientWindow(message.windowId)) this.active[message.windowId] = message.spaceId;
                 break;
             case 'clean':

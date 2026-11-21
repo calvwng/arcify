@@ -1,3 +1,5 @@
+import { createSplitFocusConfirmationUI } from './split-focus-confirmation-ui.js';
+import { createSplitPinAttachUI } from './split-pin-attach-ui.js';
 import { createSplitPinRecoveryUI } from './split-pin-recovery-ui.js';
 import { createGeneralUndoUI } from './general-undo-ui.js';
 import { isSplitPinUrl } from './split-pin-identity.js';
@@ -203,9 +205,23 @@ const favoritesStatus = createFavoritesStatus({ document,
 function showFavoritesStatus(message, preview = false, dismissible = true) {
     if (!preview) generalUndo.clear();
     favoritesPreview = preview;
-    favoritesStatus.show(message, { preview, dismissible });
+    return favoritesStatus.show(message, { preview, dismissible });
 }
+const splitFocusRouteFence=()=>`${currentWindow?.id}:${activeSpaceId}:${archiveDisplayRevision}`;
+let splitFocusVisibilityRevision=0;
+document.addEventListener('visibilitychange', () => {
+    splitFocusVisibilityRevision++;
+    splitFocusConfirmationUI.begin();
+});
+const splitFocusNoticeFence=()=>`${splitFocusRouteFence()}:${splitFocusVisibilityRevision}`;
+const splitFocusConfirmationUI=createSplitFocusConfirmationUI({
+    send:message=>chrome.runtime.sendMessage(message),showPending:showFavoritesStatus,getFence:splitFocusNoticeFence
+});
+window.addEventListener('pagehide',()=>splitFocusConfirmationUI.begin());
 const splitPinRecoveryUI = createSplitPinRecoveryUI({ document, sendRequest: message => chrome.runtime.sendMessage(message),
+    context: () => ({ windowId: currentWindow?.id, spaceId: activeSpaceId, bookmarkFolderId: spaces.find(s => s.id === activeSpaceId)?.bookmarkFolderId }),
+    refresh: () => refreshCoordinator.invalidateBookmarks(), showStatus: showFavoritesStatus });
+const splitPinAttachUI = createSplitPinAttachUI({ document, sendRequest: message => chrome.runtime.sendMessage(message),
     context: () => ({ windowId: currentWindow?.id, spaceId: activeSpaceId, bookmarkFolderId: spaces.find(s => s.id === activeSpaceId)?.bookmarkFolderId }),
     refresh: () => refreshCoordinator.invalidateBookmarks(), showStatus: showFavoritesStatus });
 function clearFavoritesPreview() {
@@ -492,7 +508,7 @@ async function initializeNormalSidebar() {
 
     // Listen for storage changes to re-apply colors when they're updated
     chrome.storage.onChanged.addListener((changes, areaName) => {
-        if (areaName === 'local' && (changes.splitPinsV1 || changes.savedSplitRecipesV1) || areaName === 'session' && changes.splitPinInstancesV1) refreshCoordinator.invalidateBookmarks();
+        if (areaName === 'local' && (changes.splitPinsV1 || changes.savedSplitRecipesV1) || areaName === 'session' && (changes.splitPinInstancesV1 || changes.splitPinFocusLinksV1)) refreshCoordinator.invalidateBookmarks();
         if ((areaName === 'local' && (changes.persistentFavorites || changes[FAVORITE_ICON_CACHE_KEY])) || (areaName === 'session' && changes.favoriteSession)) {
             if (currentWindow) updatePinnedFavicons();
         }
@@ -2957,7 +2973,16 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false, d
             if (splitPin) {
                 if (tabElement.dataset.splitBusy === 'true') return;
                 tabElement.dataset.splitBusy = 'true';
-                try { await splitPinRequest('activate', tabElement.dataset.bookmarkId); await refreshActiveSpaceUI(); }
+                const attempt=splitFocusConfirmationUI.begin(),noticeFence=splitFocusNoticeFence();
+                const space=spaces.find(s=>s.id===activeSpaceId);
+                const route={type:'splitPinAction',windowId:currentWindow.id,spaceId:space?.id,bookmarkFolderId:space?.bookmarkFolderId,bookmarkId:tabElement.dataset.bookmarkId};
+                try {
+                    const result=await chrome.runtime.sendMessage({...route,action:'activate',deferFocusConfirmation:true});
+                    if(!result?.success)throw new Error(result?.error||'Split View action was not confirmed. Check the sidebar before retrying.');
+                    if(result.confirmationToken&&result.pendingMessage){
+                        if(document.visibilityState!=='hidden')splitFocusConfirmationUI.accept(attempt,route,noticeFence,result);
+                    }else await refreshActiveSpaceUI();
+                }
                 catch (error) { showFavoritesStatus(error.message); }
                 finally { delete tabElement.dataset.splitBusy; }
                 return;
@@ -3171,6 +3196,7 @@ async function createTabElement(tab, isPinned = false, isBookmarkOnly = false, d
                     ...(!moveActions ? { moveHint: 'End Split View before moving these selected tabs to another Space. Nothing was moved.' } : {}) } : null,
                 { ...actions, report: showFavoritesStatus, closeSelection: selectedTabClose(pinSnapshot || todaySnapshot, pinSnapshot ? bookmarkSelection : todaySelection) },
                 { ...splitActions, keyboard,
+                    attach: (pinSnapshot?.entries.length || 1) === 1 && tabElement.classList.contains('split-pin') && tabElement.dataset.splitLive !== 'true' ? () => splitPinAttachUI.open(tabElement.dataset.bookmarkId) : null,
                     ...(!todaySnapshot && !pinSnapshot && (splitActions?.create || splitActions?.end || savedMove?.destinations.length) ? { beginInteraction: () => {
                         const session = editorSessions.begin(pinSnapshot ? 'bookmark' : 'tab', pinSnapshot ? tabElement.dataset.bookmarkId : tab.id);
                         return () => { void editorSessions.complete(session); };
@@ -3512,6 +3538,7 @@ let activationEventSequence = 0;
 let latestAcceptedActivationSequence = 0;
 
 function handleTabActivated(activeInfo) {
+    splitFocusConfirmationUI.observeActivation(activeInfo);
     const eventSequence = ++activationEventSequence;
     // Sequence each window independently: a foreign-window activation must not
     // cancel this panel's still-current pending activation.
