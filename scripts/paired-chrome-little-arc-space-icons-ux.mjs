@@ -105,12 +105,24 @@ export async function exerciseLittleArcSpaceIcons({apiPage, ui, poll, first, fix
         } finally {await frameElement.dispose();}
         assert(embedding.rect.width>0&&embedding.hits.every(mark=>mark.hit),'The visible glyph and fallback must hit the authentic outer host.');
         if (label==='narrow-zoomed') assert(embedding.rect.width<=NARROW_CSS_WIDTH,'The actual iframe must also fit the narrow CSS viewport.');
+        const observedOptions = [];
         for (const name of [ICON_PROBE.name,FALLBACK_PROBE.name]) {
-            // Chromium's aria query uses computed accessible name and role, not row text.
-            const option=await frame.$(`aria/${name}[role="option"]`);
-            assert(option,`Missing accessible option: ${name}`);
-            try {assert.equal(await option.evaluate(node=>node.id),rows.find(row=>row.name===name).optionId);}
-            finally {await option.dispose();}
+            const row = rows.find(row=>row.name===name);
+            assert.match(row.optionId,/^space-option-\d+$/);
+            const option = await frame.$(`#${row.optionId}[role="option"]`);
+            assert(option,`Missing exact option DOM node: ${row.optionId}`);
+            try {
+                const ax = await frame.accessibility.snapshot({root:option,interestingOnly:false});
+                observedOptions.push({expectedName:name,optionId:row.optionId,
+                    dom:await option.evaluate(node=>({selected:node.getAttribute('aria-selected'),after:getComputedStyle(node,'::after').content})),
+                    ax:ax&&{role:ax.role,name:ax.name,selected:ax.selected}});
+            } finally {await option.dispose();}
+        }
+        await checkpoint(`space-icons-ax-${label}`, {options:observedOptions});
+        console.log(`Little Arc Space chooser AX (${label}): ${JSON.stringify(observedOptions)}`);
+        for(const option of observedOptions) {
+            assert.equal(option.ax?.role,'option',`Unexpected Chromium AX role for ${option.optionId}`);
+            assert.equal(option.ax?.name,option.expectedName,`Unexpected Chromium AX name for ${option.optionId}`);
         }
         const chooserCapture = await screenshot(first.page, `little-arc-space-icons-${label}`, true, {fullPage:false});
         assert.equal(await frame.$eval('#space-search', node => node === document.activeElement), true);
