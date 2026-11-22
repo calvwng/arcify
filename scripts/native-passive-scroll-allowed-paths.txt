@@ -1,0 +1,7 @@
+.github/workflows/native-passive-scroll.yml
+scripts/build-native-passive-scroll-runner.mjs
+scripts/native-passive-scroll-allowed-paths.txt
+scripts/native-passive-scroll-insertion.txt
+scripts/native-passive-scroll-source.sha256
+scripts/paired-chrome-scroll-passive-probe.mjs
+tests/unit/paired-chrome-scroll-passive-probe.test.js
