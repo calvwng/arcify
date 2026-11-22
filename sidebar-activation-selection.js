@@ -2,7 +2,7 @@
 // while its context is current, with a short bounded event-delivery lifetime.
 // Unknown/external events retain the normal selection-clearing path.
 export function createSidebarActivationSelection({ capture, getContext, readTab,
-    schedule = setTimeout, cancel = clearTimeout, lifetime = 1000 }) {
+    schedule = setTimeout, cancel = clearTimeout, now = () => performance.now(), lifetime = 1000 }) {
     const intents = new Map(), latest = new Map();
     function retire(intent) {
         if (intents.get(intent.windowId) === intent) intents.delete(intent.windowId);
@@ -16,7 +16,6 @@ export function createSidebarActivationSelection({ capture, getContext, readTab,
             // Capture before the initiating gesture's asynchronous preparation.
             const intent = { windowId, spaceId, complete: capture(), armed: false };
             intents.set(windowId, intent); latest.set(windowId, intent);
-            intent.timer = schedule(() => retire(intent), lifetime);
             return async (tabId, activate) => {
                 try {
                     if (!current(intent)) return false;
@@ -28,6 +27,10 @@ export function createSidebarActivationSelection({ capture, getContext, readTab,
                     if (tab?.id !== tabId || tab.windowId !== windowId) { retire(intent); intent.cancelled = true; return false; }
                     if (intents.get(windowId) === intent && !tab.active) {
                         intent.tabId = tabId; intent.armed = true;
+                        // Measure native event delivery from dispatch, not from asynchronous
+                        // sidebar preparation. Intervening events still cancel an unarmed intent.
+                        intent.expiresAt = now() + lifetime;
+                        intent.timer = schedule(() => retire(intent), lifetime);
                     } else retire(intent); // An already-active no-op cannot claim a later event.
                     await activate();
                     return current(intent);
@@ -37,7 +40,9 @@ export function createSidebarActivationSelection({ capture, getContext, readTab,
         consume({ windowId, tabId }) {
             const intent = intents.get(windowId);
             if (!intent) { const previous = latest.get(windowId); if (previous) previous.cancelled = true; return null; }
-            const accepted = current(intent) && intent.armed && intent.tabId === tabId;
+            // Timer cleanup is opportunistic; delayed event-loop service must not
+            // extend the period during which an event can be treated as owned.
+            const accepted = current(intent) && intent.armed && intent.tabId === tabId && now() < intent.expiresAt;
             if (!accepted) intent.cancelled = true;
             retire(intent); // Any intervening event in this window invalidates it.
             return accepted ? intent.complete : null;
