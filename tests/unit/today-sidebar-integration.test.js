@@ -1242,3 +1242,145 @@ test('return activation held read from Space A cannot activate after switching t
   assert.equal(document.querySelector('.space.active').dataset.spaceId,'race-b');
  }finally{release?.();beforeGetTab=null;storedSpaces=savedSpaces;for(const id of added)folders.splice(folders.findIndex(f=>f.id===id),1);await publishSpaces();await refresh();clear();}
 });
+
+test('return probe late pre-dispatch read then prompt owned activation must preserve selected pair', {timeout:10000}, async()=>{
+ const saved={spaces:structuredClone(storedSpaces),local:structuredClone(local),session:structuredClone(session),
+   folders:structuredClone(folders),tabs:structuredClone(tabs),requestCount:todayMoveRequests.length,mutationCount:mutations.length};
+ const oldUpdate=chrome.tabs.update, oldSend=chrome.runtime.sendMessage, oldSet=chrome.storage.local.set;
+ const backend=new SpaceStore();backend.discoverBookmarkSpaces=async()=>false;
+ let activation=Promise.resolve(),receipt;
+ chrome.storage.local.set=async value=>{
+   await oldSet(value);
+   if(value.spaces){storedSpaces=structuredClone(value.spaces);await publishSpaces();}
+ };
+ chrome.runtime.sendMessage=async message=>{
+   if(message.type!=='spaceStore'||message.action!=='activate')return oldSend.call(chrome.runtime,message);
+   activation=backend.dispatch(message);
+   return {success:true,spaces:await activation};
+ };
+ beforeTodayMoveRequest=async message=>{
+   try {receipt={success:true,batch:await moveTodayTabsToSpace(backend,message)};}
+   catch(error){receipt={success:false,error:error.message,batch:error.batch};}
+   return receipt;
+ };
+ const destination={id:'expiry-probe',name:'Expiry probe',color:'green',bookmarkFolderId:'expiry-root',temporaryTabs:[3,4],spaceBookmarks:[]};
+ for(const s of storedSpaces)s.temporaryTabs=s.temporaryTabs.filter(id=>![3,4].includes(id));
+ storedSpaces.push(destination);folders.push({id:'expiry-root',parentId:'root',title:'Expiry probe'});
+ await oldSet({spaces:storedSpaces,spaceModelVersion:2,todayOrderRepresentation:{version:1,inverted:false}});
+ await chrome.storage.session.set({spaceSession:true});
+ await backend.initialize();await publishSpaces();await refresh();
+ let release,readHeld=false,promptActivations=0;
+ const until=async (f,label)=>{const end=Date.now()+4000;while(!f()){assert(Date.now()<end,label);await wait(5);}};
+ const expected=destination.temporaryTabs.at(-1);
+ beforeGetTab=async id=>{if(id!==expected||readHeld)return;readHeld=true;await new Promise(r=>release=r);};
+ chrome.tabs.update=async (id,props)=>{
+   const result=await oldUpdate.call(chrome.tabs,id,props);
+   if(id===expected&&props.active){promptActivations++;await activate(id);}
+   return result;
+ };
+ try{
+   clear();event(document.querySelector('#spaceSwitcher button[data-space-id="expiry-probe"]'),'click');
+   await until(()=>readHeld&&live(3)&&live(4),'exact activation read held prior to native update');
+   event(live(3),'click',{ctrlKey:true});event(live(4),'click',{ctrlKey:true});assert.deepEqual(selected(),[3,4]);
+   await wait(1100); assert.equal(promptActivations,0);assert.deepEqual(selected(),[3,4]);
+   release(); await until(()=>promptActivations===1,'owned activation must dispatch');await wait(100);
+   await context(4);event(menuItem('moveTodayTabsToSpace'),'click');
+   const planned=document.querySelector('.today-move-hint').textContent;
+   const resultBefore=todayMoveRequests.length;
+   const choice=document.querySelector('[data-action="moveTodayToDestination"][data-space-id="alpha"]');
+   for(const type of ['pointerdown','mousedown','mouseup','click'])event(choice,type);
+   const status=()=>document.getElementById('favoritesDropStatus').textContent;
+   await until(()=>receipt&&!status().startsWith('Moving'),'actual writer receipt and sidebar status');
+   assert.equal(todayMoveRequests.length,resultBefore+1);
+   assert.equal(receipt.success,true,receipt.error);
+   assert.deepEqual({planned,requestIds:todayMoveRequests.at(-1).entries.map(x=>x.tabId),completed:receipt.batch.completed,status:status().split(' to Today')[0]},
+     {planned:'Move 2 tabs to Today. Stay in the current Space.',requestIds:[3,4],completed:[3,4],status:'Moved 2 tabs'});
+   const {spaces,spaceTabSnapshot}=await chrome.storage.local.get(['spaces','spaceTabSnapshot']);
+   for(const id of [3,4]){
+     assert.deepEqual(spaces.filter(space=>space.temporaryTabs.includes(id)).map(space=>space.id),['alpha']);
+     assert.deepEqual(spaceTabSnapshot.filter(row=>row.tabId===id).map(row=>[row.spaceId,row.section]),[['alpha','temporaryTabs']]);
+   }
+ }finally{
+   release?.();beforeGetTab=null;beforeTodayMoveRequest=null;chrome.tabs.update=oldUpdate;clear();
+   await Promise.allSettled([activation,backend.chain]);
+   chrome.runtime.sendMessage=oldSend;chrome.storage.local.set=oldSet;
+   storedSpaces=saved.spaces;for(const [current,previous] of [[local,saved.local],[session,saved.session]]){
+     for(const key of Object.keys(current))delete current[key];
+     Object.assign(current,previous);
+   }
+   tabs.splice(0,tabs.length,...saved.tabs);folders.splice(0,folders.length,...saved.folders);
+   todayMoveRequests.length=saved.requestCount;mutations.length=saved.mutationCount;
+   await publishSpaces();await refresh();
+ }
+});
+
+test('return probe a held native click cannot dispatch after authoritative Space A to B to A', {timeout:10000}, async()=>{
+ const baseline=structuredClone(storedSpaces),sessionBefore=structuredClone(session),priorUpdate=chrome.tabs.update;
+ const other={id:'expiry-aba',name:'Expiry ABA',color:'green',bookmarkFolderId:'expiry-aba-root',temporaryTabs:[],spaceBookmarks:[]};
+ storedSpaces.push(other);folders.push({id:'expiry-aba-root',parentId:'root',title:'Expiry ABA'});
+ await publishSpaces();await refresh();
+ const until=async(f,label)=>{const end=Date.now()+4000;while(!f()){assert(Date.now()<end,label);await wait(5);}};
+ const panelSpace=()=>document.querySelector('.space.active')?.dataset.spaceId;
+ const scope=async id=>{
+   session.activeSpaces[10]=id;
+   await onChanged.emit({activeSpaces:{newValue:structuredClone(session.activeSpaces)}},'session');
+   await until(()=>panelSpace()===id,'panel must actually redraw in '+id);
+ };
+ let release,held=false,writes=0;
+ beforeGetTab=async id=>{if(id!==3||held)return;held=true;await new Promise(r=>release=r);};
+ chrome.tabs.update=async (id,props)=>{if(id===3&&props.active)writes++;return priorUpdate.call(chrome.tabs,id,props);};
+ try{
+   assert.equal(panelSpace(),'alpha');event(live(3),'click');
+   await until(()=>held,'exact native click preparation in alpha is held');
+   await scope('expiry-aba');await scope('alpha');
+   release();await wait(100);
+   assert.equal(writes,0,'new Alpha view cannot revive stale click preparation from old Alpha view');
+ }finally{
+   release?.();beforeGetTab=null;chrome.tabs.update=priorUpdate;storedSpaces=baseline;
+   for(const k of Object.keys(session))delete session[k];Object.assign(session,sessionBefore);
+   folders.splice(folders.findIndex(f=>f.id==='expiry-aba-root'),1);
+   clear();await publishSpaces();await refresh();
+ }
+});
+
+for(const detachId of [4,5]) test(`return probe detaching ${detachId===4?'the exact target':'an unrelated tab'} while the target read is held`, {timeout:10000}, async()=>{
+ const saved={spaces:structuredClone(storedSpaces),session:structuredClone(session),tabs:structuredClone(tabs),mutationCount:mutations.length,
+   folders:structuredClone(folders),local:structuredClone(local)};
+ const oldUpdate=chrome.tabs.update;
+ const destination={id:'detach-probe',name:'Detach probe',color:'green',bookmarkFolderId:'detach-root',temporaryTabs:[3,4],spaceBookmarks:[]};
+ for(const s of storedSpaces)s.temporaryTabs=s.temporaryTabs.filter(id=>![3,4].includes(id));
+ storedSpaces.push(destination);folders.push({id:'detach-root',parentId:'root',title:'Detach probe'});
+ await publishSpaces();await refresh();
+ const until=async(f,label)=>{const end=Date.now()+4000;while(!f()){assert(Date.now()<end,label);await wait(5);}};
+ // Seed one known exact ordinary active tab before the tested switch;
+ // native setup for neighboring tests may have selected another fixture row.
+ for(const tab of tabs)if(tab.windowId===10)tab.active=tab.id===1;
+ const target=tabs.find(tab=>tab.id===4), detached=tabs.find(tab=>tab.id===detachId);
+ assert.equal(target.active,false);assert.equal(detached.active,false);
+ let release,held=false,writes=0,readFinished=false;
+ beforeGetTab=async id=>{if(id!==target.id||held)return;held=true;await new Promise(r=>release=r);readFinished=true;};
+ chrome.tabs.update=async (id,props)=>{if(id===target.id&&props.active)writes++;return oldUpdate.call(chrome.tabs,id,props);};
+ try{
+   // Space switch enters the activation tracker's exact tabs.get read for tab 4.
+   event(document.querySelector('#spaceSwitcher button[data-space-id="detach-probe"]'),'click');
+   await until(()=>held&&live(3)&&live(4),'held exact tracker read in destination Space');
+   detached.windowId=20;
+   await chrome.tabs.onDetached.emit(detached.id,{oldWindowId:10,oldPosition:3});
+   await chrome.tabs.onAttached.emit(detached.id,{newWindowId:20,newPosition:0});
+   detached.windowId=10;
+   await chrome.tabs.onDetached.emit(detached.id,{oldWindowId:20,oldPosition:0});
+   await chrome.tabs.onAttached.emit(detached.id,{newWindowId:10,newPosition:3});
+   release();
+   await until(()=>readFinished,'exact read returns the target back in its original window');
+   await new Promise(resolve=>setImmediate(resolve));
+   assert.equal(writes,detachId===target.id?0:1,'Only detaching the exact tracked ID can retire its existing intent');
+ }finally{
+   release?.();beforeGetTab=null;chrome.tabs.update=oldUpdate;storedSpaces=saved.spaces;
+   for(const [current,previous] of [[local,saved.local],[session,saved.session]]){
+     for(const key of Object.keys(current))delete current[key];
+     Object.assign(current,previous);
+   }
+   tabs.splice(0,tabs.length,...saved.tabs);folders.splice(0,folders.length,...saved.folders);
+   mutations.length=saved.mutationCount;clear();await publishSpaces();await refresh();
+ }
+});

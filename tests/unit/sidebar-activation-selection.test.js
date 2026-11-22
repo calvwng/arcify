@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { createSidebarActivationSelection } from '../../sidebar-activation-selection.js';
 
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
-function fixture(){
+function fixture({now}={}){
  const context={windowId:10,spaceId:'s'},timers=new Map();let serial=0,interaction=0,selected=0,clears=0;
  const tab={id:1,windowId:10,active:false};
  const capture=()=>{const start=interaction;return()=>{if(start===interaction){selected=0;clears++;}};};
  const tracker=createSidebarActivationSelection({capture,getContext:()=>context,readTab:async()=>({...tab}),
-  schedule:fn=>{timers.set(++serial,fn);return serial;},cancel:id=>timers.delete(id)});
+  schedule:fn=>{timers.set(++serial,fn);return serial;},cancel:id=>timers.delete(id),now});
  const event=(tabId=1,windowId=10)=>(tracker.consume({tabId,windowId})||capture())();
  return{tracker,context,tab,timers,event,begin:()=>tracker.begin({...context}),select:()=>{interaction++;selected=2;},selected:()=>selected,clears:()=>clears};
 }
@@ -63,4 +63,48 @@ test('consecutive same-window requests completing in reverse order activate only
  const a=tracker.begin(context)(1,async()=>writes.push(1)),b=tracker.begin(context)(2,async()=>writes.push(2));
  reads.get(2).resolve({id:2,windowId:10,active:false});assert.equal(await b,true);
  reads.get(1).resolve({id:1,windowId:10,active:false});assert.equal(await a,false);assert.deepEqual(writes,[2]);tracker.clear();
+});
+
+
+test('the event window starts at exact native dispatch, not while browser read is held', async()=>{
+ const pending=deferred(),context={windowId:10,spaceId:'s'},timeouts=new Map();
+ let previous=0,writes=0,owned=0;const capture=()=>()=>owned++;
+ const tracker=createSidebarActivationSelection({capture,getContext:()=>context,readTab:()=>pending.promise,
+  schedule:fn=>{timeouts.set(++previous,fn);return previous;},cancel:id=>timeouts.delete(id)});
+ const run=tracker.begin(context),result=run(1,async()=>{
+  writes++;assert.equal(timeouts.size,1,'The native window exists at the exact point of dispatch');
+  const complete=tracker.consume({windowId:10,tabId:1});assert(complete);complete();
+ });
+ assert.equal(timeouts.size,0,'Predispatch read must not spend the event-delivery window');
+ pending.resolve({id:1,windowId:10,active:false});assert.equal(await result,true);
+ assert.equal(writes,1);assert.equal(owned,1);assert.equal(timeouts.size,0);
+});
+
+test('a replaced exact tab ID cannot dispatch or open an event-delivery window', async()=>{
+ const context={windowId:10,spaceId:'s'};let writes=0,scheduled=0;
+ const tracker=createSidebarActivationSelection({capture:()=>()=>{},getContext:()=>context,
+  readTab:async()=>({id:2,windowId:10,active:false}),schedule:()=>{scheduled++;}});
+ assert.equal(await tracker.begin(context)(1,async()=>writes++),false);
+ assert.equal(writes,0);assert.equal(scheduled,0);assert.equal(tracker.consume({windowId:10,tabId:1}),null);
+});
+
+test('failure after the one consumed native event cannot claim subsequent activations',async()=>{
+ const f=fixture(),failure=new Error('native follow-up failed');
+ const result=f.begin()(1,async()=>{
+   f.select();f.event();assert.equal(f.selected(),2);
+   throw failure;
+ });
+ await assert.rejects(result,failure);assert.equal(f.timers.size,0);
+ f.event();assert.equal(f.selected(),0);
+});
+
+
+for(const elapsed of [999, 1000, 1001]) test(`native delivery at ${elapsed}ms uses elapsed monotonic time even if the timer has not run`, async()=>{
+ let monotonic=1234;const f=fixture({now:()=>monotonic});
+ await f.begin()(1,async()=>{});f.select();
+ assert.equal(f.timers.size,1,'Scheduler has not serviced the timeout');
+ monotonic+=elapsed;f.event();
+ assert.equal(f.selected(),elapsed<1000?2:0);
+ assert.equal(f.timers.size,0,'Consumed or stale intent cancels the scheduled retirement');
+ f.select();f.event();assert.equal(f.selected(),0,'One event cannot grandfather another');
 });

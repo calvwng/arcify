@@ -570,7 +570,10 @@ async function initializeNormalSidebar() {
         }
     };
     chrome.tabs.onAttached.addListener(refreshWindowTabs);
-    chrome.tabs.onDetached.addListener(refreshWindowTabs);
+    chrome.tabs.onDetached.addListener((tabId, info) => {
+        todayActivationSelection.remove(tabId);
+        return refreshWindowTabs(tabId, info);
+    });
     chrome.tabs.onMoved.addListener((_tabId, info) => {
         if (info.windowId === currentWindow?.id) { updatePinnedFavicons(); refreshCoordinator.invalidateActiveView(); }
     });
@@ -777,11 +780,15 @@ async function adoptStoredSpaces(next, { render = true } = {}) {
     restoreViewport();
     if (pendingActiveSpaceId && spaces.some(space => space.id === pendingActiveSpaceId)) {
         needsRender ||= activeSpaceId !== pendingActiveSpaceId;
+        if (activeSpaceId !== pendingActiveSpaceId) todayActivationSelection.clear();
         invalidateArchiveDisplay();
         activeSpaceId = pendingActiveSpaceId;
         pendingActiveSpaceId = null;
     }
-    if (!spaces.some(s => s.id === activeSpaceId)) { invalidateArchiveDisplay(); activeSpaceId = spaces[0]?.id; }
+    if (!spaces.some(s => s.id === activeSpaceId)) {
+        if (activeSpaceId !== spaces[0]?.id) todayActivationSelection.clear();
+        invalidateArchiveDisplay(); activeSpaceId = spaces[0]?.id;
+    }
     // A metadata replacement may remove the button's parent. Reattach only to
     // that same visible Space here; a different active view commits after its
     // async render so a newly opened editor can still defer the switch.
@@ -853,6 +860,9 @@ async function initSidebar() {
             if (nextId && (nextId !== activeSpaceId || pendingActiveSpaceId)) {
                 tabContextMenuRequest++; closeTabContextMenu();
                 bookmarkSelection.clear();
+                // An externally selected Space can change without a native tab event.
+                // Cancel old preparation before a later return to the same Space ID.
+                todayActivationSelection.clear();
                 if (spaces.some(space => space.id === nextId)) {
                     invalidateArchiveDisplay();
                     activeSpaceId = nextId;
@@ -3651,6 +3661,7 @@ function handleTabActivated(activeInfo) {
         if (!pendingActiveSpaceId && spaceWithTab && spaceWithTab.id !== activeSpaceId) {
             // Switch to the space containing the tab
             tabContextMenuRequest++; closeTabContextMenu();
+            todayActivationSelection.clear();
             invalidateArchiveDisplay();
             activeSpaceId = spaceWithTab.id;
             // Session and tab events can arrive in either order. Queue a view
