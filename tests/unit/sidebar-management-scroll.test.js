@@ -68,7 +68,7 @@ const area = (state, areaName) => ({ async get(keys) {
     const oldValue = structuredClone(state[key]); delete state[key];
     await onChanged.emit({ [key]: { oldValue } }, areaName);
 } });
-let beforeTree, beforeRemove;
+let beforeTree, beforeRemove, sessionEcho;
 Object.assign(globalThis, { window, document, Event: window.Event, Node: window.Node,
     localStorage: { getItem() { return null; }, setItem() {} },
     getComputedStyle: () => ({ getPropertyValue() { return ''; } }),
@@ -88,7 +88,11 @@ globalThis.chrome = {
                 storedSpaces = applySpacePatch(storedSpaces, message.before, message.after);
                 await onChanged.emit({ spaces: { newValue: structuredClone(storedSpaces) } }, 'local');
             }
-            if (message.action === 'activate') session.activeSpaces[message.windowId] = message.spaceId;
+            if (message.action === 'activate') {
+                const oldValue=structuredClone(session.activeSpaces);
+                session.activeSpaces[message.windowId] = message.spaceId;
+                if(sessionEcho)await onChanged.emit({activeSpaces:{oldValue,newValue:structuredClone(session.activeSpaces)}},'session');
+            }
             return { success: true, spaces: structuredClone(storedSpaces) };
         } },
     storage: { onChanged, local: area(local, 'local'), sync: area({ invertTabOrder: false }, 'sync'), session: area(session, 'session') },
@@ -301,4 +305,134 @@ test('background membership arriving before onRemoved retains the closed bookmar
     assert(row('b25').classList.contains('bookmark-only'));
     assert.equal(row('b24').getBoundingClientRect().top, offset);
     assert(document.activeElement === row('b25').querySelector('.tab-remove'), 'Storage-first close retains the bookmark’s own management action');
+});
+
+for (const cause of ['foreign-tab-created', 'local-tab-url-updated', 'local-tab-group-updated']) test(`passive ${cause} refresh does not reveal the still-active offscreen tab`,async()=>{
+    await activate(1);
+    content().scrollTop=720;
+    const offset=row('b25').getBoundingClientRect().top;
+    scrollWrites.length=0;
+    if(cause==='foreign-tab-created'){
+        const remote={id:99,windowId:20,active:true,pinned:false,title:'Unrelated window',url:'https://remote.test/'};
+        tabs.push(remote);
+        try{await chrome.tabs.onCreated.emit(remote);await wait(240);}
+        finally{tabs.splice(tabs.indexOf(remote),1);beforeTree=null;}
+    }else{
+        const localTab=tabs.find(t=>t.id===1);
+        const change=cause==='local-tab-url-updated' ? {url:'https://updated-local.test/'} : {groupId:81};
+        const original={...localTab};
+        Object.assign(localTab,change);
+        try {await chrome.tabs.onUpdated.emit(localTab.id,change,localTab);await wait(240);}
+        finally {delete localTab.groupId;Object.assign(localTab,original);}
+    }
+    assert(scrollWrites.length > 0,'Ordinary anchored repaint must still happen');
+    assert.equal(live(1).classList.contains('active'),true);
+    assert.equal(content().scrollTop,720);
+    assert.equal(row('b25').getBoundingClientRect().top,offset);
+});
+
+test('coalesced external A→unknown B→A does not turn unchanged visible Space into navigation',async()=>{
+    await activate(1);
+    content().scrollTop=720;
+    const offset=row('b25').getBoundingClientRect().top;
+    await onChanged.emit({activeSpaces:{oldValue:{10:'alpha'},newValue:{10:'unavailable'}}},'session');
+    await onChanged.emit({activeSpaces:{oldValue:{10:'unavailable'},newValue:{10:'alpha'}}},'session');
+    await wait(240);
+    assert.equal(document.querySelector('.space.active').dataset.spaceId,'alpha');
+    assert.equal(content().scrollTop,720);
+    assert.equal(row('b25').getBoundingClientRect().top,offset);
+});
+
+for(const mode of ['delayed','absent-authority','known-owner-mismatch'])
+test(`external route admission ${mode} only reveals with current authority and owner at commit`,async()=>{
+    await activate(1);
+    const prior=structuredClone(storedSpaces),savedBinding=local.pinnedTabStatesById[1];
+    const beta={id:'beta',name:'Beta',color:'blue',bookmarkFolderId:'q',spaceBookmarks:[],temporaryTabs:[]};
+    const extras=Array.from({length:24},(_,i)=>({id:200+i,windowId:10,active:false,pinned:false,title:'Beta fixture '+i,url:'https://beta.test/'+i}));
+    folders.push({id:'q',title:'Beta',parentId:'root'});tabs.push(...extras);
+    try{
+        if(mode==='known-owner-mismatch'){
+            beta.temporaryTabs=extras.map(tab=>tab.id);
+            storedSpaces.push(beta);
+            await onChanged.emit({spaces:{newValue:structuredClone(storedSpaces)}},'local');
+            await wait(240);
+        }
+        await onChanged.emit({activeSpaces:{oldValue:{10:'alpha'},newValue:{10:'beta'}}},'session');
+        await wait(240);
+        assert.equal(document.querySelector('.space.active').dataset.spaceId,mode==='known-owner-mismatch'?'beta':'alpha');
+        if(mode==='absent-authority'){
+            await onChanged.emit({activeSpaces:{oldValue:{10:'beta'},newValue:{}}},'session');
+        }
+        delete local.pinnedTabStatesById[1];
+        storedSpaces[0].spaceBookmarks=storedSpaces[0].spaceBookmarks.filter(id=>id!==1);
+        beta.temporaryTabs=[...extras.map(tab=>tab.id),1];
+        if(mode!=='known-owner-mismatch')storedSpaces.push(beta);
+        await onChanged.emit({spaces:{newValue:structuredClone(storedSpaces)}},'local');
+        const until=Date.now()+2500;
+        while((document.querySelector('.space.active').dataset.spaceId!=='beta'||!live(1)||(mode==='delayed'&&content().scrollTop<500))&&Date.now()<until)await wait(10);
+        if(mode!=='delayed'){
+            await wait(120);
+            assert.equal(content().scrollTop,0,'passive ownership arriving after the route commitment or authority removal must not reveal');
+            assert(live(1).getBoundingClientRect().top>content().clientHeight);
+            return;
+        }
+        assert.equal(document.querySelector('.space.active').dataset.spaceId,'beta');
+        assert(content().scrollTop>=500,'tab beyond viewport was revealed once');
+        assert(live(1).getBoundingClientRect().bottom<=content().clientHeight);
+        content().scrollTop=240;
+        await chrome.tabs.onMoved.emit(200,{windowId:10,fromIndex:1,toIndex:2});await wait(240);
+        assert.equal(content().scrollTop,240,'later passive repaint cannot reuse the route');
+    }finally{
+        storedSpaces=prior;
+        local.pinnedTabStatesById[1]=savedBinding;
+        tabs.splice(tabs.length-extras.length,extras.length);
+        folders.pop();
+        await onChanged.emit({activeSpaces:{oldValue:{10:'beta'},newValue:{10:'alpha'}}},'session');
+        await onChanged.emit({spaces:{newValue:structuredClone(storedSpaces)}},'local');
+        await wait(240);
+    }
+});
+for(const mode of ['latest known B after revoke','direct Space click with session echo'])
+test(`${mode} reveals the exact B-owned offscreen row once`,async()=>{
+    await activate(1);
+    const prior=structuredClone(storedSpaces),binding=local.pinnedTabStatesById[1],oldSelection=structuredClone(session.activeSpaces);
+    const extras=Array.from({length:24},(_,i)=>({id:300+i,windowId:10,active:false,pinned:false,title:'Beta '+i,url:'https://beta.test/'+i}));
+    folders.push({id:'q',title:'Beta',parentId:'root'}); tabs.push(...extras);
+    try {
+        delete local.pinnedTabStatesById[1];
+        storedSpaces[0].spaceBookmarks=storedSpaces[0].spaceBookmarks.filter(id=>id!==1);
+        storedSpaces.push({id:'beta',name:'Beta',color:'blue',bookmarkFolderId:'q',lastTab:1,spaceBookmarks:[],temporaryTabs:[...extras.map(t=>t.id),1]});
+        await onChanged.emit({spaces:{newValue:structuredClone(storedSpaces)}},'local');
+        await wait(240);
+        assert.equal(document.querySelector('.space.active').dataset.spaceId,'alpha');
+        if(mode==='latest known B after revoke'){
+            await onChanged.emit({activeSpaces:{oldValue:{10:'alpha'},newValue:{10:'beta'}}},'session');
+            await onChanged.emit({activeSpaces:{oldValue:{10:'beta'},newValue:{}}},'session');
+            await onChanged.emit({activeSpaces:{oldValue:{},newValue:{10:'beta'}}},'session');
+            assert.equal(document.querySelector('.space.active').dataset.spaceId,'alpha');
+        }else{
+            sessionEcho=true;
+            const chip=document.querySelector('#spaceSwitcher button[data-space-id="beta"]');
+            assert(chip);chip.dispatchEvent(new window.Event('click',{bubbles:true}));
+        }
+        await wait(320);
+        assert.equal(document.querySelector('.space.active').dataset.spaceId,'beta');
+        assert(live(1), 'the final exactly owned active row is mounted');
+        assert(live(1).getBoundingClientRect().bottom <= content().clientHeight, 'genuine navigation reveals the offscreen active tab');
+        content().scrollTop=120;
+        const unchangedRoute={oldValue:{10:'beta',20:'other-A'},newValue:{10:'beta',20:'other-B'}};
+        await onChanged.emit({activeSpaces:unchangedRoute},'session');
+        await chrome.tabs.onMoved.emit(300,{windowId:10,fromIndex:1,toIndex:2});
+        await wait(240);
+        assert.equal(content().scrollTop,120,'unrelated storage and a later passive repaint may not reuse a consumed reveal');
+    } finally{
+        sessionEcho=false;session.activeSpaces=oldSelection;
+        storedSpaces=prior;
+        local.pinnedTabStatesById[1]=binding;
+        tabs.splice(tabs.length-extras.length,extras.length);
+        folders.pop();
+        await onChanged.emit({activeSpaces:{oldValue:{10:'beta'},newValue:{10:'alpha'}}},'session');
+        await onChanged.emit({spaces:{newValue:structuredClone(storedSpaces)}},'local');
+        await wait(240);
+    }
 });
