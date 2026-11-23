@@ -1,0 +1,103 @@
+name: Isolated PR92 native scroll and sticky New Tab verification
+on:
+  push:
+    branches: [diagnostic/pr92-native-scroll-and-sticky-20261123]
+permissions:
+  contents: read
+jobs:
+  native-passive-scroll:
+    if: >-
+      github.repository == 'calvwng/arcify' &&
+      github.repository_owner == 'calvwng' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/diagnostic/pr92-native-scroll-and-sticky-20261123' &&
+      github.event.created == true && github.event.deleted == false &&
+      github.event.before == '0000000000000000000000000000000000000000' &&
+      github.run_attempt == '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+      ARCIFY_TEST_HEAD: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+          path: arcify
+      - uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c3e4e4d374136e608d447716c0321b32b2aa8cfb
+          persist-credentials: false
+          path: arcify-spotlight
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.5'
+      - name: Verify exact reviewed candidate parent, event and test-only changes
+        working-directory: arcify
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" = 2
+          test "$(git rev-parse HEAD^)" = e92974d464d35762aeaeb13f123fe097455b5b98
+          test "$(git rev-parse HEAD^^{tree})" = a74f48137764d3579bdb5a7de396d675059ca030
+          test "$(git -C ../arcify-spotlight rev-parse HEAD)" = c3e4e4d374136e608d447716c0321b32b2aa8cfb
+          node scripts/native-combined-admission.mjs
+          test "$(node --version)" = v22.23.5
+          git diff --name-status --no-renames HEAD^ HEAD | LC_ALL=C sort > /tmp/combined-diagnostic-paths
+          diff -u scripts/native-combined-allowed-paths.txt /tmp/combined-diagnostic-paths
+          sha256sum -c scripts/native-passive-scroll-source.sha256
+          git diff --exit-code
+      - name: Install only locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Check isolated probe and generate exact supplemental runner
+        working-directory: arcify
+        run: |
+          node --test tests/unit/paired-chrome-scroll-passive-probe.test.js tests/unit/paired-chrome-management-scroll.test.js tests/unit/paired-chrome-new-tab-drop.test.js tests/unit/native-combined-admission.test.js
+          node scripts/build-native-passive-scroll-runner.mjs
+          for f in scripts/.native-passive-*.mjs; do node --check "$f"; done
+          git diff --exit-code
+      - name: Build unchanged production packages
+        run: |
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Native passive viewport preservation and intentional reveal
+        id: passive_scroll
+        timeout-minutes: 12
+        continue-on-error: true
+        working-directory: arcify
+        env:
+          ARCIFY_PAIRED_RUN_MODE: native-passive-scroll
+        run: bash scripts/native-combined-run-lane.sh passive ../arcify-spotlight
+      - name: Sticky New Tab trusted new-window drag
+        id: sticky_drag
+        timeout-minutes: 12
+        continue-on-error: true
+        working-directory: arcify
+        env:
+          ARCIFY_PAIRED_RUN_MODE: move-drag
+        run: bash scripts/native-combined-run-lane.sh sticky ../arcify-spotlight
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pr92-native-combined-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            arcify/test-results/native-passive-scroll/
+            arcify/test-results/paired-chrome-move-drag/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Report independent lane conclusions
+        if: always()
+        env:
+          PASSIVE: ${{ steps.passive_scroll.outcome }}
+          STICKY: ${{ steps.sticky_drag.outcome }}
+        run: |
+          printf 'Passive candidate: %s\nSticky candidate: %s\n' "$PASSIVE" "$STICKY"
+          test "$PASSIVE" = success && test "$STICKY" = success

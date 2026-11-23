@@ -1,0 +1,15 @@
+A	.github/workflows/native-pr92-combined.yml
+A	scripts/build-native-passive-scroll-runner.mjs
+A	scripts/native-combined-admission.mjs
+A	scripts/native-combined-allowed-paths.txt
+A	scripts/native-combined-run-lane.sh
+A	scripts/native-passive-scroll-allowed-paths.txt
+A	scripts/native-passive-scroll-expected-dist.sha256
+A	scripts/native-passive-scroll-insertion.txt
+A	scripts/native-passive-scroll-source.sha256
+A	scripts/paired-chrome-scroll-passive-probe.mjs
+A	scripts/passive-gate-receipt.mjs
+A	tests/unit/native-combined-admission.test.js
+A	tests/unit/paired-chrome-scroll-passive-probe.test.js
+M	scripts/paired-chrome-new-tab-drop.mjs
+M	tests/unit/paired-chrome-new-tab-drop.test.js

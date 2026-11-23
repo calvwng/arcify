@@ -8,10 +8,16 @@ export async function readStickyNewTab() {
     const hosting={tab:await chrome.tabs.getCurrent()||null,windowId:(await chrome.windows.getCurrent()).id};
     const row=document.getElementById('newTabBtn'),space=row?.closest('.space.active'),port=space?.querySelector('.space-content');
     const box=node=>{if(!node)return null;const r=node.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,bottom:r.bottom};};
+    const today=[...space?.querySelectorAll('[data-tab-type="temporary"] .tab[data-tab-id]')||[]];
+    const portBox=box(port), targetBox=box(row);
+    const visibleTodayIds=portBox&&targetBox?today.filter(node=>{
+        const r=node.getBoundingClientRect();
+        return r.y>targetBox.bottom+3&&r.bottom<portBox.bottom-3;
+    }).map(node=>Number(node.dataset.tabId)):[];
     const style=row?getComputedStyle(row):null,canvas=document.createElement('canvas');canvas.width=canvas.height=1;
     const ctx=canvas.getContext('2d'),pixels=color=>{ctx.clearRect(0,0,1,1);ctx.fillStyle=color;ctx.fillRect(0,0,1,1);return [...ctx.getImageData(0,0,1,1).data];};
     return {hosting,activeSpaceId:space?.dataset.spaceId,activeSpaceIds:[...document.querySelectorAll('.space.active')].map(node=>node.dataset.spaceId),
-        renderedTodayIds:[...space?.querySelectorAll('[data-tab-type="temporary"] .tab[data-tab-id]')||[]].map(node=>Number(node.dataset.tabId)),
+        renderedTodayIds:today.map(node=>Number(node.dataset.tabId)),visibleTodayIds,
         row:box(row),port:box(port),header:box(space?.querySelector('.space-header')),favorites:box(document.getElementById('pinnedFavicons')),
         divider:box(space?.querySelector('.temp-header')),position:style?.position,opacity:Number(style?.opacity),background:style?.backgroundColor,pixels:style?pixels(style.backgroundColor):null,
         scrollTop:port?.scrollTop,scrollHeight:port?.scrollHeight,clientHeight:port?.clientHeight,theme:document.documentElement.dataset.theme,
@@ -54,12 +60,83 @@ export async function waitForStickyFixtureReady({read,poll,request,observe}) {
         try{assertStickyFixtureReady(sample,request);return true;}catch{return false;}
     },'exact fixture-owned Today rows and original sticky overflow readiness');
 }
+// Test-only source eligibility. Selection and every pre-input recheck use
+// the same proof; a selected ID never changes after the first input begins.
+export function assertStickyDragSource({geometry,raw},{windowId,spaceId,fixtureUrls,movedIds},id,{visible=false}={}) {
+    assert.equal(geometry.hosting.tab,null);
+    assert.equal(geometry.hosting.windowId,windowId);
+    assert.equal(geometry.activeSpaceId,spaceId);
+    assert.deepEqual(geometry.activeSpaceIds,[spaceId]);
+    assert.equal(geometry.count,1,'A unique New Tab target is required in the source panel.');
+    for(const moved of movedIds){
+        assert(!geometry.renderedTodayIds.includes(moved),'Prior moved source still projects in exact A.');
+        const live=raw.tabs.filter(tab=>tab.id===moved);
+        assert.equal(live.length,1,'Prior successful move must still have its exact native tab.');
+        assert.notEqual(live[0].windowId,windowId,'Prior moved source must still be outside exact A.');
+    }
+    assert(fixtureUrls.has(id)&&!movedIds.has(id),'Exact unmoved fixture source required.');
+    assert.equal(geometry.renderedTodayIds.filter(rowId=>rowId===id).length,1,'One exact Today source row is required.');
+    if(visible)assert.equal(geometry.visibleTodayIds.filter(rowId=>rowId===id).length,1,'Exact source must be visible.');
+    const live=raw.tabs.filter(tab=>tab.id===id);
+    assert.equal(live.length,1);
+    const tab=live[0];
+    assert.equal(tab.windowId,windowId,'Exact source must still be in the source native window.');
+    assert.equal(tab.url,fixtureUrls.get(id),'Exact source fixture URL changed.');
+    assert.equal(raw.tabs.filter(other=>other.url===tab.url).length,1,'Source fixture URL must identify only the captured native ID.');
+    assert.equal(tab.incognito,false);assert.equal(tab.pinned,false);
+    assert.equal(tab.groupId,-1);assert.equal(tab.splitViewId,-1);
+    const owners=raw.spaces.filter(space=>space.spaceBookmarks.includes(id)||space.temporaryTabs.includes(id));
+    assert.equal(owners.length,1);
+    assert.equal(owners[0].id,spaceId);
+    assert(!owners[0].spaceBookmarks.includes(id));
+    assert.equal(owners[0].temporaryTabs.filter(rowId=>rowId===id).length,1);
+    return tab;
+}
+
+export async function waitForStickyDragSource({read,poll,scope}) {
+    const sample=await poll(read,value=>{
+        const id=value.geometry.visibleTodayIds.find(value=>scope.fixtureUrls.has(value));
+        try{assertStickyDragSource(value,scope,id,{visible:true});return true;}catch{return false;}
+    },'prior moved rows absent and fresh exact visible ordinary source');
+    const id=sample.geometry.visibleTodayIds.find(value=>scope.fixtureUrls.has(value));
+    assertStickyDragSource(sample,scope,id,{visible:true});
+    return id;
+}
+
 export function assertNoNewTabDropMutation(before,after) {
     const tabs=s=>s.tabs.map(({id,windowId,index,url,pinned,groupId})=>({id,windowId,index,url,pinned,groupId})).sort((a,b)=>a.id-b.id);
     assert.deepEqual(tabs(after),tabs(before));assert.deepEqual(after.windows.map(w=>w.id).sort(),before.windows.map(w=>w.id).sort());
     for(const key of ['bookmarks','pinBindings','favorites','favoriteBindings'])assert.deepEqual(after[key],before[key]);
     const membership=s=>s.spaces.map(({id,spaceBookmarks,temporaryTabs})=>({id,spaceBookmarks,temporaryTabs}));assert.deepEqual(membership(after),membership(before));
 }
+// Runs in the actual native panel after the observer and geometry prerequisites.
+export function readStickyDragInputPoints(source,target,{id,spaceId}) {
+    const spaces=[...document.querySelectorAll('.space.active')],space=spaces[0];
+    if(spaces.length!==1||space.dataset.spaceId!==spaceId)return null;
+    const rows=space.querySelectorAll(`[data-tab-type="temporary"] .tab[data-tab-id="${id}"]`);
+    const targets=document.querySelectorAll('#newTabBtn');
+    if(rows.length!==1||rows[0]!==source||!source.isConnected||source.closest('.shared-today-remote')||
+        targets.length!==1||targets[0]!==target||!target.isConnected||target.closest('.space.active')!==space)return null;
+    const from=source.getBoundingClientRect(),to=target.getBoundingClientRect();
+    if(![from,to].every(r=>r.width>0&&r.height>0))return null;
+    const start={x:from.x+Math.min(70,from.width/3),y:from.y+from.height/2};
+    const drop={x:to.x+to.width/2,y:to.y+to.height/2};
+    if(![start.x,start.y,drop.x,drop.y].every(Number.isFinite))return null;
+    const hitSource=document.elementFromPoint(start.x,start.y),hitDrop=document.elementFromPoint(drop.x,drop.y);
+    if(!hitSource||!source.contains(hitSource)||hitSource.closest('button, .shared-today-remote')||
+        !hitDrop||!target.contains(hitDrop))return null;
+    return {start,drop};
+}
+
+export async function startStickyDragOnce(page,{source,target},scope,verifySource){
+    await verifySource();
+    const points=await page.evaluate(readStickyDragInputPoints,source,target,scope);
+    assert(points,'Exact source and sticky destination must both receive the selected points before input.');
+    await page.mouse.move(points.start.x,points.start.y);
+    await page.mouse.down();
+    return points.start;
+}
+
 export function observeNativeNewTabDrop() {
     const events=[];const listen=event=>{if(events.length<300)events.push({type:event.type,trusted:event.isTrusted,tabId:Number(event.target.closest?.('.tab[data-tab-id]')?.dataset.tabId)||null,target:Boolean(event.target.closest?.('#newTabBtn')),dropEffect:event.dataTransfer?.dropEffect||null});};
     const names=['dragstart','dragenter','dragover','dragleave','drop','dragend'];for(const name of names)document.addEventListener(name,listen,true);
@@ -103,28 +180,37 @@ export async function cancelHeldNewTabDrag(page,client,tabId) {
 }
 
 export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll,sourceId,space,base,create,assign,pageForUrl,state,raw,assertMoved,checkpoint}) {
-    const page=panel.page,ids=[],originalTheme=await apiPage.$eval('#themeMode',node=>node.value);let primaryError,lastReadiness;
+    const page=panel.page,ids=[],movedIds=new Set(),fixtureUrls=new Map(),originalTheme=await apiPage.$eval('#themeMode',node=>node.value);let primaryError,lastReadiness;
     const row=id=>`.space.active [data-tab-type="temporary"] .tab[data-tab-id="${id}"]`;
     const geometry=()=>page.evaluate(readStickyNewTab);
     const capture=async label=>{const shot=await ui(page,`Capture ${label}`,()=>screenshot(page,label,true));assert(shot);return shot;};
-    const fill=async suffix=>{const tab=await create(`ordinary?new-tab-drop=${suffix}`);ids.push(tab.id);await assign(tab.id,space.id);return tab;};
+    const fill=async suffix=>{const path=`ordinary?new-tab-drop=${suffix}`,tab=await create(path);ids.push(tab.id);fixtureUrls.set(tab.id,`${base}/${path}`);await assign(tab.id,space.id);return tab;};
     const scroll=async delta=>ui(page,'Scroll the real tab area with a native wheel',async()=>{const g=await geometry();await page.mouse.move(g.port.x+g.port.width/2,g.port.y+g.port.height/2);await page.mouse.wheel({deltaY:delta});});
-    const visibleSource=()=>page.evaluate(ids=>{const port=document.querySelector('.space.active .space-content').getBoundingClientRect(),target=document.getElementById('newTabBtn').getBoundingClientRect();return [...document.querySelectorAll('.space.active [data-tab-type="temporary"] .tab[data-tab-id]')].filter(n=>ids.includes(Number(n.dataset.tabId))).find(n=>{const r=n.getBoundingClientRect();return r.y>target.bottom+3&&r.bottom<port.bottom-3;})?.dataset.tabId;},ids);
+    const scope={windowId:sourceId,spaceId:space.id,fixtureUrls,movedIds};
+    const sourceSample=async()=>({geometry:await geometry(),raw:await raw()});
+    const visibleSource=()=>waitForStickyDragSource({read:sourceSample,poll,scope});
     async function drag(id,{cancel=false,stale=false}={}) {
         const target='#newTabBtn';let held=false;
-        const url=await apiPage.evaluate(id=>chrome.tabs.get(id).then(tab=>tab.url),id),sourcePage=await pageForUrl(url);
-        await ui(sourcePage,'Type page state before native drag',()=>sourcePage.type('#page-state','-kept'));
+        const url=fixtureUrls.get(id),sourcePage=await pageForUrl(url);
+        await checkpoint('sticky-exact-source-before-typing',{tabId:id,cancel,stale});
+        await ui(sourcePage,'Type page state before native drag',async()=>{
+            assertStickyDragSource(await sourceSample(),scope,id,{visible:true});
+            await sourcePage.type('#page-state','-kept');
+        });
         // Typing foregrounds the native source tab; reacquire geometry only
         // before input, never after a successful drop as an implicit retry.
         await ui(page,'Perform one genuine source-to-New-Tab drag',async()=>{
+            assertStickyDragSource(await sourceSample(),scope,id);
             const g=await locateFreshDragGeometry(page,row(id),target,o=>checkpoint('drop-geometry-input',o));
-            const from=await g.source.boundingBox();assert(from);const baseline=await geometry();let invocation,cancellation,before,dragError;
+            let invocation,cancellation,before,dragError;
             const client=favoriteDragInputClient(page);
             const observation=async(phase,detail={})=>{const dragEvidence=await page.evaluate(readNativeNewTabDragEvidence);await checkpoint(phase,{tabId:id,cancel,stale,...detail,dragEvidence});return dragEvidence;};
-            await page.evaluate(observeNativeNewTabDrop);
             try{
-                await page.mouse.move(from.x+Math.min(70,from.width/3),from.y+from.height/2);await page.mouse.down();held=true;
-                await page.mouse.move(from.x+Math.min(70,from.width/3)+14,from.y+from.height/2,{steps:6});
+                const baseline=await geometry();
+                await page.evaluate(observeNativeNewTabDrop);
+                const start=await startStickyDragOnce(page,g,{id,spaceId:scope.spaceId},
+                    async()=>assertStickyDragSource(await sourceSample(),scope,id));held=true;
+                await page.mouse.move(start.x+14,start.y,{steps:6});
                 await poll(()=>page.$eval(row(id),n=>n.classList.contains('dragging')),Boolean,'real source dragstart');
                 const preview=await poll(geometry,s=>s.eligible==='eligible'&&s.label==='Move to new window'&&!s.hover,'eligible preview before pointer enters New Tab');
                 assertStickyNewTab(preview,{stuck:preview.scrollTop>0&&Math.abs(preview.row.y-preview.port.y)<=2,drag:true,hovered:false,baseline});
@@ -180,6 +266,7 @@ export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll
                 ],dragError,detail=>checkpoint('sticky-drag-cleanup-failed',detail));
             }
         });
+        if(!cancel&&!stale)movedIds.add(id);
     }
     try{
         for(let i=0;i<36;i++){
@@ -196,9 +283,9 @@ export async function exerciseStickyNewTabDrop({panel,apiPage,ui,screenshot,poll
             await scroll(normal.row.height*4);const stuck=await poll(geometry,g=>g.scrollTop>0&&Math.abs(g.row.y-g.port.y)<=2,'sticky row reached top of scroll area');assertStickyNewTab(stuck,{stuck:true,baseline:normal});
             const stuckShot=await capture(`new-tab-sticky-${mode}-stuck`);await checkpoint('sticky-theme-geometry',{mode,normal,stuck,normalShot,stuckShot});
         }
-        let id=Number(await visibleSource());assert(ids.includes(id));await drag(id,{cancel:true});await drag(id,{cancel:true});await drag(id);
-        id=Number(await visibleSource());assert(ids.includes(id));await drag(id);
-        id=Number(await visibleSource());assert(ids.includes(id));await drag(id,{stale:true});
+        let id=await visibleSource();await drag(id,{cancel:true});await drag(id,{cancel:true});await drag(id);
+        id=await visibleSource();await drag(id);
+        id=await visibleSource();await drag(id,{stale:true});
     }catch(error){
         primaryError=error;const failure={error:{name:error.name,message:error.message,stack:error.stack},ids:[...ids],spaceId:space.id,windowId:sourceId,lastReadiness};
         try{failure.geometry=await geometry();}catch(diagnostic){failure.geometryError=diagnostic.message;}

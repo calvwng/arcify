@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {readFile,writeFile} from 'node:fs/promises';
+const get=(file)=>readFile(new URL(file,import.meta.url),'utf8');
+const put=(file,text)=>writeFile(new URL(file,import.meta.url),text,{flag:'wx'});
+const fixed=async(file,sha256)=>{
+ const source=await get(file);
+ assert.equal(createHash('sha256').update(source).digest('hex'),sha256,'Unexpected exact baseline '+file);
+ return source;
+};
+const once=(s,a,b)=>{assert.equal(s.split(a).length,2,'Nonunique or missing insertion: '+a.slice(0,70));return s.replace(a,b);};
+let smoke=await fixed('paired-chrome-smoke.mjs','53f08159602ca66cb31a299e37b624f311748989f06d4f1cc0b9aae6abe20b68');
+let plan=await fixed('paired-chrome-run-plan.mjs','57cbe4f3b92e7d6d6eae1b2f6ff960cd7f4a292d4150346b27d8e1f329ec9c43');
+let management=await fixed('paired-chrome-management-scroll.mjs','6219f86445283c4709df85d5be8220bfae9ed69b8223dca5f21216d973d0f1c6');
+smoke=once(smoke,"from './paired-chrome-management-scroll.mjs';","from './.native-passive-management-scroll.mjs';");
+smoke=once(smoke,"from './paired-chrome-run-plan.mjs';","from './.native-passive-scroll-plan.mjs';");
+smoke=once(smoke,"const OUTPUT = resolve(ROOT, report.runMode === 'folder-actions'","const OUTPUT = resolve(ROOT, report.runMode === 'native-passive-scroll' ? 'test-results/native-passive-scroll' : report.runMode === 'folder-actions'");
+smoke=once(smoke,"if (report.runMode === 'full') {\n    await step(stepNames[34]","if (report.runMode === 'native-passive-scroll') {\n    await step(stepNames[34]");
+smoke=once(smoke,"    await step(stepNames[35],","    }\n    if (report.runMode === 'full') {\n    await step(stepNames[35],");
+const assertReport="    assert(report.screenshots.length > 0, 'Successful browser verification requires screenshot evidence.');";
+smoke=once(smoke,assertReport,"    assert.equal(report.runMode,'native-passive-scroll');\n    assert((report.managementScroll||[]).filter(x=>x.phase==='passive-scroll-post'&&x.verdict==='preserved').length===1,'Native passive scroll candidate not verified; inspect durable verdict and stage receipts');\n"+assertReport);
+plan=once(plan,'function caseIndicesForMode(mode) {',"function caseIndicesForMode(mode) {\n    if(mode==='native-passive-scroll')return [0,1,2,34];");
+plan=once(plan,"scope: mode === 'folder-actions'","scope: mode === 'native-passive-scroll' ? 'Exact candidate foreign-create and intentional-reveal native checks only; no full-suite acceptance.' : mode === 'folder-actions'");
+management=once(management,"import assert from 'node:assert/strict';","import assert from 'node:assert/strict';\nimport {randomBytes} from 'node:crypto';\nimport {exercisePassiveScrollProbe} from './paired-chrome-scroll-passive-probe.mjs';");
+management=once(management,
+    'scrollTop: content.scrollTop, maxScroll: content.scrollHeight - content.clientHeight,',
+    'scrollTop: content.scrollTop, maxScroll: content.scrollHeight - content.clientHeight, scrollHeight:content.scrollHeight, clientHeight:content.clientHeight, rowCount:content.querySelectorAll(\".tab, .folder, .shared-today-remote\").length,');
+const ret='        return { nativeEvidence: native.evidence, originalPanel,';
+management=once(management,ret,(await get('native-passive-scroll-insertion.txt'))+ret.replace('originalPanel,','originalPanel, passiveProbe,'));
+await put('.native-passive-scroll-plan.mjs',plan);
+await put('.native-passive-management-scroll.mjs',management);
+await put('.native-passive-scroll-runner.mjs',smoke);
+console.log('Generated supplemental candidate native passive scroll runner; no browser started.');
