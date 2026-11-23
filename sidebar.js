@@ -106,6 +106,7 @@ const invalidateArchiveDisplay = () => { archiveDisplayRevision++; invalidateAct
 // Session selection may arrive before the selected bookmark-space is adopted.
 // Keep the intent separate so missing metadata cannot erase it via fallback.
 let pendingActiveSpaceId = null;
+let pendingSessionRevealSpaceId = null;
 let previousSpaceId = null;
 let isCreatingSpace = false;
 let isOpeningBookmark = false;
@@ -700,14 +701,22 @@ const refreshCoordinator = new RefreshCoordinator({
         return spaceRequest('get');
     },
     adoptSpaces: next => adoptStoredSpaces(next, { render: false }),
-    render: async ({ isCurrent, activeViewChanged }) => {
+    render: async ({ isCurrent }) => {
         const spaceId = activeSpaceId;
         const canCommit = () => isCurrent() && activeSpaceId === spaceId;
         if (await refreshActiveSpaceUI({ canCommit }) === false || !canCommit()) return false;
         activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher);
         syncCollapsedFoldersInActiveSpace();
-        if (activeViewChanged && ownerOf(spaces, activeChromeTabId)?.id === spaceId) activeTabReveal.request(activeChromeTabId);
-        else activeTabReveal.flush();
+        // Structural repaint is not navigation. Only the latest session Space
+        // transition may reveal after its exact route commits.
+        if (pendingSessionRevealSpaceId === spaceId) {
+            pendingSessionRevealSpaceId = null;
+            if (ownerOf(spaces, activeChromeTabId)?.id === spaceId) {
+                activeTabReveal.request(activeChromeTabId);
+                return true;
+            }
+        }
+        activeTabReveal.flush();
         return true;
     },
     isBusy: () => !sidebarReady || isDraggingTab || isDraggingSpace || isOpeningBookmark || pendingSaveCount > 0 || pendingMutationCount > 0 || editorSessions?.isActive(),
@@ -856,7 +865,13 @@ async function initSidebar() {
     refreshCoordinator.schedule();
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'session' && changes.activeSpaces && sidebarReady) {
+            const previousId = changes.activeSpaces.oldValue?.[currentWindow.id];
             const nextId = changes.activeSpaces.newValue?.[currentWindow.id];
+            // Scroll intent follows actual session transitions for this window,
+            // even when a queued-but-unpainted model already has this Space ID.
+            if (previousId !== nextId) {
+                pendingSessionRevealSpaceId = nextId && !getSpaceElement(nextId)?.classList.contains('active') ? nextId : null;
+            }
             if (nextId && (nextId !== activeSpaceId || pendingActiveSpaceId)) {
                 tabContextMenuRequest++; closeTabContextMenu();
                 bookmarkSelection.clear();
@@ -1376,12 +1391,15 @@ async function setActiveSpace(spaceId, updateTab = true) {
     }
     if (activeSpaceId !== spaceId || pendingActiveSpaceId) invalidateArchiveDisplay();
     pendingActiveSpaceId = null;
+    pendingSessionRevealSpaceId = null;
     activeSpaceId = spaceId;
     await pendingSpaceSaves;
     await spaceRequest('activate', { windowId: currentWindow.id, spaceId });
     if (activeSpaceId !== spaceId) return false;
     await activateSpaceInDOM(spaceId, spaces, updateSpaceSwitcher);
     if (await refreshActiveSpaceUI() === false || activeSpaceId !== spaceId) return false;
+    // A session echo of this successful direct navigation is no longer owed.
+    if (pendingSessionRevealSpaceId === spaceId) pendingSessionRevealSpaceId = null;
     if (updateTab) {
         const tabs = (await getOwnedTabs(spaceId)).filter(t => t.windowId === currentWindow.id);
         if (activeSpaceId !== spaceId) return false;
@@ -3663,6 +3681,7 @@ function handleTabActivated(activeInfo) {
             tabContextMenuRequest++; closeTabContextMenu();
             todayActivationSelection.clear();
             invalidateArchiveDisplay();
+            pendingSessionRevealSpaceId = null;
             activeSpaceId = spaceWithTab.id;
             // Session and tab events can arrive in either order. Queue a view
             // change independently of the metadata projection, and let the same
