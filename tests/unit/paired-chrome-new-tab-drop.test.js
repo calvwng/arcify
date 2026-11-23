@@ -129,3 +129,104 @@ test('sticky setup samples geometry once per observation and records original er
  assert.match(source,/failure.raw=await raw\(\)/);assert.match(source,/failure.geometry=await geometry\(\)/);
  assert.match(source,/request:\{ids,spaceId:space.id,windowId:sourceId\}/);
 });
+
+const {assertStickyDragSource,waitForStickyDragSource}=await import('../../scripts/paired-chrome-new-tab-drop.mjs');
+function sourceCase(){
+ const tab=(id,windowId)=>({id,windowId,url:`https://fixture.test/ordinary?new-tab-drop=${id}`,pinned:false,incognito:false,groupId:-1,splitViewId:-1});
+ const raw={tabs:[tab(32,20),tab(31,10)],spaces:[{id:'s',spaceBookmarks:[],temporaryTabs:[31]}]};
+ return {scope:{windowId:10,spaceId:'s',movedIds:new Set([32]),fixtureUrls:new Map(raw.tabs.map(t=>[t.id,t.url]))},
+  sample:{raw,geometry:{hosting:{tab:null,windowId:10},activeSpaceId:'s',activeSpaceIds:['s'],count:1,visibleTodayIds:[32,31],renderedTodayIds:[32,31]}}};
+}
+test('old visible selector would pick preceding moved #32; wait for exact A to stop projecting it before selection',async()=>{
+ const {sample,scope}=sourceCase();
+ assert.equal(sample.geometry.visibleTodayIds.find(id=>scope.fixtureUrls.has(id)),32);
+ assert.throws(()=>assertStickyDragSource(sample,scope,31),/Prior moved source still projects/);
+ const settled=structuredClone(sample);settled.geometry.visibleTodayIds=[31];settled.geometry.renderedTodayIds=[31];
+ const samples=[sample,settled];let reads=0;
+ const id=await waitForStickyDragSource({scope,read:async()=>samples[reads++],poll:async(read,ready)=>{
+  assert.equal(ready(await read()),false);const next=await read();assert.equal(ready(next),true);return next;
+ }});
+ assert.equal(id,31);assert.equal(reads,2);
+});
+test('captured ID fails closed if native scope changes after typing; no substitute visible row',()=>{
+ const {sample,scope}=sourceCase();sample.geometry.visibleTodayIds=[31];sample.geometry.renderedTodayIds=[31];
+ assert.equal(assertStickyDragSource(sample,scope,31,{visible:true}).id,31);
+ sample.raw.tabs[1].windowId=20;
+ assert.throws(()=>assertStickyDragSource(sample,scope,31),/still be in the source native window/);
+});
+for(const [name,mutate] of [
+ ['foreign native panel',s=>s.geometry.hosting.windowId=20],['normal tab substitute',s=>s.geometry.hosting.tab=31],
+ ['different active Space',s=>s.geometry.activeSpaceIds=['other']],['duplicate row',s=>s.geometry.renderedTodayIds.push(31)],
+ ['duplicate URL target',s=>s.raw.tabs[0].url=s.raw.tabs[1].url],
+ ['pinned',s=>s.raw.tabs[1].pinned=true],['grouped',s=>s.raw.tabs[1].groupId=8],['native split',s=>s.raw.tabs[1].splitViewId=5],
+ ['saved binding',s=>s.raw.spaces[0].spaceBookmarks.push(31)],['foreign ownership',s=>s.raw.spaces[0].id='b']
+])test(`sticky pre-input proof rejects ${name}`,()=>{
+ const {sample,scope}=sourceCase();sample.geometry.visibleTodayIds=[31];sample.geometry.renderedTodayIds=[31];
+ mutate(sample);assert.throws(()=>assertStickyDragSource(sample,scope,31,{visible:true}));
+});
+test('stale test starts from exact owned live source; race is introduced only after actual drag and hover',async()=>{
+ const {sample,scope}=sourceCase();sample.geometry.visibleTodayIds=[31];sample.geometry.renderedTodayIds=[31];
+ assert.equal(assertStickyDragSource(sample,scope,31).id,31);
+ const source=await readFile(new URL('../../scripts/paired-chrome-new-tab-drop.mjs',import.meta.url),'utf8');
+ const proof=source.indexOf('assertStickyDragSource(await sourceSample(),scope,id);');
+ const nativeStart=source.indexOf("'real source dragstart'",proof);
+ const hover=source.indexOf("'eligible sticky New Tab target'",nativeStart);
+ const stale=source.indexOf('}else if(stale){',hover);
+ assert(proof>=0&&proof<nativeStart&&nativeStart<hover&&hover<stale);
+ const external=source.indexOf('chrome.tabs.remove(id)',stale);
+ const release=source.indexOf('await page.mouse.up()',external);
+ const noMutation=source.indexOf('assertNoNewTabDropMutation(external,after)',release);
+ assert(stale<external&&external<release&&release<noMutation);
+ sample.raw.tabs.pop();
+ assert.throws(()=>assertStickyDragSource(sample,scope,31), 'Already closed cannot be accepted as a stale case precondition');
+});
+
+test('last native-panel hit test refuses covering markup, recycled rows and a foreign Shared Today button before pointer debt',async()=>{
+ const {parseHTML}=await import('linkedom');
+ const {startStickyDragOnce}=await import('../../scripts/paired-chrome-new-tab-drop.mjs');
+ const {createRemoteTodayRow}=await import('../../shared-today-ui.js');
+ const {document}=parseHTML(`<section class="space active" data-space-id="s"><div id="newTabBtn"><span>New Tab</span></div>
+   <div data-tab-type="temporary"><div class="tab" data-tab-id="31"><span>Local</span></div></div></section><div id="overlay"></div>`);
+ const restore=globalThis.document;globalThis.document=document;
+ try{
+  const source=document.querySelector('.tab'),target=document.getElementById('newTabBtn'),overlay=document.getElementById('overlay');
+  const foreign=createRemoteTodayRow(document,{id:31,windowId:20,title:'Foreign'}, {windowId:10});source.parentNode.append(foreign);
+  const calls=[];let sourceHit=source.firstElementChild,targetHit=target.firstElementChild;
+  source.getBoundingClientRect=()=>({x:8,y:160,width:300,height:40});
+  target.getBoundingClientRect=()=>({x:8,y:100,width:300,height:40});
+  document.elementFromPoint=(_x,y)=>y===180?sourceHit:y===120?targetHit:null;
+  const page={evaluate:async(fn,...args)=>{calls.push('proof');return fn(...args);},mouse:{
+   move:async(x,y)=>calls.push(['move',x,y]),down:async()=>calls.push('down')}};
+  const tryStart=()=>startStickyDragOnce(page,{source,target},{id:31,spaceId:'s'},async()=>{});
+  const reject=async()=>{calls.length=0;await assert.rejects(tryStart(),/must both receive/);assert.deepEqual(calls,['proof']);};
+  assert.deepEqual(await tryStart(),{x:78,y:180});
+  assert.deepEqual(calls,['proof',['move',78,180],'down']);
+  sourceHit=overlay;await reject();
+  sourceHit=foreign;await reject();
+  sourceHit=source.firstElementChild;targetHit=overlay;await reject();
+  targetHit=target.firstElementChild;
+  const replacement=source.cloneNode(true);source.replaceWith(replacement);await reject();
+  replacement.replaceWith(source);
+  const duplicate=target.cloneNode(true);target.after(duplicate);await reject();duplicate.remove();
+  document.querySelector('.space').dataset.spaceId='foreign';await reject();
+ }finally{if(restore===undefined)delete globalThis.document;else globalThis.document=restore;}
+});
+
+test('native ownership lost after observer install refuses input even while original row and target still hit',async()=>{
+ const {startStickyDragOnce}=await import('../../scripts/paired-chrome-new-tab-drop.mjs');
+ const {sample,scope}=sourceCase();
+ sample.geometry.visibleTodayIds=[31];sample.geometry.renderedTodayIds=[31];
+ assert.equal(assertStickyDragSource(sample,scope,31).id,31);
+ const capturedDom=structuredClone(sample.geometry),seen=[];
+ const page={evaluate:async()=>{seen.push('dom-hit');return{start:{x:70,y:120},drop:{x:100,y:80}};},
+  mouse:{move:async()=>seen.push('cursor-move'),down:async()=>seen.push('mouse-down')}};
+ const observerReady=async()=>{seen.push('observer');sample.raw.tabs[1].windowId=20;};
+ await observerReady();
+ assert.deepEqual(sample.geometry,capturedDom);
+ await assert.rejects(startStickyDragOnce(page,{source:{},target:{}},{id:31,spaceId:'s'},async()=>{
+  seen.push('late-native-proof');assertStickyDragSource(sample,scope,31);
+ }),/still be in the source native window/);
+ assert.deepEqual(seen,['observer','late-native-proof']);
+ const source=await readFile(new URL('../../scripts/paired-chrome-new-tab-drop.mjs',import.meta.url),'utf8');
+ assert.match(source,/await page.evaluate\(observeNativeNewTabDrop\);\s*const start=await startStickyDragOnce\(page,g,\{id,spaceId:scope.spaceId\},\s*async\(\)=>assertStickyDragSource\(await sourceSample\(\),scope,id\)\)/);
+});
