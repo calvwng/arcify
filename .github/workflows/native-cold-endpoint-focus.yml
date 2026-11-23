@@ -1,0 +1,106 @@
+name: Isolated cold Split View endpoint focus
+on:
+  push:
+    branches: [diagnostic/split-cold-endpoint-proof-20261123]
+permissions:
+  contents: read
+jobs:
+  native-cold-linked-split:
+    if: github.run_attempt == 1 && github.repository == 'calvwng/arcify' && github.event_name == 'push' && github.event.created == true && github.event.deleted == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: split-cold-diagnostic
+      ARCIFY_TEST_HEAD: ${{ github.sha }}
+    steps:
+      - name: Check out exact authorized Arcify diagnostic commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+          path: arcify
+      - name: Check out reviewed Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c3e4e4d374136e608d447716c0321b32b2aa8cfb
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Verify approved product parent and only supplemental files
+        working-directory: arcify
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-cold-linked-split
+          printf '%s %s %s\n' "$GITHUB_REF" "$GITHUB_SHA" "$GITHUB_RUN_ATTEMPT" > test-results/native-cold-linked-split/run-custody.txt
+          test "$GITHUB_REF" = refs/heads/diagnostic/split-cold-endpoint-proof-20261123
+          jq -e --arg sha "$GITHUB_SHA" '.created == true and .deleted == false and .before == "0000000000000000000000000000000000000000" and .after == $sha' "$GITHUB_EVENT_PATH" >/dev/null
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" = 2
+          test "$(git rev-parse HEAD^)" = a529cea9c90d41d63fd5f10b41fc98a738d876f5
+          test "$(git rev-parse HEAD^^{tree})" = 81e6183a5a84155d90e73aede22e3a86fee229c0
+          test "$(git -C ../arcify-spotlight rev-parse HEAD)" = c3e4e4d374136e608d447716c0321b32b2aa8cfb
+          test "$(git diff --name-status --no-renames HEAD^ HEAD | cut -f1 | sort -u)" = A
+          git diff --name-only HEAD^ HEAD | LC_ALL=C sort > /tmp/native-cold-paths.txt
+          diff -u scripts/native-cold-allowed-paths.txt /tmp/native-cold-paths.txt
+          sha256sum -c scripts/native-cold-source.sha256
+          git diff --exit-code
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.5'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install only locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated runtime and generate supplemental runner
+        working-directory: arcify
+        run: |
+          npm test --prefix scripts/paired-chrome-runtime
+          node --test scripts/cold-split-validator.test.mjs scripts/cold-rails.test.mjs
+          node scripts/build-native-cold-link-runner.mjs
+          node --check scripts/.native-cold-link-runner.mjs
+          git diff --exit-code
+      - name: Build exact unmodified production sources
+        run: |
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+          (
+            cd arcify/dist
+            find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > ../test-results/native-cold-linked-split/actual-arcify-dist.sha256
+            diff -u ../scripts/native-cold-reviewed-dist.sha256 ../test-results/native-cold-linked-split/actual-arcify-dist.sha256
+          )
+      - name: Validate preinstalled native Split-capable Chrome
+        working-directory: arcify
+        run: |
+          set -o pipefail
+          mkdir -p test-results/native-cold-linked-split
+          node --input-type=module <<'NODE' | tee test-results/native-cold-linked-split/preinstalled-chrome.log
+          import assert from 'node:assert/strict';
+          import {CHROME_EXECUTABLE,inspectInstalledChromeRuntime,validateNamespaceLaunchEnvironment} from './scripts/paired-chrome-sandbox.mjs';
+          validateNamespaceLaunchEnvironment(process.env,process.getuid?.());
+          const runtime=await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);
+          assert.equal(runtime.package.browserVersion,'157.0.8103.78','Use the exact reviewed preinstalled Chrome; do not update, downgrade, or weaken policy.');
+          console.log('Compatible preinstalled stable Chrome', runtime.package.browserVersion);
+          NODE
+      - name: Characterize the one exact saved-pin activation after cold restoration
+        timeout-minutes: 10
+        working-directory: arcify
+        run: |
+          set -o pipefail
+          xvfb-run --auto-servernum node scripts/.native-cold-link-runner.mjs ../arcify-spotlight 2>&1 | tee test-results/native-cold-linked-split/runner.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-cold-linked-split-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/native-cold-linked-split/
+          if-no-files-found: warn
+          retention-days: 14
