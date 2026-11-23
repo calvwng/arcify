@@ -1,0 +1,9 @@
+        let passiveProbe;
+        if (true) {
+            await scrollToRow(bookmarks[25].id);
+            await settle();
+            passiveProbe = await exercisePassiveScrollProbe({ page, apiPage, fixture, observe:()=>observe(bookmarks[25].id),
+                record, traceCount, exactActiveTabId:activeTabId, expectedSpaceId:space.id,
+                syntheticUrl:`${fixture.base}/native-scroll-passive-${randomBytes(12).toString('hex')}`,
+                ownTab:id=>tabIds.push(id) });
+        }

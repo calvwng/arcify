@@ -1,0 +1,93 @@
+name: Isolated candidate native passive scroll acceptance
+on:
+  push:
+    branches: [diagnostic/native-passive-scroll-candidate-20261123]
+permissions:
+  contents: read
+jobs:
+  native-passive-scroll:
+    if: >-
+      github.repository == 'calvwng/arcify' &&
+      github.repository_owner == 'calvwng' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/diagnostic/native-passive-scroll-candidate-20261123' &&
+      github.event.created == true && github.event.deleted == false &&
+      github.event.before == '0000000000000000000000000000000000000000' &&
+      github.run_attempt == '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: native-passive-scroll
+      ARCIFY_TEST_HEAD: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+          path: arcify
+      - uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: c3e4e4d374136e608d447716c0321b32b2aa8cfb
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Verify exact reviewed candidate parent and diagnostic-only additions
+        working-directory: arcify
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" = 2
+          test "$(git rev-parse HEAD^)" = e92974d464d35762aeaeb13f123fe097455b5b98
+          test "$(git rev-parse HEAD^^{tree})" = a74f48137764d3579bdb5a7de396d675059ca030
+          test "$(git -C ../arcify-spotlight rev-parse HEAD)" = c3e4e4d374136e608d447716c0321b32b2aa8cfb
+          test "$(git diff --name-status --no-renames HEAD^ HEAD | cut -f1 | sort -u)" = A
+          git diff --name-only HEAD^ HEAD | LC_ALL=C sort >/tmp/native-passive-scroll-added
+          diff -u scripts/native-passive-scroll-allowed-paths.txt /tmp/native-passive-scroll-added
+          sha256sum -c scripts/native-passive-scroll-source.sha256
+          git diff --exit-code
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install only locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Check isolated probe and generate exact supplemental runner
+        working-directory: arcify
+        run: |
+          node --test tests/unit/paired-chrome-scroll-passive-probe.test.js tests/unit/paired-chrome-management-scroll.test.js
+          node scripts/build-native-passive-scroll-runner.mjs
+          for f in scripts/.native-passive-*.mjs; do node --check "$f"; done
+          git diff --exit-code
+      - name: Build unchanged production packages
+        run: |
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+      - name: Observe native candidate with existing sandbox
+        working-directory: arcify
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-passive-scroll
+          capture_dist() {
+            local receipt="$1"
+            (cd dist && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$receipt"
+            cmp scripts/native-passive-scroll-expected-dist.sha256 "$receipt"
+          }
+          capture_dist test-results/native-passive-scroll/candidate-dist-before.sha256
+          run_status=0
+          xvfb-run --auto-servernum node scripts/.native-passive-scroll-runner.mjs ../arcify-spotlight 2>&1 | tee test-results/native-passive-scroll/runner.log || run_status=$?
+          capture_dist test-results/native-passive-scroll/candidate-dist-after.sha256
+          cmp test-results/native-passive-scroll/candidate-dist-{before,after}.sha256
+          exit "$run_status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-passive-scroll-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/native-passive-scroll/
+          if-no-files-found: warn
+          retention-days: 14
