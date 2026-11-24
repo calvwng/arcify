@@ -1162,29 +1162,131 @@ test('Today destination click exposes recovery, stale-row and transport failures
         folders.splice(folders.findIndex(f=>f.id==='explicit-root'),1);await publishSpaces();await refresh();
     }
  });
-test('return probe real sidebar sends both tabs back from an otherwise empty interim Space',async()=>{
+test('return probe real sidebar Ctrl/Shift moves the same two Today tabs both ways with pending activation on return', {timeout:15000}, async()=>{
  const ids=[3,4],destination={id:'return-probe',name:'Return probe',color:'green',bookmarkFolderId:'return-root',temporaryTabs:[],spaceBookmarks:[]};
- storedSpaces.push(destination);folders.push({id:'return-root',parentId:'root',title:'Return probe'});await publishSpaces();await refresh();
+ const until=async (predicate, label)=>{
+  const deadline=Date.now()+2000;
+  while(!predicate()){
+   assert(Date.now()<deadline,label);
+   await wait(5);
+  }
+ };
+ const activeSpace=()=>document.querySelector('.space.active')?.dataset.spaceId;
+ const byId=(spaces,id)=>spaces.find(space=>space.id===id);
+ const receipts=[],writes=[];
+ const saved={spaces:structuredClone(storedSpaces),local:structuredClone(local),session:structuredClone(session),
+  folders:structuredClone(folders),tabs:structuredClone(tabs),requestCount:todayMoveRequests.length,mutationCount:mutations.length};
+ const localStorage=chrome.storage.local, originalSet=localStorage.set;
+ const originalSend=chrome.runtime.sendMessage,originalUpdate=chrome.tabs.update;
+ let heldActivation;
+ chrome.tabs.update=async(id,props)=>{
+  const gate=heldActivation;
+  if(!gate||gate.id!==id||!props.active||gate.release)return originalUpdate.call(chrome.tabs,id,props);
+  gate.finished=(async()=>{
+   await new Promise(resolve=>{gate.release=resolve;});
+   const updated=await originalUpdate.call(chrome.tabs,id,props);
+   for(const tab of tabs)if(tab.windowId===10)tab.active=tab.id===id;
+   await chrome.tabs.onActivated.emit({tabId:id,windowId:10});
+   return updated;
+  })();
+  return gate.finished;
+ };
+ let activation=Promise.resolve();
+ const backend=new SpaceStore();
+ backend.discoverBookmarkSpaces=async()=>false;
+ storedSpaces.push(destination);
+ folders.push({id:'return-root',parentId:'root',title:'Return probe'});
+ localStorage.set=async values=>{
+  await originalSet(values);
+  if(!values.spaces)return;
+  writes.push(structuredClone(values));
+  storedSpaces=structuredClone(values.spaces);
+  await onChanged.emit({spaces:{newValue:structuredClone(storedSpaces)}},'local');
+ };
+ chrome.runtime.sendMessage=async message=>{
+  if(message.type!=='spaceStore'||message.action!=='activate')return originalSend.call(chrome.runtime,message);
+  activation=backend.dispatch(message);
+  return {success:true,spaces:await activation};
+ };
  beforeTodayMoveRequest=async message=>{
-  const source=storedSpaces.find(s=>s.id===message.spaceId),target=storedSpaces.find(s=>s.id===message.destinationSpaceId),moved=message.entries.map(e=>e.tabId);
-  source.temporaryTabs=source.temporaryTabs.filter(id=>!moved.includes(id));target.temporaryTabs.push(...moved);
-  await publishSpaces();
-  return {success:true,batch:{total:moved.length,completed:moved,remaining:[],uncertain:false,destinationSpaceId:target.id}};
+  let response;
+  try {response={success:true,batch:await moveTodayTabsToSpace(backend,message)};}
+  catch(error){response={success:false,error:error.message,batch:error.batch};}
+  receipts.push(response);
+  return response;
  };
  try{
+  await originalSet({spaces:storedSpaces,spaceModelVersion:2,todayOrderRepresentation:{version:1,inverted:false}});
+  await chrome.storage.session.set({spaceSession:true});
+  await backend.initialize();
+  await onChanged.emit({spaces:{newValue:structuredClone(storedSpaces)}},'local');
+  await until(()=>document.querySelector('#spaceSwitcher button[data-space-id="return-probe"]'),'interim Space rendered');
+  const untouched=storedSpaces.flatMap(space=>['temporaryTabs','spaceBookmarks'].flatMap(section=>
+   space[section].filter(id=>!ids.includes(id)).map(id=>({id,spaceId:space.id,section}))));
   for(const modifier of ['ctrlKey','shiftKey'])for(const [from,to]of [['alpha','return-probe'],['return-probe','alpha']]){
-   event(document.querySelector(`#spaceSwitcher button[data-space-id="${from}"]`),'click');await wait(300);await refresh();
-   if(from==='return-probe')assert.deepEqual(storedSpaces.find(s=>s.id===from).temporaryTabs,ids);
-   event(live(ids[0]),'click');await activate(ids[0]);event(live(ids[1]),'click',{[modifier]:true});await refresh();
-   assert.deepEqual(selected(),ids);await context(ids[1]);event(menuItem('moveTodayTabsToSpace'),'click');
-   assert.match(document.querySelector('.today-move-hint').textContent,/Move 2 tabs/);
-   const prior=todayMoveRequests.length,choice=document.querySelector(`[data-action="moveTodayToDestination"][data-space-id="${to}"]`);
-   for(const type of ['pointerdown','mousedown','mouseup','click'])event(choice,type);await wait(300);
-   assert.equal(todayMoveRequests.length,prior+1);assert.deepEqual(todayMoveRequests.at(-1).entries.map(e=>e.tabId),ids);
-   assert.match(document.getElementById('favoritesDropStatus').textContent,/Moved 2 tabs/);
-   if(from==='return-probe')assert.deepEqual(storedSpaces.find(s=>s.id===from).temporaryTabs,[]);
+   heldActivation=from==='return-probe'?{id:ids.at(-1)}:null;
+   if(activeSpace()!==from)event(document.querySelector(`#spaceSwitcher button[data-space-id="${from}"]`),'click');
+   await until(()=>activeSpace()===from&&session.activeSpaces[10]===from&&ids.every(live),`${from} rendered both Today tabs`);
+   await activation;
+   if(heldActivation){
+    assert.deepEqual(byId(local.spaces,from).temporaryTabs,ids);
+    await until(()=>heldActivation.release,'return Space native activation in flight');
+   }
+   if(heldActivation){
+    // Establish the range anchor without superseding the in-flight navigation
+    // with a second native activation, then extend it via Ctrl or Shift.
+    event(live(ids[0]),'click',{ctrlKey:true});
+   }else{
+    event(live(ids[0]),'click');
+    for(const tab of tabs)tab.active=tab.windowId===10 ? tab.id===ids[0] : tab.active;
+    await chrome.tabs.onActivated.emit({tabId:ids[0],windowId:10});
+   }
+   event(live(ids[1]),'click',{[modifier]:true});
+   assert.deepEqual(selected(),ids);
+   if(heldActivation){
+    heldActivation.release();
+    await heldActivation.finished;
+    assert.deepEqual(selected(),ids,'owned native activation must preserve the selected pair');
+   }
+   event(live(ids[1]),'contextmenu',{pageX:30,pageY:60});
+   await until(()=>menuItem('moveTodayTabsToSpace'),'Today context menu rendered');
+   event(menuItem('moveTodayTabsToSpace'),'click');
+   const choice=document.querySelector(`[data-action="moveTodayToDestination"][data-space-id="${to}"]`);
+   assert(choice);assert.match(document.querySelector('.today-move-hint').textContent,/Move 2 tabs/);
+   const prior=todayMoveRequests.length,beforeReceipt=receipts.length,writeCount=writes.length;
+   for(const type of ['pointerdown','mousedown','mouseup','click'])event(choice,type);
+   await until(()=>receipts.length>beforeReceipt,`${modifier} ${from}→${to}: awaited production receipt`);
+   assert.equal(todayMoveRequests.length,prior+1);
+   assert.equal(receipts.length,beforeReceipt+1);
+   assert.deepEqual(todayMoveRequests.at(-1).entries.map(entry=>entry.tabId),ids);
+   const {success,error,batch}=receipts[beforeReceipt];
+   assert.equal(success,true,error);
+   assert.deepEqual([batch.total,batch.completed,batch.remaining,batch.uncertain,batch.destinationSpaceId],[2,ids,[],false,to]);
+   assert.equal(writes.length,writeCount+1,'one canonical storage write per move');
+   const {spaces,spaceTabSnapshot}=await localStorage.get(['spaces','spaceTabSnapshot']);
+   for(const id of ids){
+    const owners=spaces.flatMap(space=>['temporaryTabs','spaceBookmarks'].filter(section=>space[section].includes(id)).map(section=>[space.id,section]));
+    assert.deepEqual(owners,[[to,'temporaryTabs']]);
+    assert.deepEqual(spaceTabSnapshot.filter(record=>record.tabId===id).map(record=>[record.spaceId,record.section]),[[to,'temporaryTabs']]);
+   }
+   for(const {id,spaceId,section} of untouched)assert(byId(spaces,spaceId)[section].includes(id));
+   assert.deepEqual(byId(spaces,'return-probe').temporaryTabs,to==='return-probe'?ids:[]);
+   await until(()=>ids.every(id=>!live(id))&&/Moved 2 tabs/.test(document.getElementById('favoritesDropStatus').textContent),'source rows cleared and sidebar reported two moves');
+   assert.equal(activeSpace(),from);
   }
- }finally{beforeTodayMoveRequest=null;clear();}
+ }finally{
+  heldActivation?.release?.();chrome.tabs.update=originalUpdate;
+  chrome.runtime.sendMessage=originalSend;chrome.storage.local.set=originalSet;beforeTodayMoveRequest=null;clear();
+  await Promise.allSettled([activation,backend.chain,heldActivation?.finished]);
+  storedSpaces=saved.spaces;
+  for(const [current,previous] of [[local,saved.local],[session,saved.session]]){
+   for(const key of Object.keys(current))delete current[key];
+   Object.assign(current,previous);
+  }
+  tabs.splice(0,tabs.length,...saved.tabs);folders.splice(0,folders.length,...saved.folders);
+  todayMoveRequests.length=saved.requestCount;mutations.length=saved.mutationCount;
+  await onChanged.emit({spaces:{newValue:structuredClone(storedSpaces)}},'local');
+ }
 });
 
 test('return probe focus loss before opening menu reduces a prior batch to the context row',async()=>{
