@@ -60,7 +60,7 @@ export function assertDisabledDimObservation({dim,seen,destinationFocused}) {
     assert.equal(destinationFocused,true,'Observe absence while the destination remains focused, before source focus can clear it.');
 }
 
-export async function exerciseSourceDimming({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint}) {
+export async function exerciseSourceDimming({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint,requireFastOriginClear=false}) {
     const targetUrl = `${fixture.base}/little-arc/${nonce}/ux-target`;
     const controller=first.controller;
     const original = await spotlightOptions.evaluate(() => chrome.storage.local.get(['peekEnabled','peekIframeEnabled','littleArcDimSource','littleArcDimStrength']));
@@ -163,11 +163,37 @@ export async function exerciseSourceDimming({browser,observePage,apiPage,spotlig
         assert.deepEqual(input,[{trusted:true,shift:true,button:0}]);
         const lifecycle=enabled?await exerciseDimFocusLifecycle({browser,observePage,apiPage,ui,poll,source,first,target,claimed,fixture,nonce,strength,ownedTabs,checkpoint}):null;
         if(enabled&&!lifecycle.targetClosed)assertSourceDim(await source.page.evaluate(readSourceDim),{enabled:true,strength});
+        let originClearEvidence;
+        if (requireFastOriginClear && enabled && strength===55) {
+            assert.equal(lifecycle.targetClosed,false);
+            assert.equal((await source.page.evaluate(readSourceDim)).focus,false);
+            const started=performance.now();
+            let state;
+            await ui(source.page,'Return focus to origin without clicking',async()=>{
+                state=await poll(()=>source.page.evaluate(readSourceDim),value=>value.focus===true && value.count===0,
+                    'real source focus clears overlay without input',1000);
+            });
+            const elapsedMs=performance.now()-started;
+            assert(elapsedMs<=1000,'source-focus clear exceeded conservative 1000ms dispatch-to-receipt bound');
+            assert.equal(state.documentId,sourceBefore.documentId);
+            assert.equal(state.url,sourceBefore.url);
+            assert.equal(state.checked,dim.checked,'focus alone must clear before clicking');
+            assert.equal(target.isClosed(),false);
+            const native=await apiPage.evaluate(async ids=>({source:await chrome.tabs.get(ids.source),window:await chrome.windows.get(ids.window),target:await chrome.tabs.get(ids.target)}),
+                {source:source.tab.id,window:source.tab.windowId,target:claimed.tabId});
+            assert.equal(native.source.active,true);
+            assert.equal(native.window.focused,true);
+            assert.equal(native.source.windowId,source.tab.windowId);
+            assert.equal(native.source.url,sourceBefore.url);
+            assert.equal(native.target.windowId,claimed.windowId);
+            assert.equal(native.target.url,targetUrl);
+            originClearEvidence={elapsedMs,state,native:{sourceTabId:native.source.id,sourceWindowId:native.window.id,targetTabId:native.target.id,targetWindowId:native.target.windowId,sourceTabActive:true,sourceWindowFocused:true}};
+        }
         const beforeChecked=dim.checked;
         await ui(source.page,'Return to source and click underlying checkbox',()=>source.page.click('#little-arc-check'));
         const cleared=await poll(()=>source.page.evaluate(readSourceDim),value=>value.count===0 && value.checked!==beforeChecked,'source focus clears dim and underlying click is delivered');
         assert.equal(cleared.url,source.page.url());assert.equal(cleared.documentId,sourceBefore.documentId);
-        await checkpoint('source-dimming',{enabled,strength,sourceTabId:source.tab.id,record:claimed,dim,disabledObservation,lifecycle,cleared,input,receiptObserved:true,createdTabs:state.tabs.filter(tab=>[claimed.tabId,claimed.controllerTabId].includes(tab.id))});
+        await checkpoint('source-dimming',{enabled,strength,sourceTabId:source.tab.id,record:claimed,dim,disabledObservation,lifecycle,cleared,input,originClearEvidence,receiptObserved:true,createdTabs:state.tabs.filter(tab=>[claimed.tabId,claimed.controllerTabId].includes(tab.id))});
         await ui(source.page,'Restore source checkbox after click-through proof',()=>source.page.click('#little-arc-check'));
         assert.equal((await source.page.evaluate(readSourceDim)).checked,beforeChecked);
         // Remove only the exact window claimed from the paired receipt above.

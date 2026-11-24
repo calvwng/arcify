@@ -345,7 +345,7 @@ export async function readLittleArcRawState() {
 }
 
 /** No positive transport adapter: open, recover and promote originate only in genuine visible UI. */
-export async function exerciseLittleArc({ browser, observePage, apiPage, spotlightOptions, ui, screenshot, snapshot, external, poll, fixture, arcifyId, spotlightId, search, reloadArcify, ux=false, spaceIcons=false, record = async () => {} }) {
+export async function exerciseLittleArc({ browser, observePage, apiPage, spotlightOptions, ui, screenshot, snapshot, external, poll, fixture, arcifyId, spotlightId, search, reloadArcify, ux=false, dimFocusOneShot=false, spaceIcons=false, record = async () => {} }) {
     assertLittleArcEnvironment();
     for (const adapter of [observePage, ui, screenshot, snapshot, external, poll, search, reloadArcify, record]) assert.equal(typeof adapter, 'function');
     const nonce = randomBytes(16).toString('hex'), originWindowId = fixture.windowA, targetWindowId = fixture.windowB;
@@ -497,6 +497,7 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
         ownedTabs.add(source.tab.id); await setup('Assign only the ordinary source fixture to Today', () => local({ action: 'assign', tabId: source.tab.id, spaceId: fixture.spaces.work, pinned: false, newTodayTab: true }));
         await writeDraft(source.tab.id, source.page, 'ordinary source');
         // Cancel the real visible Spotlight choice before any launch.
+        if (!dimFocusOneShot) {
         const cancel = await prepareLaunch(true); let cancelBefore;
         await ui(source.page, 'Cancel Little Arc launch with trusted Escape', async () => {
             cancelBefore = await read(); await cancel.surface.evaluate(installLittleArcInputObservation, { retainInParent: true }); await reset();
@@ -510,10 +511,15 @@ export async function exerciseLittleArc({ browser, observePage, apiPage, spotlig
         assert.equal(cancelInput.filter(event => event.type === 'keydown' && event.key === 'Escape' && event.trusted).length, 1);
         await checkpoint('spotlight-cancel-no-launch', { before: cancelBefore, after: cancelled, events: cancelEvents, input: cancelInput });
 
-        const first = await launch(false, 'click'); await refreshController(first.controller);
+        }
+        const first = await launch(false, 'click'); if (!dimFocusOneShot) await refreshController(first.controller);
         if (spaceIcons) await exerciseLittleArcSpaceIcons({
             apiPage, ui, poll, first, fixture, spotlightId, checkpoint, screenshot, raw, trace
         });
+        if(dimFocusOneShot){
+            await exerciseLittleArcDimmingUx({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint,requireFastOriginClear:true});
+            return evidence; // Preserve stock finally: exact owned fixture cleanup and residue assertions.
+        }
         if(ux){
             await exerciseLittleArcSizingUx({apiPage,ui,poll,first,selectExact,checkpoint});
             await exerciseLittleArcDimmingUx({browser,observePage,apiPage,spotlightOptions,ui,poll,source,first,fixture,nonce,arcifyId,spotlightId,ownedTabs,ownedWindows,checkpoint,selectExact});

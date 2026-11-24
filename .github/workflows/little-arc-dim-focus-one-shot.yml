@@ -1,0 +1,182 @@
+name: One-shot exact Little Arc dim focus
+on:
+  push:
+    branches: [diagnostic/little-arc-dim-focus-clean-v2-20261124]
+permissions:
+  contents: read
+jobs:
+  little-arc-ux:
+    runs-on: ubuntu-24.04
+    if: github.run_attempt == 1 && github.repository == 'calvwng/arcify' && github.repository_owner == 'calvwng' && github.event_name == 'push' && github.actor == 'calvwng' && github.triggering_actor == 'calvwng' && github.ref == 'refs/heads/diagnostic/little-arc-dim-focus-clean-v2-20261124' && github.event.created == true && github.event.deleted == false && github.event.forced == false
+    timeout-minutes: 20
+    env:
+      ARCIFY_LITTLE_ARC_DIM_FOCUS_ONE_SHOT: '1'
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: little-arc
+      ARCIFY_TEST_HEAD: ${{ github.sha }}
+      ARCIFY_SPOTLIGHT_HEAD: 8ef43359d2dfd62d5a0d8715816653538daeb194
+    steps:
+      - name: Check out exact Arcify acceptance head (not the synthetic PR merge)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          path: arcify
+          fetch-depth: 2
+      - name: Check out immutable Arcify stock for independent dist parity
+        uses: actions/checkout@v4
+        with:
+          ref: bc7403fb2749af9a2f9638652251e18ca45d30ac
+          persist-credentials: false
+          path: arcify-stock
+      - name: Check out exact Little Arc Spotlight companion
+        uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: ${{ env.ARCIFY_SPOTLIGHT_HEAD }}
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Record and verify exact source provenance before installation
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/arcify/test-results/paired-chrome-little-arc"
+          [[ "$ARCIFY_TEST_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ARCIFY_SPOTLIGHT_HEAD" =~ ^[0-9a-f]{40}$ && "$ARCIFY_SPOTLIGHT_HEAD" != 0000000000000000000000000000000000000000 ]]
+          test "$(git -C arcify rev-parse HEAD)" = "$ARCIFY_TEST_HEAD"
+          test "$(git -C arcify-spotlight rev-parse HEAD)" = "$ARCIFY_SPOTLIGHT_HEAD"
+          stock=bc7403fb2749af9a2f9638652251e18ca45d30ac
+          test "$(git -C arcify rev-list --parents -n 1 HEAD)" = "$ARCIFY_TEST_HEAD $stock"
+          test "$(git -C arcify-stock rev-parse HEAD)" = "$stock"
+          test "$(git -C arcify rev-parse "$stock^{tree}")" = ad213d605c6704ee7d901ec4a5f2e4fcf64dfa18
+          test "$(git -C arcify diff --name-only "$stock" HEAD)" = "$(printf '%s\n' .github/workflows/little-arc-dim-focus-one-shot.yml scripts/paired-chrome-dim-focus-one-shot-context.mjs scripts/paired-chrome-little-arc-dimming-ux.mjs scripts/paired-chrome-little-arc.mjs scripts/paired-chrome-smoke.mjs)"
+          test "$(git -C arcify-spotlight rev-parse HEAD:shared/little-arc-dimming-broker.js)" = ff08b7cdb4f2444b221ca1ee237b16e838332c24
+          test "$(git -C arcify-spotlight rev-parse HEAD:test/unit/little-arc-dimming.test.js)" = b54884814dcfbbe7fbe2b7f4836406f6f3d5fd3b
+          # Do not create reports in any checkout before proving all three are clean.
+          for repo in arcify arcify-stock arcify-spotlight; do
+            tracked=$(git -C "$repo" status --porcelain --untracked-files=all)
+            untracked=$(git -C "$repo" ls-files --others --exclude-standard)
+            ignored=$(git -C "$repo" ls-files --others --ignored --exclude-standard)
+            if [[ -n "$tracked$untracked$ignored" ]]; then
+              printf 'Unclean checkout before evidence creation: %s\n' "$repo" >&2
+              exit 1
+            fi
+          done
+          mkdir -p "$evidence"
+          {
+            printf 'workflow-ref=%s\nworkflow-sha=%s\nrun-id=%s\nrun-attempt=%s\n' "$GITHUB_WORKFLOW_REF" "$GITHUB_WORKFLOW_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+            printf 'event-name=%s\nevent-ref=%s\nevent-sha=%s\n' "$GITHUB_EVENT_NAME" "$GITHUB_REF" "$GITHUB_SHA"
+            printf 'expected-arcify=%s\nactual-arcify=%s\n' "$ARCIFY_TEST_HEAD" "$(git -C arcify rev-parse HEAD)"
+            printf 'expected-spotlight=%s\nactual-spotlight=%s\n' "$ARCIFY_SPOTLIGHT_HEAD" "$(git -C arcify-spotlight rev-parse HEAD)"
+          } | tee "$evidence/source-provenance.txt"
+          for repo in arcify arcify-spotlight; do
+            git -C "$repo" ls-tree -r --full-tree HEAD > "$evidence/$repo-source-tree.txt"
+            (cd "$repo" && git ls-files -z | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/$repo-source-sha256.txt"
+          done
+          node --input-type=module <<'NODE' | tee "$evidence/event-provenance.json"
+          import { execFileSync } from 'node:child_process';
+          import { readDimFocusOneShot } from './arcify/scripts/paired-chrome-dim-focus-one-shot-context.mjs';
+          const head = execFileSync('git', ['-C', 'arcify', 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          console.log(JSON.stringify(readDimFocusOneShot(process.env, head), null, 2));
+          NODE
+          node arcify/scripts/paired-chrome-little-arc-provenance.mjs record arcify-spotlight "$evidence"
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.5'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify-stock
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and sandbox defaults (no browser launch)
+        run: npm test --prefix arcify/scripts/paired-chrome-runtime
+      - name: Verify exact paired dimming preferences and cosmetic delivery
+        working-directory: arcify
+        env:
+          ARCIFY_DIMMING_SPOTLIGHT_ROOT: ${{ github.workspace }}/arcify-spotlight
+        run: |
+          set -euo pipefail
+          node --test tests/integration/little-arc-dimming-pair.test.mjs 2>&1 | tee test-results/paired-chrome-little-arc/dimming-pair-integration.log
+      - name: Build the exact pair and retain production hashes
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/arcify/test-results/paired-chrome-little-arc"
+          npm run build --prefix arcify-stock 2>&1 | tee "$evidence/arcify-stock-build.log"
+          npm run build --prefix arcify 2>&1 | tee "$evidence/arcify-build.log"
+          npm run build --prefix arcify-spotlight 2>&1 | tee "$evidence/arcify-spotlight-build.log"
+          for repo in arcify arcify-spotlight; do
+            git -C "$repo" status --porcelain=v1 -z --untracked-files=all > "$evidence/$repo-post-build-git-status.z"
+            git -C "$repo" status --porcelain=v1 --untracked-files=all > "$evidence/$repo-post-build-git-status.txt"
+          done
+          for repo in arcify arcify-spotlight; do
+            if [ "$repo" = arcify ]; then
+              test -z "$(git -C "$repo" status --porcelain)"
+              (cd "$repo" && sha256sum --check "$evidence/$repo-source-sha256.txt") > "$evidence/$repo-source-verification.txt"
+            else
+              node arcify/scripts/paired-chrome-little-arc-provenance.mjs verify "$repo" "$evidence" > "$evidence/$repo-source-verification.txt"
+            fi
+            test -f "$repo/dist/manifest.json"
+            (cd "$repo" && find dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/$repo-build-sha256.txt"
+          done
+          test -z "$(git -C arcify-stock status --porcelain --untracked-files=all)"
+          for repo in arcify arcify-stock arcify-spotlight; do
+            test -z "$(find "$repo/dist" ! -type f ! -type d -print -quit)"
+          done
+          (cd arcify-stock && find dist -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$evidence/arcify-stock-build-sha256.txt"
+          test "$(wc -l < "$evidence/arcify-stock-build-sha256.txt")" = 62
+          test "$(wc -l < "$evidence/arcify-spotlight-build-sha256.txt")" = 92
+          diff -u "$evidence/arcify-stock-build-sha256.txt" "$evidence/arcify-build-sha256.txt"
+      - name: Exercise only Little Arc with installed Chrome's namespace sandbox
+        working-directory: arcify
+        # Keep the ordinary non-root runner, installed Chrome, isolated locked driver,
+        # fresh disposable profile and real Namespace/PID/network/seccomp evidence.
+        # Never update the browser, repair helpers, change policy or weaken security.
+        # A browser launch denial remains a failed run with the original error.
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/paired-chrome-little-arc
+          xvfb-run --auto-servernum npm run test:paired-chrome -- ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-little-arc/runner.log
+      - name: Require focus clear and ordinary controls in the actual synthetic run
+        working-directory: arcify
+        run: |
+          set -euo pipefail
+          e=test-results/paired-chrome-little-arc
+          jq -e '
+            .runMode == "little-arc" and .status == "passed"
+            and .executedCaseIndices == [0,1,2,55] and .expectedCaseCount == 4
+            and .environment.acceptanceContext.scope == "little-arc-dim-focus-one-shot"
+            and .environment.chromeSandbox.validated == true
+            and (.littleArc.cleanup | any(.[]; .verified == true))
+            and ([.littleArc.checkpoints[] | select(.phase == "source-dimming")] as $a
+              | ($a | length == 3)
+              and ($a[0] | .enabled == true and .strength == 55 and .lifecycle.targetClosed == false
+                and .originClearEvidence.elapsedMs >= 0 and .originClearEvidence.elapsedMs <= 1000
+                and .originClearEvidence.state.focus == true and .originClearEvidence.state.count == 0
+                and .originClearEvidence.state.documentId == .dim.documentId
+                and .originClearEvidence.native.sourceTabId == .sourceTabId
+                and .originClearEvidence.native.sourceWindowId == .record.originWindowId
+                and .originClearEvidence.native.targetTabId == .record.tabId
+                and .originClearEvidence.native.targetWindowId == .record.windowId
+                and .originClearEvidence.native.sourceTabActive == true
+                and .originClearEvidence.native.sourceWindowFocused == true
+                and (.lifecycle.observations | length == 3 and all(.[]; .elapsedMs >= 4500)))
+              and ($a[1] | .enabled == true and .strength == 100 and .lifecycle.targetClosed == true)
+              and ($a[2] | .enabled == false and .disabledObservation.elapsedMs >= 4500))
+          ' "$e/report.json" | tee "$e/dim-focus-receipts.log"
+          sha256sum "$e/report.json" > "$e/report.sha256"
+      - name: Upload success or failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paired-chrome-little-arc-dim-focus-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-little-arc/
+          if-no-files-found: warn
+          retention-days: 14
