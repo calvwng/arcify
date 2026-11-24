@@ -1,0 +1,121 @@
+name: Isolated native Ctrl Today roundtrip
+on:
+  push:
+    branches: [diagnostic/ctrl-move-roundtrip-20261124]
+permissions:
+  contents: read
+jobs:
+  native-ctrl-move-roundtrip:
+    if: github.run_attempt == 1 && github.repository == 'calvwng/arcify' && github.event_name == 'push' && github.ref == 'refs/heads/diagnostic/ctrl-move-roundtrip-20261124' && github.event.created == true && github.event.deleted == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CI: 'true'
+      ARCIFY_PAIRED_RUN_MODE: ctrl-today-roundtrip
+      ARCIFY_TEST_HEAD: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+          path: arcify
+      - uses: actions/checkout@v4
+        with:
+          repository: calvwng/arcify-spotlight
+          ref: 9c1f4666d7b7d76d057a1df09d43666cee7a36d9
+          persist-credentials: false
+          path: arcify-spotlight
+      - name: Verify exact checkout and test-only changes
+        working-directory: arcify
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/paired-chrome-move-drag
+          e=test-results/paired-chrome-move-drag
+          printf '%s %s %s\n' "$GITHUB_REF" "$GITHUB_SHA" "$GITHUB_RUN_ATTEMPT" > "$e/custody.txt"
+          test "$GITHUB_REPOSITORY" = calvwng/arcify
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/diagnostic/ctrl-move-roundtrip-20261124
+          jq -e --arg ref "$GITHUB_REF" --arg sha "$GITHUB_SHA" '.created == true and .deleted == false and .ref == $ref and .before == "0000000000000000000000000000000000000000" and .after == $sha' "$GITHUB_EVENT_PATH" >/dev/null
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | wc -w)" = 2
+          test "$(git rev-parse HEAD^)" = bc7403fb2749af9a2f9638652251e18ca45d30ac
+          test "$(git rev-parse HEAD^^{tree})" = ad213d605c6704ee7d901ec4a5f2e4fcf64dfa18
+          test "$(git -C ../arcify-spotlight rev-parse HEAD)" = 9c1f4666d7b7d76d057a1df09d43666cee7a36d9
+          test "$(git -C ../arcify-spotlight rev-parse 'HEAD^{tree}')" = 38318c32941ab994a8cd64a0aca11b5b9e91e835
+          git diff --name-status --no-renames HEAD^ HEAD > "$e/changed-paths.txt"
+          diff -u <(printf '%s\n' $'A\t.github/workflows/native-ctrl-move-roundtrip.yml' $'A\tscripts/build-ctrl-roundtrip-runner.mjs' $'A\tscripts/ctrl-roundtrip-a-dist.sha256' $'A\tscripts/ctrl-roundtrip-s-dist.sha256' $'A\tscripts/ctrl-roundtrip-source.sha256' $'M\tscripts/paired-chrome-today-move.mjs' $'M\ttests/unit/paired-chrome-today-move.test.js') "$e/changed-paths.txt"
+          sha256sum -c scripts/ctrl-roundtrip-source.sha256 | tee "$e/source-verification.log"
+          git diff --exit-code
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.5'
+          cache: npm
+          cache-dependency-path: |
+            arcify/package-lock.json
+            arcify/scripts/paired-chrome-runtime/package-lock.json
+            arcify-spotlight/package-lock.json
+      - name: Install locked dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
+        run: |
+          npm ci --prefix arcify
+          npm ci --prefix arcify/scripts/paired-chrome-runtime
+          npm ci --prefix arcify-spotlight
+      - name: Verify isolated driver and exact Today oracle
+        working-directory: arcify
+        run: |
+          node scripts/build-ctrl-roundtrip-runner.mjs
+          node --check scripts/.ctrl-roundtrip-runner.mjs
+          node --check scripts/.ctrl-roundtrip-run-plan.mjs
+          npm test --prefix scripts/paired-chrome-runtime
+          node --test tests/unit/paired-chrome-today-move.test.js | tee test-results/paired-chrome-move-drag/today-oracle.log
+      - name: Build and verify exact unmodified Arcify and Spotlight products
+        run: |
+          npm run build --prefix arcify
+          npm run build --prefix arcify-spotlight
+          for entry in a:arcify s:arcify-spotlight; do
+            label=${entry%%:*}; dir=${entry#*:}
+            (cd "$dir/dist"; find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "arcify/test-results/paired-chrome-move-drag/$label-actual-dist.sha256"
+            diff -u "arcify/scripts/ctrl-roundtrip-$label-dist.sha256" "arcify/test-results/paired-chrome-move-drag/$label-actual-dist.sha256"
+            git -C "$dir" diff --exit-code
+          done
+      - name: Record stock Chrome preflight
+        working-directory: arcify
+        run: |
+          node --input-type=module <<'NODE' | tee test-results/paired-chrome-move-drag/preinstalled-chrome.log
+          import {CHROME_EXECUTABLE,inspectInstalledChromeRuntime,validateNamespaceLaunchEnvironment} from './scripts/paired-chrome-sandbox.mjs';
+          validateNamespaceLaunchEnvironment(process.env, process.getuid?.());
+          const runtime = await inspectInstalledChromeRuntime(CHROME_EXECUTABLE);
+          console.log(runtime.package.browserVersion);
+          NODE
+      - name: Exercise only exact native Ctrl Today returns after shared setup
+        working-directory: arcify
+        timeout-minutes: 15
+        run: |
+          xvfb-run --auto-servernum node scripts/.ctrl-roundtrip-runner.mjs ../arcify-spotlight 2>&1 | tee test-results/paired-chrome-move-drag/runner.log
+      - name: Require both exact native return receipts
+        working-directory: arcify
+        run: |
+          e=test-results/paired-chrome-move-drag
+          jq -e '
+              .runMode == "ctrl-today-roundtrip" and .status == "passed"
+              and .executedCaseIndices == [0,1,2,28,40,41] and .expectedCaseCount == 6
+              and .ctrlFavoriteSeed.favoriteId != null
+              and ([.todayMoveSyncOff, .todayMoveSyncOn]
+                | all(.[]; .checkpoints as $c
+                  | (["same-two-return-exact-source-restored", "same-two-return-space-switched", "same-two-returned", "same-two-return-rendered"]
+                    | all(.[]; . as $phase | [$c[] | select(.phase == $phase)] | length == 1))))
+            ' "$e/report.json" | tee "$e/return-receipts.log"
+          sha256sum "$e/report.json" > "$e/report.sha256"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-ctrl-move-roundtrip-${{ github.run_id }}-${{ github.run_attempt }}
+          path: arcify/test-results/paired-chrome-move-drag/
+          if-no-files-found: warn
+          retention-days: 14
+defaults:
+  run:
+    shell: bash
