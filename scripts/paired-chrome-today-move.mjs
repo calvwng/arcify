@@ -95,12 +95,25 @@ export function assertTodayMoveTrace(events, { tabIds, contextTabId, destination
     assert(events.every(event => event.trusted), 'Synthetic input cannot satisfy the positive Move evidence.');
 }
 
+export function assertTodayMoveReturnSwap(outbound, request) {
+    assert(outbound.tabIds.length === 2 && new Set(outbound.tabIds).size === 2, 'Outbound proof must identify exactly two distinct native tabs.');
+    assert.deepEqual([...request.tabIds].sort((a,b) => a-b), [...outbound.tabIds].sort((a,b) => a-b), 'Return must select the same two exact native IDs.');
+    assert.deepEqual([request.sourceId, request.destinationId, request.windowId, request.inverted, request.groupSync],
+        [outbound.destinationId, outbound.sourceId, outbound.windowId, outbound.inverted, outbound.groupSync], 'Return must reverse the exact Spaces within the same window and ordering mode.');
+}
+
+export function assertTodayMoveReturnSwitch(events, destinationId) {
+    const switches = events.filter(event => event.type === 'click' && event.switchSpaceId);
+    assert.deepEqual(switches.map(event => [event.switchSpaceId, event.trusted]), [[destinationId, true]], 'Require one trusted click on the exact Space chip before returning.');
+}
+
 export function installTodayMoveTrace() {
     globalThis.__todayMoveTrace = [];
     for (const type of ['click', 'contextmenu', 'keydown']) document.addEventListener(type, event => {
         const row = event.target.closest?.('.tab[data-tab-id]'), action = event.target.closest?.('[data-action]');
         globalThis.__todayMoveTrace.push({ type, trusted: event.isTrusted, tabId: row ? Number(row.dataset.tabId) : null,
-            action: action?.dataset.action || null, spaceId: action?.dataset.spaceId || null, ctrl: event.ctrlKey, key: event.key || null });
+            action: action?.dataset.action || null, spaceId: action?.dataset.spaceId || null,
+            switchSpaceId: event.target.closest?.('#spaceSwitcher > button[data-space-id]')?.dataset.spaceId || null, ctrl: event.ctrlKey, key: event.key || null });
     }, { capture: true, passive: true });
 }
 
@@ -138,13 +151,16 @@ export function readTodayMoveSpaceTarget(spaceId) {
 }
 
 /** A foreground action finishes before its activation/session-driven panel redraw can finish. */
-export async function waitForTodayMoveSpaceSelection({ read, poll, spaceId, windowId, extensionId, targetSpaceId, activeTabId }) {
+export async function waitForTodayMoveSpaceSelection({ read, poll, spaceId, windowId, extensionId, targetSpaceId, activeTabId, requireActiveTodayRow = false }) {
     let previous = null;
     return poll(read, state => {
         const { snapshot, rendered, target } = state;
         const ready = snapshot.windowId === windowId && snapshot.activeSpaceId === spaceId &&
             (activeTabId === undefined || snapshot.tabs.filter(tab => tab.active && tab.windowId === windowId).length === 1 &&
                 snapshot.tabs.some(tab => tab.id === activeTabId && tab.windowId === windowId && tab.active && tab.spaceId === spaceId)) &&
+            (!requireActiveTodayRow || Number.isSafeInteger(activeTabId) &&
+                state.nativeActiveIds?.length === 1 && state.nativeActiveIds[0] === activeTabId &&
+                state.activeTodayRowIds?.length === 1 && state.activeTodayRowIds[0] === activeTabId) &&
             nativeSidebarRenderReady(rendered, extensionId) && rendered.selectedSpaces[0] === spaceId &&
             target.count === 1 && target.spaceId === targetSpaceId && Number.isSafeInteger(target.nodeId) && target.nodeId > 0 &&
             target.connected === true && target.enabled === true && target.visible === true;
@@ -234,36 +250,49 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
         await checkpoint('native-today-move-input', { label, hosting }); return action();
     };
     const clear = async () => input('Clear Move menu/Today selection with real Escape', () => native.page.keyboard.press('Escape'));
-    const picker = async id => input('Open exact Today context menu and Move chooser', async () => {
+    const picker = async (id, from = source, to = destination) => input('Open exact Today context menu and Move chooser', async () => {
         await native.page.click(todayRow(id), { button: 'right' }); await native.page.waitForSelector(TODAY_MOVE_ACTION, { visible: true });
-        await native.page.click(TODAY_MOVE_ACTION); await native.page.waitForSelector(todayMoveDestination(destination.id), { visible: true });
-        assert.equal(await native.page.$(todayMoveDestination(source.id)), null, 'Current source cannot be a destination.');
+        await native.page.click(TODAY_MOVE_ACTION); await native.page.waitForSelector(todayMoveDestination(to.id), { visible: true });
+        assert.equal(await native.page.$(todayMoveDestination(from.id)), null, 'Current source cannot be a destination.');
         const choices = await native.page.$$eval('#tab-context-menu [data-action="moveTodayToDestination"]', nodes => nodes.map(node => ({ id: node.dataset.spaceId, name: node.textContent })));
-        assert.deepEqual(choices, initial.spaces.filter(space => space.id !== source.id).map(({ id, name }) => ({ id, name })), 'Chooser must list each exact existing destination once, in Space order.');
+        assert.deepEqual(choices, initial.spaces.filter(space => space.id !== from.id).map(({ id, name }) => ({ id, name })), 'Chooser must list each exact existing destination once, in Space order.');
     });
     const render = async (spaceId, expectedIds) => poll(() => native.page.evaluate(({ ids }) => {
         const active = document.querySelector('.space.active');
         const rows = [...active.querySelectorAll('[data-tab-type="temporary"] .tab[data-tab-id]')].filter(row => ids.includes(Number(row.dataset.tabId)));
         return { spaceId: active.dataset.spaceId, ids: rows.map(row => Number(row.dataset.tabId)), visible: rows.map(row => Boolean(row.getClientRects().length && getComputedStyle(row).visibility !== 'hidden')) };
     }, { ids: seed }), state => state.spaceId === spaceId && JSON.stringify(state.ids) === JSON.stringify(expectedIds) && state.visible.every(Boolean), 'exact visible source/destination Today rows');
-    const move = async (ids, multi) => {
+    const move = async (ids, multi, { from = source, to = destination, outbound } = {}) => {
         await clear();
         const traceStart = await native.page.evaluate(() => globalThis.__todayMoveTrace.length);
         if (multi) {
             for (const id of ids) await input('Select exact Today row with real Control click', () => clickBookmarkFixtureRow(native.page, todayRow(id), ['Control'], observation => checkpoint('row-click-observation', { observation })));
             await poll(() => native.page.evaluate(readTodaySelection), state => { try { assertTodaySelection(state, ids); return true; } catch { return false; } }, 'exact multi-selection before Move');
         }
-        await picker(ids[0]);
+        await picker(ids[0], from, to);
         const before = await read();
         await apiPage.evaluate(() => { globalThis.__todayMoveNativeTrace.events.length = 0; });
-        await input('Choose the existing destination Space', () => native.page.click(todayMoveDestination(destination.id)));
-        const request = { tabIds: ids, sourceId: source.id, destinationId: destination.id, windowId, inverted, groupSync };
+        const request = { tabIds: ids, sourceId: from.id, destinationId: to.id, windowId, inverted, groupSync };
+        const expectedStatus = `Moved ${ids.length} tab${ids.length === 1 ? '' : 's'} to Today in “${to.name}”. You’re still in the current Space.`;
+        if (outbound) {
+            assertTodayMoveReturnSwap(outbound, request);
+            assert.notEqual(await native.page.$eval('#favoritesDropStatus', node => node.textContent), expectedStatus, 'Return UI receipt must be newly written.');
+            assert.match(await native.page.$eval('.today-move-hint', node => node.textContent), /^Move 2 tabs to Today/);
+        }
+        await input('Choose the existing destination Space', () => native.page.click(todayMoveDestination(to.id)));
         await native.page.waitForFunction(count => { const status = document.getElementById('favoritesDropStatus'); return !document.getElementById('favoritesDropNotice')?.hidden && new RegExp(`^Moved ${count} tabs? to Today`).test(status?.textContent || ''); }, { polling: 50 }, ids.length);
+        let status;
+        if (outbound) {
+            await native.page.waitForFunction(expected => !document.getElementById('favoritesDropNotice')?.hidden && document.getElementById('favoritesDropStatus')?.textContent === expected,
+                { polling: 50 }, expectedStatus);
+            status = await native.page.$eval('#favoritesDropStatus', node => node.textContent);
+            assert.equal(status, expectedStatus);
+        }
         const after = await poll(read, state => { try { assertTodayMoved(before, state, request); return true; } catch { return false; } }, 'exact identity/order move and settled native projection');
         const proof = assertTodayMoved(before, after, request), trace = await native.page.evaluate(start => globalThis.__todayMoveTrace.slice(start), traceStart);
-        assertTodayMoveTrace(trace, { tabIds: ids, contextTabId: ids[0], destinationId: destination.id, multi });
+        assertTodayMoveTrace(trace, { tabIds: ids, contextTabId: ids[0], destinationId: to.id, multi });
         const nativeEvents = await apiPage.evaluate(() => globalThis.__todayMoveNativeTrace.events); assertTodayMoveNativeQuiet(nativeEvents);
-        await checkpoint(multi ? 'multi-moved' : 'active-single-moved', { before, after, proof, trace, nativeEvents }); return after;
+        await checkpoint(outbound ? 'same-two-returned' : multi ? 'multi-moved' : 'active-single-moved', { before, after, proof, trace, nativeEvents, ...(outbound ? { status, outbound } : {}) }); return { after, proof };
     };
     try {
         await option('syncTabGroups', groupSync); await option('invertTabOrder', groupSync);
@@ -301,9 +330,9 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
         assertTodayMoveUnchanged(beforeCancel, await read());
         await picker(seed[0]); await clear(); assertTodayMoveUnchanged(beforeCancel, await read());
         await checkpoint('destination-choice-cancelled', { before: beforeCancel, after: await read(), nativeHost: native.evidence });
-        const single = await move([seed[0]], false); assert.equal(single.tabs.find(tab => tab.id === seed[0]).active, true);
+        const { after: single } = await move([seed[0]], false); assert.equal(single.tabs.find(tab => tab.id === seed[0]).active, true);
         const multi = inverted ? [seed[2], seed[1]] : [seed[1], seed[2]];
-        const moved = await move(multi, true);
+        const { after: moved, proof: outbound } = await move(multi, true);
         assert.equal(moved.tabs.find(tab => tab.id === seed[1]).url, moved.tabs.find(tab => tab.id === seed[2]).url);
         const sourceRendered = await render(source.id, inverted ? [seed[4], seed[3]] : [seed[3], seed[4]]);
         await input('Capture unchanged current Space after exact moves', () => screenshot(native.page, `today-move-sync-${groupSync}-source-native-panel`));
@@ -385,6 +414,43 @@ export async function exerciseTodayMove({ apiPage, nativeSidebar, newTabPage, pa
         native = await nativeSidebar();
         const reloadedSource = await render(source.id, [seed[4]]);
         await checkpoint('witnessed-extension-reload', { lifecycle: reloaded.evidence, before: beforeReload, after: afterReload, reloadedSource });
+        // The original outbound, rejection and reload attestations complete
+        // first. The reverse leg uses newly attached passive traces, not an API
+        // activation or synthetic UI event after the witnessed reload.
+        await native.page.evaluate(installTodayMoveTrace);
+        await apiPage.evaluate(installTodayMoveNativeTrace);
+        const sourceClickStart = await native.page.evaluate(() => globalThis.__todayMoveTrace.length);
+        // Reopening the panel can leave its owned launcher active. Restore the
+        // exact Today canary through the native sidebar, not chrome.tabs.update.
+        await input('Restore exact Today source after reopening the native panel', () => native.page.click(todayRow(seed[4])));
+        const sourceReady = await waitForTodayMoveSpaceSelection({ ...selectionOptions, spaceId: source.id, activeTabId: seed[4],
+            targetSpaceId: destination.id, requireActiveTodayRow: true,
+            read: async () => ({ snapshot: await snapshot(windowId), rendered: await native.page.evaluate(readNativeSidebarRender),
+                target: await native.page.evaluate(readTodayMoveSpaceTarget, destination.id),
+                nativeActiveIds: await apiPage.evaluate(async windowId => (await chrome.tabs.query({ windowId, active: true })).map(tab => tab.id), windowId),
+                activeTodayRowIds: await native.page.$$eval('.space.active [data-tab-type="temporary"] .tab.active[data-tab-id]',
+                    rows => rows.map(row => Number(row.dataset.tabId))) }) });
+        const sourceClickTrace = await native.page.evaluate(start => globalThis.__todayMoveTrace.slice(start), sourceClickStart);
+        assert.deepEqual(sourceClickTrace.filter(event => event.type === 'click').map(event => [event.trusted, event.tabId]),
+            [[true, seed[4]]], 'Require one trusted click restoring the exact source Today tab.');
+        await checkpoint('same-two-return-exact-source-restored', { sourceReady, sourceClickTrace });
+        const returnStart = await native.page.evaluate(() => globalThis.__todayMoveTrace.length);
+        await input('Switch to the interim Space via its exact native panel chip', () => native.page.click(`#spaceSwitcher button[data-space-id="${destination.id}"]`));
+        const switched = await waitForTodayMoveSpaceSelection({ ...selectionOptions, spaceId: destination.id });
+        const switchTrace = await native.page.evaluate(start => globalThis.__todayMoveTrace.slice(start), returnStart);
+        assertTodayMoveReturnSwitch(switchTrace, destination.id);
+        await checkpoint('same-two-return-space-switched', { switched, switchTrace });
+        const beforeReturn = exactSpace(await read(), destination.id).temporaryTabs;
+        const visible = inverted ? [...beforeReturn].reverse() : beforeReturn;
+        await render(destination.id, visible.filter(id => seed.includes(id)));
+        const { after: returned } = await move(visible.filter(id => multi.includes(id)), true, { from: destination, to: source, outbound });
+        const stayed = exactSpace(returned, destination.id).temporaryTabs;
+        await render(destination.id, (inverted ? [...stayed].reverse() : stayed).filter(id => seed.includes(id)));
+        await input('Restore the original source Space after verified return', () => native.page.click(`#spaceSwitcher button[data-space-id="${source.id}"]`));
+        await waitForTodayMoveSpaceSelection({ ...selectionOptions, spaceId: source.id });
+        const restored = exactSpace(returned, source.id).temporaryTabs;
+        const returnedRows = await render(source.id, (inverted ? [...restored].reverse() : restored).filter(id => seed.includes(id)));
+        await checkpoint('same-two-return-rendered', { returnedRows });
         return evidence;
     } catch (error) {
         primaryError = error; await checkpoint('today-move-failed', { error: { message: error.message, stack: error.stack }, seed }).catch(() => {});

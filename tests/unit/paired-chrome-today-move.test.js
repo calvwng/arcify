@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { readSourceText } from '../source-text.js';
 import { assertTodayMoved, assertTodayMoveUnchanged, assertTodayMoveRejected, assertTodayMoveTrace, assertTodayMoveReload, assertTodayMoveHelperClosed, waitForTodayMoveHelperCleanup, todayMoveReloadVerdict, readTodayMoveSpaceTarget, waitForTodayMoveSpaceSelection,
-    installTodayMoveTrace, installTodayMoveNativeTrace, assertTodayMoveNativeQuiet, readTodayMovePage, serveTodayMoveFixture, todayMoveDestination } from '../../scripts/paired-chrome-today-move.mjs';
+    assertTodayMoveReturnSwap, assertTodayMoveReturnSwitch, installTodayMoveTrace, installTodayMoveNativeTrace, assertTodayMoveNativeQuiet, readTodayMovePage, serveTodayMoveFixture, todayMoveDestination } from '../../scripts/paired-chrome-today-move.mjs';
 
 function sample({ groupSync = false, inverted = false } = {}) {
     const tabs = [11, 12, 13, 21, 22, 90].map((id, index) => ({ id, windowId: id === 90 ? 8 : 7, index, url: `http://127.0.0.1/${id === 12 ? 11 : id}`,
@@ -145,6 +145,17 @@ test('Space transition waits for exact authoritative/rendered destination and st
     await waitForTodayMoveSpaceSelection({ ...selectionOptions, spaceId: 'source', activeTabId: undefined, read: async () => source, poll: boundedPoll });
 });
 
+test('return readiness cannot use a stale Chrome active launcher or wrong highlighted Today row', async () => {
+    const exact={...selectionReadback(),nativeActiveIds:[11],activeTodayRowIds:[11]};
+    const read = state => waitForTodayMoveSpaceSelection({...selectionOptions,activeTabId:11,requireActiveTodayRow:true,
+        read:async()=>state,poll:boundedPoll});
+    for(const stale of [{nativeActiveIds:[99]}, {activeTodayRowIds:[]}, {activeTodayRowIds:[12]},
+        {activeTodayRowIds:[11,12]}, {nativeActiveIds:[11,99]}]) {
+        await assert.rejects(read({...exact,...stale}),/Selection did not settle/);
+    }
+    assert.equal(await read(exact),exact);
+});
+
 test('read-only chip probe detects replacement despite identical labels and geometry', () => {
     const { document } = parseHTML('<html><body><div id="spaceSwitcher"><button data-space-id="source">Source</button></div></body></html>');
     const keys = ['document', 'getComputedStyle', 'innerWidth', 'innerHeight', '__todayMoveChipIdentity'];
@@ -264,4 +275,39 @@ test('new full cases retain existing stable IDs and real native host, paired ref
     assert.match(native, /sidebar.page.evaluate\(message=>chrome.runtime.sendMessage\(message\),rejectedMoveRequest\)/);
     assert.match(native, /native-split-today-move-rejected/); assert.match(native, /assertNativeSplitRejected\(beforeMoveRejection,afterMoveRejection\)/);
     assert.match(runner, /assertNoTargetCrashes\(report.targetLifecycle\)/); assert.match(runner, /assertNoPageErrors\(report.diagnostics\)/);
+});
+
+test('roundtrip oracle requires the same two exact IDs, reversed owners and a trusted interim Space click', () => {
+    const sampleMove = sample();
+    const outbound = assertTodayMoved(sampleMove.before, sampleMove.after, sampleMove.request);
+    const returning = { ...sampleMove.request, sourceId: 'destination', destinationId: 'source' };
+    assert.doesNotThrow(() => assertTodayMoveReturnSwap(outbound, returning));
+    for (const wrong of [{tabIds:[11]}, {tabIds:[11,13]}, {tabIds:[11,11]}, {destinationId:'other'}, {sourceId:'source'},
+        {windowId:8}, {inverted:true}, {groupSync:true}]) assert.throws(() => assertTodayMoveReturnSwap(outbound, {...returning,...wrong}));
+    const click={type:'click',switchSpaceId:'destination',trusted:true};
+    assert.doesNotThrow(() => assertTodayMoveReturnSwitch([click],'destination'));
+    for(const events of [[],[click,click],[{...click,trusted:false}],[{...click,switchSpaceId:'source'}]])
+        assert.throws(() => assertTodayMoveReturnSwitch(events,'destination'));
+
+    const beforeReturn=structuredClone(sampleMove.after);
+    beforeReturn.activeSpaceId=beforeReturn.activeSpaces[7]=beforeReturn.snapshot.activeSpaceId='destination';
+    const afterReturn=structuredClone(beforeReturn);
+    const projectReturn = (state, ids) => {
+        for(const id of ids){
+            state.spaces[0].temporaryTabs.push(id);
+            state.spaces[1].temporaryTabs=state.spaces[1].temporaryTabs.filter(tabId=>tabId!==id);
+            state.snapshot.tabs.find(tab=>tab.id===id).spaceId='source';
+            for(const [index,space] of state.spaces.entries()) {
+                state.snapshot.spaces[index].temporaryTabIds=[...space.temporaryTabs];
+                state.snapshot.spaces[index].tabIds=[...space.temporaryTabs];
+            }
+        }
+    };
+    const oneIdLost=structuredClone(beforeReturn);
+    projectReturn(oneIdLost,[11]);
+    assert.throws(() => assertTodayMoved(beforeReturn,oneIdLost,returning), /exact source\/destination Today membership/);
+    projectReturn(afterReturn,[11,12]);
+    assert.doesNotThrow(() => assertTodayMoved(beforeReturn,afterReturn,returning));
+    afterReturn.pageStates[12].value='lost-input';
+    assert.throws(() => assertTodayMoved(beforeReturn,afterReturn,returning), /pageStates cannot change/);
 });
