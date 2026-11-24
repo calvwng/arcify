@@ -89,6 +89,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const COMPANION = resolve(process.argv[2] || resolve(ROOT, '../arcify-spotlight'));
 const PINNED_SPOTLIGHT = 'c3e4e4d374136e608d447716c0321b32b2aa8cfb';
 // Every scope qualifies the same reconciled companion; retain scope-specific provenance checks.
+import {readDimFocusOneShot} from './paired-chrome-dim-focus-one-shot-context.mjs';
 const PINNED_LITTLE_ARC_SPOTLIGHT = 'c3e4e4d374136e608d447716c0321b32b2aa8cfb';
 const stepNames = [
     'Sandboxed Chrome startup and exact extension identities',
@@ -903,7 +904,10 @@ try {
     report.environment.arcifyHead = head(ROOT);
     report.environment.spotlightHead = head(COMPANION);
     report.environment.expectedSpotlightHead = PINNED_SPOTLIGHT;
-    if ('little-arc' === report.runMode) {
+    if (process.env.ARCIFY_LITTLE_ARC_DIM_FOCUS_ONE_SHOT !== undefined) {
+        report.environment.acceptanceContext = readDimFocusOneShot(process.env, report.environment.arcifyHead);
+        report.environment.expectedSpotlightHead = report.environment.acceptanceContext.spotlightHead;
+    } else if ('little-arc' === report.runMode) {
         report.environment.acceptanceContext = process.env.ARCIFY_LITTLE_ARC_UX === '1' ? readLittleArcUxContext(process.env,report.environment.arcifyHead) : readLittleArcAcceptanceContext(process.env, report.environment.arcifyHead);
         report.environment.expectedSpotlightHead = process.env.ARCIFY_LITTLE_ARC_UX === '1' ? report.environment.acceptanceContext.spotlightHead : PINNED_LITTLE_ARC_SPOTLIGHT;
         assert.equal(process.env.ARCIFY_SPOTLIGHT_HEAD, report.environment.expectedSpotlightHead, 'Little Arc job must declare the reviewed companion pin.');
@@ -2514,6 +2518,7 @@ try {
     await step(stepNames[55], () => exerciseLittleArc({ browser, observePage, apiPage:arcifyOptions, spotlightOptions, ui, screenshot,
         snapshot, external, poll, fixture, arcifyId, spotlightId, search,
         ux: report.environment?.acceptanceContext?.scope === 'little-arc-ux',
+        dimFocusOneShot: report.environment?.acceptanceContext?.scope === 'little-arc-dim-focus-one-shot',
         spaceIcons: report.environment?.acceptanceContext?.scope === 'little-arc-space-icons',
         reloadArcify:async () => {
             const reloaded = await reloadPairedExtension('arcify');
