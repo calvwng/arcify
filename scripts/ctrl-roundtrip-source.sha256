@@ -1,0 +1,6 @@
+bc4b948eec855a640adcfcebe8994de53e1ba23e15dafb905b5b280ec6956d10  .github/workflows/native-ctrl-move-roundtrip.yml
+9bf471f82b926a1ed08e510eba7f4c685e8aa6c819e4d9688d975144a22438d7  scripts/build-ctrl-roundtrip-runner.mjs
+1435d61dbb3cea3ba7f69c4a1f81cbec35a34c056c5b7af53dd36547c984c6c4  scripts/ctrl-roundtrip-a-dist.sha256
+941ed89fbb656dcd8581d4b777baa4392cda6486aaa9bce1ed300ad455feb87d  scripts/ctrl-roundtrip-s-dist.sha256
+c461fa30da0cdeaae0e2209bb16ac16f4d06e8c28771df8745329dfad3d0672d  scripts/paired-chrome-today-move.mjs
+8a73ed8745867df20ef3b714b1b4fda8cb855e802774409660e33e05e5c25503  tests/unit/paired-chrome-today-move.test.js
