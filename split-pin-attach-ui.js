@@ -14,7 +14,7 @@ export function createSplitPinAttachUI({document,sendRequest,context,refresh,sho
             const result = await request('attachCandidates');
             dialog = document.createElement('dialog'); dialog.className = 'split-pin-recovery-dialog';
             const title = document.createElement('h2'); title.textContent = 'Attach open Split View'; title.id = 'splitPinAttachTitle'; dialog.setAttribute('aria-labelledby',title.id); dialog.append(title);
-            const help = document.createElement('p'); help.textContent = 'Choose the exact current pair for focus only. This does not prove restored identity. Both panes stay in Today; saved reopening URLs stay unchanged. No tabs will open or move.'; dialog.append(help);
+            const help = document.createElement('p'); help.textContent = 'Choose the exact current pair for focus only. This does not prove restored identity. Both panes stay in Today; saved reopening URLs stay unchanged. No tabs will open or move.'; help.id = 'splitPinAttachHelp'; dialog.setAttribute('aria-describedby',help.id); dialog.append(help);
             const status = document.createElement('p'); status.setAttribute('role','status'); dialog.append(status);
             let selected, submitted = false;
             const confirm = document.createElement('button'); confirm.type = 'button'; confirm.textContent = 'Link selected pair for focus'; confirm.disabled = true;

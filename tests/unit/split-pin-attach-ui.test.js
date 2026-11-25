@@ -18,3 +18,20 @@ test('no default selection; duplicate labels retain exact IDs; explicit frozen t
 test('Cancel and Escape cause no mutation',async()=>{const f=fixture();await f.ui.open('pin');f.button('Cancel').click();assert.equal(f.calls.length,1);await f.ui.open('pin');f.document.querySelector('dialog').dispatchEvent(new f.window.Event('cancel'));assert.equal(f.calls.length,2);assert.equal(f.document.querySelector('dialog'),null);});
 test('uncertain write cannot be retried from old dialog; cancel still works',async()=>{const f=fixture(async()=>{throw Error('uncertain');});await f.ui.open('pin');f.document.querySelector('input').dispatchEvent(new f.window.Event('change'));const b=f.button('Link selected pair for focus');b.click();await settle();b.click();await settle();assert.equal(f.calls.length,2);assert.match(f.document.querySelector('[role=status]').textContent,/uncertain/);f.button('Cancel').click();assert.equal(f.document.querySelector('dialog'),null);});
 test('unlink is explicit and separate from activation',async()=>{const f=fixture();await f.ui.open('pin');f.button('Remove link; keep panes').click();await settle();assert.equal(f.calls[1].action,'unlinkFocus');assert.equal(f.calls[1].candidateToken,'unlink');assert.equal(f.calls.length,2);});
+
+test('dialog name and existing scope warning stay associated through Escape and reopen',async()=>{
+ const f=fixture();
+ for(let pass=0;pass<2;pass++){
+  await f.ui.open('pin');
+  const dialog=f.document.querySelector('dialog');
+  const title=f.document.getElementById(dialog.getAttribute('aria-labelledby'));
+  const help=f.document.getElementById(dialog.getAttribute('aria-describedby'));
+  assert.equal(title.textContent,'Attach open Split View');
+  assert.ok(help&&dialog.contains(help));
+  assert.equal(help.textContent,'Choose the exact current pair for focus only. This does not prove restored identity. Both panes stay in Today; saved reopening URLs stay unchanged. No tabs will open or move.');
+  assert.equal(f.document.querySelectorAll('#'+help.id).length,1);
+  dialog.dispatchEvent(new f.window.Event('cancel'));
+  assert.equal(f.document.getElementById(help.id),null);
+ }
+ assert.deepEqual(f.calls.map(r=>r.action),['attachCandidates','attachCandidates']);
+});

@@ -44,6 +44,27 @@ test('Split menu releases its interaction gate exactly once for every exit', asy
             assert.equal(ends, begins); assert.equal(calls, ['Enter', 'mouse'].includes(exit) ? 1 : 0);
             assert.equal(document.getElementById('tab-context-menu'), null);
         });
+        await t.test('Attach leaves a valid focus origin for its native dialog', async () => {
+            const outside = document.getElementById('outside');
+            for (const mode of ['focused-menu', 'focus-moved', 'row-removed']) {
+                const source = row.cloneNode();
+                document.body.prepend(source);
+                const opened = [];
+                try {
+                    showTabContextMenu(10, 10, { id: 11, url: 'https://fixture/left' }, true, true, source,
+                        () => {}, [], () => {}, () => {}, [], () => {}, null, null, null, null,
+                        { attach: () => opened.push(document.activeElement), keyboard: true });
+                    const item = document.querySelector('[data-action="attachSplitView"]');
+                    assert.equal(document.activeElement, item);
+                    if (mode === 'focus-moved') outside.focus();
+                    if (mode === 'row-removed') source.remove();
+                    event(item, 'keydown', { key: 'Enter' });
+                    assert.equal(opened.length, 1);
+                    assert.ok(opened[0] === (mode === 'focused-menu' ? source : mode === 'focus-moved' ? outside : item), `unexpected Attach focus origin: ${mode}`);
+                    assert.equal(document.getElementById('tab-context-menu'), null);
+                } finally { closeTabContextMenu(); source.remove(); }
+            }
+        });
     } finally {
         closeTabContextMenu(); window.HTMLElement.prototype.focus = oldFocus; window.HTMLElement.prototype.getBoundingClientRect = oldRect;
         for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value; }

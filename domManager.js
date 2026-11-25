@@ -221,7 +221,7 @@ export function showTabContextMenu(x, y, tab, isPinned, isBookmarkOnly, tabEleme
             if (!session.active || !contextMenu.contains(item)) return;
             // Transfer focus before removing the menu; refresh then restores the
             // same live row identity without overriding later user focus.
-            if (['createSplitView', 'endSplitView', 'saveSplitView'].includes(action) && contextMenu.contains(document.activeElement) && tabElement.isConnected) tabElement.focus({ preventScroll: true });
+            if (['createSplitView', 'endSplitView', 'saveSplitView', 'attachSplitView'].includes(action) && contextMenu.contains(document.activeElement) && tabElement.isConnected) tabElement.focus({ preventScroll: true });
             closeMenu(); void callback();
         }, { once: true });
         item.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); item.click(); } });
